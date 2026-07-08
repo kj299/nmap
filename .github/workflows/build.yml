@@ -20,9 +20,19 @@ on:
       - "**/*.awk"
       - "**/*.sh"
       - "**/*.toml"
+      # LESSONS #5 — the Rust port and the kit coexist in this repo. Exclude them
+      # so a Rust-only or kit-only change doesn't kick off the heavy C autotools
+      # build (which cannot be affected by it). The Rust pipeline is
+      # .github/workflows/nmap-rs-ci.yml, scoped to these same paths.
+      - "!nmap-rs/**"
+      - "!porting-kit/**"
     branches:
       - master
   pull_request:
+    paths-ignore:
+      - "nmap-rs/**"
+      - "porting-kit/**"
+      - ".github/workflows/nmap-rs-ci.yml"
   workflow_dispatch:
     inputs:
       deploymentName:

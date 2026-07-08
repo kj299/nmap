@@ -1,0 +1,19 @@
+[package]
+name = "nmap-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Binary is `nmap-rs` so it coexists with the C `nmap` during the port (the C
+# tree stays runnable as the differential oracle through cutover).
+[[bin]]
+name = "nmap-rs"
+path = "src/main.rs"
+
+[dependencies]
+nmap-core = { path = "../core" }
+nmap-sys = { path = "../sys" }
+
+[lints]
+workspace = true

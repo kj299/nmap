@@ -1,6 +1,7 @@
 [package]
 name = "nmap-sys"
 version = "0.1.0"
+publish = false          # application crate; never published to crates.io
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

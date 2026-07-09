@@ -4,6 +4,7 @@
     "connect_scan": "not_started",
     "model": "ported",
     "net": "not_started",
+    "options": "ported",
     "output": "not_started",
     "ports": "not_started",
     "targets": "ported",

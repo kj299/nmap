@@ -13,7 +13,7 @@ record; edit it as milestones complete.
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — Phase 0 done (flaw scan + threat model + tracker); awaiting approval for the module loop |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — Phase 0 + `model` + `targets` merged (PR #2); `options`+`log` (verbosity) done; next: `ports` |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
 | 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |
@@ -154,12 +154,16 @@ retrospective bled over and should ship at **~0 `unsafe`** (a headline result).
 - **Phase 4 module loop (leaf-first):**
   1. `core::model` — `Target`, `Port`, `PortState`, `ScanResult` (`Target.h`, `portlist.h`)
   2. `core::targets` — CIDR/range/hostname expansion (`TargetGroup.cc`, `targets.cc`) — **fuzz**
-  3. `core::ports` — port-spec + `nmap-services` parse (`scan_lists.cc`, `services.cc`) — **fuzz**
-  4. `core::timing` — minimal timeout/parallelism math (`timing.cc` subset)
-  5. `sys::net` — async TCP connect-with-timeout + DNS (`tokio`, `hickory-resolver`)
-  6. `core+sys::connect_scan` — bounded-concurrency connect driver (`scan_engine_connect.cc`)
-  7. `core::output` — normal / grepable / XML renderers (`output.cc`, `xml.cc`) — **golden**
-  8. `cli` — argv → `Scan` request → run → render (`nmap.cc` getopt subset, `NmapOps`)
+  3. `core::options` + `core::log` — **verbosity/debug pulled forward**: `-v`/`-vv`/`-vN`,
+     `-d`/`-dN` (nmap `o.verbose`/`o.debugging`, `box(0,10,·)`) + a leveled `verbose!`/`debug!`
+     logger to **stderr** (keeps stdout differential-clean). Done early so every module below
+     is diagnosable during development (kit habit #5). Starts the `NmapOps` analog.
+  4. `core::ports` — port-spec + `nmap-services` parse (`scan_lists.cc`, `services.cc`) — **fuzz**
+  5. `core::timing` — minimal timeout/parallelism math (`timing.cc` subset)
+  6. `sys::net` — async TCP connect-with-timeout + DNS (`tokio`, `hickory-resolver`)
+  7. `core+sys::connect_scan` — bounded-concurrency connect driver (`scan_engine_connect.cc`)
+  8. `core::output` — normal / grepable / XML renderers (`output.cc`, `xml.cc`) — **golden**
+  9. `cli` — argv → `Scan` request → run → render (`nmap.cc` getopt subset, growing `NmapOps`)
 
 **Crates:** `tokio`, `hickory-resolver`, `ipnet`/std, `clap` (or hand-rolled to
 match nmap's exact flags), `quick-xml`/hand-rolled (nmap XML DTD), `arbitrary`+`cargo-fuzz`.

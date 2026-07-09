@@ -1,0 +1,72 @@
+{
+  "total": 9,
+  "by_category": {
+    "unbounded-copy": 7,
+    "format-string": 2
+  },
+  "hits": [
+    {
+      "line": 719,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "strcpy(protocol, IPPROTO2STR(current->proto));",
+      "file": "output.cc"
+    },
+    {
+      "line": 923,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "vfprintf(fmt",
+      "file": "output.cc"
+    },
+    {
+      "line": 928,
+      "category": "format-string",
+      "cwe": "CWE-134",
+      "text": "vfprintf(fmt",
+      "file": "output.cc"
+    },
+    {
+      "line": 1564,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "strcat(familygenerations[familyno], \"|\");",
+      "file": "output.cc"
+    },
+    {
+      "line": 2003,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "sprintf(p, \"%X\", currenths->seq.seqs[i]);",
+      "file": "output.cc"
+    },
+    {
+      "line": 2027,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "sprintf(p, \"%hX\", currenths->seq.ipids[i]);",
+      "file": "output.cc"
+    },
+    {
+      "line": 2048,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "sprintf(p, \"%X\", currenths->seq.timestamps[i]);",
+      "file": "output.cc"
+    },
+    {
+      "line": 134,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "strcpy(filename, \"/etc/services\");",
+      "file": "services.cc"
+    },
+    {
+      "line": 140,
+      "category": "unbounded-copy",
+      "cwe": "CWE-120",
+      "text": "strcpy(filename + len, \"\\\\drivers\\\\etc\\\\services\");",
+      "file": "services.cc"
+    }
+  ]
+}

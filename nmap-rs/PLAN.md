@@ -12,8 +12,8 @@ record; edit it as milestones complete.
 | # | Milestone | Kit cycle | State |
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
-| 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **DONE** — commits `278f403`, `6108be3`; PR #1; Rust CI green |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — no Rust ported yet; start at Phase 0 |
+| 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — Phase 0 done (flaw scan + threat model + tracker); awaiting approval for the module loop |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
 | 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |

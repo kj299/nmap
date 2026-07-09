@@ -133,14 +133,22 @@ def scan_text(src):
     return hits
 
 
+# C *and* C++ sources: the classic sink classes (strcpy/sprintf/memcpy/malloc/
+# system/…) apply to C++ too, and many real targets (e.g. nmap's core engine) are
+# C++. Scanning only .c/.h silently skips a whole codebase and reports a false
+# "0 flaws" — a scanner that reads nothing is worse than none (LESSONS #2/#3).
+C_SOURCE_EXTS = (".c", ".h", ".cc", ".cpp", ".cxx", ".c++",
+                 ".hpp", ".hh", ".hxx", ".h++")
+
+
 def iter_c_files(paths):
     for p in paths:
-        if os.path.isfile(p) and p.endswith((".c", ".h")):
+        if os.path.isfile(p) and p.endswith(C_SOURCE_EXTS):
             yield p
         elif os.path.isdir(p):
             for root, _d, files in os.walk(p):
                 for f in files:
-                    if f.endswith((".c", ".h")):
+                    if f.endswith(C_SOURCE_EXTS):
                         yield os.path.join(root, f)
 
 

@@ -12,6 +12,7 @@
 pub mod log;
 pub mod model;
 pub mod options;
+pub mod output;
 pub mod ports;
 pub mod targets;
 pub mod timing;
@@ -19,6 +20,7 @@ pub mod trace;
 
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
 pub use options::{parse_args, RunConfig};
+pub use output::{render_grepable, render_normal, render_xml, ScanMeta};
 pub use ports::{parse_port_spec, PortList, PortSpecError, ServiceTable};
 pub use targets::{parse_target, Ipv4Ranges, TargetParseError, TargetSpec};
 pub use timing::{TimeoutInfo, TimingParams, TimingTemplate};

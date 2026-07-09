@@ -6,7 +6,7 @@
     "net": "not_started",
     "output": "not_started",
     "ports": "not_started",
-    "targets": "not_started",
+    "targets": "ported",
     "timing": "not_started"
   }
 }

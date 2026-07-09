@@ -10,6 +10,8 @@
 #![forbid(unsafe_code)]
 
 pub mod model;
+pub mod targets;
 pub mod trace;
 
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
+pub use targets::{parse_target, Ipv4Ranges, TargetParseError, TargetSpec};

@@ -27,8 +27,20 @@ pub struct RunConfig {
     pub show_help: bool,
     /// Positional target expressions, in order (parsed by `core::targets`).
     pub targets: Vec<String>,
+    /// `-p` port specification (parsed by `core::ports`); `None` ⇒ default ports.
+    pub port_spec: Option<String>,
+    /// `-6`: treat targets as IPv6.
+    pub ipv6: bool,
+    /// `-Pn`: skip host discovery (treat every target as up).
+    pub assume_up: bool,
+    /// `-oN <file>` normal output destination (`"-"` = stdout).
+    pub out_normal: Option<String>,
+    /// `-oX <file>` XML output destination (`"-"` = stdout).
+    pub out_xml: Option<String>,
+    /// `-oG <file>` grepable output destination (`"-"` = stdout).
+    pub out_grep: Option<String>,
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
-    /// CLI can warn instead of misparsing them (the full set lands with `cli`).
+    /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
 }
 
@@ -92,12 +104,31 @@ fn apply_d(cfg: &mut RunConfig, rest: &str) {
     }
 }
 
+/// The value for an option that takes an argument, supporting both the attached
+/// (`-p22`, `-oXfile`) and separate (`-p 22`, `-oX file`) forms. Returns the
+/// value and how many *extra* argv entries were consumed (0 or 1).
+fn opt_value(args: &[String], i: usize, prefix: &str) -> (String, usize) {
+    let s = &args[i];
+    if s.len() > prefix.len() {
+        (s[prefix.len()..].to_string(), 0) // attached
+    } else if let Some(next) = args.get(i.saturating_add(1)) {
+        (next.clone(), 1) // separate
+    } else {
+        (String::new(), 0) // missing value — treated as empty
+    }
+}
+
 /// Parse argv (without the program name) into a [`RunConfig`]. Total and
 /// panic-free over any input.
+// Index arithmetic is bounded by `args.len()` and only ever advances.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn parse_args(args: &[String]) -> RunConfig {
     let mut cfg = RunConfig::default();
-    for arg in args {
-        match arg.as_str() {
+    let mut i = 0;
+    while i < args.len() {
+        let s = args[i].as_str();
+        let mut consumed_extra = 0;
+        match s {
             "--version" => cfg.show_version = true,
             "-h" | "--help" => cfg.show_help = true,
             "--verbose" => cfg.verbose = bump(cfg.verbose),
@@ -105,14 +136,38 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 cfg.debugging = bump(cfg.debugging);
                 cfg.verbose = bump(cfg.verbose);
             }
-            s if s.starts_with("-v") => apply_v(&mut cfg, &s[2..]),
-            s if s.starts_with("-d") => apply_d(&mut cfg, &s[2..]),
+            "-6" => cfg.ipv6 = true,
+            "-Pn" => cfg.assume_up = true,
+            "-sT" => {} // connect scan — the only scan type in M1 (the default)
+            _ if s.starts_with("-oN") => {
+                let (v, adv) = opt_value(args, i, "-oN");
+                cfg.out_normal = Some(v);
+                consumed_extra = adv;
+            }
+            _ if s.starts_with("-oX") => {
+                let (v, adv) = opt_value(args, i, "-oX");
+                cfg.out_xml = Some(v);
+                consumed_extra = adv;
+            }
+            _ if s.starts_with("-oG") => {
+                let (v, adv) = opt_value(args, i, "-oG");
+                cfg.out_grep = Some(v);
+                consumed_extra = adv;
+            }
+            _ if s.starts_with("-p") => {
+                let (v, adv) = opt_value(args, i, "-p");
+                cfg.port_spec = Some(v);
+                consumed_extra = adv;
+            }
+            _ if s.starts_with("-v") => apply_v(&mut cfg, &s[2..]),
+            _ if s.starts_with("-d") => apply_d(&mut cfg, &s[2..]),
             // Any other dash-led token longer than "-" is an option we don't
             // parse yet — record it rather than misread it as a target.
-            s if s.starts_with('-') && s.len() > 1 => cfg.unrecognized.push(s.to_string()),
+            _ if s.starts_with('-') && s.len() > 1 => cfg.unrecognized.push(s.to_string()),
             // Everything else is a target expression.
-            s => cfg.targets.push(s.to_string()),
+            _ => cfg.targets.push(s.to_string()),
         }
+        i += 1 + consumed_extra;
     }
     cfg
 }
@@ -169,6 +224,27 @@ mod tests {
         assert_eq!(c.verbose, 2); // -v then -d each bump verbose
         assert_eq!(c.debugging, 1);
         assert_eq!(c.targets, vec!["10.0.0.1", "example.com"]);
+    }
+
+    #[test]
+    fn port_spec_and_output_flags_attached_and_separate() {
+        assert_eq!(cfg(&["-p", "22,80"]).port_spec.as_deref(), Some("22,80"));
+        assert_eq!(cfg(&["-p22,80"]).port_spec.as_deref(), Some("22,80"));
+        assert_eq!(cfg(&["-oX", "out.xml"]).out_xml.as_deref(), Some("out.xml"));
+        assert_eq!(cfg(&["-oX-"]).out_xml.as_deref(), Some("-"));
+        let c = cfg(&["-oG", "-", "-oN", "n.txt"]);
+        assert_eq!(c.out_grep.as_deref(), Some("-"));
+        assert_eq!(c.out_normal.as_deref(), Some("n.txt"));
+    }
+
+    #[test]
+    fn scan_flags_and_targets_together() {
+        let c = cfg(&["-sT", "-Pn", "-6", "-p", "1-100", "scanme.nmap.org"]);
+        assert!(c.assume_up);
+        assert!(c.ipv6);
+        assert_eq!(c.port_spec.as_deref(), Some("1-100"));
+        assert_eq!(c.targets, vec!["scanme.nmap.org"]);
+        assert!(c.unrecognized.is_empty());
     }
 
     #[test]

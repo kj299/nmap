@@ -13,7 +13,7 @@ record; edit it as milestones complete.
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — merged: …`sys::net`, `connect_scan`; `output` done (normal/grep/XML, faithful format); **last module: `cli`** (wire it all together) |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — **all 9 modules ported**; `nmap-rs -sT` works end-to-end (normal/-oX/-oG). Remaining: shared fuzz + C-nmap differential oracle to close those gate columns, then the M1 retrospective |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
 | 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |

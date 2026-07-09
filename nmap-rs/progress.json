@@ -2,7 +2,7 @@
   "modules": {
     "cli": "not_started",
     "connect_scan": "not_started",
-    "model": "not_started",
+    "model": "ported",
     "net": "not_started",
     "output": "not_started",
     "ports": "not_started",

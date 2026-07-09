@@ -10,8 +10,6 @@
 #![forbid(unsafe_code)]
 
 pub mod model;
-pub mod parser;
 pub mod trace;
 
-pub use model::Record;
-pub use parser::{parse, ParseError};
+pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};

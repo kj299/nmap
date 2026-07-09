@@ -3,7 +3,7 @@
     "cli": "not_started",
     "connect_scan": "not_started",
     "model": "ported",
-    "net": "not_started",
+    "net": "ported",
     "options": "ported",
     "output": "not_started",
     "ports": "ported",

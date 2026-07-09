@@ -13,7 +13,7 @@ record; edit it as milestones complete.
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — merged: …`timing`, `sys::net`; `connect_scan` done (end-to-end scan works: open/closed detected); next: `output` then `cli` |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — merged: …`sys::net`, `connect_scan`; `output` done (normal/grep/XML, faithful format); **last module: `cli`** (wire it all together) |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
 | 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |

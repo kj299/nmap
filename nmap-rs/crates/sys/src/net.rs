@@ -129,6 +129,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test]
     async fn open_port_is_detected() {
         // A bound listener accepts the handshake from the backlog even without
@@ -143,6 +144,7 @@ mod tests {
         assert!(r.rtt.is_some());
     }
 
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test]
     async fn closed_port_is_refused() {
         // Bind then drop to obtain a port that is (almost certainly) now free;
@@ -157,12 +159,14 @@ mod tests {
         assert_eq!(r.reason, Reason::ConnRefused);
     }
 
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test]
     async fn resolve_ip_literal_is_identity() {
         let ips = resolve_host("127.0.0.1").await.unwrap();
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     }
 
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test]
     async fn resolve_localhost_yields_loopback() {
         let ips = resolve_host("localhost").await.unwrap();

@@ -1,0 +1,16 @@
+[package]
+name = "nmap-core"
+version = "0.1.0"
+publish = false          # application crate; never published to crates.io
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies by default. Every dependency added here must clear the
+# supply-chain gate (porting-kit/harnesses/supply-chain). Keep the trusted
+# surface small. `core` is #![forbid(unsafe_code)] — all pure nmap logic lives
+# here (target expansion, port/service parsing, model, timing math, rendering).
+[dependencies]
+
+[lints]
+workspace = true

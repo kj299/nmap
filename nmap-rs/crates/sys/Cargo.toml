@@ -1,0 +1,17 @@
+[package]
+name = "nmap-sys"
+version = "0.1.0"
+publish = false          # application crate; never published to crates.io
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The ONLY crate permitted `unsafe`. FFI bindings (Npcap, the `windows` crate)
+# land here later, each wrapped in an audited safe fn; the unsafe-audit harness
+# runs against this crate in CI and HARD-FAILS on any undocumented block. For the
+# MVP (connect scan) this crate is expected to hold ~0 unsafe.
+[dependencies]
+nmap-core = { path = "../core" }
+
+[lints]
+workspace = true

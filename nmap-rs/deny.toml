@@ -1,0 +1,32 @@
+# cargo-deny policy for the safety-first nmap C-to-Rust port. Philosophy: a rewrite
+# for safety must not import unsafety through the dependency tree — few deps, all
+# vetted, no known CVEs. Schema: cargo-deny v2 (0.18+).
+
+[advisories]
+# Fail on any RUSTSEC advisory (vulnerabilities/unmaintained/unsound are always
+# denied in v2); also refuse yanked crates.
+yanked = "deny"
+ignore = []            # add "RUSTSEC-XXXX-YYYY" only with a written justification
+
+[bans]
+# Multiple versions of the same crate bloat the trusted surface; warn and prune.
+multiple-versions = "warn"
+# Reject `*` version requirements — a dep must be pinned to be auditable.
+wildcards = "deny"
+# ...but our own workspace crates are path deps (no version), which cargo-deny
+# treats as wildcards; allow that so intra-workspace paths don't trip the gate.
+allow-wildcard-paths = true
+# Keep the dependency count auditable. A safety port earns trust by being small.
+# deny = [{ name = "openssl-sys" }]   # example: prefer rustls over C OpenSSL
+
+[licenses]
+# Allow-list, not deny-list: positively approve every license present.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[sources]
+# Only crates.io by default. A git or unknown-registry dependency is an explicit,
+# reviewed decision — not something that slips in.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

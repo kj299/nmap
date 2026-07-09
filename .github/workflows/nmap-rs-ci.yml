@@ -1,0 +1,98 @@
+# Safety-first CI for the nmap C-to-Rust port (nmap-rs/ workspace).
+# Adapted from porting-kit/harnesses/ci/porting-ci.template.yml. Organized around
+# the kit's SAFETY GATES, not OS coverage.
+#
+# LESSONS #5 — path-scoped to nmap-rs/** + porting-kit/** so it never triggers the
+# heavy C autotools build (build.yml), and the C build never triggers on Rust-only
+# changes (see the paths added to build.yml).
+name: nmap-rs-ci
+
+on:
+  push:
+    branches: [master, 'claude/**']
+    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
+  pull_request:
+    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: nmap-rs
+
+jobs:
+  build-test:
+    name: build + test + clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt --all -- --check
+      # -D warnings escalates the workspace safety lints (arithmetic_side_effects,
+      # cast_possible_truncation, undocumented_unsafe_blocks, missing_safety_doc)
+      # to hard errors. Explicit -D flags are belt-and-suspenders (LESSONS #3).
+      - run: >
+          cargo clippy --all-targets --
+          -D warnings
+          -D clippy::missing_safety_doc
+          -D clippy::undocumented_unsafe_blocks
+      - run: cargo test --all
+
+  unsafe-audit:
+    name: unsafe-audit (hard fail on undocumented unsafe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # Fails if ANY `unsafe {}` block lacks a // SAFETY: comment. Run from repo
+      # root against the workspace crates.
+      - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py nmap-rs/crates/
+        working-directory: .
+
+  supply-chain:
+    name: supply-chain (audit + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit cargo-deny --locked
+      - run: cargo audit
+      - run: cargo deny check
+
+  miri:
+    name: miri (UB in unsafe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: miri }
+      - run: cargo +nightly miri test
+
+  # --- Gates below activate as their inputs land (kept wired, self-skip until then) ---
+
+  fuzz-smoke:
+    name: fuzz (60s smoke per target; skips until targets exist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: |
+          if [ ! -d fuzz ]; then echo "no fuzz/ dir yet (Milestone 1) — skipping"; exit 0; fi
+          cargo install cargo-fuzz --locked
+          for t in $(cargo fuzz list 2>/dev/null); do
+            cargo fuzz run "$t" -- -max_total_time=60
+          done
+
+  differential:
+    name: differential vs C oracle (activates in Milestone 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          if [ ! -f porting-kit/harnesses/differential/mvp-matrix.toml ]; then
+            echo "no differential matrix yet (Milestone 1 oracle) — skipping"; exit 0
+          fi
+        working-directory: .

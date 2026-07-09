@@ -43,7 +43,22 @@ that could surface in a differential.
 
 ## Behavioral improvements (not security, but deliberate)
 
-_(none yet for M1 — add as the module loop surfaces them)_
+- [x] `services-parse-degrade` (`services.cc` `nmap_services_init`, owner
+      `core::ports`): the C `fatal()`s and aborts the whole scan on a malformed
+      `nmap-services` line (bad ratio, `/0` denominator, unknown protocol). The
+      Rust `ServiceTable::parse` **skips** the offending line and keeps going, so
+      a corrupt or partially-edited data file degrades gracefully instead of
+      taking the tool down (availability hardening). Verified: real 3.9 MB
+      `nmap-services` parses to 27,461 entries; `top_ports(tcp,8)` matches nmap's
+      canonical `[80,23,443,21,22,25,3389,110]`.
+
+## Deferred `-p` syntax (rejected explicitly, never silently ignored)
+
+`core::ports::parse_port_spec` returns `PortSpecError::Unsupported` for syntax
+accepted by nmap but not yet ported — `[...]` top-ports brackets, `*`/`?`
+wildcard service masks, and `P:` protocol scan. Numeric ranges/lists,
+`T:`/`U:`/`S:` prefixes, open ranges, and exact service names are supported.
+These land in a later slice; until then they error rather than mis-scan.
 
 ## Platform / environment differences
 

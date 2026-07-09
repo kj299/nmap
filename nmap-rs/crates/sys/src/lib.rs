@@ -10,7 +10,11 @@
 //!   2. Small audited safe fns over raw FFI — the `unsafe` a few lines behind a
 //!      safe signature, with its invariants written down.
 //!
-//! For the Milestone-1 connect scan there is **no `unsafe`**: [`net`] wraps
-//! tokio's safe socket API, so the unsafe-audit gate reports 0 for this crate.
+//! For the Milestone-1 connect scan there is **no `unsafe`**: [`net`] and
+//! [`scan`] wrap tokio's safe socket/task APIs, so the unsafe-audit gate reports
+//! 0 for this crate.
 
 pub mod net;
+pub mod scan;
+
+pub use scan::{connect_scan, ConnectScanConfig};

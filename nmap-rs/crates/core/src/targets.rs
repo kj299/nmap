@@ -195,8 +195,14 @@ pub enum TargetSpec {
     Ipv4(Box<Ipv4Ranges>),
     /// A single numeric IPv6 address (M1 does not expand IPv6 CIDR/ranges).
     Ipv6(Ipv6Addr),
-    /// A name to resolve (resolution happens in `nmap-sys`).
-    Hostname(String),
+    /// A name to resolve (resolution happens in `nmap-sys`). Any `/mask` is
+    /// carried here and applied *after* resolution, matching nmap's
+    /// `NetBlockHostname` — never dropped.
+    Hostname {
+        name: String,
+        /// The `/bits` netmask, if the expression had one.
+        netmask_bits: Option<u32>,
+    },
 }
 
 /// Why a target expression could not be parsed. Typed, never a panic.
@@ -208,10 +214,18 @@ pub enum TargetParseError {
     BadNetmask,
     /// Looks like IPv6 but IPv6 was not requested (nmap: "use the -6 option").
     Ipv6NotEnabled,
+    /// An IPv6 address with a non-`/128` netmask. Milestone 1 does not expand
+    /// IPv6 ranges; we reject rather than silently scan a single address.
+    Ipv6RangeUnsupported,
 }
 
 /// Parse one target expression into a [`TargetSpec`]. `want_ipv6` mirrors nmap's
 /// `-6` flag: a numeric IPv6 literal is only accepted when it is set.
+///
+/// `expr` is expected to be a single, already-trimmed token (the CLI / `-iL`
+/// reader splits and trims before calling this, exactly as the C tokenizes the
+/// host expression before `parse_ipv4_ranges`). Leading/trailing whitespace is
+/// therefore treated as part of the token (and makes it a non-numeric name).
 ///
 /// Total over all `&str` inputs: returns `Ok` or a typed `Err`, never panics.
 pub fn parse_target(expr: &str, want_ipv6: bool) -> Result<TargetSpec, TargetParseError> {
@@ -240,11 +254,20 @@ pub fn parse_target(expr: &str, want_ipv6: bool) -> Result<TargetSpec, TargetPar
         if !want_ipv6 {
             return Err(TargetParseError::Ipv6NotEnabled);
         }
+        // A non-/128 mask would denote an IPv6 range, which M1 does not expand.
+        // Reject rather than silently scanning just this one address.
+        if matches!(bits, Some(b) if b != 128) {
+            return Err(TargetParseError::Ipv6RangeUnsupported);
+        }
         return Ok(TargetSpec::Ipv6(v6));
     }
 
-    // 3. Otherwise a hostname to resolve later.
-    Ok(TargetSpec::Hostname(host.to_string()))
+    // 3. Otherwise a hostname to resolve later — carry any netmask through so
+    // it can be applied post-resolution (nmap's NetBlockHostname behavior).
+    Ok(TargetSpec::Hostname {
+        name: host.to_string(),
+        netmask_bits: bits,
+    })
 }
 
 /// Split the trailing `/bits` off an expression (on the LAST `/`, like
@@ -473,13 +496,43 @@ mod tests {
     fn hostname_and_ipv6() {
         assert_eq!(
             parse_target("scanme.nmap.org", false),
-            Ok(TargetSpec::Hostname("scanme.nmap.org".to_string()))
+            Ok(TargetSpec::Hostname {
+                name: "scanme.nmap.org".to_string(),
+                netmask_bits: None,
+            })
         );
         assert_eq!(
             parse_target("::1", false),
             Err(TargetParseError::Ipv6NotEnabled)
         );
         assert!(matches!(parse_target("::1", true), Ok(TargetSpec::Ipv6(_))));
+    }
+
+    #[test]
+    fn netmask_on_hostname_is_carried_not_dropped() {
+        // Regression: a /mask on a hostname must survive for post-resolution
+        // application, not silently collapse to a single host.
+        assert_eq!(
+            parse_target("example.com/24", false),
+            Ok(TargetSpec::Hostname {
+                name: "example.com".to_string(),
+                netmask_bits: Some(24),
+            })
+        );
+    }
+
+    #[test]
+    fn ipv6_range_is_rejected_not_silently_single() {
+        // Regression: "2001:db8::/64" must not silently become a single host.
+        assert_eq!(
+            parse_target("2001:db8::/64", true),
+            Err(TargetParseError::Ipv6RangeUnsupported)
+        );
+        // A bare address or explicit /128 is still a single host.
+        assert!(matches!(
+            parse_target("2001:db8::1/128", true),
+            Ok(TargetSpec::Ipv6(_))
+        ));
     }
 
     #[test]
@@ -494,7 +547,7 @@ mod tests {
         ] {
             let r = parse_target(bad, false);
             assert!(
-                r.is_err() || matches!(r, Ok(TargetSpec::Hostname(_))),
+                r.is_err() || matches!(r, Ok(TargetSpec::Hostname { .. })),
                 "{bad:?} should not parse as a valid IPv4 range: {r:?}"
             );
         }

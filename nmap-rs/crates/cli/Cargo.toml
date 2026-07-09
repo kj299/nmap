@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 nmap-core = { path = "../core" }
 nmap-sys = { path = "../sys" }
+# Async runtime to drive the scan; the socket/DNS primitives live in nmap-sys.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

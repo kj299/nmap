@@ -12,6 +12,10 @@ rust-version.workspace = true
 # MVP (connect scan) this crate is expected to hold ~0 unsafe.
 [dependencies]
 nmap-core = { path = "../core" }
+# Async runtime + safe socket API for the connect scan. tokio's networking is a
+# safe wrapper over the OS (Winsock/IOCP on Windows, epoll/kqueue elsewhere), so
+# this crate still holds ~0 unsafe for the MVP. Feature set kept minimal.
+tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

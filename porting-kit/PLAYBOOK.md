@@ -42,6 +42,12 @@ per-module control ledger the phases refer to.
   against the real target before relying on it — a check that cries wolf gets
   muted, and the real flaws drown (LESSONS #2: the format-string check once
   produced 828 false positives on lsof, burying ~215 real candidates).
+  **Confirm the scanner actually reads the target's languages before believing a
+  low count.** A "0 flaws" result on a large codebase usually means the scanner
+  glob missed the files, not that the code is clean — a scanner that reads nothing
+  is worse than none because it reports *clean* (LESSONS #6: `scan_c_flaws.py`
+  globbed only `.c`/`.h` and silently skipped nmap's ~9.4k LOC of C++ `.cc`,
+  reporting nothing until the extension set was widened).
 - **Classify the FFI/syscall surface by failure mode** (LESSONS #1). For each
   external call the port will make, record three properties: can it **block
   indefinitely** (→ needs a timeout / worker thread / a design that avoids it),
@@ -199,12 +205,36 @@ Then the loop — each step is a CI-enforced gate:
    `<<TIMEOUT>>` and fails it. Treat a timeout as a design smell (an unbounded
    blocking call on the hot path) — the winlsof fix was to *avoid* the blocking
    call, not wrap it.
+   When the port **intentionally renders a subset** of the C output (an MVP that
+   abbreviates, e.g. nmap-rs collapsing closed ports into one summary line while C
+   nmap lists each), do **not** diff raw output: `diff_run.py` is case-granular, so
+   you either drown in intentional divergences or ledger the whole case — which
+   blinds it to real regressions inside that case. Instead point `--oracle`/`--rust`
+   at thin wrappers that emit a **canonical semantic projection** (the load-bearing
+   result only — for a scanner: host state + open-port state/reason + per-state
+   counts), canonicalizing *both* representations to the same shape. Then a genuine
+   regression still breaks the match while the ledgered abbreviation stays invisible
+   (LESSONS #7). Full output-format parity becomes its own later differential.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
-   release blocker.
+   release blocker. Scope this gate to the **threat-model boundary**: it applies to
+   modules that consume untrusted input (parsers of CLI specs, data files, network
+   responses), not to a renderer or a pure data model with no external input edge —
+   for those the fuzz gate is *N/A*, not a missing tick, and forcing a token target
+   just to fill the column is theater (LESSONS #9). Keep the hand-authored seed
+   corpus **read-only and separate from the writable corpus dir**: `cargo fuzz run
+   <t> <seeds>` writes discovered inputs back into whatever dir you pass, so run
+   `cargo fuzz run <t> corpus/<t> seeds/<t>` (first dir writable, rest read-only) or
+   the seeds silently balloon into thousands of committed files.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
    logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). winlsof's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
+   **Miri cannot execute real I/O** (sockets, files, real syscalls) — a tokio
+   `TcpStream::connect` test aborts under Miri. So structure the `sys` layer to
+   **split the pure decision from the I/O**: extract the branch logic into a pure
+   fn (`verdict(outcome, elapsed) -> …`) that Miri *does* cover, and gate the thin
+   I/O tests behind `#[cfg_attr(miri, ignore = "…")]`. Don't let "Miri can't run
+   this" become "this module has no Miri coverage" (LESSONS #8).
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
 6. **Review & merge.** Update the `progress` table (the module advances

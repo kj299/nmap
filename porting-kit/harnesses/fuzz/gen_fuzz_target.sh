@@ -56,7 +56,14 @@ cat <<EOF
 Next steps (one-time, if not already set up):
   cargo install cargo-fuzz
   cargo fuzz init                       # if this crate has no fuzz/ yet
-  cargo fuzz run $MODULE -- -max_total_time=60     # smoke
-  cargo fuzz run $MODULE                            # deep (nightly / CI schedule)
-Seed the corpus with real inputs and any crash reproducers you find.
+  cargo fuzz run $MODULE seeds/$MODULE -- -max_total_time=60   # smoke, from seeds
+  cargo fuzz run $MODULE                                        # deep (nightly / CI)
+Seed the corpus with real inputs and any crash reproducers you find. Keep those
+hand-authored seeds in a SEPARATE, read-only dir (e.g. seeds/$MODULE) and let the
+writable corpus live elsewhere: 'cargo fuzz run <t> corpus/<t> seeds/<t>' treats
+the FIRST dir as writable and the rest as read-only inputs. If you pass only the
+seeds dir, libFuzzer writes every discovered input back into it and your curated
+seed set balloons into thousands of files (LESSONS #9). Also fuzz ONLY modules on
+the threat-model boundary (untrusted-input parsers) — a renderer or pure model has
+no input edge and needs no target.
 EOF

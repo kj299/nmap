@@ -74,25 +74,32 @@ jobs:
   # --- Gates below activate as their inputs land (kept wired, self-skip until then) ---
 
   fuzz-smoke:
-    name: fuzz (60s smoke per target; skips until targets exist)
+    name: fuzz (60s smoke per untrusted-input parser)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with: { components: rust-src }
       - run: |
-          if [ ! -d fuzz ]; then echo "no fuzz/ dir yet (Milestone 1) — skipping"; exit 0; fi
+          if [ ! -d fuzz ]; then echo "no fuzz/ dir yet — skipping"; exit 0; fi
           cargo install cargo-fuzz --locked
-          for t in $(cargo fuzz list 2>/dev/null); do
-            cargo fuzz run "$t" -- -max_total_time=60
+          # Fuzz each target from its hand-authored seed corpus. Any panic/crash
+          # on arbitrary input is a release blocker (Phase 4, gate 3).
+          for t in $(cargo fuzz list); do
+            cargo fuzz run "$t" fuzz/seeds/"$t" -- -max_total_time=60 -print_final_stats=1
           done
 
   differential:
-    name: differential vs C oracle (activates in Milestone 1)
+    name: differential vs C nmap oracle (M1 connect scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          if [ ! -f porting-kit/harnesses/differential/mvp-matrix.toml ]; then
-            echo "no differential matrix yet (Milestone 1 oracle) — skipping"; exit 0
-          fi
-        working-directory: .
+      - uses: dtolnay/rust-toolchain@stable
+      # The C oracle: distro nmap. project.py compares only the semantic scan
+      # result (host status + open-port state/reason + closed counts), so the
+      # exact nmap version's decorative output does not affect the verdict.
+      - run: sudo apt-get update && sudo apt-get install -y nmap
+      - run: cargo build --release
+      # Fixture listeners + both binaries + diff_run.py over the M1 matrix.
+      # Fails on any UNLEDGERED divergence in port-state fidelity.
+      - run: bash tests/differential/run_differential.sh

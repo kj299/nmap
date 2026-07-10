@@ -25,15 +25,15 @@ produce no observable output divergence (so no differential case), but each is a
 C sink the port must not re-implement. Case names prefixed `sec-` for the ones
 that could surface in a differential.
 
-- [ ] `sec-services-path` (`services.cc:134/140`, owner `core::ports`): C builds
+- [x] `sec-services-path` (`services.cc:134/140`, owner `core::ports`): C builds
       the fallback services-file path with `GetSystemDirectory(buf,480)` then
       `strcpy(buf+len, "\\drivers\\etc\\services")` — a latent CWE-120 overflow
       resting on a hardcoded `480` "be safe" assumption. Rust uses
       `PathBuf::join`, so the bound is structural and the overflow class is gone.
-- [ ] `sec-proto-name` (`output.cc:719`, owner `core::output`):
+- [x] `sec-proto-name` (`output.cc:719`, owner `core::output`):
       `strcpy(protocol, IPPROTO2STR(...))` into a fixed buffer (CWE-120). Rust
       renders protocol names as `String`/`&str` with no fixed-size destination.
-- [ ] `sec-log-format` (`output.cc:923/928`, owner `core::output`):
+- [x] `sec-log-format` (`output.cc:923/928`, owner `core::output`):
       `vfprintf(fmt, …)` with a non-literal `fmt` (CWE-134 format-string). Rust's
       compile-time-checked `format!`/`write!` makes the whole class unexpressible.
 
@@ -60,7 +60,44 @@ wildcard service masks, and `P:` protocol scan. Numeric ranges/lists,
 `T:`/`U:`/`S:` prefixes, open ranges, and exact service names are supported.
 These land in a later slice; until then they error rather than mis-scan.
 
+## M1 output-format abbreviation (confirmed by the differential oracle)
+
+The M1 differential (`tests/differential/`) compares the **semantic** scan result
+— host status + open-port state/reason + closed/filtered counts — via
+`project.py`, and all matrix cases MATCH C nmap 7.94. The comparison deliberately
+projects away the following **intentional MVP renderer abbreviations**, documented
+here so the format-level differential planned for M2/M3 treats them as known and
+not as regressions. None is a fidelity bug in *what was scanned*; each is a
+narrower *rendering* of the same result.
+
+- **Collapsed non-open ports.** C nmap lists every scanned port individually (incl.
+  `closed`/`filtered`) until a per-state count crosses its "Not shown" threshold;
+  the MVP always collapses non-open ports into a single `<extraports>` / `Not shown`
+  summary. `project.py` canonicalizes both to a per-(state,proto) count, so the
+  *set* is verified even though per-closed-port identity is not rendered.
+- **No decorative XML preamble.** The MVP omits `<!DOCTYPE nmaprun>`,
+  `<?xml-stylesheet?>`, `<scaninfo>`, `<verbose>`, `<debugging>`, `<hostnames>`,
+  `<times>`, `reason_ttl`, and `startstr`/`xmloutputversion` attributes. These are
+  non-load-bearing for the connect scan and land with the output-fidelity pass.
+- **Unknown-service labelling.** In `-oN` the MVP prints `unknown` in the SERVICE
+  column (matching nmap); in `-oX`/`-oG` nmap emits an *empty* service field / no
+  `<service>` element for an unknown port, whereas the MVP currently emits
+  `name="unknown"`. Excluded from the projection (M1 does no `-sV`); flagged to
+  reconcile in the output-fidelity pass so `-oX` consumers aren't misled.
+- **`# Nmap ...` file banners / done-line.** nmap's `-oN`/`-oX`/`-oG` file format
+  wraps output in `# Nmap <ver> scan initiated ... as: ...` / `# Nmap done at ...`
+  comments and omits the interactive `Starting Nmap` line; the MVP uses its own
+  banner/`Nmap done:` line. `project.py` and the format's comment convention make
+  this invisible to the semantic diff.
+
+- [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
+      (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
+      stderr because forward resolution is only performed for hostname targets
+      under `-Pn` anyway — so `-n` is a semantic no-op in M1, not silently honored.
+      Stderr-only; does not affect scan output or the differential projection.
+
 ## Platform / environment differences
 
-- [ ] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the
-      port; the differential normalizes the version line. (Seeded; confirm at M1 CLI.)
+- [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the
+      port; the differential compares the semantic projection, which excludes the
+      version banner entirely. (Confirmed at M1 CLI.)

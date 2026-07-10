@@ -13,7 +13,7 @@ record; edit it as milestones complete.
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — **all 9 modules ported**; `nmap-rs -sT` works end-to-end (normal/-oX/-oG). Remaining: shared fuzz + C-nmap differential oracle to close those gate columns, then the M1 retrospective |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — **all 9 modules ported**; `nmap-rs -sT` works end-to-end (normal/-oX/-oG). **Fuzz + differential gates now closed**: 3 cargo-fuzz targets over the untrusted parsers (0 crashes) + a C-nmap differential oracle (5/5 cases MATCH nmap 7.94 on the loopback fixture). Remaining: the M1 retrospective |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
 | 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |
@@ -22,16 +22,21 @@ record; edit it as milestones complete.
 | 6 | NSE — Lua engine + bridges + scripts | full cycle | ⬜ |
 | 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | ⬜ |
 
-> **We are here:** Milestone 0 is complete and pushed (kit vendored at `porting-kit/`,
-> `nmap-rs/` workspace up, six skill symlinks in `.claude/skills/`, path-scoped CI
-> wired with differential/fuzz gates stubbed to skip "until targets exist", PR #1
-> Rust jobs green). **The immediate next action is Milestone 1 Phase 0** — invoke
-> `porting-kit-kickoff` (inventory + `cflaw-scan` + `THREAT-MODEL.md`) and
-> `porting-kit-oracle` in parallel, present the Phase-0 report + confirmed port
-> order, and **stop for approval before writing any Rust** (kit requirement).
-> Each milestone is its own kit cycle: `kickoff → (cflaw-scan ∥ oracle) → per-module
-> six-gate loop → audit → retrospective-that-patches-the-kit`. **Never skip the
-> retrospective** — it is the one rule that makes the kit worth having.
+> **We are here:** Milestone 1's MVP is built and its safety gates are green. All 9
+> modules are ported and `nmap-rs -sT` runs end-to-end (normal/`-oX`/`-oG`); the
+> workspace holds **0 `unsafe`**. The **fuzz gate** is closed with three cargo-fuzz
+> targets over the untrusted-input parsers (`parse_target`, `parse_port_spec`,
+> `ServiceTable::parse`) — millions of runs, zero crashes — and the **differential
+> gate** is closed by `tests/differential/`, which proves port-state fidelity
+> against C nmap 7.94 over a loopback fixture (5/5 cases MATCH). Both are wired into
+> CI (`fuzz-smoke`, `differential` jobs) and no longer self-skip. `progress.json`:
+> `targets` and `ports` are fully gated (DONE); the rest are through `differential`
+> (fuzz is scoped to the untrusted-parser surface per `THREAT-MODEL.md`).
+> **The one remaining M1 step is the retrospective** — patch the kit
+> (playbook/harnesses/skills) and append `LESSONS.md`. **Never skip the
+> retrospective** — it is the one rule that makes the kit worth having. Each
+> milestone is its own kit cycle: `kickoff → (cflaw-scan ∥ oracle) → per-module
+> six-gate loop → audit → retrospective-that-patches-the-kit`.
 
 **Sequencing rationale (why this order, and where raw lands).** Order follows the
 kit's "roots-before-dependents, cheapest-and-safest-first, spike-the-scary-module-

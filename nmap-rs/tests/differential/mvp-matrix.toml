@@ -1,0 +1,31 @@
+# M1 connect-scan differential matrix — the behavioral contract nmap-rs must
+# match against C nmap, over the loopback fixture in run_differential.sh
+# (open ports 18080 & 18443 have listeners; every other port is closed → RST).
+#
+# Each [[case]] runs BOTH tools with `args`; the wrapper appends `-oX -` and pipes
+# through project.py, so we compare the canonical semantic projection (host
+# status + open-port state/reason + closed/filtered counts), not raw output.
+# `-Pn` makes host state deterministic (no discovery variance); `-n` skips rDNS.
+# Grow this every time a bug escapes: add the case that would have caught it.
+
+[[case]]
+name = "mixed-open-closed"
+args = ["-sT", "-Pn", "-n", "-p", "18080,18443,18081,19999", "127.0.0.1"]
+
+[[case]]
+name = "single-open"
+args = ["-sT", "-Pn", "-n", "-p", "18080", "127.0.0.1"]
+
+[[case]]
+name = "all-closed"
+args = ["-sT", "-Pn", "-n", "-p", "18081,18082,19998,19999", "127.0.0.1"]
+
+# Range spec (18078-18082): exercises port-range expansion; only 18080 is open.
+[[case]]
+name = "port-range"
+args = ["-sT", "-Pn", "-n", "-p", "18078-18082", "127.0.0.1"]
+
+# List + range mixed, out of order: canonical projection sorts, so order-agnostic.
+[[case]]
+name = "list-and-range-unsorted"
+args = ["-sT", "-Pn", "-n", "-p", "19999,18080-18081,18443", "127.0.0.1"]

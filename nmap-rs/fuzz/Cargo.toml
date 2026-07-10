@@ -1,0 +1,54 @@
+# cargo-fuzz crate for nmap-rs. Detached from the main workspace (its own empty
+# [workspace] table) so the stable `cargo build`/`clippy`/`test` gates never try
+# to compile the nightly-only libfuzzer runtime, and `cargo fuzz` resolves this
+# as its own root. Fuzzes the M1 untrusted-input parsers in nmap-core:
+#   parse_target      — CLI target/host/CIDR spec        (targets.rs)
+#   parse_port_spec   — -p port spec grammar             (ports.rs)
+#   services_parse    — nmap-services file parser        (ports.rs)
+# Contract: none of these may panic/abort/OOM on arbitrary bytes (Phase 4 gate 3).
+[package]
+name = "nmap-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nmap-core]
+path = "../crates/core"
+
+# Detach from the parent workspace: fuzz builds on nightly with a distinct
+# dependency set and must not be pulled into the stable workspace gates.
+[workspace]
+
+# Fuzz targets deliberately do not inherit the workspace release profile; keep
+# overflow-checks on so an arithmetic overflow surfaces as a fuzz crash, not
+# silent wraparound.
+[profile.release]
+overflow-checks = true
+debug = 1
+
+[[bin]]
+name = "parse_target"
+path = "fuzz_targets/parse_target.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_port_spec"
+path = "fuzz_targets/parse_port_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "services_parse"
+path = "fuzz_targets/services_parse.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,3 @@
+80
+http	80/tcp	0.5	# comment
+https	443/tcp	0.4

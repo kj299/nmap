@@ -1,13 +1,13 @@
 {
   "modules": {
-    "cli": "ported",
-    "connect_scan": "ported",
-    "model": "ported",
-    "net": "ported",
-    "options": "ported",
-    "output": "ported",
-    "ports": "ported",
-    "targets": "ported",
-    "timing": "ported"
+    "cli": "differential",
+    "connect_scan": "differential",
+    "model": "differential",
+    "net": "differential",
+    "options": "differential",
+    "output": "differential",
+    "ports": "unsafe_audited",
+    "targets": "unsafe_audited",
+    "timing": "differential"
   }
 }

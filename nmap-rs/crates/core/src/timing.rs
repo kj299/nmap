@@ -10,7 +10,7 @@
 /// Clamp `val` to `[min, max]` — nmap's `box(min, max, val)`. Unlike
 /// `i64::clamp`, this does not panic when `min > max` (it returns `min`),
 /// mirroring the C helper's behavior.
-fn box_clamp(min: i64, max: i64, val: i64) -> i64 {
+pub(crate) fn box_clamp(min: i64, max: i64, val: i64) -> i64 {
     if val < min {
         min
     } else if val > max {
@@ -113,6 +113,20 @@ impl TimingTemplate {
             5 => TimingTemplate::Insane,
             _ => return None,
         })
+    }
+
+    /// The numeric `-T` level (0–5) — nmap's `o.timing_level`. Several timing
+    /// constants (congestion-avoidance increment, ssthresh drop divisor) branch
+    /// on this.
+    pub fn level(self) -> u8 {
+        match self {
+            TimingTemplate::Paranoid => 0,
+            TimingTemplate::Sneaky => 1,
+            TimingTemplate::Polite => 2,
+            TimingTemplate::Normal => 3,
+            TimingTemplate::Aggressive => 4,
+            TimingTemplate::Insane => 5,
+        }
     }
 
     /// From a `-T` name (case-insensitive), e.g. `"Aggressive"`.

@@ -192,3 +192,122 @@ code), not the playbook prose — evidence that a kit is only as good as its too
 are exercised. `PROMPTS/90-retrospective.md` already says "run against the real
 code"; these passes prove that half is where the findings live, and it is now
 the emphasized half.
+
+---
+
+# Milestone 1 — nmap C→Rust (unprivileged TCP connect scan MVP)
+
+The kit's second port. Target: nmap (~55k LOC C++ core + bundled C libs) → Rust,
+Windows. M1 is the vertical-slice MVP: `-sT` connect scan + host discovery +
+normal/`-oX`/`-oG` output, shipped at **0 `unsafe`** in the whole workspace. These
+entries are the M1 retrospective; each names the harness/playbook section patched.
+
+## 006. A scanner that reads only .c/.h reports a C++ codebase as "0 flaws"
+
+- **Date:** 2026-07-10
+- **Codebase:** nmap (C++ `.cc` core) — Phase 0 flaw scan
+- **What happened:** `scan_c_flaws.py`'s file walk globbed only `.c`/`.h`. nmap's
+  entire core engine is C++ (`.cc`) — `services.cc`, `output.cc`, `scan_lists.cc`,
+  `TargetGroup.cc`, ~9.4k LOC of it — so the Phase-0 scan returned **nothing** and
+  read as *clean*. This is the #2/#3 class made worse: not a noisy control or an
+  unwired one, but a control that **silently inspects an empty set and reports
+  success**. A "0 flaws" on a large, old C++ tree is almost never real; it means
+  the tool didn't read the code. Widening the extension set immediately surfaced
+  the real sinks — `services.cc:134/140` (`strcpy` into a `GetSystemDirectory`
+  buffer, CWE-120) and `output.cc:1564/2003/2027/2048` (`sprintf`/`strcat` of
+  OS-detect fields) — which then seeded `DIVERGENCES.md`.
+- **Kit change:** `C_SOURCE_EXTS` now covers C++ (`.cc/.cpp/.cxx/.c++/.hpp/.hh/
+  .hxx/.h++`) alongside `.c/.h`; the classic sink patterns apply to C++ verbatim.
+  Pinned with a self-test that asserts `iter_c_files` yields `.cc/.cpp/.hpp`
+  sources and ignores non-source files. Phase 0 prose now says: *confirm the
+  scanner reads the target's actual languages before believing a low count.*
+- **Section amended:** harnesses/c-flaw-scan/scan_c_flaws.py (`C_SOURCE_EXTS`,
+  `iter_c_files`, `_self_test`); PLAYBOOK · Phase 0 "Do".
+
+## 007. A case-granular differential can't judge a port that renders a subset
+
+- **Date:** 2026-07-10
+- **Codebase:** nmap — M1 `core::output` / connect-scan differential
+- **What happened:** The MVP output renderer intentionally abbreviates C nmap: it
+  collapses non-open ports into one `<extraports>`/`Not shown` summary where nmap
+  lists each port, and omits nmap's decorative XML preamble (`<!DOCTYPE>`,
+  `<scaninfo>`, `<times>`, `reason_ttl`, …). A raw `diff_run.py` over full `-oX`
+  output therefore DIVERGEs on **every** case — all of it intentional. And the
+  ledger can't help: `diff_run.py` is **case-granular** (whole-case MATCH/DIVERGE),
+  so ledgering `mixed-open-closed` as intentional suppresses the *entire* case,
+  blinding it to a real regression inside it (an open port mis-reported closed
+  would still read as ledgered). The harness had no way to compare *part* of a
+  case. The load-bearing question — did we get every port's **state and reason**
+  right? — was undiffable as written.
+- **Kit change:** documented the **canonical-projection** pattern on top of the
+  existing wrapper mechanism (`--oracle`/`--rust` are arbitrary binaries):
+  point each at a thin wrapper that pipes its output through a project-specific
+  filter emitting only the semantic result (for a scanner: `host <addr> <status>`,
+  `open <port> <proto> <reason>`, per-state counts), canonicalizing *both* the
+  per-port and the aggregated representations to the same lines. A genuine
+  regression then breaks the match while the intentional abbreviation stays
+  invisible — and the projection is unit-testable on its own (nmap-rs's
+  `project.py` has a self-test proving an open→closed regression breaks the
+  match). Full output-format parity becomes its own later, format-level matrix.
+- **Section amended:** PLAYBOOK · Phase 4 gate 2 (differential); the pattern is
+  demonstrated in `nmap-rs/tests/differential/{project.py,run_differential.sh}`.
+
+## 008. Miri can't run real I/O — split the pure decision from the syscall
+
+- **Date:** 2026-07-10
+- **Codebase:** nmap — M1 `sys::net` (tokio TCP connect) sanitize gate
+- **What happened:** `cargo miri test` on the `sys` layer **aborted**: Miri has no
+  real network/OS and cannot execute a tokio `TcpStream::connect`/`lookup_host` —
+  the test dies in the `syscall` shim, not on a bug. Taken naively this reads as
+  "the sanitize gate doesn't apply to `sys`," which would leave the I/O layer with
+  *no* Miri coverage at all. Compounding it, the sandbox's own network is a liar:
+  it completed connects to non-routable addresses and lost zero-timeout races to
+  loopback, so real-network *assertions* were flaky regardless of Miri.
+- **Kit change:** Phase 4 gate 4 now states Miri's real-I/O limitation and the fix
+  it forces — **split the pure decision from the I/O**: factor the branch logic
+  into a pure fn (`verdict(outcome, elapsed) -> ConnectResult`) that Miri fully
+  covers, and gate the thin I/O tests behind `#[cfg_attr(miri, ignore = "…")]`.
+  This also removed the flakiness (the deterministic `verdict` test replaced the
+  environment-dependent real-connect assertions). The rule: "Miri can't run this
+  test" must never silently become "this module has no Miri coverage."
+- **Section amended:** PLAYBOOK · Phase 4 gate 4 (sanitize).
+
+## 009. The six-gate model assumes every module has a fuzzable input edge
+
+- **Date:** 2026-07-10
+- **Codebase:** nmap — M1 gate closure across 9 modules
+- **What happened:** The gate ladder (`ported → differential → fuzzed → sanitized →
+  unsafe_audited`) is linear, and `progress.py` treats a module's status as the
+  highest *consecutive* gate cleared — which implies **every** module must pass a
+  fuzz gate to reach DONE. But fuzzing targets an **untrusted-input boundary**;
+  M1's parser modules (`targets`, `ports`) have one, while `output` (a renderer),
+  `model` (a pure data type), `timing`, and the connect driver do not. Marking a
+  renderer "fuzzed" would mean fabricating a token target just to tick the column
+  — theater. Separately, standing up the fuzz corpus, a real gotcha bit: running
+  `cargo fuzz run <t> seeds/<t>` made libFuzzer **write every discovered input back
+  into the seeds dir**, turning a curated 5-file seed set into thousands of files
+  staged for commit.
+- **Kit change:** (a) documented that the fuzz gate is **threat-model-scoped** —
+  N/A (not a missing tick) for modules with no untrusted-input edge; a port's
+  `THREAT-MODEL.md` designates which modules require it. (b) `gen_fuzz_target.sh`'s
+  guidance now shows `cargo fuzz run <t> corpus/<t> seeds/<t>` (first dir writable,
+  rest read-only) and warns that passing only the seeds dir balloons it.
+- **Section amended:** PLAYBOOK · Phase 4 gate 3 (fuzz);
+  harnesses/fuzz/gen_fuzz_target.sh (Next-steps guidance).
+
+## Meta — M1's gaps were all "a control that inspects less than it claims"
+
+Three of the four M1 lessons (#6, #7, #8) are the same shape as winlsof's dry-run
+trio (#2–#4): a control that **passes while inspecting less than it purports to** —
+a scanner reading an empty file set (#6), a differential judging whole cases it
+can't decompose (#7), a sanitizer silently skipping the I/O layer (#8). The kit's
+recurring failure mode is not a *missing* gate but a gate whose **coverage is
+narrower than its green checkmark implies**. The standing defense — from
+`PROMPTS/90-retrospective.md` step 0 — is unchanged and vindicated again: **run
+every harness against the real target and eyeball what it actually inspected**, not
+just whether it passed. #6 was caught exactly that way (a 0-flaw result that
+couldn't be true); #7 and #8 surfaced the moment the harnesses met real nmap output
+and a real socket. The single failure the kit *still* would not have prevented:
+nothing forced the *insight* that the differential needed a semantic projection —
+the kit made the problem visible (every case DIVERGEd) but inventing the projection
+was human/agent work, the same "kit buys time, not the design" limit as #1.

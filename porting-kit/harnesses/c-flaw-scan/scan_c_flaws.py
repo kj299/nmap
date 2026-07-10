@@ -217,6 +217,21 @@ def _self_test():
     check("format-string flags exactly the 2 non-literal calls", len(fmt_hits) == 2)
     check("literal-format fprintf/snprintf NOT flagged",
           not any("literal" in h["text"] or '"%d"' in h["text"] for h in fmt_hits))
+
+    # LESSONS #6: the file walk must cover C++ (.cc/.cpp/.hpp/…), not just
+    # .c/.h — scanning only C silently skips a C++ codebase and reports a false
+    # "0 flaws". Prove iter_c_files yields C++ sources and ignores non-source.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        for fn in ("engine.cc", "header.hpp", "mod.cpp", "legacy.c",
+                   "notes.txt", "build.py"):
+            open(os.path.join(d, fn), "w").write("int main(){}\n")
+        found = {os.path.basename(p) for p in iter_c_files([d])}
+        check("C++ sources (.cc/.hpp/.cpp) are scanned, not just .c/.h",
+              {"engine.cc", "header.hpp", "mod.cpp", "legacy.c"} <= found)
+        check("non-source files are not scanned",
+              "notes.txt" not in found and "build.py" not in found)
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

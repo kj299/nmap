@@ -1,6 +1,7 @@
 {
   "modules": {
     "cli": "differential",
+    "congestion": "ported",
     "connect_scan": "differential",
     "model": "differential",
     "net": "differential",

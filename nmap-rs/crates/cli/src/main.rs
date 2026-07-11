@@ -6,13 +6,13 @@
 
 use std::net::IpAddr;
 use std::process::ExitCode;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nmap_core::model::HostState;
 use nmap_core::options::RunConfig;
 use nmap_core::{
     parse_args, parse_port_spec, parse_target, render_grepable, render_normal, render_xml,
-    ScanMeta, ServiceTable, TargetSpec, TimingParams,
+    ScanMeta, ServiceTable, TargetSpec, TimingParams, TimingTemplate,
 };
 use nmap_sys::net::resolve_host;
 use nmap_sys::{connect_scan, ConnectScanConfig};
@@ -69,11 +69,14 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Milestone 2: the scan engine derives its per-probe timeout adaptively from
+    // observed RTTs and paces probes by the congestion window, so the CLI passes
+    // the timing *template* rather than a fixed timeout. (`-T` selection is a
+    // later CLI refinement; the default is Normal / -T3.)
     let timing = TimingParams::default();
     let scan_cfg = ConnectScanConfig {
         ports,
-        // Fixed per-probe timeout for the MVP (adaptive RTT is a refinement).
-        timeout: Duration::from_millis(timing.initial_rtt_timeout_ms.max(0) as u64),
+        template: TimingTemplate::Normal,
         max_parallelism: timing.max_parallelism as usize,
     };
 

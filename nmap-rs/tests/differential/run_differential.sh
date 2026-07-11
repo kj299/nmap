@@ -41,11 +41,14 @@ if [[ -z "${NMAP_RS:-}" ]]; then
     if [[ -x "$cand" ]]; then NMAP_RS="$cand"; break; fi
   done
 fi
-if [[ -z "$NMAP" || ! -x "$NMAP" ]]; then
+# Require a regular executable *file*, not just something with the +x bit — a
+# directory passes `-x` and would be "run" to empty output, surfacing as a
+# confusing XML parse-error downstream instead of a clear "not a binary".
+if [[ -z "$NMAP" || ! -f "$NMAP" || ! -x "$NMAP" ]]; then
   echo "SKIP: C nmap oracle not found (set NMAP=... or install nmap)"; exit 0
 fi
-if [[ -z "${NMAP_RS:-}" || ! -x "$NMAP_RS" ]]; then
-  echo "error: nmap-rs binary not found — run 'cargo build --release' first" >&2; exit 2
+if [[ -z "${NMAP_RS:-}" || ! -f "$NMAP_RS" || ! -x "$NMAP_RS" ]]; then
+  echo "error: nmap-rs binary not found or not a file — run 'cargo build --release' first (got: '${NMAP_RS:-}')" >&2; exit 2
 fi
 echo "oracle : $NMAP ($("$NMAP" --version | head -1))"
 echo "rust   : $NMAP_RS ($("$NMAP_RS" --version 2>/dev/null | head -1))"

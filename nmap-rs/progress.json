@@ -3,6 +3,7 @@
     "cli": "differential",
     "congestion": "ported",
     "connect_scan": "differential",
+    "engine": "ported",
     "model": "differential",
     "net": "differential",
     "options": "differential",

@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod congestion;
+pub mod engine;
 pub mod log;
 pub mod model;
 pub mod options;
@@ -20,6 +21,7 @@ pub mod timing;
 pub mod trace;
 
 pub use congestion::{PerfVars, TimingVals};
+pub use engine::{HostScheduler, Probe};
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
 pub use options::{parse_args, RunConfig};
 pub use output::{render_grepable, render_normal, render_xml, ScanMeta};

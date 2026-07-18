@@ -21,7 +21,7 @@ pub mod timing;
 pub mod trace;
 
 pub use congestion::{PerfVars, TimingVals};
-pub use engine::{HostScheduler, Probe};
+pub use engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict};
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
 pub use options::{parse_args, RunConfig};
 pub use output::{render_grepable, render_normal, render_xml, ScanMeta};

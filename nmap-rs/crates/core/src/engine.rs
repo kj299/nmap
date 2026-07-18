@@ -5,17 +5,20 @@
 //! **when the host is finished** — driving the congestion window
 //! ([`crate::congestion`]) and the RTT-timeout estimator ([`crate::timing`]).
 //!
-//! Milestone-2 scope: the **per-host** scheduler for the connect path. It owns
-//! the congestion gate `cwnd >= num_probes_active + 0.5` (nmap's
-//! `HostScanStats::sendOK`), the retransmission queue with a per-port try cap
-//! (`allowedTryno`), and the completion test. The **group**-level scheduler
-//! (cross-host `cwnd` bounding, min-rate pacing) and the wall-clock scan-delay /
-//! rate-limit paths live with the driver in the next slice — they need a clock,
-//! which this pure module deliberately does not have.
+//! Three pieces, all pure:
+//!   - [`HostScheduler`] — the per-host scheduler: the congestion gate
+//!     `cwnd >= num_probes_active + 0.5` (nmap's `HostScanStats::sendOK`), the
+//!     retransmission queue with a per-port try cap (`allowedTryno`), and the
+//!     completion test.
+//!   - [`GroupScheduler`] — the cross-host congestion window (`GroupScanStats`),
+//!     bounding *total* probes in flight across a multi-host group.
+//!   - [`RateLimiter`] — `--min-rate` / `--max-rate` pacing (`probeSent` +
+//!     `sendOK`), expressed over integer-µs timestamps the driver supplies.
 //!
 //! Purity is the safety story: no sockets, no `Instant::now()`, so every
 //! transition is a total function of (state, event) and is exhaustively testable.
-//! The caller supplies elapsed times as plain integers.
+//! The caller (the `sys` driver) owns the clock and feeds elapsed times in as
+//! plain integers; this module never blocks or reaches for I/O.
 
 use std::collections::VecDeque;
 
@@ -189,6 +192,179 @@ impl HostScheduler {
     }
 }
 
+/// Cross-host congestion control — the port of the scheduling subset of nmap's
+/// `GroupScanStats`. When more than one host is still being scanned, a shared
+/// **group** congestion window bounds the *total* probes in flight across all
+/// hosts, so a large host group can't collectively overrun the network even
+/// though each host's own window is small. Pure — the driver owns the clock.
+#[derive(Clone, Debug)]
+pub struct GroupScheduler {
+    perf: PerfVars,
+    timing: TimingVals,
+    /// Total probes in flight across all hosts in the group.
+    active: u32,
+}
+
+impl GroupScheduler {
+    /// A fresh group window under a `-T` template (`cwnd = group_initial_cwnd`).
+    pub fn new(template: TimingTemplate, min_parallelism: u32, max_parallelism: u32) -> Self {
+        let perf = PerfVars::new(template, min_parallelism, max_parallelism);
+        let timing = TimingVals::new_group(&perf);
+        GroupScheduler {
+            perf,
+            timing,
+            active: 0,
+        }
+    }
+
+    /// May the group admit another probe right now? Mirrors the group congestion
+    /// gate in `GroupScanStats::sendOK`: with fewer than two hosts still
+    /// incomplete, the group defers entirely to per-host control (returns
+    /// `true`); otherwise the group window must have room
+    /// (`cwnd >= active + 0.5`). The wall-clock rate/pacing gates are the
+    /// driver's job (see [`RateLimiter`]).
+    pub fn may_admit(&self, incomplete_hosts: usize) -> bool {
+        if incomplete_hosts < 2 {
+            return true;
+        }
+        self.timing.cwnd >= f64::from(self.active) + 0.5
+    }
+
+    /// Account a probe launched into the group.
+    pub fn on_send(&mut self) {
+        self.active = self.active.saturating_add(1);
+    }
+
+    /// A reply resolved a probe somewhere in the group: free a slot and grow the
+    /// group window.
+    pub fn on_reply(&mut self) {
+        self.active = self.active.saturating_sub(1);
+        self.timing.num_replies_expected = self.timing.num_replies_expected.saturating_add(1);
+        self.timing.ack(&self.perf, 1.0);
+    }
+
+    /// A probe in the group timed out: free the slot and drop the group window —
+    /// **gently** (`drop_group`, `cwnd /= 2`), so one host's loss doesn't stall
+    /// the whole group.
+    pub fn on_timeout(&mut self) {
+        let in_flight = self.active;
+        self.active = self.active.saturating_sub(1);
+        self.timing.num_replies_expected = self.timing.num_replies_expected.saturating_add(1);
+        self.timing.drop_group(in_flight, &self.perf);
+    }
+
+    /// Probes in flight across the group.
+    pub fn in_flight(&self) -> u32 {
+        self.active
+    }
+
+    /// The group congestion window (probes).
+    pub fn cwnd(&self) -> f64 {
+        self.timing.cwnd
+    }
+}
+
+/// What the [`RateLimiter`] says about sending a probe at a given instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateVerdict {
+    /// `--max-rate` says it's too soon; don't send until the returned time (µs
+    /// since scan start).
+    TooEarly(i64),
+    /// `--min-rate` says we're behind schedule; send now regardless of the
+    /// congestion window.
+    MustSend,
+    /// No rate constraint forces the decision; defer to congestion control.
+    Ok,
+}
+
+/// Send-rate pacing — the port of the `--min-rate` / `--max-rate` bookkeeping in
+/// `GroupScanStats::probeSent` + `sendOK`. Pure: all times are integer
+/// microseconds relative to scan start; the driver supplies "now".
+///
+/// `--max-rate` spaces sends at least `1e6 / rate` µs apart (the threshold may
+/// slip into the past so bursts can catch up). `--min-rate` forces a send once
+/// the schedule falls behind. Absent either flag the corresponding path is inert.
+#[derive(Clone, Copy, Debug)]
+pub struct RateLimiter {
+    /// Minimum µs between sends for `--max-rate` (`0` = no max-rate).
+    max_rate_add: i64,
+    /// Scheduling interval for `--min-rate` (`0` = no min-rate).
+    min_rate_add: i64,
+    /// Earliest next send (µs since start); only meaningful with `--max-rate`.
+    send_no_earlier_than: i64,
+    /// Latest next send (µs since start); only meaningful with `--min-rate`.
+    send_no_later_than: i64,
+}
+
+impl RateLimiter {
+    /// Build from optional `--min-rate` / `--max-rate` (probes per second). A
+    /// non-positive or non-finite rate is treated as "unset".
+    pub fn new(min_rate: Option<f64>, max_rate: Option<f64>) -> Self {
+        RateLimiter {
+            max_rate_add: rate_interval_us(max_rate),
+            min_rate_add: rate_interval_us(min_rate),
+            send_no_earlier_than: 0,
+            send_no_later_than: 0,
+        }
+    }
+
+    /// Whether any rate flag is active (else this limiter is a no-op).
+    pub fn is_active(&self) -> bool {
+        self.max_rate_add != 0 || self.min_rate_add != 0
+    }
+
+    /// Advance the schedule after a probe is sent at `now_us` — the port of
+    /// `probeSent`.
+    pub fn record_send(&mut self, now_us: i64) {
+        if self.max_rate_add != 0 {
+            // May slip into the past so the scheduler can catch up to max rate.
+            self.send_no_earlier_than = self.send_no_earlier_than.saturating_add(self.max_rate_add);
+        }
+        if self.min_rate_add != 0 {
+            // Pull a future deadline back to now so slack can't lower the rate.
+            if self.send_no_later_than > now_us {
+                self.send_no_later_than = now_us;
+            }
+            self.send_no_later_than = self.send_no_later_than.saturating_add(self.min_rate_add);
+        }
+    }
+
+    /// The pacing verdict at `now_us` — the port of the rate branches of
+    /// `sendOK`. `--max-rate` too-early wins over everything; then `--min-rate`
+    /// behind-schedule forces a send; otherwise defer to congestion control.
+    pub fn verdict(&self, now_us: i64) -> RateVerdict {
+        if self.max_rate_add != 0 && self.send_no_earlier_than > now_us {
+            return RateVerdict::TooEarly(self.send_no_earlier_than);
+        }
+        if self.min_rate_add != 0 && self.send_no_later_than <= now_us {
+            return RateVerdict::MustSend;
+        }
+        RateVerdict::Ok
+    }
+}
+
+/// `1e6 / rate` µs as an `i64`, or `0` for an unset / invalid rate. Bounded and
+/// finite by construction, so no truncating cast can wrap.
+fn rate_interval_us(rate: Option<f64>) -> i64 {
+    match rate {
+        Some(r) if r.is_finite() && r > 0.0 => {
+            let us = (1_000_000.0 / r).round();
+            if us >= i64::MAX as f64 {
+                i64::MAX
+            } else if us < 1.0 {
+                // Sub-microsecond spacing: at least 1 µs so the interval is real.
+                1
+            } else {
+                // In [1, i64::MAX) and finite — exact integer part, no wrap.
+                #[allow(clippy::cast_possible_truncation)]
+                let v = us as i64;
+                v
+            }
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +495,104 @@ mod tests {
         fn timing_expected_seed(&mut self) {
             self.timing.num_replies_expected = 1;
         }
+    }
+
+    // ---- GroupScheduler ----
+
+    #[test]
+    fn group_defers_to_host_below_two_incomplete_hosts() {
+        let mut g = GroupScheduler::new(TimingTemplate::Normal, 0, 0);
+        // Saturate the group window well past cwnd.
+        for _ in 0..100 {
+            g.on_send();
+        }
+        // With 0 or 1 incomplete hosts, the group never blocks (host control runs).
+        assert!(g.may_admit(0));
+        assert!(g.may_admit(1));
+        // With 2+, the (now overfull) window blocks.
+        assert!(!g.may_admit(2));
+    }
+
+    #[test]
+    fn group_gate_bounds_total_in_flight_at_cwnd() {
+        let mut g = GroupScheduler::new(TimingTemplate::Normal, 0, 0); // group cwnd 10
+        let mut admitted = 0;
+        while g.may_admit(5) {
+            g.on_send();
+            admitted += 1;
+            if admitted > 100 {
+                break;
+            }
+        }
+        assert_eq!(admitted, 10, "group cwnd=10 bounds total in flight");
+        assert_eq!(g.in_flight(), 10);
+    }
+
+    #[test]
+    fn group_drop_is_gentle_not_a_reset() {
+        let mut g = GroupScheduler::new(TimingTemplate::Normal, 0, 0);
+        for _ in 0..10 {
+            g.on_send();
+        }
+        g.on_timeout(); // drop_group: cwnd 10 -> max(1, 10/2) = 5
+        assert_eq!(g.cwnd(), 5.0);
+        assert_eq!(g.in_flight(), 9);
+    }
+
+    // ---- RateLimiter ----
+
+    #[test]
+    fn no_rate_flags_is_inert() {
+        let r = RateLimiter::new(None, None);
+        assert!(!r.is_active());
+        assert_eq!(r.verdict(0), RateVerdict::Ok);
+        assert_eq!(r.verdict(1_000_000), RateVerdict::Ok);
+    }
+
+    #[test]
+    fn max_rate_spaces_sends_apart() {
+        // 1000 probes/sec → 1000 µs spacing.
+        let mut r = RateLimiter::new(None, Some(1000.0));
+        assert!(r.is_active());
+        // At start, sending is allowed.
+        assert_eq!(r.verdict(0), RateVerdict::Ok);
+        r.record_send(0); // next-earliest advances to 1000 µs
+        match r.verdict(500) {
+            RateVerdict::TooEarly(t) => assert_eq!(t, 1000),
+            v => panic!("expected TooEarly, got {v:?}"),
+        }
+        // At/after the interval it's allowed again.
+        assert_eq!(r.verdict(1000), RateVerdict::Ok);
+    }
+
+    #[test]
+    fn min_rate_forces_a_send_when_behind() {
+        // 100 probes/sec → 10_000 µs interval.
+        let mut r = RateLimiter::new(Some(100.0), None);
+        // send_no_later_than starts at 0; at now=0 it's <= now → MustSend.
+        assert_eq!(r.verdict(0), RateVerdict::MustSend);
+        r.record_send(0); // deadline pulled to 0 then +10_000 → 10_000
+        assert_eq!(r.verdict(5_000), RateVerdict::Ok); // ahead of schedule
+        assert_eq!(r.verdict(10_000), RateVerdict::MustSend); // deadline reached
+    }
+
+    #[test]
+    fn max_rate_too_early_takes_precedence_over_min() {
+        // A (nonsensical but valid) window where max spacing exceeds min interval.
+        let mut r = RateLimiter::new(Some(100.0), Some(1000.0));
+        r.record_send(0); // no_earlier=1000, no_later pulled to 0 then +10_000
+                          // now=500: max says too-early (500 < 1000) → TooEarly wins over any min.
+        assert_eq!(r.verdict(500), RateVerdict::TooEarly(1000));
+    }
+
+    #[test]
+    fn rate_interval_handles_edges() {
+        assert_eq!(rate_interval_us(None), 0);
+        assert_eq!(rate_interval_us(Some(0.0)), 0);
+        assert_eq!(rate_interval_us(Some(-5.0)), 0);
+        assert_eq!(rate_interval_us(Some(f64::NAN)), 0);
+        assert_eq!(rate_interval_us(Some(1000.0)), 1000);
+        // Absurdly high rate → sub-µs spacing floored to 1 µs, never 0.
+        assert_eq!(rate_interval_us(Some(1e12)), 1);
     }
 }

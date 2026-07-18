@@ -78,6 +78,8 @@ async fn main() -> ExitCode {
         ports,
         template: TimingTemplate::Normal,
         max_parallelism: timing.max_parallelism as usize,
+        min_rate: cfg.min_rate,
+        max_rate: cfg.max_rate,
     };
 
     let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();

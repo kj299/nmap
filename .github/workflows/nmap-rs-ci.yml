@@ -71,6 +71,22 @@ jobs:
         with: { components: miri }
       - run: cargo +nightly miri test
 
+  tsan:
+    name: tsan (data races in the async driver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: rust-src }
+      # ThreadSanitizer over nmap-sys, where all the concurrency lives (the
+      # host-group scan driver). Miri can't run tokio's real threads; TSan is the
+      # standing check that the fan-out/collect design stays race-free (M2 threat
+      # model). Needs build-std so std is instrumented too.
+      - run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p nmap-sys
+        env:
+          RUSTFLAGS: "-Zsanitizer=thread"
+          RUSTDOCFLAGS: "-Zsanitizer=thread"
+
   # --- Gates below activate as their inputs land (kept wired, self-skip until then) ---
 
   fuzz-smoke:

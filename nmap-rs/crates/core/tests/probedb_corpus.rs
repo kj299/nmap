@@ -15,6 +15,12 @@
 //!   match  lines     : 11968
 //!   softmatch lines  :   203
 //!   Exclude          :   1  (T:9100-9107)
+//!
+//! Skipped under Miri: this is a differential/regression gate that reads a real
+//! file, not a UB check (the unit suite in `probedb.rs` is what Miri interrogates).
+//! Miri runs with filesystem isolation, under which `std::fs` *aborts* rather than
+//! returning an `Err` — so the whole file is `cfg`-excluded from a Miri build.
+#![cfg(not(miri))]
 
 use nmap_core::model::Protocol;
 use nmap_core::probedb::{ProbeDb, ProbeProtocol};

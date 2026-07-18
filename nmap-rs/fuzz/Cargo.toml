@@ -59,3 +59,10 @@ path = "fuzz_targets/services_probes_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pcre_translate"
+path = "fuzz_targets/pcre_translate.rs"
+test = false
+doc = false
+bench = false

@@ -12,5 +12,12 @@ rust-version.workspace = true
 # here (target expansion, port/service parsing, model, timing math, rendering).
 [dependencies]
 
+# Test-only: `core::pcre_translate` is a pure string transform with no runtime
+# dependency, but its tests verify that each rewrite actually compiles in the
+# engine the matcher will use. `core::matcher` (the next module) promotes this to
+# a real dependency. Dev-deps still clear the supply-chain gate.
+[dev-dependencies]
+regex = "1"
+
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ pub mod log;
 pub mod model;
 pub mod options;
 pub mod output;
+pub mod pcre_translate;
 pub mod ports;
 pub mod probedb;
 pub mod targets;
@@ -26,6 +27,7 @@ pub use engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict}
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
 pub use options::{parse_args, RunConfig};
 pub use output::{render_grepable, render_normal, render_xml, ScanMeta};
+pub use pcre_translate::translate as pcre_translate;
 pub use ports::{parse_port_spec, PortList, PortSpecError, ServiceTable};
 pub use probedb::{MatchRule, Probe as ServiceProbe, ProbeDb, ProbeProtocol, ProbeWarning};
 pub use targets::{parse_target, Ipv4Ranges, TargetParseError, TargetSpec};

@@ -91,3 +91,9 @@ unblocked — so the risk is retired on paper, not mid-port.
 - **Outcome:** finding recorded; `docs/M3-ANALYSIS.md` port order updated. The spike
   crate is retained (detached, not in the workspace build) as the reproducible
   measurement and the seed corpus for `core::pcre_translate`'s test suite.
+- **Productionized (M3 module 2/6):** `core::pcre_translate` shipped through the six
+  gates. Its class-context state machine (which the spike's flat prototype lacked)
+  adds the "escape a literal `[` inside a class" rewrite, so the corpus regression
+  measures **77.50% → 93.57%** — marginally above the spike's 93.50%. The spike's
+  `translate_pcre_to_rust` prototype is thus fully superseded by the tested module;
+  the spike crate remains only as the standalone census.

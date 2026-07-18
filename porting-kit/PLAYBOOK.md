@@ -235,6 +235,13 @@ Then the loop — each step is a CI-enforced gate:
    fn (`verdict(outcome, elapsed) -> …`) that Miri *does* cover, and gate the thin
    I/O tests behind `#[cfg_attr(miri, ignore = "…")]`. Don't let "Miri can't run
    this" become "this module has no Miri coverage" (LESSONS #8).
+   **TSan is unsound as a gate over an async runtime** (tokio/async-std): it flags
+   the runtime's own lock-free scheduler, not your code, and app code runs *inside*
+   the runtime so suppressions can't separate the two (LESSONS #10). For
+   async-driven concurrency, prove race-freedom **structurally** — no shared
+   mutable state + the compiler's `Send`/`Sync` bounds on `spawn` reject it at
+   compile time — and keep a multi-thread *liveness* test (must complete, no hang).
+   Reserve TSan for code that spawns OS threads over genuinely shared state.
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
 6. **Review & merge.** Update the `progress` table (the module advances

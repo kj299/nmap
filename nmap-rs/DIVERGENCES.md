@@ -168,6 +168,18 @@ narrower *rendering* of the same result.
       Unicode class (`\w`/`\d`) in a *backtracking* pattern would range over
       U+0080–U+00FF letters rather than bytes — no such pattern exists in the shipped
       DB. Recorded for completeness.
+- [x] `versioninfo-no-fixed-buffer` (`core::versioninfo`, ports `getVersionStr` /
+      `dotmplsubst` / `substvar`): the C assembles each `-sV` field (`product`,
+      `version`, CPE, …) into a **fixed stack buffer** (`SERVICE_FIELD_LEN`) with
+      `memcpy`/`Snprintf`, and drops the whole field with a warning if the
+      substitution overflows it — the same fixed-destination family behind the
+      `strcat`/`sprintf` CWE-120 findings in `output.cc`. The port substitutes into
+      a growing `Vec<u8>`, so **there is no fixed destination and no overflow
+      class**, and an unusually long value is kept rather than silently truncated
+      away. Both the banner (capture bytes) and the templates (a custom `--versiondb`)
+      are untrusted, so substitution is fuzzed to be total (never panics). A template
+      that references an absent capture group (`$5` with 3 groups) drops **that field**
+      (`None`), matching the C's per-field failure — the service name still stands.
 
 ## Platform / environment differences
 

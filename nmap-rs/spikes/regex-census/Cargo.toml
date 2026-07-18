@@ -1,0 +1,18 @@
+# M3 spike — corpus validation for the -sV regex-engine decision.
+# Detached from the workspace (own [workspace]) so its regex/fancy-regex deps
+# don't touch the main build. Throwaway/measurement tool; its FINDING (the exact
+# accept/reject split) informs core::matcher, per docs/M3-ANALYSIS.md.
+[package]
+name = "regex-census"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+regex = "1"
+fancy-regex = "0.13"
+
+[workspace]
+
+[profile.release]
+overflow-checks = true

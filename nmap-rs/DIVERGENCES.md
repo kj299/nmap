@@ -141,13 +141,33 @@ narrower *rendering* of the same result.
       scan result, but it is recorded here because the on-the-wire regex text sent to
       the engine differs from the C's. The un-rewritable remainder is handled by the
       backtracking fallback (`core::matcher`, ~6.4%) or ledgered per pattern below.
-- [ ] `pcre-unportable-residual` (`core::matcher`, pending): a small set (~9 of
-      12,171) compiles in **neither** Rust engine even after translation — they mix
-      an atomic group `(?>…)` with other constructs `fancy-regex` also rejects. These
-      will each get a per-pattern entry (divergence or the documented break-glass
-      PCRE2 path) when `core::matcher` lands; until then they simply fail to match
-      (the service is reported `unknown`, never a crash). Placeholder so the residual
-      is never silently dropped.
+- [x] `pcre-unportable-residual` (`core::matcher`): **resolved to zero on the
+      shipped file.** The spike (with its prototype translator) projected ~9
+      patterns compiling in neither engine; the production `core::pcre_translate`
+      adds the literal-`[`-in-class rewrite the prototype lacked, which fixes the
+      leading-bracket-class patterns that made up most of that residual. With the
+      bounded-backtracking fallback, `core::matcher` compiles **all 12,171** shipped
+      rules (100% coverage, 0 dropped — pinned by `tests/matcher_corpus.rs`). The
+      degrade path (drop-with-warning for a rule neither engine accepts) remains for
+      hostile/custom `--versiondb` input; it just never fires on the shipped DB.
+- [x] `matcher-empty-match-drop` (`core::matcher`): nmap `fatal()`s if a pattern can
+      match the empty string (`PCRE2_INFO_MATCHEMPTY`, `service_scan.cc:440`) — such
+      a rule would label every port. The port instead **drops** that rule with a
+      warning and keeps the rest of the DB usable (degrade, not abort). No shipped
+      rule matches empty, so this only fires on a malformed custom DB.
+- [x] `matcher-backtrack-bound` (`core::matcher`): nmap bounds PCRE2 with
+      `match_limit=50000`/`depth=1000` because a backtracking engine's cost can't be
+      *proven*. The port runs ~93.6% of patterns on a **linear-time** engine
+      (`regex::bytes`) where the hazard is *unexpressible*, and confines
+      backtracking to `fancy-regex` with an explicit `backtrack_limit`; exceeding it
+      yields "no match", never a hang. A banner that would ReDoS the C is safe here.
+- [x] `matcher-fancy-latin1` (`core::matcher`): `fancy-regex` is `&str`-only, so a
+      binary banner is matched through a latin-1 bijection (`byte b` ⇄ `char U+00b`)
+      and captures are mapped back to bytes. Exact for the corpus (every
+      backtracking pattern is ASCII); the only theoretical difference is that a
+      Unicode class (`\w`/`\d`) in a *backtracking* pattern would range over
+      U+0080–U+00FF letters rather than bytes — no such pattern exists in the shipped
+      DB. Recorded for completeness.
 
 ## Platform / environment differences
 

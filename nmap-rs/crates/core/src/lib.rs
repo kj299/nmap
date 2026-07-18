@@ -12,6 +12,7 @@
 pub mod congestion;
 pub mod engine;
 pub mod log;
+pub mod matcher;
 pub mod model;
 pub mod options;
 pub mod output;
@@ -24,6 +25,7 @@ pub mod trace;
 
 pub use congestion::{PerfVars, TimingVals};
 pub use engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict};
+pub use matcher::{CompileWarning, CompiledDb, CompiledProbe, CompiledRule, MatchOutcome};
 pub use model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults, ServiceInfo};
 pub use options::{parse_args, RunConfig};
 pub use output::{render_grepable, render_normal, render_xml, ScanMeta};

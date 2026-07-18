@@ -1,0 +1,4 @@
+Probe TCP GetRequest q|GET / HTTP/1.0\r\n\r\n|
+rarity 3
+ports 80,443
+match http m|^HTTP/1\.[01]| p/generic/ v/$1/ cpe:/a:x:y/

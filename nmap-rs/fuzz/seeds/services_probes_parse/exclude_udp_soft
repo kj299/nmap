@@ -1,0 +1,3 @@
+Exclude T:9100-9107
+Probe UDP DNS q|\x00\x1e| no-payload
+softmatch dns m|^\x00| p/DNS/

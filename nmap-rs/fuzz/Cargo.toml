@@ -52,3 +52,10 @@ path = "fuzz_targets/services_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "services_probes_parse"
+path = "fuzz_targets/services_probes_parse.rs"
+test = false
+doc = false
+bench = false

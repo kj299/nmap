@@ -1,0 +1,2 @@
+Probe TCP H q|\xff\x00\xfe| totalwaitms 6000 tcpwrappedms 3000
+fallback a,b,c

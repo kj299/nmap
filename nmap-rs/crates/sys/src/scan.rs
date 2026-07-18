@@ -322,11 +322,15 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn group_scan_is_race_free_under_a_multithread_runtime() {
-        // Runs the whole group loop on a real multi-threaded runtime so
-        // ThreadSanitizer can check the fan-out/collect for data races. All
-        // scheduler state lives in the driver task; probe tasks capture only Copy
-        // data and return owned results — there is no shared mutable state to race.
+    async fn group_scan_completes_on_a_multithread_runtime() {
+        // Liveness/functional check: the whole group loop must run to completion
+        // on a real multi-threaded runtime — no deadlock, no lost task, every port
+        // classified (the winlsof-class hang is the risk this guards). Race-freedom
+        // itself is structural, not checked here: all scheduler state is mutated by
+        // the single driver task and probe tasks capture only Copy/owned data, so
+        // `JoinSet::spawn`'s Send bound rejects shared mutable state at compile
+        // time. (Full-program TSan of tokio's multi-thread scheduler reports
+        // runtime-internal false positives, so it is not used as a gate.)
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();

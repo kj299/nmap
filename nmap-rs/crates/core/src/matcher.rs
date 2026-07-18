@@ -136,6 +136,18 @@ impl CompiledRule {
     /// whole match) as raw bytes on a match, else `None`. Bounded: the backtrack
     /// limit turns a pathological banner into `None`, never a hang or panic.
     pub fn captures(&self, banner: &[u8]) -> Option<Vec<Option<Vec<u8>>>> {
+        self.captures_with(banner, &mut None)
+    }
+
+    /// As [`Self::captures`], but sharing a lazily-built latin-1 view of `banner`
+    /// across the rules of one probe. `latin1` is populated on first backtrack
+    /// use and reused, so a probe with many backtracking rules decodes the banner
+    /// once per match call instead of once per rule.
+    fn captures_with(
+        &self,
+        banner: &[u8],
+        latin1: &mut Option<String>,
+    ) -> Option<Vec<Option<Vec<u8>>>> {
         match &self.engine {
             Engine::Linear(re) => {
                 let caps = re.captures(banner)?;
@@ -146,10 +158,9 @@ impl CompiledRule {
                 )
             }
             Engine::Backtrack(re) => {
-                // Latin-1 decode: each banner byte becomes one char U+00..U+FF.
-                let hay: String = banner.iter().map(|&b| b as char).collect();
+                let hay = latin1.get_or_insert_with(|| latin1_decode(banner));
                 // A backtrack-limit overflow surfaces as Err → treat as no match.
-                let caps = match re.captures(&hay) {
+                let caps = match re.captures(hay) {
                     Ok(Some(c)) => c,
                     _ => return None,
                 };
@@ -166,16 +177,24 @@ impl CompiledRule {
         }
     }
 
-    /// Whether this rule matched, ignoring captures (cheaper for `test`).
-    fn is_match(&self, banner: &[u8]) -> bool {
+    /// Whether this rule matched, ignoring captures (cheaper for `test`). Shares
+    /// the same lazily-built latin-1 view as [`Self::captures_with`].
+    fn is_match_with(&self, banner: &[u8], latin1: &mut Option<String>) -> bool {
         match &self.engine {
             Engine::Linear(re) => re.is_match(banner),
             Engine::Backtrack(re) => {
-                let hay: String = banner.iter().map(|&b| b as char).collect();
-                matches!(re.is_match(&hay), Ok(true))
+                let hay = latin1.get_or_insert_with(|| latin1_decode(banner));
+                matches!(re.is_match(hay), Ok(true))
             }
         }
     }
+}
+
+/// Latin-1 decode: each banner byte becomes one `char` in `U+0000..=U+00FF`. The
+/// inverse (`char as u8`) recovers the original byte, so captures round-trip
+/// exactly. Used only for the `&str`-only backtracking engine.
+fn latin1_decode(banner: &[u8]) -> String {
+    banner.iter().map(|&b| b as char).collect()
 }
 
 /// A compiled probe: its rules in file order. Mirrors `ServiceProbe` (match half).
@@ -229,8 +248,11 @@ impl CompiledProbe {
     /// order** (`ServiceProbe::testMatch`). Returns the firing rule + its
     /// captures, or `None` if nothing matched.
     pub fn test(&self, banner: &[u8]) -> Option<MatchOutcome<'_>> {
+        // Decode the banner to latin-1 at most once, shared across all
+        // backtracking rules of this probe (linear rules never touch it).
+        let mut latin1: Option<String> = None;
         for rule in &self.rules {
-            if let Some(captures) = rule.captures(banner) {
+            if let Some(captures) = rule.captures_with(banner, &mut latin1) {
                 return Some(MatchOutcome {
                     rule: &rule.rule,
                     captures,
@@ -242,7 +264,10 @@ impl CompiledProbe {
 
     /// Whether any rule matches (cheaper than [`Self::test`] — no capture alloc).
     pub fn matches(&self, banner: &[u8]) -> bool {
-        self.rules.iter().any(|r| r.is_match(banner))
+        let mut latin1: Option<String> = None;
+        self.rules
+            .iter()
+            .any(|r| r.is_match_with(banner, &mut latin1))
     }
 
     /// Number of rules that compiled.

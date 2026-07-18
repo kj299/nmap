@@ -311,3 +311,78 @@ and a real socket. The single failure the kit *still* would not have prevented:
 nothing forced the *insight* that the differential needed a semantic projection —
 the kit made the problem visible (every case DIVERGEd) but inventing the projection
 was human/agent work, the same "kit buys time, not the design" limit as #1.
+
+---
+
+# Milestone 2 — nmap C→Rust (async engine + full ultra_scan)
+
+The connect scan cut over from a fixed prime/refill loop to nmap's real
+`ultra_scan`: AIMD congestion control, adaptive RTT timeouts, retransmission, a
+cross-host group window, and `--min-rate`/`--max-rate` pacing — driven by a tokio
+event loop over a pure decision core. Whole workspace still **0 unsafe**; the
+differential matches C nmap 7.94 on all 8 cases (incl. multi-host + rate-limited).
+These entries are the M2 retrospective.
+
+## 010. ThreadSanitizer is an unsound gate over an async runtime
+
+- **Date:** 2026-07-18
+- **Codebase:** nmap M2 — the tokio host-group scan driver (`sys::scan`)
+- **What happened:** The M2 concurrency lives in a tokio driver, so the retrospective
+  plan added a `tsan` CI job (`-Zsanitizer=thread -Zbuild-std`) to prove the
+  fan-out/collect is race-free. It went **red in CI while every test passed**: TSan
+  reported a data race inside `core::sync::atomic::compare_exchange` reached
+  *through* `tokio::runtime`'s multi-threaded work-stealing scheduler — a
+  false-positive in the runtime's own lock-free code, not ours. Locally it had
+  passed (TSan on the scheduler is timing-dependent), so the gate was also flaky.
+  The deeper problem: because *all* app code runs inside the runtime, a TSan
+  suppressions file can't separate a runtime false-positive from a real app race
+  (any real race's stack also contains `tokio::runtime` frames). So full-program
+  TSan of an async-runtime app is not a sound race gate — it gates the runtime.
+- **Kit change:** documented the caveat where the temptation arises — PLAYBOOK
+  Phase 4 gate 4 and the `run_sanitizers.sh` header + a stderr warning on its
+  `tsan` path. The guidance: for async-driven concurrency, prove race-freedom
+  **structurally** (no shared mutable state + the compiler's `Send`/`Sync` bounds
+  on `spawn`, which reject shared mutable state at compile time) plus Miri on the
+  pure logic, and keep a multi-thread **liveness** test (must complete, no hang —
+  the winlsof class). Reserve TSan for code that spawns OS threads over genuinely
+  shared state. nmap-rs dropped the TSan job accordingly; its driver has zero
+  shared mutable state by construction.
+- **Section amended:** PLAYBOOK · Phase 4 gate 4; harnesses/sanitizers/
+  run_sanitizers.sh (header caveat + `tsan` warning).
+
+## 011. A differential must reject a non-file "binary" — a directory passes `-x`
+
+- **Date:** 2026-07-18
+- **Codebase:** nmap M2 — the connect-scan differential, found mid-cutover
+- **What happened:** Running the oracle with `NMAP_RS=$(pwd)` (a *directory*, by a
+  copy-paste slip) did not error — a directory has the execute bit, so both the
+  shell wrapper's `-x` test and Python's `os.access(_, X_OK)` pass. The "binary"
+  reached `exec`, produced empty output, and surfaced two layers downstream as a
+  confusing XML **parse-error / spurious divergence** rather than "that's not a
+  binary." Same family as #6: a check that inspects less than it claims and fails
+  unhelpfully.
+- **Kit change:** `diff_run.py` gained `require_binary(path, label)` (called for
+  `--oracle` and `--rust` before any case runs) that requires a *regular file*
+  (`os.path.isfile`, not just `X_OK`) and is executable, exiting with a clear
+  message otherwise; `run_one` also now catches `IsADirectoryError`/
+  `PermissionError` at exec. Pinned with self-tests (rejects a directory, rejects a
+  missing path, accepts a real executable). The project's own
+  `run_differential.sh` got the matching `-f && -x` guard.
+- **Section amended:** harnesses/differential/diff_run.py (`require_binary`,
+  `run_one`, `_self_test`).
+
+## Positive validations (habits that paid off, no change needed)
+
+- **Spike-the-scary-module worked cleanly.** The congestion/retransmission math was
+  the flagged hazard; the timeboxed spike (`SPIKES.md` M2-1) read `timing.cc`,
+  confirmed textbook AIMD, found the two divide-by-zero footguns the C guards with
+  an `assert`, and graduated straight into `core::congestion` with **High**
+  confidence and no pivot. The kit's #1 habit did exactly what it promises.
+- **The pure/impure split scaled to a whole engine.** Every scheduling *decision*
+  (congestion window, host scheduler, group window, rate limiter) ported into pure,
+  Miri-checked `core` with the clock/sockets injected by the thin `sys` driver.
+  That is *why* M2 stayed at 0 unsafe, kept full Miri coverage over the engine, and
+  made #010's "structural race-freedom" argument available at all — the concurrency
+  shell has no logic and no shared state to race. LESSONS #8's split is not just a
+  Miri workaround; it is the property that lets a safety rewrite reason about an
+  async engine at all.

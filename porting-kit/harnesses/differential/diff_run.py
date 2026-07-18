@@ -83,6 +83,21 @@ def run_one(binary, case, default_timeout=15):
         return "<<TIMEOUT>>\n", 124
     except FileNotFoundError:
         sys.exit(f"error: binary not found: {binary}")
+    except (IsADirectoryError, PermissionError) as e:
+        # A directory has the +x bit set, so `-x` checks pass and it reaches
+        # exec, which fails here. Without this a directory arg would surface as an
+        # empty-output "divergence" downstream, not a clear error (LESSONS #11).
+        sys.exit(f"error: not a runnable binary: {binary} ({e.__class__.__name__})")
+
+
+def require_binary(path, label):
+    """Fail fast with a clear message if `path` is not a regular executable file.
+    A directory passes `os.access(_, X_OK)`, so check `isfile` explicitly."""
+    if not os.path.isfile(path):
+        sys.exit(f"error: --{label} is not a file: {path!r} "
+                 f"(a directory or missing path, not a runnable binary)")
+    if not os.access(path, os.X_OK):
+        sys.exit(f"error: --{label} is not executable: {path!r}")
 
 
 def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exit=False):
@@ -137,6 +152,8 @@ def main(argv=None):
         ap.print_usage(sys.stderr)
         print("error: --oracle, --rust and --matrix are required", file=sys.stderr)
         return 2
+    require_binary(args.oracle, "oracle")
+    require_binary(args.rust, "rust")
 
     results = compare(args.oracle, args.rust, load_matrix(args.matrix),
                       args.ledger, args.sort, args.mask_numbers, args.ignore_exit)
@@ -195,6 +212,18 @@ def _self_test():
         check("divergence note names the exit codes", "exit code differs" in (res[0]["diff"] or ""))
         res = compare(o, r, ec, ledger=None, sort=False, mask_numbers=False, ignore_exit=True)
         check("--ignore-exit suppresses an exit-only divergence → MATCH", res[0]["verdict"] == "MATCH")
+
+        # require_binary: a directory has +x, so it must be rejected explicitly
+        # (LESSONS #11) rather than reaching exec and looking like empty output.
+        def rejects(path):
+            try:
+                require_binary(path, "rust")
+                return False
+            except SystemExit:
+                return True
+        check("require_binary rejects a directory", rejects(d))
+        check("require_binary rejects a missing path", rejects(os.path.join(d, "nope")))
+        check("require_binary accepts a real executable", not rejects(o))
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

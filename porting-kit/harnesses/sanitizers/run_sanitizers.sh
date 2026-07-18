@@ -8,6 +8,15 @@
 #                       class — worker threads over shared handles).
 # (PLAYBOOK Phase 4 gate 4; SECURITY-CHECKLIST "no UB at the FFI boundary".)
 #
+# TSan CAVEAT (LESSONS #10): TSan is *unsound as a gate over an async-runtime
+# application* (tokio/async-std). The runtime's own lock-free work-stealing
+# scheduler is not TSan-instrumentation-clean, so TSan reports false-positive
+# races inside the runtime's atomics — and because your task code runs *inside*
+# the runtime, a suppressions file can't cleanly separate a runtime false-positive
+# from a real app race. Prefer *structural* race-freedom for such code (no shared
+# mutable state + the compiler's Send/Sync bounds on spawn) plus Miri on the pure
+# logic. Reserve TSan for code that spawns OS threads over genuinely shared state.
+#
 # Usage:
 #   run_sanitizers.sh [miri|asan|ubsan|tsan|all] [CRATE_DIR]
 #   run_sanitizers.sh --check      # smoke: validate script + report tool avail
@@ -57,7 +66,11 @@ case "$MODE" in
   miri)  run_miri;;
   asan)  run_san address;;
   ubsan) run_san undefined;;
-  tsan)  run_san thread;;
+  tsan)
+    echo "!! NOTE: TSan is unsound as a gate over an async runtime (tokio/async-std)" >&2
+    echo "!! — it flags the runtime's own scheduler, not your code. See the header" >&2
+    echo "!! caveat (LESSONS #10) before trusting a red/green result here." >&2
+    run_san thread;;
   all)   run_miri; run_san address; run_san undefined;;
   *) echo "usage: $0 [miri|asan|ubsan|tsan|all] [CRATE_DIR] | --check" >&2; exit 2;;
 esac

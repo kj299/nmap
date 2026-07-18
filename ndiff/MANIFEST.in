@@ -1,0 +1,5 @@
+# Version.py supplies the package version (pyproject.toml reads
+# tool.setuptools.dynamic version from Version.VERSION). It is not one of the
+# installed py-modules, so setuptools omits it from the sdist by default --
+# which breaks `python -m build`, whose wheel stage rebuilds from the sdist.
+include Version.py

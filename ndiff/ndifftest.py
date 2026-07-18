@@ -12,10 +12,13 @@ xml.__path__ = [x for x in xml.__path__ if "_xmlplus" not in x]
 
 import xml.dom.minidom
 
-import imp
+import importlib.util
 dont_write_bytecode = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
-ndiff = imp.load_source("ndiff", "ndiff.py")
+spec = importlib.util.spec_from_file_location("ndiff", "ndiff.py")
+ndiff = importlib.util.module_from_spec(spec)
+sys.modules["ndiff"] = ndiff
+spec.loader.exec_module(ndiff)
 for x in dir(ndiff):
     if not x.startswith("_"):
         globals()[x] = getattr(ndiff, x)

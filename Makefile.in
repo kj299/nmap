@@ -438,7 +438,8 @@ uninstall-nping:
 	@cd $(NPINGDIR) && $(MAKE) uninstall
 
 check-nse:
-	./nmap -d --datadir . --script=unittest --script-args=unittest.run --release-mem
+	./nmap -d --datadir . --script=unittest --script-args=unittest.run --release-mem | \
+		awk '/unittest: All tests passed/{ok=1} {print} END{exit !ok}'
 
 check-ncat:
 	@cd $(NCATDIR) && $(MAKE) check
@@ -453,7 +454,7 @@ check-zenmap:
 	@cd $(ZENMAPDIR)/test && $(PYTHON) run_tests.py
 
 check-nmap: tests/nmap_dns_test tests/expr_match_test tests/cstring_unescape_test
-	for test in $^; do ./$$test; done
+	for test in $^; do ./$$test || exit 1; done
 
 check: @NCAT_CHECK@ @NSOCK_CHECK@ @ZENMAP_CHECK@ @NSE_CHECK@ @NDIFF_CHECK@ check-nmap
 

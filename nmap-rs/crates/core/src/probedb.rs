@@ -536,14 +536,15 @@ fn next_template(matchtext: &str) -> Result<Option<TemplateStep<'_>>, String> {
         }
         ('/', 0usize, slash)
     } else {
-        // Normal template: the byte after the mode is the delimiter; the body
-        // starts right after it.
-        match b.get(i) {
+        // Normal template: the CHARACTER after the mode is the delimiter. Read it
+        // as a real `char`, not a raw byte — a multi-byte UTF-8 delimiter (which a
+        // hostile `--versiondb` can supply) would otherwise be mis-sized by
+        // `len_utf8()` and push a later byte index into the middle of a code
+        // point, panicking the slice. (Regression: `probedb-multibyte-delim`.)
+        match p[i..].chars().next() {
             None => return Err("bare word (no delimiter)".into()),
-            Some(&c) if (c as char).is_whitespace() => {
-                return Err("bare word (no delimiter)".into())
-            }
-            Some(&c) => (c as char, i.saturating_add(1), i),
+            Some(dc) if dc.is_whitespace() => return Err("bare word (no delimiter)".into()),
+            Some(dc) => (dc, i.saturating_add(dc.len_utf8()), i),
         }
     };
 
@@ -563,8 +564,13 @@ fn next_template(matchtext: &str) -> Result<Option<TemplateStep<'_>>, String> {
         j = j.saturating_add(1);
     }
     let flags = &p[after..j];
-    if j < ab.len() && !(ab[j] as char).is_whitespace() {
-        return Err("flags too long".into());
+    // `j` sits on a char boundary (it only advanced over ASCII-alpha). The char
+    // after the flags must be whitespace or end-of-line; read it as a real char
+    // so a multi-byte follower is judged correctly, not via a lead byte.
+    if let Some(c) = p[j..].chars().next() {
+        if !c.is_whitespace() {
+            return Err("flags too long".into());
+        }
     }
     Ok(Some((mode.to_string(), body, flags.to_string(), &p[j..])))
 }
@@ -829,6 +835,34 @@ fallback GetRequest,NULL
         assert!(db.null_probe.is_none());
         assert!(db.probes.is_empty());
         assert!(db.warnings.is_empty());
+    }
+
+    #[test]
+    fn multibyte_delimiter_does_not_panic() {
+        // Regression `probedb-multibyte-delim`: a match line whose template
+        // delimiter (or the char after flags) is a multi-byte UTF-8 code point
+        // used to panic the byte-index slicing in `next_template`. It must now
+        // degrade to a skipped line with a warning, never abort.
+        for line in [
+            "match svc \u{20ac}foo\u{20ac} p/z/\n", // '€' as delimiter
+            "match svc m|x|\u{20ac} p/z/\n",        // multi-byte after flags
+            "match svc \u{1f600}a\u{1f600}\n",      // 4-byte emoji delimiter
+        ] {
+            let db = ProbeDb::parse(&format!("Probe TCP X q|y|\n{line}"));
+            // Parsed to completion; the bad match line was skipped, not panicked.
+            assert!(db.probes.iter().any(|p| p.name == "X"));
+        }
+    }
+
+    #[test]
+    fn ascii_delimiter_still_parses_after_fix() {
+        // The multi-byte fix must not regress ordinary ASCII-delimited templates.
+        let db =
+            ProbeDb::parse("Probe TCP NULL q||\nmatch ssh m|^SSH-([\\d.]+)| p/OpenSSH/ v/$1/\n");
+        let m = &db.null_probe.as_ref().unwrap().matches[0];
+        assert_eq!(m.service, "ssh");
+        assert_eq!(m.pattern, "^SSH-([\\d.]+)");
+        assert_eq!(m.product.as_deref(), Some("OpenSSH"));
     }
 
     #[test]

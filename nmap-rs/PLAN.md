@@ -15,7 +15,7 @@ record; edit it as milestones complete.
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
 | 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | ✅ **DONE** — all 9 modules; `-sT` end-to-end; fuzz + differential gates closed; retrospective merged (PRs #2–#11) |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ✅ **DONE** — congestion (AIMD) + host & group schedulers + rate limiting, pure core driven by a tokio host-group driver; 8/8 differential incl. multi-host + `--min`/`--max-rate`; TSan dropped as unsound over tokio (structural race-freedom instead); retrospective merged (PRs #12–#17, this PR) |
-| 3 | Service / version detection (`-sV`) | full cycle | 🔶 **CURRENT** — Phase 0 next |
+| 3 | Service / version detection (`-sV`) | full cycle | 🔶 **CURRENT** — Phase-0 analysis done (`docs/M3-ANALYSIS.md`): 92.99% of the 12,171 probe regexes fit a linear-time engine → hybrid `regex`+`fancy-regex` plan. Awaiting approval on port order before Rust |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |
 | 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ⬜ |
 | S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | ⬜ |

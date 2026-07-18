@@ -128,6 +128,26 @@ narrower *rendering* of the same result.
       instead of aborting. Not a behavior change for the shipped file; a robustness
       improvement for hand-edited databases. Resolution + its own divergence entry
       land with the scheduling slice.
+- [x] `pcre-syntax-translate` (`core::pcre_translate`): nmap compiles each pattern
+      with PCRE2; the port compiles with Rust's `regex`/`fancy-regex`, whose syntax
+      differs in a few spellings. Rather than reject those patterns, a pure,
+      semantics-preserving preprocessor rewrites exactly three PCRE spellings into
+      their Rust equivalents — `\0`→`\x00`, a bare literal `{`/`}`→`\{`/`\}`, and a
+      literal `[` inside a character class→`\[` (Rust reads an unescaped `[` there
+      as a nested-class opener). Verified against `regex::bytes`: over the 12,171
+      shipped patterns this lifts linear-engine acceptance from 77.50% to **93.57%**
+      with no pattern made worse. This changes *how a pattern is spelled to the
+      engine*, never *what it matches* — so it is not a behavioral divergence in the
+      scan result, but it is recorded here because the on-the-wire regex text sent to
+      the engine differs from the C's. The un-rewritable remainder is handled by the
+      backtracking fallback (`core::matcher`, ~6.4%) or ledgered per pattern below.
+- [ ] `pcre-unportable-residual` (`core::matcher`, pending): a small set (~9 of
+      12,171) compiles in **neither** Rust engine even after translation — they mix
+      an atomic group `(?>…)` with other constructs `fancy-regex` also rejects. These
+      will each get a per-pattern entry (divergence or the documented break-glass
+      PCRE2 path) when `core::matcher` lands; until then they simply fail to match
+      (the service is reported `unknown`, never a crash). Placeholder so the residual
+      is never silently dropped.
 
 ## Platform / environment differences
 

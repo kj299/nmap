@@ -13,30 +13,33 @@ record; edit it as milestones complete.
 |---|---|---|---|
 | — | **Planning** | — | ✅ **DONE** (this document) |
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
-| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | 🔶 **CURRENT** — **all 9 modules ported**; `nmap-rs -sT` works end-to-end (normal/-oX/-oG). **Fuzz + differential gates now closed**: 3 cargo-fuzz targets over the untrusted parsers (0 crashes) + a C-nmap differential oracle (5/5 cases MATCH nmap 7.94 on the loopback fixture). Remaining: the M1 retrospective |
-| 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ⬜ |
-| 3 | Service / version detection (`-sV`) | full cycle | ⬜ |
+| 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | ✅ **DONE** — all 9 modules; `-sT` end-to-end; fuzz + differential gates closed; retrospective merged (PRs #2–#11) |
+| 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ✅ **DONE** — congestion (AIMD) + host & group schedulers + rate limiting, pure core driven by a tokio host-group driver; 8/8 differential incl. multi-host + `--min`/`--max-rate`; TSan dropped as unsound over tokio (structural race-freedom instead); retrospective merged (PRs #12–#17, this PR) |
+| 3 | Service / version detection (`-sV`) | full cycle | 🔶 **CURRENT** — Phase 0 next |
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |
 | 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ⬜ |
 | S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | ⬜ |
 | 6 | NSE — Lua engine + bridges + scripts | full cycle | ⬜ |
 | 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | ⬜ |
 
-> **We are here:** Milestone 1's MVP is built and its safety gates are green. All 9
-> modules are ported and `nmap-rs -sT` runs end-to-end (normal/`-oX`/`-oG`); the
-> workspace holds **0 `unsafe`**. The **fuzz gate** is closed with three cargo-fuzz
-> targets over the untrusted-input parsers (`parse_target`, `parse_port_spec`,
-> `ServiceTable::parse`) — millions of runs, zero crashes — and the **differential
-> gate** is closed by `tests/differential/`, which proves port-state fidelity
-> against C nmap 7.94 over a loopback fixture (5/5 cases MATCH). Both are wired into
-> CI (`fuzz-smoke`, `differential` jobs) and no longer self-skip. `progress.json`:
-> `targets` and `ports` are fully gated (DONE); the rest are through `differential`
-> (fuzz is scoped to the untrusted-parser surface per `THREAT-MODEL.md`).
-> **The one remaining M1 step is the retrospective** — patch the kit
-> (playbook/harnesses/skills) and append `LESSONS.md`. **Never skip the
-> retrospective** — it is the one rule that makes the kit worth having. Each
-> milestone is its own kit cycle: `kickoff → (cflaw-scan ∥ oracle) → per-module
-> six-gate loop → audit → retrospective-that-patches-the-kit`.
+> **We are here:** Milestones 0–2 are complete and merged. `nmap-rs -sT` runs the
+> real `ultra_scan` engine — AIMD congestion control, adaptive RTT timeouts,
+> retransmission, a cross-host group window, and `--min-rate`/`--max-rate` pacing —
+> as a **pure decision core** (`core::{congestion,engine,timing}`, all Miri-checked)
+> driven by a thin tokio host-group driver (`sys::scan`). The whole workspace still
+> holds **0 `unsafe`**, and the differential matches C nmap 7.94 on all 8 cases
+> (incl. multi-host group + rate-limited). M2's retrospective added two kit lessons
+> — **#10 TSan is unsound as a gate over an async runtime** (dropped it; race-freedom
+> is now structural: no shared mutable state + `Send`/`Sync` on `spawn`), and **#11
+> a differential must reject a non-file "binary"** (a directory passes `-x`).
+> **Next: Milestone 3 (`-sV` service/version detection)** — start a fresh kit cycle
+> at Phase 0 (`kickoff` inventory + `cflaw-scan` over `service_scan.cc` +
+> `nmap-service-probes` parser + threat model; the big decision point is regex
+> fidelity: pure-Rust `regex` first, `fancy-regex`/PCRE2 FFI only where a probe
+> needs backrefs/lookaround), then **stop for approval on port order before any
+> Rust**. **Never skip the retrospective.** Each milestone is its own kit cycle:
+> `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop → audit →
+> retrospective-that-patches-the-kit`.
 
 **Sequencing rationale (why this order, and where raw lands).** Order follows the
 kit's "roots-before-dependents, cheapest-and-safest-first, spike-the-scary-module-

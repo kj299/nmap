@@ -15,7 +15,9 @@
 const MAX_LEVEL: u8 = 10;
 
 /// Parsed command-line configuration. Grows toward the full `NmapOps` surface.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// No `Eq`: `min_rate`/`max_rate` are `f64` (only `PartialEq`). Equality is used
+// solely by tests via `assert_eq!`, which needs only `PartialEq`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunConfig {
     /// Verbosity level (nmap `o.verbose`, 0..=10).
     pub verbose: u8,
@@ -39,9 +41,23 @@ pub struct RunConfig {
     pub out_xml: Option<String>,
     /// `-oG <file>` grepable output destination (`"-"` = stdout).
     pub out_grep: Option<String>,
+    /// `--min-rate <n>`: floor on probes/sec (`None` ⇒ unset).
+    pub min_rate: Option<f64>,
+    /// `--max-rate <n>`: ceiling on probes/sec (`None` ⇒ unset).
+    pub max_rate: Option<f64>,
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
     /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
+}
+
+/// Parse a `--min-rate`/`--max-rate` value: a positive, finite probes-per-second
+/// number. Anything else (empty, non-numeric, `<= 0`, NaN) is rejected as `None`
+/// rather than silently treated as a rate.
+fn parse_rate(s: &str) -> Option<f64> {
+    match s.trim().parse::<f64>() {
+        Ok(r) if r.is_finite() && r > 0.0 => Some(r),
+        _ => None,
+    }
 }
 
 /// Increment a level toward the 0..=10 ceiling (nmap's `if (x < 10) x++`).
@@ -159,6 +175,24 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 cfg.port_spec = Some(v);
                 consumed_extra = adv;
             }
+            "--min-rate" => {
+                if let Some(next) = args.get(i + 1) {
+                    cfg.min_rate = parse_rate(next);
+                    consumed_extra = 1;
+                }
+            }
+            _ if s.starts_with("--min-rate=") => {
+                cfg.min_rate = parse_rate(&s["--min-rate=".len()..])
+            }
+            "--max-rate" => {
+                if let Some(next) = args.get(i + 1) {
+                    cfg.max_rate = parse_rate(next);
+                    consumed_extra = 1;
+                }
+            }
+            _ if s.starts_with("--max-rate=") => {
+                cfg.max_rate = parse_rate(&s["--max-rate=".len()..])
+            }
             _ if s.starts_with("-v") => apply_v(&mut cfg, &s[2..]),
             _ if s.starts_with("-d") => apply_d(&mut cfg, &s[2..]),
             // Any other dash-led token longer than "-" is an option we don't
@@ -230,6 +264,15 @@ mod tests {
     fn port_spec_and_output_flags_attached_and_separate() {
         assert_eq!(cfg(&["-p", "22,80"]).port_spec.as_deref(), Some("22,80"));
         assert_eq!(cfg(&["-p22,80"]).port_spec.as_deref(), Some("22,80"));
+    }
+
+    #[test]
+    fn min_and_max_rate_parse_separate_attached_and_reject_junk() {
+        assert_eq!(cfg(&["--min-rate", "100"]).min_rate, Some(100.0));
+        assert_eq!(cfg(&["--max-rate=5000"]).max_rate, Some(5000.0));
+        assert_eq!(cfg(&["--min-rate", "0"]).min_rate, None); // non-positive rejected
+        assert_eq!(cfg(&["--max-rate", "abc"]).max_rate, None); // non-numeric rejected
+        assert!(cfg(&["--min-rate"]).unrecognized.is_empty()); // trailing flag: no value, no crash
         assert_eq!(cfg(&["-oX", "out.xml"]).out_xml.as_deref(), Some("out.xml"));
         assert_eq!(cfg(&["-oX-"]).out_xml.as_deref(), Some("-"));
         let c = cfg(&["-oG", "-", "-oN", "n.txt"]);

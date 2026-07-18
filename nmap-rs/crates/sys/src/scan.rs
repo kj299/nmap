@@ -1,19 +1,23 @@
 //! Connect-scan driver — the tokio event loop that turns the pure
-//! [`nmap_core::engine::HostScheduler`] decisions into real TCP connects. This is
-//! the Milestone-2 replacement for the Milestone-1 fixed prime/refill loop: the
-//! number of probes in flight is now bounded by the **congestion window**
-//! (`ultra_scan`'s AIMD), and each probe's timeout is the scheduler's
-//! **adaptive RTT estimate**, not a fixed constant.
+//! [`nmap_core::engine`] decisions into real TCP connects. Every *decision*
+//! (may I send? which probe? is the host done?) lives in `core` as a pure,
+//! Miri-checked state machine; this module only performs the I/O those decisions
+//! call for and feeds the outcomes back. Built on tokio's safe task API — **no
+//! `unsafe`**.
 //!
-//! The split is deliberate and is the safety story: every *decision* (may I send?
-//! which probe? is the host done?) lives in `core` as a pure, Miri-checked state
-//! machine; this module only performs the I/O the scheduler asks for and feeds
-//! the outcomes back. Built on tokio's safe task API — **no `unsafe`**.
+//! Milestone 2 drives a whole **host group** through a single event loop: each
+//! host has its own [`HostScheduler`] (congestion window + adaptive timeout +
+//! retransmission), while a shared [`GroupScheduler`] bounds the *total* probes
+//! in flight across all hosts and an optional [`RateLimiter`] enforces
+//! `--min-rate`/`--max-rate`. One [`JoinSet`] holds every in-flight probe; the
+//! loop launches whatever the gates permit, then blocks on the next completion —
+//! so it can never spin and, with work outstanding, always has a probe in flight
+//! to wake it (the liveness argument the winlsof retrospective asks for).
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use nmap_core::engine::{HostScheduler, Probe};
+use nmap_core::engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict};
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults};
 use nmap_core::timing::{TimingParams, TimingTemplate};
 use tokio::task::JoinSet;
@@ -30,85 +34,165 @@ pub struct ConnectScanConfig {
     /// RTT timeout.
     pub template: TimingTemplate,
     /// Hard ceiling on concurrent connects per host (nmap's `--max-parallelism`;
-    /// `0` = the template default). Caps the congestion window.
+    /// `0` = the template default). Caps each congestion window.
     pub max_parallelism: usize,
+    /// `--min-rate` (probes/sec); `None` = unset.
+    pub min_rate: Option<f64>,
+    /// `--max-rate` (probes/sec); `None` = unset.
+    pub max_rate: Option<f64>,
 }
 
-/// Run an unprivileged TCP connect scan over `targets` (already-resolved IPs),
-/// returning the populated [`ScanResults`]. Hosts are scanned in order; within a
-/// host the scheduler paces probes by the congestion window.
+/// Per-host mutable state carried through the group event loop.
+struct HostCtx {
+    sched: HostScheduler,
+    host: Host,
+    /// Finalized port outcomes, recorded as each port resolves.
+    finals: Vec<(u16, PortState, Reason)>,
+}
+
+/// Run an unprivileged TCP connect scan over `targets` (already-resolved IPs) as a
+/// single congestion-controlled host group, returning the populated
+/// [`ScanResults`] in target order.
 pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> ScanResults {
     let max_par = u32::try_from(config.max_parallelism).unwrap_or(u32::MAX);
+    let mut ctxs: Vec<HostCtx> = targets
+        .iter()
+        .map(|&ip| HostCtx {
+            sched: HostScheduler::with_params(
+                &config.ports,
+                config.template,
+                TimingParams::for_template(config.template),
+                0,
+                max_par,
+            ),
+            host: Host::new(ip, HostState::Down),
+            finals: Vec::new(),
+        })
+        .collect();
+
+    let mut group = GroupScheduler::new(config.template, 0, max_par);
+    let mut rate = RateLimiter::new(config.min_rate, config.max_rate);
+
+    run_group(&mut ctxs, &mut group, &mut rate).await;
+
     let mut results = ScanResults::new();
-    for &ip in targets {
-        results
-            .hosts
-            .push(scan_host(ip, &config.ports, config.template, max_par).await);
+    for mut ctx in ctxs {
+        for (port, state, reason) in ctx.finals.drain(..) {
+            ctx.host
+                .ports
+                .push(Port::new(port, Protocol::Tcp, state, reason));
+        }
+        ctx.host.ports.sort_by_key(|p| (p.protocol, p.number));
+        results.hosts.push(ctx.host);
     }
     results
 }
 
-/// Drive one host's ports through the congestion-controlled scheduler.
-async fn scan_host(ip: IpAddr, ports: &[u16], template: TimingTemplate, max_par: u32) -> Host {
-    let params = TimingParams::for_template(template);
-    let mut sched = HostScheduler::with_params(ports, template, params, 0, max_par);
-
-    let mut set: JoinSet<(Probe, ConnectResult)> = JoinSet::new();
-    let mut host = Host::new(ip, HostState::Down);
-    // Finalized port outcomes, recorded as each port resolves.
-    let mut finals: Vec<(u16, PortState, Reason)> = Vec::new();
+/// The group event loop: launch every probe the gates permit, then await the next
+/// completion, until every host is done.
+async fn run_group(ctxs: &mut [HostCtx], group: &mut GroupScheduler, rate: &mut RateLimiter) {
+    let start = Instant::now();
+    let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();
 
     loop {
-        // Launch every probe the congestion gate currently permits.
-        while let Some(probe) = sched.next_probe() {
-            let timeout = micros_to_duration(sched.probe_timeout_us());
-            let addr = SocketAddr::new(ip, probe.port);
-            set.spawn(async move { (probe, tcp_connect(addr, timeout).await) });
+        launch_ready(ctxs, group, rate, start, &mut set);
+
+        if set.is_empty() {
+            // Nothing in flight. Either the whole group is finished, or the rate
+            // limiter is holding us back — sleep until it reopens, never spin.
+            if all_done(ctxs) {
+                break;
+            }
+            match rate.verdict(now_us(start)) {
+                RateVerdict::TooEarly(t) => {
+                    tokio::time::sleep(micros_to_duration(t.saturating_sub(now_us(start)))).await;
+                    continue;
+                }
+                // No probe in flight, work remains, yet no rate hold — nothing
+                // could wake us; bail rather than hang (defensive; unreachable
+                // while a host has a fresh port or pending retransmit).
+                _ => break,
+            }
         }
 
-        // Nothing in flight: either we're done, or (defensively) there is no more
-        // reachable work — break either way.
-        let Some(joined) = set.join_next().await else {
-            break;
-        };
-
-        if let Ok((probe, res)) = joined {
+        if let Some(Ok((idx, probe, res))) = set.join_next().await {
+            let ctx = &mut ctxs[idx];
             match res.state {
-                // A definite answer resolves the port and grows the window.
                 PortState::Open | PortState::Closed => {
-                    sched.on_reply(probe, rtt_micros(&res));
-                    finals.push((probe.port, res.state, res.reason));
-                    host.state = HostState::Up;
+                    ctx.sched.on_reply(probe, rtt_micros(&res));
+                    group.on_reply();
+                    ctx.finals.push((probe.port, res.state, res.reason));
+                    ctx.host.state = HostState::Up;
                 }
-                // No answer: the scheduler decides whether to retry or give up.
-                // A resolution (retries exhausted) finalizes the port as filtered.
                 _ => {
-                    let before = sched.resolved();
-                    sched.on_timeout(probe);
-                    if sched.resolved() > before {
-                        finals.push((probe.port, PortState::Filtered, res.reason));
+                    let before = ctx.sched.resolved();
+                    ctx.sched.on_timeout(probe);
+                    group.on_timeout();
+                    if ctx.sched.resolved() > before {
+                        ctx.finals
+                            .push((probe.port, PortState::Filtered, res.reason));
                     }
                 }
             }
         }
-
-        if sched.is_done() && set.is_empty() {
-            break;
-        }
     }
-
-    for (port, state, reason) in finals {
-        host.ports
-            .push(Port::new(port, Protocol::Tcp, state, reason));
-    }
-    // Deterministic order regardless of completion order.
-    host.ports.sort_by_key(|p| (p.protocol, p.number));
-    host
 }
 
-/// Convert the scheduler's µs timeout into a `Duration`, clamping a non-positive
-/// value to zero (the estimator keeps it in `[min, max]` RTT, so this is just
-/// defensive).
+/// Launch as many probes as the rate limiter, the group window, and each host's
+/// own congestion window currently permit.
+fn launch_ready(
+    ctxs: &mut [HostCtx],
+    group: &mut GroupScheduler,
+    rate: &mut RateLimiter,
+    start: Instant,
+    set: &mut JoinSet<(usize, Probe, ConnectResult)>,
+) {
+    loop {
+        let incomplete = ctxs.iter().filter(|c| !c.sched.is_done()).count();
+        let verdict = rate.verdict(now_us(start));
+        if matches!(verdict, RateVerdict::TooEarly(_)) {
+            return;
+        }
+        // `--min-rate` behind schedule forces a send past the congestion gate.
+        let must_send = matches!(verdict, RateVerdict::MustSend);
+        if !must_send && !group.may_admit(incomplete) {
+            return;
+        }
+
+        // Find a host that can and wants to send. `next_probe` applies the host's
+        // own congestion gate, so a host at its window is skipped.
+        let mut launched = false;
+        for (idx, ctx) in ctxs.iter_mut().enumerate() {
+            if ctx.sched.is_done() {
+                continue;
+            }
+            if let Some(probe) = ctx.sched.next_probe() {
+                group.on_send();
+                rate.record_send(now_us(start));
+                let timeout = micros_to_duration(ctx.sched.probe_timeout_us());
+                let addr = SocketAddr::new(ctx.host.address, probe.port);
+                set.spawn(async move { (idx, probe, tcp_connect(addr, timeout).await) });
+                launched = true;
+                break;
+            }
+        }
+        if !launched {
+            return;
+        }
+    }
+}
+
+fn all_done(ctxs: &[HostCtx]) -> bool {
+    ctxs.iter().all(|c| c.sched.is_done())
+}
+
+/// Microseconds since the scan started, saturating into `i64` (a scan never runs
+/// long enough to approach the `i64::MAX` µs ceiling, ~292,000 years).
+fn now_us(start: Instant) -> i64 {
+    i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)
+}
+
+/// Convert a µs count into a `Duration`, clamping a non-positive value to zero.
 fn micros_to_duration(us: i64) -> Duration {
     Duration::from_micros(u64::try_from(us).unwrap_or(0))
 }
@@ -127,6 +211,16 @@ fn rtt_micros(res: &ConnectResult) -> i64 {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    fn cfg(ports: Vec<u16>) -> ConnectScanConfig {
+        ConnectScanConfig {
+            ports,
+            template: TimingTemplate::Normal,
+            max_parallelism: 0,
+            min_rate: None,
+            max_rate: None,
+        }
+    }
 
     #[test]
     fn micros_to_duration_clamps_negative() {
@@ -149,12 +243,11 @@ mod tests {
         let closed_port = closed_listener.local_addr().unwrap().port();
         drop(closed_listener);
 
-        let cfg = ConnectScanConfig {
-            ports: vec![open_port, closed_port],
-            template: TimingTemplate::Normal,
-            max_parallelism: 0,
-        };
-        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &cfg).await;
+        let results = connect_scan(
+            &[IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            &cfg(vec![open_port, closed_port]),
+        )
+        .await;
 
         assert_eq!(results.hosts.len(), 1);
         let host = &results.hosts[0];
@@ -168,7 +261,6 @@ mod tests {
         assert_eq!(closed.state, PortState::Closed);
         assert_eq!(closed.reason, Reason::ConnRefused);
 
-        // Ports are reported in ascending order.
         let numbers: Vec<u16> = host.ports.iter().map(|p| p.number).collect();
         let mut sorted = numbers.clone();
         sorted.sort_unstable();
@@ -177,9 +269,44 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     #[tokio::test]
+    async fn scans_multiple_hosts_as_one_group() {
+        // A listener on 127.0.0.1 only; scan it plus 127.0.0.2 (also loopback).
+        // Both hosts must be scanned and every port classified — exercises the
+        // shared group window across hosts.
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let closed = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+
+        let targets = [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        ];
+        let results = connect_scan(&targets, &cfg(vec![port, closed_port])).await;
+
+        assert_eq!(results.hosts.len(), 2);
+        // Every host classified both ports (2 ports each).
+        for h in &results.hosts {
+            assert_eq!(h.ports.len(), 2, "host {:?} missing ports", h.address);
+        }
+        // The listener's port is open on 127.0.0.1.
+        let h1 = &results.hosts[0];
+        assert_eq!(h1.address, targets[0]);
+        assert_eq!(
+            h1.ports.iter().find(|p| p.number == port).unwrap().state,
+            PortState::Open
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    #[tokio::test]
     async fn congestion_window_bounds_a_large_closed_range() {
-        // Scanning many closed ports must still complete and classify every port
-        // (exercises the scheduler's prime/refill under drops).
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -187,12 +314,56 @@ mod tests {
         drop(listener);
 
         let ports: Vec<u16> = (base..base.saturating_add(20)).collect();
-        let cfg = ConnectScanConfig {
-            ports: ports.clone(),
-            template: TimingTemplate::Normal,
-            max_parallelism: 4,
-        };
-        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &cfg).await;
+        let mut c = cfg(ports.clone());
+        c.max_parallelism = 4;
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        assert_eq!(results.hosts[0].ports.len(), ports.len());
+    }
+
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn group_scan_completes_on_a_multithread_runtime() {
+        // Liveness/functional check: the whole group loop must run to completion
+        // on a real multi-threaded runtime — no deadlock, no lost task, every port
+        // classified (the winlsof-class hang is the risk this guards). Race-freedom
+        // itself is structural, not checked here: all scheduler state is mutated by
+        // the single driver task and probe tasks capture only Copy/owned data, so
+        // `JoinSet::spawn`'s Send bound rejects shared mutable state at compile
+        // time. (Full-program TSan of tokio's multi-thread scheduler reports
+        // runtime-internal false positives, so it is not used as a gate.)
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let base = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let ports: Vec<u16> = (base..base.saturating_add(16)).collect();
+        let targets = [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        ];
+        let results = connect_scan(&targets, &cfg(ports.clone())).await;
+        assert_eq!(results.hosts.len(), 2);
+        for h in &results.hosts {
+            assert_eq!(h.ports.len(), ports.len());
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    #[tokio::test]
+    async fn max_rate_paces_without_stalling() {
+        // With a max-rate set, a small closed-port scan must still complete and
+        // classify every port (the rate-limit sleep path must not hang).
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let base = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let ports: Vec<u16> = (base..base.saturating_add(8)).collect();
+        let mut c = cfg(ports.clone());
+        c.max_rate = Some(5000.0); // 200 µs spacing
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
         assert_eq!(results.hosts[0].ports.len(), ports.len());
     }
 }

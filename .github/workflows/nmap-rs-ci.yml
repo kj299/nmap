@@ -71,6 +71,15 @@ jobs:
         with: { components: miri }
       - run: cargo +nightly miri test
 
+  # NOTE: no ThreadSanitizer gate. The host-group driver's race-freedom is
+  # *structural* — all scheduler state is mutated by the single driver task and
+  # probe tasks capture only `Copy`/owned data, so `JoinSet::spawn`'s `Send`
+  # bound rejects shared mutable state at compile time. Full-program TSan of a
+  # tokio multi-threaded runtime reports false positives from tokio's own
+  # lock-free scheduler (and app code runs *inside* the runtime, so suppressions
+  # can't cleanly separate the two), which makes it an unsound gate here rather
+  # than a safe one. See LESSONS (M2 retrospective).
+
   # --- Gates below activate as their inputs land (kept wired, self-skip until then) ---
 
   fuzz-smoke:

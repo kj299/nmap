@@ -29,3 +29,20 @@ args = ["-sT", "-Pn", "-n", "-p", "18078-18082", "127.0.0.1"]
 [[case]]
 name = "list-and-range-unsorted"
 args = ["-sT", "-Pn", "-n", "-p", "19999,18080-18081,18443", "127.0.0.1"]
+
+# Multi-host group: 127.0.0.1 has the listeners, 127.0.0.2 (also loopback) does
+# not. Exercises the shared group window across hosts. The projection aggregates
+# closed counts across both hosts, so both tools must agree on the totals.
+[[case]]
+name = "two-host-group"
+args = ["-sT", "-Pn", "-n", "-p", "18080,18443,18081", "127.0.0.1", "127.0.0.2"]
+
+# Rate-limited: --max-rate must not change the results, only the pacing.
+[[case]]
+name = "mixed-max-rate"
+args = ["-sT", "-Pn", "-n", "--max-rate", "5000", "-p", "18080,18443,18081,19999", "127.0.0.1"]
+
+# Min-rate floor: likewise result-invariant.
+[[case]]
+name = "mixed-min-rate"
+args = ["-sT", "-Pn", "-n", "--min-rate", "100", "-p", "18080,18443,18081,19999", "127.0.0.1"]

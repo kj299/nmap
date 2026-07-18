@@ -96,6 +96,39 @@ narrower *rendering* of the same result.
       under `-Pn` anyway — so `-n` is a semantic no-op in M1, not silently honored.
       Stderr-only; does not affect scan output or the differential projection.
 
+## Milestone 3 — service/version detection (`-sV`)
+
+- [x] `probedb-parse-degrade` (`core::probedb`, ports the parse half of
+      `service_scan.cc`): the C parser `fatal()`s (aborts the whole process) on the
+      first malformed byte of `nmap-service-probes` — a bad protocol, a missing
+      delimiter, an unsupported probe-string escape, an out-of-range
+      `rarity`/`totalwaitms`/`tcpwrappedms`, an unknown directive, a second NULL
+      probe (`assert`), a second `Exclude`, or an `Exclude` after a Probe. Because
+      `--versiondb <file>` makes this file **untrusted-shaped input**, the port
+      instead *localizes* every failure: the offending line (or probe) is skipped,
+      a `ProbeWarning{line, message}` is recorded, and parsing continues. A hostile
+      or corrupt database degrades to "fewer probes" rather than aborting the scan,
+      and never panics (proved by the `services_probes_parse` fuzz target). This is
+      the same deliberate, safer-than-C divergence M1 made for `nmap-services`
+      (`services-parse-degrade`). On the *shipped, well-formed* file the behavior is
+      identical to C — the corpus differential parses it with **zero warnings** and
+      the exact C structural counts (186 non-NULL probes + 1 NULL, 12,171 match
+      rules), so the divergence is observable only on malformed input.
+- [x] `probedb-waitms-rarity-keep-default` (`core::probedb`): where the C aborts on
+      an out-of-range `rarity` (not `1..=9`) or `totalwaitms`/`tcpwrappedms` (not
+      `[100, 300000]`), the port keeps the field's **default** value and warns,
+      rather than clamping (which would silently alter timing) or aborting. A
+      sub-case of `probedb-parse-degrade`, called out because it changes a value
+      rather than dropping a whole line.
+- [x] `probedb-fallback-unresolved` (`core::probedb`): the C `compileFallbacks()`
+      resolves each `fallback` name to a probe pointer at load time and `fatal()`s
+      on an unknown name. The port stores fallback **names** (comma/space-split,
+      capped at `MAXFALLBACKS`=20) and defers resolution to the probe scheduler
+      (a later M3 module), so a probe DB naming a not-yet-defined fallback loads
+      instead of aborting. Not a behavior change for the shipped file; a robustness
+      improvement for hand-edited databases. Resolution + its own divergence entry
+      land with the scheduling slice.
+
 ## Platform / environment differences
 
 - [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the

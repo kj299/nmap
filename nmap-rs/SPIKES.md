@@ -47,3 +47,47 @@ unblocked — so the risk is retired on paper, not mid-port.
   module (the algorithm was small enough that the experiment *is* the port). The
   async driver (next M2 module) will call `ack`/`drop` on these values; no engine
   code reaches a socket through this type. **No design pivot needed.**
+
+---
+
+## M3-1 — service-detection regex-engine corpus validation
+
+- **Date:** 2026-07-18
+- **Milestone:** 3 (`-sV` service/version detection)
+- **Hazard (why spiked):** the whole M3 plan rests on one assumption — that Rust's
+  linear-time `regex` crate can carry the bulk of `nmap-service-probes`, confining
+  the ReDoS-capable backtracking engine to a small minority. A paper feature-grep
+  estimated ~7% need backtracking. Before scheduling the milestone, that had to be
+  proven by *actually compiling every pattern*, not grepped.
+- **What was unknown going in:** the real fraction that compiles in `regex`; what
+  *else* (beyond lookaround/backrefs) Rust rejects that PCRE accepts; and whether
+  any patterns are simply un-portable.
+- **What the spike found** (`spikes/regex-census/`, compiling all 12,171
+  `match`/`softmatch` patterns through `regex::bytes` then `fancy-regex`):
+  - **Naively, only 77.5% compile in `regex`** — far below the 7%-fail estimate.
+    The gap is **PCRE-vs-Rust *syntax*, not semantics**: nmap writes `\0` for the
+    null byte (Rust needs `\x00`), bare `{`/`}` as literals (Rust requires them
+    escaped), and leading-bracket character classes `[]abc]` / `[^]]` (Rust
+    requires escaping). 421 patterns compiled in **neither** engine.
+  - **Service banners are binary, so the engine must be `regex::bytes` with Unicode
+    off** — not the `&str` API. (Also relevant: `fancy-regex` is `&str`-only, so a
+    pattern that needs *both* backtracking *and* binary bytes is a genuine hard
+    case.)
+  - **A ~20-line PCRE→Rust translation pass** (`\0`→`\x00`, escape bare braces)
+    moves the linear fit **77.5% → 93.5%** (11,380 patterns), drops the
+    backtracking set to **6.4%** (782), and collapses the un-portable set from
+    **421 → 9**. Extending the translator to the leading-bracket class forms would
+    absorb most of the final 9, leaving a single-digit set of genuine
+    atomic-group-on-binary patterns for `DIVERGENCES.md` / the break-glass PCRE2
+    path.
+- **Design decision unblocked / changed:** the port order gains a module the paper
+  analysis could not see — **`core::pcre_translate`**, a bounded, pure, heavily
+  tested PCRE-syntax→Rust-`regex`-syntax preprocessor — inserted **before**
+  `core::matcher`. The hybrid engine choice (`regex::bytes` default →
+  `fancy-regex` fallback, step-limited) stands, and is now *empirically* backed:
+  the dangerous engine runs on ~6.4% of patterns, and only after translation.
+  Confidence: **High**; **the plan changed** (a new module), which is exactly what a
+  spike is for — this would otherwise have surfaced as a wall at 77.5% mid-port.
+- **Outcome:** finding recorded; `docs/M3-ANALYSIS.md` port order updated. The spike
+  crate is retained (detached, not in the workspace build) as the reproducible
+  measurement and the seed corpus for `core::pcre_translate`'s test suite.

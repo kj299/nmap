@@ -97,28 +97,58 @@ The number decides the architecture:
   backtracking for *all* patterns. Kept only as a documented break-glass option if
   a specific probe proves un-portable.
 
-**Net effect:** 12,171 regexes, and the dangerous engine now runs on 853 of them
-instead of all of them; the other ~93% carry a guarantee the original couldn't
+**Net effect:** 12,171 regexes, and the dangerous engine now runs on a small
+minority instead of all of them; the rest carry a guarantee the original couldn't
 state. Any pattern neither engine accepts, or whose semantics differ, is logged in
-`DIVERGENCES.md` — never silently dropped; the corpus-validation spike turns
-"which patterns differ" into a committed list.
+`DIVERGENCES.md` — never silently dropped.
+
+---
+
+## 4a. Spike result — corpus validation (RUN; it changed the plan)
+
+The spike (`spikes/regex-census/`) compiled all 12,171 patterns through
+`regex::bytes` then `fancy-regex`, and overturned a hidden assumption the paper
+feature-grep in §3 could not see:
+
+| | linear `regex::bytes` | needs `fancy-regex` | **neither** |
+|---|---:|---:|---:|
+| **naive** (patterns as-written) | 77.50% | 19.04% | 421 |
+| **+ PCRE→Rust translation** | **93.50%** | 6.43% | **9** |
+
+Two findings:
+
+1. **Banners are binary** → the engine is `regex::bytes` with Unicode **off**, not
+   the `&str` API.
+2. **Most "failures" are PCRE *syntax*, not backtracking semantics.** nmap writes
+   `\0` (Rust needs `\x00`), bare `{`/`}` literals, and leading-bracket classes
+   `[]abc]`/`[^]]`. A ~20-line translation pass recovers 77.5%→93.5% and collapses
+   the un-portable set 421→9. Without it, a naive port hits a wall at 77.5% and
+   discovers `\0` failures mid-implementation.
+
+**Consequence for the plan:** a new module, **`core::pcre_translate`**, lands
+*before* the matcher. The hybrid engine choice is unchanged and now empirically
+backed: the backtracking engine runs on ~6.4% of patterns, only after translation.
+(Full record: `SPIKES.md` M3-1.)
 
 ---
 
 ## 5. Proposed port order (leaf-first; each module through the six gates)
 
-0. **Spike — corpus validation** (before scheduling): compile all 12,171 patterns
-   through `regex`, rejects through `fancy-regex`; emit exact accept/reject/deferred
-   lists + confidence rating on the 7%.
+0. **Spike — corpus validation** — ✅ **DONE** (§4a): the hybrid split holds; it
+   added `core::pcre_translate` to the order and dropped the un-portable set to 9.
 1. **`core::probedb`** — the `nmap-service-probes` parser (Probe / match / softmatch
    / ports / rarity). *Fuzzed* (untrusted-shaped); degrade on malformed lines.
-2. **`core::matcher`** — the hybrid regex engine + soft/hard-match state machine.
-   *Fuzzed* (hostile banners — the #1 target) + *sanitized*.
-3. **`core::versioninfo`** — `$1`/`$P`/`$SUBST` capture substitution into
+2. **`core::pcre_translate`** — bounded, pure PCRE-syntax→Rust-`regex`-syntax
+   preprocessor (`\0`, braces, leading-bracket classes). *Fuzzed* (never panics on
+   any pattern); the spike corpus is its regression seed.
+3. **`core::matcher`** — the hybrid `regex::bytes`→`fancy-regex` (step-limited)
+   engine + soft/hard-match state machine. *Fuzzed* (hostile banners — the #1
+   target) + *sanitized*.
+4. **`core::versioninfo`** — `$1`/`$P`/`$SUBST` capture substitution into
    product/version/CPE. *Fuzzed*; overflow-checked, no fixed buffers.
-4. **`sys`** — probe scheduling (rarity/intensity) over the M2 connect engine; read
+5. **`sys`** — probe scheduling (rarity/intensity) over the M2 connect engine; read
    banners, feed the matcher. *Differential*.
-5. **`cli`** — wire `-sV`, `--version-intensity`, and the VERSION output columns
+6. **`cli`** — wire `-sV`, `--version-intensity`, and the VERSION output columns
    (normal/XML/grep). *Differential* vs C `nmap -sV`.
 
 **Oracle:** local listeners emitting fixed banners (HTTP server line, SSH ident,

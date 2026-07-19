@@ -27,6 +27,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "fancy-regex"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -165,6 +171,7 @@ version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",

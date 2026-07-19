@@ -180,6 +180,20 @@ narrower *rendering* of the same result.
       are untrusted, so substitution is fuzzed to be total (never panics). A template
       that references an absent capture group (`$5` with 3 groups) drops **that field**
       (`None`), matching the C's per-field failure — the service name still stands.
+- [ ] `servicescan-connect-only` (`core::servicescan` + `sys::servicescan`, scope):
+      this slice ports the **connect** `-sV` path — the NULL-probe banner grab and
+      TCP probes in the C's exact rarity / intensity / soft-match order
+      (`ServiceNFO::nextProbe`). Three C features are **deferred** to a follow-up and
+      are *not yet* attempted (so no wrong result is produced — the affected service
+      simply reports `unknown`/soft rather than a fabricated version): **SSL/STARTTLS
+      tunnels** (probing through TLS; needs `rustls`), **UDP probes** (needs the M4
+      raw/UDP path), and the **RPC grinder** (`nmap_ftp.cc` bounce is also out of
+      scope). The state machine is structured so each slots in as an added phase
+      without disturbing the connect core. Tracked, never silently dropped.
+- [x] `servicescan-bounded-banner` (`sys::servicescan`): each probe's banner read is
+      capped (`max_banner_bytes`, default 64 KiB) and time-bounded by the probe's
+      `totalwaitms`. A chatty or hostile port can neither exhaust memory nor stall the
+      scan — a bound the C's `nsock` read loop imposes only via the overall timeout.
 
 ## Platform / environment differences
 

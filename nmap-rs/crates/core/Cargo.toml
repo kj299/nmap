@@ -6,18 +6,18 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# No dependencies by default. Every dependency added here must clear the
-# supply-chain gate (porting-kit/harnesses/supply-chain). Keep the trusted
-# surface small. `core` is #![forbid(unsafe_code)] — all pure nmap logic lives
-# here (target expansion, port/service parsing, model, timing math, rendering).
+# Keep the trusted surface small. Every dependency added here must clear the
+# supply-chain gate (porting-kit/harnesses/supply-chain). `core` is
+# #![forbid(unsafe_code)] — the crates below expose safe APIs; their internal
+# unsafe is their own audited concern, not reachable from this crate's code.
 [dependencies]
-
-# Test-only: `core::pcre_translate` is a pure string transform with no runtime
-# dependency, but its tests verify that each rewrite actually compiles in the
-# engine the matcher will use. `core::matcher` (the next module) promotes this to
-# a real dependency. Dev-deps still clear the supply-chain gate.
-[dev-dependencies]
+# `core::matcher` — the hybrid service-detection regex engine. `regex` is the
+# finite-automaton default (linear-time, ReDoS-immune); `fancy-regex` is the
+# bounded-backtracking fallback for the ~6% of probes that need lookaround /
+# backreferences / atomic groups (its backtrack limit is the analog of nmap's
+# PCRE2 match_limit). See docs/M3-ANALYSIS.md for why this split.
 regex = "1"
+fancy-regex = "0.13"
 
 [lints]
 workspace = true

@@ -371,8 +371,102 @@ These entries are the M2 retrospective.
 - **Section amended:** harnesses/differential/diff_run.py (`require_binary`,
   `run_one`, `_self_test`).
 
+## 012. Binary input stays bytes — a `char`-at-a-time C parser ported through `&str` re-adds a panic class
+
+- **Date:** 2026-07-19
+- **Codebase:** nmap M3 — `core::probedb`, the `nmap-service-probes` parser
+- **What happened:** The C reads a probe's regex delimiter one byte at a time
+  (`*p`) and never assumes UTF-8 — the file (and any `--versiondb` override) is
+  binary. The Rust port, reaching for ergonomic string handling, read the delimiter
+  as `c as char`, computed `len_utf8()` from it, and sliced the pattern at that
+  offset. On a **multibyte lead byte** the char was mis-decoded, `len_utf8` was
+  mis-sized, and the slice landed **mid-codepoint → panic** — a crash the
+  byte-oriented C could not have. CI fuzz found it (and, per #015, only two modules
+  later). The same UTF-8-on-binary reflex showed up twice more in M3, caught in
+  design review: the matcher *must* be `regex::bytes` (Unicode off) because banners
+  are binary, and `fancy-regex` being `&str`-only forced an explicit latin-1
+  bijection for the backtracking minority.
+- **Kit change:** PLAYBOOK Phase 4 gate 1 now states the rule directly — a C
+  byte-at-a-time parser ports over `&[u8]`, not `&str`/`chars()`; `&str` is for
+  *proven* text and only via `from_utf8` returning an error, never slice-and-hope.
+  The pattern generalizes hard to M4 (every raw-packet parser is binary), which is
+  why it is stated as a porting rule, not a probedb footnote.
+- **Section amended:** PLAYBOOK · Phase 4 gate 1 (Port).
+
+## 013. A signature-DB-driven differential must compare findings, not data-file lookups
+
+- **Date:** 2026-07-19
+- **Codebase:** nmap M3 — the `-sV` differential (`tests/differential/project.py`)
+- **What happened:** `-sV` output carries a service *name* plus a *product/version*
+  string, all derived from `nmap-service-probes`. The obvious differential —
+  project the whole service line and diff it against C nmap — would have compared
+  **product/version strings that are a function of each tool's shipped DB version**,
+  not of the port's correctness. C nmap 7.94 and nmap-rs ship different probe DBs,
+  so the gate would flag a "divergence" on every version-detected port: a false
+  failure that trains you to `--ignore` the case, blinding it to real regressions
+  (the #007 family — a differential that judges the wrong thing). This is
+  structurally certain to recur at M5 (`nmap-os-db`, `nmap-mac-prefixes`).
+- **Kit change:** `project.py` projects only the version-independent finding —
+  the detected service *name* on a `method="probed"` port — and explicitly excludes
+  product/version (pinned by four self-test checks incl. "two tools agree on service
+  despite differing product versions"). PLAYBOOK Phase 4 gate 2 generalizes it: the
+  differential compares *what the port computes*; anything the port merely *looks up*
+  from a versioned DB belongs in a golden test against a fixed snapshot, not the
+  oracle.
+- **Section amended:** PLAYBOOK · Phase 4 gate 2 (Differential); the port's
+  `tests/differential/project.py` (service-name projection + self-tests).
+
+## 014. A defensive catch-all `break` in a scheduler loop is a liveness bug
+
+- **Date:** 2026-07-19
+- **Codebase:** nmap M2 rate-limited group loop (`sys::scan`), surfaced by an M3
+  module-5 test
+- **What happened:** The concurrent group driver had a `match` on the scheduler
+  state ending in `_ => break` — a "if something unexpected happens, stop" guard.
+  Under a timing skew between `launch_ready`'s rate check and the outer loop's rate
+  check, the loop hit that arm **with ports still unscanned** and abandoned 2 of 8
+  as neither open nor closed. It is not UB, not a panic, and not a hang — so no
+  sanitizer sees it; only the multi-thread **liveness** test prescribed by #010
+  ("every unit of work reaches a terminal state") caught it, one milestone after
+  the bug shipped. The defensive `break` — meant to be safe — was the failure.
+- **Kit change:** PLAYBOOK Phase 4 gate 4 now names the class: in a work-scheduling
+  loop the safe default with work outstanding is **retry/continue (re-poll,
+  sleep-then-continue), never `break`**; reserve `break` for a proven-terminal
+  condition (queue empty), not for "confused." Reinforces #010's standing
+  prescription to keep a liveness test — here it is what paid out.
+- **Section amended:** PLAYBOOK · Phase 4 gate 4 (Sanitize / liveness).
+
+## 015. A time-bounded fuzz smoke is a floor, not a proof — seed what it finds late
+
+- **Date:** 2026-07-19
+- **Codebase:** nmap M3 — the `probedb` fuzz target vs the 60s CI smoke
+- **What happened:** The multibyte-delimiter panic (#012) lived in `probedb`, which
+  **passed its own module's 60s fuzz smoke and merged clean**. The crash only
+  surfaced on a *later, unrelated* module's fuzz run, because a 60s libFuzzer budget
+  reaches a low-probability branch nondeterministically. Reading the smoke's green
+  tick as "this parser is panic-free" is the trap — it means "no panic found in 60s
+  this run." This is not a hole the kit can close (exhaustive fuzzing isn't on the
+  table); the lesson is what to *do* about the residual.
+- **Kit change:** PLAYBOOK Phase 4 gate 3 now frames the smoke as a floor: when a
+  crash surfaces (whenever it surfaces), **commit the exact input as a named seed**
+  so it is deterministically re-checked forever after (nmap did — the CI crash input
+  is a committed `probedb` seed), and give untrusted-boundary parser modules a
+  budget beyond the 60s smoke at least once per milestone. The seed corpus is the
+  port's accumulating regression memory.
+- **Section amended:** PLAYBOOK · Phase 4 gate 3 (Fuzz).
+
 ## Positive validations (habits that paid off, no change needed)
 
+- **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole
+  engine choice rested on "Rust's linear `regex` carries the bulk of
+  `nmap-service-probes`; backtracking is a small minority." A *paper feature-grep*
+  put the backtracking need at ~7%. The spike (`SPIKES.md` M3-1) refused the grep
+  estimate and **compiled all 12,171 patterns through the real engine** — finding
+  only 77.5% compiled, a 3× miss, and that the gap was PCRE-vs-Rust *syntax*, not
+  semantics. That surfaced an entire new module (`core::pcre_translate`, a syntax
+  preprocessor) *before* scheduling, not as a wall at 77.5% mid-port. The durable
+  note (now in the spike's own record): **library-compatibility estimated by grep is
+  unreliable — compile the corpus through the actual engine to know the real fit.**
 - **Spike-the-scary-module worked cleanly.** The congestion/retransmission math was
   the flagged hazard; the timeboxed spike (`SPIKES.md` M2-1) read `timing.cc`,
   confirmed textbook AIMD, found the two divide-by-zero footguns the C guards with

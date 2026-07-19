@@ -15,31 +15,38 @@ record; edit it as milestones complete.
 | 0 | Kit vendored + workspace skeleton + CI | Phase 3 | ✅ **MERGED** — squashed to `master` `16f8ea1` (PR #1) |
 | 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | ✅ **DONE** — all 9 modules; `-sT` end-to-end; fuzz + differential gates closed; retrospective merged (PRs #2–#11) |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ✅ **DONE** — congestion (AIMD) + host & group schedulers + rate limiting, pure core driven by a tokio host-group driver; 8/8 differential incl. multi-host + `--min`/`--max-rate`; TSan dropped as unsound over tokio (structural race-freedom instead); retrospective merged (PRs #12–#17, this PR) |
-| 3 | Service / version detection (`-sV`) | full cycle | ✅ **DONE** — all 6 modules merged. **`core::probedb`** (exact C counts, 12,171 rules) → **`core::pcre_translate`** (77.50%→93.57%) → **`core::matcher`** (hybrid, all 12,171 rules, ReDoS-immune) → **`core::versioninfo`** (`$1`/`$P`/`$SUBST`/`$I`, no fixed buffers) → **`core::servicescan`**+**`sys::servicescan`** (pure `nextProbe` scheduler + tokio driver) → **`cli`** (`-sV`/`--version-intensity`, VERSION column in normal/XML/grep). `-sV` runs end-to-end; **9/9 differential MATCH vs C nmap 7.94 incl. `sv-ssh-banner`**. 0 unsafe workspace-wide, miri clean. Retrospective pending. |
-| 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ⬜ |
+| 3 | Service / version detection (`-sV`) | full cycle | ✅ **DONE** — all 6 modules merged. **`core::probedb`** (exact C counts, 12,171 rules) → **`core::pcre_translate`** (77.50%→93.57%) → **`core::matcher`** (hybrid, all 12,171 rules, ReDoS-immune) → **`core::versioninfo`** (`$1`/`$P`/`$SUBST`/`$I`, no fixed buffers) → **`core::servicescan`**+**`sys::servicescan`** (pure `nextProbe` scheduler + tokio driver) → **`cli`** (`-sV`/`--version-intensity`, VERSION column in normal/XML/grep). `-sV` runs end-to-end; **9/9 differential MATCH vs C nmap 7.94 incl. `sv-ssh-banner`**. 0 unsafe workspace-wide, miri clean. Retrospective merged (kit lessons #12–#15). |
+| 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | 🔶 **CURRENT** — fresh kit cycle; start at Phase 0 (spike Npcap `-msvc` linkage + pcap-fd-in-async before scheduling) |
 | 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ⬜ |
 | S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | ⬜ |
 | 6 | NSE — Lua engine + bridges + scripts | full cycle | ⬜ |
 | 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | ⬜ |
 
-> **We are here:** Milestones 0–2 are complete and merged. `nmap-rs -sT` runs the
-> real `ultra_scan` engine — AIMD congestion control, adaptive RTT timeouts,
-> retransmission, a cross-host group window, and `--min-rate`/`--max-rate` pacing —
-> as a **pure decision core** (`core::{congestion,engine,timing}`, all Miri-checked)
-> driven by a thin tokio host-group driver (`sys::scan`). The whole workspace still
-> holds **0 `unsafe`**, and the differential matches C nmap 7.94 on all 8 cases
-> (incl. multi-host group + rate-limited). M2's retrospective added two kit lessons
-> — **#10 TSan is unsound as a gate over an async runtime** (dropped it; race-freedom
-> is now structural: no shared mutable state + `Send`/`Sync` on `spawn`), and **#11
-> a differential must reject a non-file "binary"** (a directory passes `-x`).
-> **Next: Milestone 3 (`-sV` service/version detection)** — start a fresh kit cycle
-> at Phase 0 (`kickoff` inventory + `cflaw-scan` over `service_scan.cc` +
-> `nmap-service-probes` parser + threat model; the big decision point is regex
-> fidelity: pure-Rust `regex` first, `fancy-regex`/PCRE2 FFI only where a probe
-> needs backrefs/lookaround), then **stop for approval on port order before any
-> Rust**. **Never skip the retrospective.** Each milestone is its own kit cycle:
-> `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop → audit →
-> retrospective-that-patches-the-kit`.
+> **We are here:** Milestones 0–3 are complete and merged. `nmap-rs -sV` runs the
+> full service/version pipeline — `nmap-service-probes` parse → PCRE→Rust syntax
+> translation → a hybrid `regex::bytes`(linear)/`fancy-regex`(bounded-backtrack)
+> matcher over all 12,171 rules → `$1`/`$P`/`$SUBST`/`$I` version substitution into
+> growing `Vec<u8>` (no fixed buffers) → a pure `nextProbe` scheduler driven by a
+> thin tokio connect driver → the `-sV` CLI with a VERSION column across
+> normal/XML/grep. The whole workspace still holds **0 `unsafe`**, miri is clean,
+> and the differential matches C nmap 7.94 on all 9 cases (incl. `sv-ssh-banner`).
+> M3's retrospective added four kit lessons — **#12 binary input stays bytes** (a
+> `char`-at-a-time C parser ported through `&str` re-adds a mid-codepoint panic;
+> found by fuzz), **#13 a signature-DB differential compares findings not lookups**
+> (project the service *name*, not DB-version-dependent product/version), **#14 a
+> catch-all `break` in a scheduler loop is a liveness bug** (retry, never break with
+> work outstanding), and **#15 a 60s fuzz smoke is a floor not a proof** (seed what
+> it finds late) — plus a positive validation that the regex spike changed the plan
+> by compiling the corpus instead of trusting a grep estimate.
+> **Next: Milestone 4 (raw-packet infrastructure + all raw scans)** — the scariest,
+> highest-privilege, most Windows-specific phase. Start a fresh kit cycle at Phase 0
+> (`kickoff` inventory + `cflaw-scan` over `tcpip.cc`/`libnetutil`/`scan_engine_raw`
+> + the `libdnet .*-win32` layer + threat model), run the **spike-and-gate ritual**
+> on each hard piece (Npcap SDK linkage on `-msvc`, pcap-fd-in-async, packet
+> inject/capture on loopback) **before** committing, then **stop for approval on
+> port order before any Rust**. **Never skip the retrospective.** Each milestone is
+> its own kit cycle: `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop →
+> audit → retrospective-that-patches-the-kit`.
 
 **Sequencing rationale (why this order, and where raw lands).** Order follows the
 kit's "roots-before-dependents, cheapest-and-safest-first, spike-the-scary-module-

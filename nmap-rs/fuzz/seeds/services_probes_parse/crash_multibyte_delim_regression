@@ -1,0 +1,3 @@
+Probe TCP GetRequest q|GET / HTTP/0.0\r\n\r\n|
+rarimat?torts 80,443
+match Exclude 􋞓JJhttp m|HTPP/0\.[01]| p/generic/ v/$1/ cpe:/a:x:y/

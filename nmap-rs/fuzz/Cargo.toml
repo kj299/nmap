@@ -90,3 +90,8 @@ test = false
 name = "parse_tcp"
 path = "fuzz_targets/parse_tcp.rs"
 test = false
+
+[[bin]]
+name = "parse_udp"
+path = "fuzz_targets/parse_udp.rs"
+test = false

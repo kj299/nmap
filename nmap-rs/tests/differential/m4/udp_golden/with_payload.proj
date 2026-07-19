@@ -1,0 +1,3 @@
+hdr 0 udp len=8
+  udp sport=53 dport=53 ulen=22
+result ok

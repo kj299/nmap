@@ -218,7 +218,11 @@ lands, `[x]` = confirmed by that module's gates.
 
 ### Security fixes (C defect closed by the port)
 
-- [ ] `udp-checksum-no-fixed-buffer` (`core::headers::udp`, ports `UDPHeader::setSum`):
+- [x] `udp-checksum-no-fixed-buffer` (`core::headers::udp`, ports `UDPHeader::setSum`;
+      **realized** — `UdpHeader::computed_checksum` sums a growing `Vec` whose length
+      is its capacity, so the fixed-`aux[65527]`/`maxlen 65528` overflow class is gone;
+      pinned by `max_size_datagram_checksum_does_not_overflow`, which exercises the
+      exact 65528-byte datagram that overflows the C):
       the C sizes the checksum scratch buffer `u8 aux[65535-8]` = **65527 bytes**
       (`UDPHeader.cc:197`) but then calls `dumpToBinaryBuffer(aux, 65536-8)` passing
       **maxlen 65528** (`:209`); `dumpToBinaryBuffer` only aborts when a *single*

@@ -10,6 +10,7 @@
 
 #include "IPv4Header.h"
 #include "TCPHeader.h"
+#include "UDPHeader.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +53,25 @@ static int project_tcp(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Project a UDP header (used when argv[1]=="udp").
+static int project_udp(const std::vector<unsigned char> &pkt) {
+  UDPHeader udp;
+  if (udp.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = udp.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  printf("hdr 0 udp len=%d\n", vlen);
+  printf("  udp sport=%u dport=%u ulen=%u\n", udp.getSourcePort(),
+         udp.getDestinationPort(), udp.getTotalLength());
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
@@ -60,6 +80,9 @@ int main(int argc, char **argv) {
 
   if (strcmp(layer, "tcp") == 0) {
     return project_tcp(pkt);
+  }
+  if (strcmp(layer, "udp") == 0) {
+    return project_udp(pkt);
   }
 
   IPv4Header ip;

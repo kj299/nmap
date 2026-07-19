@@ -80,3 +80,8 @@ path = "fuzz_targets/versioninfo.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_ipv4"
+path = "fuzz_targets/parse_ipv4.rs"
+test = false

@@ -21,12 +21,20 @@ scope here.
   latent-bug triggers. Regenerate with `python3 gen_corpus.py`.
 - ✅ **Oracle build de-risked** (see recipe below) — the parse path is nearly
   self-contained; it compiles with `nbase` configured + a minimal `pcap.h` stub.
-- ⏳ **C oracle harness + projection wiring** — lands with the first header-parse
-  module (`core::headers::ipv4`). The leaf modules that come first (`core::bytes`,
-  `core::checksum`) need no packet oracle: the byte cursor is pure logic (unit-tested)
-  and checksums are golden-tested against the RFC 1071 test vectors. The C parser
-  harness is only needed once there is a parser to differential — so it is built in that
-  slice, against these already-authored vectors.
+- ✅ **C oracle harness built** (`oracle/`, `oracle/build.sh`) — links nmap's real
+  `IPv4Header` and emits the projection; unused-method symbols inert-stubbed
+  (`oracle/stubs.cc`) to avoid a libpcap/dnet link. Build needs `-DHAVE_CONFIG_H`
+  (the one flag that makes `nbase.h` include its generated config), `nbase`
+  configured, and the `pcap.h` stub.
+- ✅ **IPv4 differential wired** — `ipv4_vectors/` (18 IPv4-layer inputs) run through
+  the C oracle produce `ipv4_golden/`; the Rust parser's projection is asserted equal
+  to that golden by `crates/core/tests/ipv4_differential.rs` (runs in normal
+  `cargo test`, no C toolchain needed at test time — the C was run once to produce the
+  golden, satisfying "validate every vector against the C first"). Regenerate the
+  golden with `oracle/build.sh` when the format or reference changes.
+- ⏳ Later header modules (`tcp`, `udp`, `icmp`, …) extend the harness the same way.
+  The leaf modules `core::bytes` / `core::checksum` needed no packet oracle (pure
+  logic / RFC 1071 vectors).
 
 ## Projection format (the canonical shape both sides emit)
 

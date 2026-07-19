@@ -1,0 +1,4 @@
+# Oracle build artifacts (regenerate with build.sh); pcap.h is a copy of pcap_stub.h
+*.o
+parse_oracle
+pcap.h

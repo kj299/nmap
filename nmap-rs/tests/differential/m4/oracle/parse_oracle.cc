@@ -8,6 +8,7 @@
 //
 // Build: see build.sh (needs -DHAVE_CONFIG_H + nbase configured + the pcap.h stub).
 
+#include "ICMPv4Header.h"
 #include "IPv4Header.h"
 #include "TCPHeader.h"
 #include "UDPHeader.h"
@@ -72,6 +73,24 @@ static int project_udp(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Project an ICMPv4 header (used when argv[1]=="icmp").
+static int project_icmp(const std::vector<unsigned char> &pkt) {
+  ICMPv4Header icmp;
+  if (icmp.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = icmp.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  printf("hdr 0 icmp len=%d\n", vlen);
+  printf("  icmp type=%u code=%u\n", icmp.getType(), icmp.getCode());
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
@@ -83,6 +102,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(layer, "udp") == 0) {
     return project_udp(pkt);
+  }
+  if (strcmp(layer, "icmp") == 0) {
+    return project_icmp(pkt);
   }
 
   IPv4Header ip;

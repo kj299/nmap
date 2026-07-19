@@ -1,0 +1,18 @@
+# M4 spike S1 — capture-into-async-runtime design for a source with NO
+# selectable fd (the Windows/Npcap constraint). Detached from the workspace (own
+# [workspace]) so tokio here doesn't touch the main build. Throwaway/measurement
+# tool; its FINDING (which integration design to commit to) informs sys::npcap /
+# sys::rawio per docs/M4-ANALYSIS.md §S1.
+[package]
+name = "pcap-async-spike"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+[workspace]
+
+[profile.release]
+overflow-checks = true

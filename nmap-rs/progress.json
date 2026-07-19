@@ -6,6 +6,7 @@
     "core::matcher": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
+    "core::servicescan": "unsafe_audited",
     "core::versioninfo": "unsafe_audited",
     "engine": "differential",
     "model": "differential",
@@ -13,6 +14,7 @@
     "options": "differential",
     "output": "differential",
     "ports": "unsafe_audited",
+    "sys::servicescan": "unsafe_audited",
     "targets": "unsafe_audited",
     "timing": "differential"
   }

@@ -89,6 +89,90 @@ pub async fn resolve_host(host: &str) -> io::Result<Vec<IpAddr>> {
     Ok(out)
 }
 
+/// Outcome of a service-detection probe: connect, optionally send bytes, then
+/// read whatever the port volunteers within a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BannerResult {
+    /// The TCP handshake completed.
+    pub connected: bool,
+    /// Bytes read from the port (capped at the caller's `max_bytes`).
+    pub data: Vec<u8>,
+    /// The peer closed the connection (EOF) during the read window.
+    pub closed: bool,
+    /// Wall-clock time from connect start to end of the read window.
+    pub elapsed: Duration,
+}
+
+/// Connect to `addr`, optionally send `send`, then read up to `max_bytes` of
+/// banner within `read_timeout`. Keeps the stream for the read (unlike
+/// [`tcp_connect`], which drops it). Total, non-panicking: connect failure yields
+/// `connected == false`; any read error or the timeout simply ends the window.
+///
+/// This is the I/O primitive `nmap-core::servicescan` drives — one probe send +
+/// response read. Built on tokio's safe socket API — **no `unsafe`**.
+pub async fn grab_banner(
+    addr: SocketAddr,
+    send: &[u8],
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    max_bytes: usize,
+) -> BannerResult {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let start = Instant::now();
+    let mut stream =
+        match tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => s,
+            _ => {
+                return BannerResult {
+                    connected: false,
+                    data: Vec::new(),
+                    closed: false,
+                    elapsed: start.elapsed(),
+                }
+            }
+        };
+
+    // Send the probe payload (if any), bounded by the read window.
+    if !send.is_empty()
+        && tokio::time::timeout(read_timeout, stream.write_all(send))
+            .await
+            .map(|r| r.is_ok())
+            != Ok(true)
+    {
+        // Write failed or timed out — still try to read whatever's there.
+    }
+
+    // Read until the window closes, the peer closes, or we hit the byte cap.
+    let deadline = tokio::time::Instant::now()
+        .checked_add(read_timeout)
+        .unwrap_or_else(tokio::time::Instant::now);
+    let mut data: Vec<u8> = Vec::new();
+    let mut closed = false;
+    let mut buf = [0u8; 4096];
+    while data.len() < max_bytes {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                closed = true;
+                break;
+            }
+            Ok(Ok(n)) => {
+                let room = max_bytes.saturating_sub(data.len());
+                data.extend_from_slice(&buf[..n.min(room)]);
+            }
+            // Read error or window elapsed — stop with whatever we have.
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    BannerResult {
+        connected: true,
+        data,
+        closed,
+        elapsed: start.elapsed(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

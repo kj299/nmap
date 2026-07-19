@@ -99,20 +99,27 @@ async fn run_group(ctxs: &mut [HostCtx], group: &mut GroupScheduler, rate: &mut 
 
         if set.is_empty() {
             // Nothing in flight. Either the whole group is finished, or the rate
-            // limiter is holding us back — sleep until it reopens, never spin.
+            // limiter is holding us back.
             if all_done(ctxs) {
                 break;
             }
-            match rate.verdict(now_us(start)) {
-                RateVerdict::TooEarly(t) => {
-                    tokio::time::sleep(micros_to_duration(t.saturating_sub(now_us(start)))).await;
-                    continue;
-                }
-                // No probe in flight, work remains, yet no rate hold — nothing
-                // could wake us; bail rather than hang (defensive; unreachable
-                // while a host has a fresh port or pending retransmit).
-                _ => break,
+            // With work left but nothing active, the *only* thing that can be
+            // holding us is the rate limiter (a host with an unscanned port always
+            // clears its own congestion window when its active count is 0, so
+            // `launch_ready` would otherwise have dispatched). If it is holding,
+            // sleep until it reopens; then loop back to launch.
+            //
+            // A previous version `break`ed when the verdict here was *not*
+            // TooEarly — but that was reachable, and wrong: the rate interval can
+            // elapse in the gap between `launch_ready`'s own rate check and this
+            // one, so a "not too early" verdict here just means the ready work
+            // should be launched on the next iteration, not that the scan is
+            // stuck. Retrying (never breaking) classifies every port; it cannot
+            // spin, because `launch_ready` dispatches whenever a host can send.
+            if let RateVerdict::TooEarly(t) = rate.verdict(now_us(start)) {
+                tokio::time::sleep(micros_to_duration(t.saturating_sub(now_us(start)))).await;
             }
+            continue;
         }
 
         if let Some(Ok((idx, probe, res))) = set.join_next().await {

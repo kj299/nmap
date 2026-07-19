@@ -97,3 +97,60 @@ unblocked — so the risk is retired on paper, not mid-port.
   measures **77.50% → 93.57%** — marginally above the spike's 93.50%. The spike's
   `translate_pcre_to_rust` prototype is thus fully superseded by the tested module;
   the spike crate remains only as the standalone census.
+
+---
+
+## M4-1 — pcap capture into an async runtime with no selectable fd
+
+- **Date:** 2026-07-19
+- **Milestone:** 4 (raw-packet infrastructure + all raw scans)
+- **Hazard (why spiked):** the top M4 hazard (`docs/M4-ANALYSIS.md` §S1). On Windows
+  nmap's pcap handle exposes **no selectable file descriptor** — `PCAP_CAN_DO_SELECT`
+  is undefined on WIN32 (`nsock_pcap.h:85`), so `pcap_get_selectable_fd` is never
+  called (`pcap_desc = -1`); nmap sets the handle non-blocking and **polls
+  `pcap_next_ex` at a forced 2 ms cap** inside the IOCP loop
+  (`engine_iocp.c:328-346`). A Rust port that assumes "register the pcap fd with
+  tokio/mio and await readiness" **cannot work on Windows** — there is no readiness
+  fd to register. The entire `sys::npcap` capture design hinges on how we bridge a
+  no-readiness-fd source into the tokio driver, so it had to be settled before
+  scheduling any scan-type work that consumes captured packets.
+- **What was unknown going in:** whether an event-driven bridge (no polling) is even
+  possible without a readiness fd, and what latency / idle-CPU penalty nmap's actual
+  Windows mechanism (the 2 ms poll) imposes versus the alternative.
+- **Decision gate (written before the code):** the chosen design must (a) deliver a
+  loopback packet into the async runtime with **median added latency well under the
+  2 ms poll floor**, (b) **not busy-spin** the CPU while the network is idle, and
+  (c) **require no selectable/readiness fd** so it ports to Npcap on Windows. On
+  failing, document the capture design as a platform constraint before proceeding.
+- **What the spike found** (`spikes/pcap-async/`, real loopback UDP, `std` sockets
+  only so the tokio reactor is never registered — faithfully modeling "no readiness
+  fd"; 2000 packets @ 200 µs spacing, two runs):
+  - **BlockingThread → `tokio::mpsc`** (a dedicated OS thread does a *blocking* recv —
+    models Npcap blocking mode / a capture thread — and forwards frames into a channel
+    the async driver awaits): **median ~60–64 µs** send→delivery latency, **p99
+    ~120 µs–1 ms**, and **0 idle wakeups** (the thread parks in `recv`). **PASS.**
+  - **PollTask (2 ms)** (a tokio task polls a *non-blocking* socket, sleeping 2 ms
+    between empty reads — a faithful analogue of nmap's Windows IOCP path): **median
+    ~1.6 ms** (≈25× worse, exactly the expected half-of-2 ms poll floor) and
+    **~125 idle wakeups per 300 ms** of quiet network (busy-spin). Reproduces nmap's
+    Windows behavior and quantifies its cost.
+  - Neither design needs a readiness fd, so both are Windows-portable — but only the
+    blocking-thread bridge is event-driven.
+- **Design decision unblocked:** **commit `sys::npcap` capture to the
+  BlockingThread → channel design** — a dedicated blocking capture thread (Npcap in
+  blocking mode on Windows, libpcap on Linux) feeding a `tokio::mpsc` the async raw
+  driver awaits. It is event-driven (~0 idle CPU), ~25× lower latency than nmap's own
+  Windows poll, needs no selectable fd, and is identical on both platforms — so the
+  differential oracle runs the same capture path on Linux CI that ships on Windows.
+  The RAII `OwnedPcapHandle` lives on the capture thread; the async side only ever
+  touches the safe channel. Keep the 2 ms PollTask **only** as a documented fallback
+  if a platform's blocking capture misbehaves (e.g. an Npcap immediate-mode quirk).
+  Confidence: **High**; the plan did not change (the port order already isolated
+  `sys::npcap` behind the seam), but the internal design is now empirically fixed
+  rather than an open question mid-port.
+- **Outcome:** finding recorded; `docs/M4-ANALYSIS.md` §S1's decision gate is
+  discharged. The spike crate is retained (detached, not in the workspace build) as
+  the reproducible measurement. **Still to gate before `sys::npcap` ships: S2** —
+  confirming the design links against the real Npcap SDK (`wpcap.dll` + `Packet.dll`)
+  on `x86_64-pc-windows-msvc` and round-trips on the Npcap loopback adapter — which
+  needs a Windows host and is deferred to the `sys::npcap` slice.

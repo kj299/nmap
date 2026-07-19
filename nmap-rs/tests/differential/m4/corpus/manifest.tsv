@@ -1,0 +1,19 @@
+name	bytes	description
+empty	0	edge: empty packet (0 bytes)
+eth_ip_icmp_portunreach	42	baseline: ICMP port-unreachable (3/3)
+eth_ip_tcp_rst	54	baseline: TCP RST (-> closed)
+eth_ip_tcp_syn	54	baseline: Ethernet/IPv4/TCP SYN
+eth_ip_tcp_synack	54	baseline: TCP SYN/ACK (SYN scan -> open)
+eth_ip_udp	44	baseline: Ethernet/IPv4/UDP
+eth_ipv6_tcp	74	baseline: Ethernet/IPv6/TCP (v6 fixed 40-byte header + TCP)
+icmp_hostile_type_abort	42	bug-trigger parse-no-fatal-on-hostile: inner ICMP with a type the C icmp_get_data() netutil_fatal()s on (netutil.cc). Port must return Err, not abort.
+ipv4_ihl_0	54	boundary: IPv4 IHL=0 (illegal, header len underflow bait)
+ipv4_ihl_15_no_opts	54	boundary: IPv4 IHL=15 (60-byte hdr) but no option bytes present
+ipv4_totlen_overflow	54	boundary: IPv4 total_len far exceeds actual bytes
+ipv4_totlen_underflow	54	boundary: IPv4 total_len < header len
+one_byte	1	edge: single byte
+trunc_eth_only	14	truncation: Ethernet header only, no L3
+trunc_icmp_1byte	35	truncation: ICMP type byte only
+trunc_ip_no_l4	34	truncation: IPv4 header, zero transport bytes
+trunc_tcp_half	44	truncation: TCP cut mid-header (10 of 20 bytes)
+udp_maxlen_cksum_trigger	1514	bug-trigger udp-checksum-no-fixed-buffer: max-size UDP payload driving the C setSum() 1-byte stack overflow (UDPHeader.cc:197/209). Port must not overflow.

@@ -194,6 +194,17 @@ Then the loop — each step is a CI-enforced gate:
    the "call-twice-for-size" buffer dance → a growing `Vec` with length checks;
    pointer arithmetic over structs → slices + `repr(C)` with bounds; unions/FAMs →
    audited casts with a `// SAFETY:` proof; integer math → checked/`saturating`.
+   **A C byte-at-a-time parser stays byte-oriented — port it over `&[u8]`, not
+   `&str`/`chars()`** (LESSONS #12). C reads its input a `char` (one byte) at a
+   time and never asserts UTF-8; the input — a data file loaded via `--versiondb`,
+   a network banner, a raw packet — is *binary*. Decoding it to `&str` first is
+   both wrong (non-UTF-8 bytes are legal input the C accepts) and a **new panic
+   class the C never had**: indexing/slicing on a `char` boundary panics
+   mid-codepoint on a multibyte byte (nmap's `next_template` read a probe
+   delimiter as `c as char`, mis-sized `len_utf8`, and sliced mid-codepoint — a
+   fuzz-found panic). Reach for `&str` only where the field is *proven* text, and
+   even then via `from_utf8` returning an error, never a slice-and-hope. This is
+   why M3's regex engine is `regex::bytes` (Unicode off), not the `&str` API.
 2. **Differential-test** against the oracle (`harnesses/differential/diff_run.py`).
    A divergence is a *triage*, not an auto-fail: {Rust bug → fix} vs {C bug →
    log in `DIVERGENCES.md`, keep the safe behavior}. The verdict is **stdout AND
@@ -215,6 +226,19 @@ Then the loop — each step is a CI-enforced gate:
    counts), canonicalizing *both* representations to the same shape. Then a genuine
    regression still breaks the match while the ledgered abbreviation stays invisible
    (LESSONS #7). Full output-format parity becomes its own later differential.
+   The same projection discipline resolves a **second** blind spot: when *both*
+   tools derive an output field from a **versioned data file** they ship
+   independently (nmap's `nmap-service-probes`, `nmap-os-db`, `nmap-mac-prefixes`),
+   that field's *value* is a property of the file version, not of your port.
+   Projecting it turns the differential into a data-file-version check that fails
+   whenever the two trees ship different DBs — a false divergence that trains you
+   to ignore the gate (LESSONS #13). Project only the **version-independent
+   semantic finding** (for `-sV`: the detected service *name* on a `method="probed"`
+   port, not the product/version string; for `-O`: that a match occurred, not the
+   OS label). Pin the data-derived detail with **unit/golden tests against a fixed
+   DB snapshot** instead, where the input is controlled. Rule of thumb: the
+   differential compares *what the port computes*; anything the port merely *looks
+   up* belongs in a golden test, not the oracle.
 3. **Fuzz** the module's parse/input surface (`harnesses/fuzz/gen_fuzz_target.sh`
    scaffolds a `cargo-fuzz` target). Any crash/panic on untrusted input is a
    release blocker. Scope this gate to the **threat-model boundary**: it applies to
@@ -226,6 +250,15 @@ Then the loop — each step is a CI-enforced gate:
    <t> <seeds>` writes discovered inputs back into whatever dir you pass, so run
    `cargo fuzz run <t> corpus/<t> seeds/<t>` (first dir writable, rest read-only) or
    the seeds silently balloon into thousands of committed files.
+   **A time-bounded smoke (60s) is a floor, not a proof** (LESSONS #15): a panic on
+   a low-probability branch can pass a module's own smoke and merge, then surface on
+   a *later, unrelated* module's fuzz run — nmap's multibyte-delimiter panic lived
+   in `probedb` (merged clean) and only fired two modules later. This is not a hole
+   to close (exhaustive fuzzing is not on the table) but a discipline: when a
+   crash *does* surface, **commit the exact crashing input as a named seed** so it
+   is deterministically re-checked on every future run, and give the parser modules
+   sitting on the untrusted boundary a longer budget than the 60s CI smoke at least
+   once per milestone. The seed corpus is the port's accumulating regression memory.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
    logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). winlsof's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
@@ -242,6 +275,16 @@ Then the loop — each step is a CI-enforced gate:
    mutable state + the compiler's `Send`/`Sync` bounds on `spawn` reject it at
    compile time — and keep a multi-thread *liveness* test (must complete, no hang).
    Reserve TSan for code that spawns OS threads over genuinely shared state.
+   That liveness test earns its keep on a class sanitizers *cannot* see: a
+   **defensive catch-all `break`/`_ =>` in a work-scheduling loop is a liveness
+   bug** (LESSONS #14). "When the state looks unexpected, break" silently *drops
+   outstanding work* — nmap's rate-limited group loop hit a `_ => break` on a
+   timing skew between two rate checks and abandoned 2 of 8 ports as neither
+   open nor closed. It is not UB and not a hang, so only a liveness assertion
+   ("every unit of work reaches a terminal state") catches it. In a scheduler
+   loop the safe default with work still outstanding is **retry/continue (re-poll,
+   sleep-then-continue), never `break`** — reserve `break` for a proven-terminal
+   condition (queue empty), not for "confused."
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
 6. **Review & merge.** Update the `progress` table (the module advances

@@ -245,6 +245,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     async fn detects_ssh_from_null_probe_banner() {
         let port = banner_server(b"SSH-2.0-OpenSSH_9.6\r\n").await;
         let (db, compiled) = ssh_db();
@@ -269,6 +270,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
     async fn no_match_on_silent_port_still_returns() {
         // A server that connects but sends nothing and stays open → no banner,
         // no match; the driver must still return a (default) result, not hang.

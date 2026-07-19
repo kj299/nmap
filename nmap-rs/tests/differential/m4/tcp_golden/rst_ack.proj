@@ -1,0 +1,3 @@
+hdr 0 tcp len=20
+  tcp sport=80 dport=443 flags=0x14 off=5 win=8192 seq=0 ack=0
+result ok

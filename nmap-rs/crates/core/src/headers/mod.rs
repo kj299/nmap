@@ -8,3 +8,4 @@
 //! degrades to a parse error, never UB (the M4 threat-model requirement).
 
 pub mod ipv4;
+pub mod tcp;

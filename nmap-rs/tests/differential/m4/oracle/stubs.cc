@@ -51,3 +51,34 @@ void ip_checksum(void *buf, size_t len) {
   (void)buf;
   (void)len;
 }
+
+extern "C" void *safe_malloc(size_t size) {
+  return malloc(size ? size : 1);
+}
+
+void tcppacketoptinfo(const u8 *optp, int len, char *result, int bufsize) {
+  (void)optp;
+  (void)len;
+  if (bufsize > 0) result[0] = '\0';
+}
+
+unsigned short ipv4_pseudoheader_cksum(const struct in_addr *src,
+                                       const struct in_addr *dst, u8 proto,
+                                       u16 len, const void *hstart) {
+  (void)src;
+  (void)dst;
+  (void)proto;
+  (void)len;
+  (void)hstart;
+  return 0;
+}
+
+u16 ipv6_pseudoheader_cksum(const struct in6_addr *src, const struct in6_addr *dst,
+                            u8 nxt, u32 len, const void *hstart) {
+  (void)src;
+  (void)dst;
+  (void)nxt;
+  (void)len;
+  (void)hstart;
+  return 0;
+}

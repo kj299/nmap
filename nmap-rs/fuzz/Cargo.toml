@@ -85,3 +85,8 @@ bench = false
 name = "parse_ipv4"
 path = "fuzz_targets/parse_ipv4.rs"
 test = false
+
+[[bin]]
+name = "parse_tcp"
+path = "fuzz_targets/parse_tcp.rs"
+test = false

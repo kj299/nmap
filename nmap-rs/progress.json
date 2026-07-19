@@ -3,6 +3,7 @@
     "cli": "differential",
     "congestion": "differential",
     "connect_scan": "differential",
+    "core::cli": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",

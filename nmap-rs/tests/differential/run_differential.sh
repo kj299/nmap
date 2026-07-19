@@ -57,8 +57,12 @@ echo "rust   : $NMAP_RS ($("$NMAP_RS" --version 2>/dev/null | head -1))"
 # Must match the ports the matrix scans. Kept as unusual high ports so a CI
 # runner is overwhelmingly unlikely to have them already bound.
 OPEN_PORTS="18080 18443"
-python3 - "$OPEN_PORTS" <<'PY' &
-import socket, sys, time
+# Port 18022 additionally emits an SSH identification banner on every connection,
+# so `-sV` on both tools must detect service "ssh" (the M3 differential). The
+# silent listeners on 18080/18443 stay for the M1 state-fidelity cases.
+BANNER_PORT="18022"
+python3 - "$OPEN_PORTS" "$BANNER_PORT" <<'PY' &
+import socket, sys, threading, time
 socks = []
 for p in sys.argv[1].split():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -66,6 +70,26 @@ for p in sys.argv[1].split():
     s.bind(("127.0.0.1", int(p)))
     s.listen(16)
     socks.append(s)
+
+# The banner port: accept in a loop and answer with the OpenSSH banner. `-sV`
+# connects several times (NULL probe + retries) across both tools.
+bp = int(sys.argv[2])
+bs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+bs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+bs.bind(("127.0.0.1", bp))
+bs.listen(64)
+
+def serve():
+    while True:
+        try:
+            c, _ = bs.accept()
+            c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            time.sleep(0.05)
+            c.close()
+        except OSError:
+            break
+
+threading.Thread(target=serve, daemon=True).start()
 # Hold the listeners open long enough for both scans; the parent kills us.
 time.sleep(120)
 PY
@@ -82,7 +106,8 @@ cat > "$WRAP_DIR/oracle" <<EOF
 EOF
 cat > "$WRAP_DIR/rust" <<EOF
 #!/usr/bin/env bash
-"$NMAP_RS" "\$@" -oX - 2>/dev/null | python3 "$HERE/project.py"
+# NMAP_RS_DATADIR lets nmap-rs -sV find nmap-service-probes at the repo root.
+NMAP_RS_DATADIR="$RS_ROOT/.." "$NMAP_RS" "\$@" -oX - 2>/dev/null | python3 "$HERE/project.py"
 EOF
 chmod +x "$WRAP_DIR/oracle" "$WRAP_DIR/rust"
 

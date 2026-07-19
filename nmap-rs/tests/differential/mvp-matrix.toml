@@ -46,3 +46,12 @@ args = ["-sT", "-Pn", "-n", "--max-rate", "5000", "-p", "18080,18443,18081,19999
 [[case]]
 name = "mixed-min-rate"
 args = ["-sT", "-Pn", "-n", "--min-rate", "100", "-p", "18080,18443,18081,19999", "127.0.0.1"]
+
+# M3 service/version detection: port 18022 emits an SSH banner, so both tools
+# must detect service "ssh" on it. The projection includes `service <port> ssh`
+# for probe-detected (method="probed") services; product/version are excluded
+# (they vary with each tool's probe-DB version). Silent open ports are omitted
+# from this case so the -sV verdict is deterministic across nmap versions.
+[[case]]
+name = "sv-ssh-banner"
+args = ["-sV", "-Pn", "-n", "-p", "18022", "127.0.0.1"]

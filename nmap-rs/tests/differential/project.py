@@ -82,6 +82,16 @@ def project(xml_text):
                 reason = state_el.get("reason", "") if state_el is not None else ""
                 if st == "open":
                     lines.append(f"open {portid} {proto} {reason}")
+                    # -sV projection: include the *detected* service NAME (a real
+                    # scan finding, method="probed") — but NOT product/version,
+                    # which vary with the probe-DB version across the two tools.
+                    # A method="table" service is the decorative port-guess and is
+                    # excluded, so M1 (no -sV) cases project identically as before.
+                    svc = port.find("service")
+                    if svc is not None and svc.get("method") == "probed":
+                        name = svc.get("name", "")
+                        if name:
+                            lines.append(f"service {portid} {proto} {name}")
                 elif st == "open|filtered":
                     lines.append(f"openfiltered {portid} {proto} {reason}")
                 elif st in COUNTED_STATES:
@@ -143,6 +153,29 @@ def _self_test():
 
     check("malformed XML yields a stable marker, no crash",
           project("<not-xml").startswith("parse-error"))
+
+    # -sV projection: a probe-detected service (method="probed") contributes a
+    # `service <port> <name>` line; product/version are excluded; a table guess
+    # does not. Both tools' -oX must agree on the name for a MATCH.
+    sv_rs = """<?xml version="1.0"?><nmaprun>
+      <host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/>
+      <ports>
+        <port protocol="tcp" portid="18022"><state state="open" reason="syn-ack"/><service name="ssh" product="OpenSSH" version="9.6" method="probed" conf="10"/></port>
+      </ports></host></nmaprun>"""
+    sv_nmap = """<?xml version="1.0"?><nmaprun>
+      <host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/>
+      <ports>
+        <port protocol="tcp" portid="18022"><state state="open" reason="syn-ack"/><service name="ssh" product="OpenSSH" version="9.3" method="probed" conf="10"><cpe>cpe:/a:openbsd:openssh:9.3</cpe></service></port>
+      </ports></host></nmaprun>"""
+    sa, sn = project(sv_rs), project(sv_nmap)
+    check("probed service name projected", "service 18022 tcp ssh" in sa)
+    check("product/version NOT projected (DB-version-independent)",
+          "OpenSSH" not in sa and "9.6" not in sa)
+    check("two tools agree on service despite differing product versions", sa == sn)
+    # A table guess (method omitted/table) must NOT project a service line.
+    table_xml = sv_rs.replace('method="probed"', 'method="table"')
+    check("table-method service is not projected", "service 18022" not in project(table_xml))
+
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

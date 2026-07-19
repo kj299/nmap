@@ -17,7 +17,7 @@ const MAX_LEVEL: u8 = 10;
 /// Parsed command-line configuration. Grows toward the full `NmapOps` surface.
 // No `Eq`: `min_rate`/`max_rate` are `f64` (only `PartialEq`). Equality is used
 // solely by tests via `assert_eq!`, which needs only `PartialEq`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunConfig {
     /// Verbosity level (nmap `o.verbose`, 0..=10).
     pub verbose: u8,
@@ -35,6 +35,11 @@ pub struct RunConfig {
     pub ipv6: bool,
     /// `-Pn`: skip host discovery (treat every target as up).
     pub assume_up: bool,
+    /// `-sV`: probe open ports to determine service/version info.
+    pub service_version: bool,
+    /// `--version-intensity <0..=9>` (default 7). `--version-light` = 2,
+    /// `--version-all` = 9. Only meaningful when [`RunConfig::service_version`].
+    pub version_intensity: u8,
     /// `-oN <file>` normal output destination (`"-"` = stdout).
     pub out_normal: Option<String>,
     /// `-oX <file>` XML output destination (`"-"` = stdout).
@@ -48,6 +53,30 @@ pub struct RunConfig {
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
     /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
+}
+
+impl Default for RunConfig {
+    fn default() -> RunConfig {
+        RunConfig {
+            verbose: 0,
+            debugging: 0,
+            show_version: false,
+            show_help: false,
+            targets: Vec::new(),
+            port_spec: None,
+            ipv6: false,
+            assume_up: false,
+            service_version: false,
+            // nmap's default `--version-intensity` (`o.version_intensity = 7`).
+            version_intensity: crate::servicescan::DEFAULT_INTENSITY,
+            out_normal: None,
+            out_xml: None,
+            out_grep: None,
+            min_rate: None,
+            max_rate: None,
+            unrecognized: Vec::new(),
+        }
+    }
 }
 
 /// Parse a `--min-rate`/`--max-rate` value: a positive, finite probes-per-second
@@ -85,6 +114,25 @@ fn leading_level(rest: &str) -> Option<u8> {
             .saturating_add(u32::from(b).saturating_sub(u32::from(b'0')));
     }
     Some(u8::try_from(n.min(u32::from(MAX_LEVEL))).unwrap_or(MAX_LEVEL))
+}
+
+/// Parse a `--version-intensity` value: leading decimal digits, clamped to the
+/// nmap-legal `0..=9`. `None` if it does not start with a digit.
+fn leading_int_0_9(s: &str) -> Option<u8> {
+    let first = *s.as_bytes().first()?;
+    if !first.is_ascii_digit() {
+        return None;
+    }
+    let mut n: u32 = 0;
+    for &b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        n = n
+            .saturating_mul(10)
+            .saturating_add(u32::from(b).saturating_sub(u32::from(b'0')));
+    }
+    Some(u8::try_from(n.min(9)).unwrap_or(9))
 }
 
 /// Apply a `-v…` argument (the part after `-v`). `-vN` sets the level; `-v`,
@@ -155,6 +203,31 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-6" => cfg.ipv6 = true,
             "-Pn" => cfg.assume_up = true,
             "-sT" => {} // connect scan — the only scan type in M1 (the default)
+            "-sV" => cfg.service_version = true,
+            "--version-light" => {
+                cfg.service_version = true;
+                cfg.version_intensity = 2; // nmap: light = intensity 2
+            }
+            "--version-all" => {
+                cfg.service_version = true;
+                cfg.version_intensity = 9; // nmap: all = intensity 9
+            }
+            "--version-trace" => {
+                // Raises verbosity of the version scan; treat as a debug bump.
+                cfg.service_version = true;
+                cfg.debugging = bump(cfg.debugging);
+            }
+            _ if s.starts_with("--version-intensity") => {
+                let (v, adv) = opt_value(args, i, "--version-intensity");
+                // Long-option attached form is `--version-intensity=N`; drop the `=`.
+                let v = v.strip_prefix('=').map(str::to_string).unwrap_or(v);
+                if let Some(n) = leading_int_0_9(&v) {
+                    cfg.version_intensity = n;
+                } else {
+                    cfg.unrecognized.push(format!("--version-intensity {v}"));
+                }
+                consumed_extra = adv;
+            }
             _ if s.starts_with("-oN") => {
                 let (v, adv) = opt_value(args, i, "-oN");
                 cfg.out_normal = Some(v);
@@ -250,6 +323,40 @@ mod tests {
         assert!(cfg(&["--help"]).show_help);
         let c = cfg(&["scanme.nmap.org", "10.0.0.0/24"]);
         assert_eq!(c.targets, vec!["scanme.nmap.org", "10.0.0.0/24"]);
+    }
+
+    #[test]
+    fn version_scan_flags() {
+        // Default: no -sV, intensity 7.
+        let d = cfg(&["10.0.0.1"]);
+        assert!(!d.service_version);
+        assert_eq!(d.version_intensity, 7);
+
+        assert!(cfg(&["-sV", "10.0.0.1"]).service_version);
+
+        let light = cfg(&["--version-light", "10.0.0.1"]);
+        assert!(light.service_version);
+        assert_eq!(light.version_intensity, 2);
+
+        let all = cfg(&["--version-all", "10.0.0.1"]);
+        assert!(all.service_version);
+        assert_eq!(all.version_intensity, 9);
+
+        // --version-intensity as a separate arg and inline; clamped to 0..=9.
+        assert_eq!(
+            cfg(&["-sV", "--version-intensity", "3"]).version_intensity,
+            3
+        );
+        assert_eq!(cfg(&["--version-intensity", "12"]).version_intensity, 9);
+        assert_eq!(cfg(&["--version-intensity=0"]).version_intensity, 0);
+
+        // A non-numeric intensity is recorded, not misparsed; intensity stays default.
+        let bad = cfg(&["--version-intensity", "hi"]);
+        assert_eq!(bad.version_intensity, 7);
+        assert!(bad
+            .unrecognized
+            .iter()
+            .any(|u| u.contains("version-intensity")));
     }
 
     #[test]

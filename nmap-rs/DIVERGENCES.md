@@ -194,6 +194,19 @@ narrower *rendering* of the same result.
       capped (`max_banner_bytes`, default 64 KiB) and time-bounded by the probe's
       `totalwaitms`. A chatty or hostile port can neither exhaust memory nor stall the
       scan — a bound the C's `nsock` read loop imposes only via the overall timeout.
+- [x] `cli-sv-service-name-differential` (`cli` + `tests/differential`): the `-sV`
+      differential vs C nmap projects the detected **service name** per open port
+      (`service <port> <proto> <name>`, only for `method="probed"` findings), **not**
+      the product/version strings. Those vary with each tool's `nmap-service-probes`
+      version — comparing them would make the gate a data-file-version check, not a
+      port-fidelity check. Verified: nmap-rs `-sV` and C nmap 7.94 both detect `ssh`
+      on the loopback SSH-banner fixture (case `sv-ssh-banner`, MATCH). Product/
+      version fidelity is unit-pinned in `versioninfo`/`output`, not the differential.
+- [x] `cli-version-display-escape` (`cli`): `-sV` version fields are byte-faithful
+      through `core` (`Vec<u8>`); the CLI escapes them for display as `\xNN` for
+      non-printables (nmap's `nmap_printable`) and caps each field at 256 bytes, so a
+      hostile banner cannot corrupt or flood the terminal. Display-only; the XML
+      carries the same escaped text under `xml_escape`.
 
 ## Platform / environment differences
 

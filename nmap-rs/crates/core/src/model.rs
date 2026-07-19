@@ -106,12 +106,33 @@ impl Reason {
     }
 }
 
-/// Service name/info attached to a port. In M1 this is the table lookup from
-/// `nmap-services` (name + optional protocol-family); real probing arrives in M3.
+/// Service name/info attached to a port. The `name` starts as the `nmap-services`
+/// table lookup; a `-sV` probe (M3) may overwrite it and fill the version fields.
+/// All version strings are display-ready (printable-escaped by the caller).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceInfo {
-    /// Service name (e.g. `"http"`), from the `nmap-services` table.
+    /// Service name (e.g. `"http"`), from `nmap-services` or a `-sV` match.
     pub name: Option<String>,
+    /// `-sV` product name (e.g. `OpenSSH`).
+    pub product: Option<String>,
+    /// `-sV` version string (e.g. `9.6`).
+    pub version: Option<String>,
+    /// `-sV` extra info (e.g. `protocol 2.0`).
+    pub extra_info: Option<String>,
+    /// `-sV` OS type (e.g. `Unix`).
+    pub ostype: Option<String>,
+    /// `-sV` device type (e.g. `router`).
+    pub devicetype: Option<String>,
+    /// `-sV` hostname reported by the service.
+    pub hostname: Option<String>,
+    /// `-sV` CPE identifiers (`cpe:/a:…`).
+    pub cpe: Vec<String>,
+    /// How the service was identified: `"table"` (nmap-services) or `"probed"`
+    /// (`-sV`). `None` until set.
+    pub method: Option<String>,
+    /// Detection confidence 0..=10 (nmap uses 10 for a hard `-sV` match, 3 for a
+    /// table guess). `None` until set.
+    pub conf: Option<u8>,
 }
 
 /// One scanned port on one host — the analog of C `struct port`.

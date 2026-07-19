@@ -6,16 +6,20 @@
 
 use std::net::IpAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use nmap_core::model::HostState;
+use nmap_core::matcher::CompiledDb;
+use nmap_core::model::{HostState, PortState, ServiceInfo};
 use nmap_core::options::RunConfig;
+use nmap_core::probedb::ProbeDb;
+use nmap_core::servicescan::VersionResult;
 use nmap_core::{
     parse_args, parse_port_spec, parse_target, render_grepable, render_normal, render_xml,
-    ScanMeta, ServiceTable, TargetSpec, TimingParams, TimingTemplate,
+    ScanMeta, ScanResults, ServiceTable, TargetSpec, TimingParams, TimingTemplate,
 };
 use nmap_sys::net::resolve_host;
-use nmap_sys::{connect_scan, ConnectScanConfig};
+use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig};
 
 /// Default number of top TCP ports scanned when no `-p` is given (nmap's -F is
 /// 100; the default is 1000 — we use 1000 when the services table is available).
@@ -96,12 +100,18 @@ async fn main() -> ExitCode {
         }
     }
 
+    // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
+    if cfg.service_version {
+        run_service_version(&cfg, &mut results).await;
+    }
+
     let meta = ScanMeta {
         scanner: "nmap-rs",
         version: env!("CARGO_PKG_VERSION"),
         args: &args.join(" "),
         started: &started,
         elapsed_secs: elapsed,
+        service_version: cfg.service_version,
     };
 
     if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref()) {
@@ -111,11 +121,118 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Run `-sV` over every open TCP port and merge the results back into `results`.
+/// Degrades gracefully: if the probe DB can't be found or parses to nothing, the
+/// scan proceeds without version info (a warning, never a failure).
+async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
+    let Some(db_text) = load_probe_db_text() else {
+        eprintln!(
+            "nmap-rs: -sV requested but nmap-service-probes not found; skipping version scan"
+        );
+        return;
+    };
+    let db = ProbeDb::parse(&db_text);
+    for w in db.warnings.iter().take(3) {
+        nmap_core::verbose!(1, "nmap-service-probes line {}: {}", w.line, w.message);
+    }
+    let db = Arc::new(db);
+    let compiled = Arc::new(CompiledDb::compile(&db));
+
+    // Gather open TCP ports per host, in the host order `service_scan` expects.
+    let open: Vec<(IpAddr, Vec<u16>)> = results
+        .hosts
+        .iter()
+        .map(|h| {
+            let ports = h
+                .ports
+                .iter()
+                .filter(|p| p.state == PortState::Open && p.protocol == nmap_core::Protocol::Tcp)
+                .map(|p| p.number)
+                .collect();
+            (h.address, ports)
+        })
+        .collect();
+    if open.iter().all(|(_, ports)| ports.is_empty()) {
+        return; // nothing open to probe
+    }
+
+    let sv_cfg = ServiceScanConfig {
+        intensity: cfg.version_intensity,
+        ..ServiceScanConfig::default()
+    };
+    let host_versions = service_scan(&open, db, compiled, &sv_cfg).await;
+
+    // Merge each per-port result into the matching port's ServiceInfo.
+    for hv in &host_versions {
+        let Some(host) = results.hosts.iter_mut().find(|h| h.address == hv.ip) else {
+            continue;
+        };
+        for pv in &hv.ports {
+            if let Some(port) = host.ports.iter_mut().find(|p| p.number == pv.port) {
+                port.service = merge_version(&port.service, &pv.result);
+            }
+        }
+    }
+}
+
+/// Fold a `-sV` [`VersionResult`] into a port's [`ServiceInfo`], converting the
+/// byte-faithful version fields to display strings (non-printables escaped as the
+/// C's `\xNN`). A hard match sets `method="probed"`, `conf=10`; a soft/tcpwrapped
+/// result sets just the name.
+fn merge_version(existing: &ServiceInfo, r: &VersionResult) -> ServiceInfo {
+    let mut svc = existing.clone();
+    if let Some(name) = &r.service {
+        svc.name = Some(name.clone()); // the probed name overrides the table guess
+    }
+    let esc = |b: &Option<Vec<u8>>| b.as_ref().map(|v| printable_escape(v));
+    svc.product = esc(&r.product);
+    svc.version = esc(&r.version);
+    svc.extra_info = esc(&r.info);
+    svc.ostype = esc(&r.ostype);
+    svc.devicetype = esc(&r.devicetype);
+    svc.hostname = esc(&r.hostname);
+    svc.cpe = r.cpe.iter().map(|c| printable_escape(c)).collect();
+    match r.resolution {
+        nmap_core::Resolution::HardMatched => {
+            svc.method = Some("probed".into());
+            svc.conf = Some(10);
+        }
+        _ => {
+            // Soft match / tcpwrapped: name known, no hard version. nmap still
+            // marks the method probed with lower confidence.
+            svc.method = Some("probed".into());
+            svc.conf = Some(if r.service.is_some() { 8 } else { 3 });
+        }
+    }
+    svc
+}
+
+/// nmap's display escaping for a service field: keep printable ASCII (incl. space)
+/// verbatim, render everything else as `\xNN`. Bounds the string to a sane length
+/// so a hostile banner can't blow up the terminal.
+fn printable_escape(bytes: &[u8]) -> String {
+    const MAX: usize = 256;
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes.iter().take(MAX) {
+        if b == b'\\' {
+            out.push_str("\\\\");
+        } else if (0x20..=0x7e).contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    if bytes.len() > MAX {
+        out.push_str("...");
+    }
+    out
+}
+
 fn print_usage() {
     println!(
-        "Usage: nmap-rs [-sT] [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
+        "Usage: nmap-rs [-sT] [-sV [--version-intensity <0-9>|--version-light|--version-all]]\n              [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
     );
-    println!("  Milestone 1 (MVP): unprivileged TCP connect scan. See nmap-rs/PLAN.md.");
+    println!("  Unprivileged TCP connect scan (-sT) + service/version detection (-sV).");
 }
 
 /// Choose the TCP ports to scan.
@@ -224,6 +341,30 @@ fn load_services() -> Option<ServiceTable> {
         if let Ok(text) = std::fs::read_to_string(&cand) {
             nmap_core::debug!(1, "loaded services from {}", cand.display());
             return Some(ServiceTable::parse(&text));
+        }
+    }
+    None
+}
+
+/// Locate and read the `nmap-service-probes` data file (same search convention as
+/// [`load_services`]). `None` if absent — `-sV` then degrades to a warning.
+fn load_probe_db_text() -> Option<String> {
+    let candidates = [
+        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
+            let mut p = std::path::PathBuf::from(d);
+            p.push("nmap-service-probes");
+            p
+        }),
+        Some("nmap-service-probes".into()),
+        Some("../nmap-service-probes".into()),
+        Some("../../nmap-service-probes".into()),
+        Some("../../../nmap-service-probes".into()),
+        Some("/usr/share/nmap/nmap-service-probes".into()),
+    ];
+    for cand in candidates.into_iter().flatten() {
+        if let Ok(text) = std::fs::read_to_string(&cand) {
+            nmap_core::debug!(1, "loaded service probes from {}", cand.display());
+            return Some(text);
         }
     }
     None

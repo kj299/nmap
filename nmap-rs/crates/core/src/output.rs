@@ -28,6 +28,30 @@ pub struct ScanMeta<'a> {
     pub started: &'a str,
     /// Elapsed wall-clock seconds for the footer (normalized in diffs).
     pub elapsed_secs: f64,
+    /// Whether `-sV` was requested — adds the VERSION column / `<service>` version
+    /// attributes to the output, matching nmap.
+    pub service_version: bool,
+}
+
+/// Assemble the human-readable VERSION column for a port from its `-sV` fields,
+/// in nmap's order: `product version (extrainfo)`, with `ostype`/`devicetype`
+/// appended when present. Empty string if nothing was determined.
+fn version_display(svc: &crate::model::ServiceInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = &svc.product {
+        parts.push(p.clone());
+    }
+    if let Some(v) = &svc.version {
+        parts.push(v.clone());
+    }
+    let mut s = parts.join(" ");
+    if let Some(info) = &svc.extra_info {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(&format!("({info})"));
+    }
+    s
 }
 
 /// A port is *shown* in the table iff it is open (or open|filtered); every other
@@ -95,7 +119,7 @@ pub fn render_normal(
         if host.state == crate::model::HostState::Up {
             up = up.saturating_add(1);
         }
-        render_host_normal(&mut out, host, services);
+        render_host_normal(&mut out, host, services, meta.service_version);
     }
 
     let n = results.hosts.len();
@@ -111,7 +135,12 @@ pub fn render_normal(
     out
 }
 
-fn render_host_normal(out: &mut String, host: &Host, services: Option<&ServiceTable>) {
+fn render_host_normal(
+    out: &mut String,
+    host: &Host,
+    services: Option<&ServiceTable>,
+    service_version: bool,
+) {
     let name = match &host.hostname {
         Some(h) => format!("{h} ({})", host.address),
         None => host.address.to_string(),
@@ -139,14 +168,20 @@ fn render_host_normal(out: &mut String, host: &Host, services: Option<&ServiceTa
         return;
     }
 
-    // Column-aligned PORT / STATE / SERVICE table (nmap's NmapOutputTable shape).
-    let rows: Vec<(String, &str, &str)> = shown
+    // Column-aligned PORT / STATE / SERVICE [/ VERSION] table (nmap's
+    // NmapOutputTable shape). The VERSION column appears only under `-sV`.
+    let rows: Vec<(String, &str, &str, String)> = shown
         .iter()
         .map(|p| {
             (
                 format!("{}/{}", p.number, p.protocol.as_str()),
                 p.state.as_str(),
                 service_name(p.number, p.protocol, p.service.name.as_deref(), services),
+                if service_version {
+                    version_display(&p.service)
+                } else {
+                    String::new()
+                },
             )
         })
         .collect();
@@ -158,13 +193,32 @@ fn render_host_normal(out: &mut String, host: &Host, services: Option<&ServiceTa
         .unwrap_or(4);
     let state_w = rows
         .iter()
-        .map(|(_, s, _)| s.len())
+        .map(|(_, s, ..)| s.len())
         .chain([5])
         .max()
         .unwrap_or(5);
-    let _ = writeln!(out, "{:port_w$} {:state_w$} SERVICE", "PORT", "STATE");
-    for (p, s, svc) in rows {
-        let _ = writeln!(out, "{p:port_w$} {s:state_w$} {svc}");
+    if service_version {
+        let svc_w = rows
+            .iter()
+            .map(|(_, _, svc, _)| svc.len())
+            .chain([7])
+            .max()
+            .unwrap_or(7);
+        let _ = writeln!(
+            out,
+            "{:port_w$} {:state_w$} {:svc_w$} VERSION",
+            "PORT", "STATE", "SERVICE"
+        );
+        for (p, s, svc, ver) in rows {
+            // Trailing space is trimmed so an empty VERSION leaves no dangling ws.
+            let line = format!("{p:port_w$} {s:state_w$} {svc:svc_w$} {ver}");
+            let _ = writeln!(out, "{}", line.trim_end());
+        }
+    } else {
+        let _ = writeln!(out, "{:port_w$} {:state_w$} SERVICE", "PORT", "STATE");
+        for (p, s, svc, _) in rows {
+            let _ = writeln!(out, "{p:port_w$} {s:state_w$} {svc}");
+        }
     }
 }
 
@@ -198,14 +252,23 @@ pub fn render_grepable(
             let entries: Vec<String> = shown
                 .iter()
                 .map(|p| {
-                    // portno/state/proto/owner/service/rpc/version — M1 fills
-                    // portno/state/proto//service, the rest empty (as nmap does).
+                    // portno/state/proto/owner/service/rpc/version. Without `-sV`
+                    // the version field is empty (as nmap does); with `-sV` it
+                    // carries the assembled product/version string.
+                    let version = if meta.service_version {
+                        // Grepable escapes `/` (the field separator) as it would
+                        // corrupt the record; nmap uses a comma.
+                        version_display(&p.service).replace('/', ",")
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}/{}/{}//{}///",
+                        "{}/{}/{}//{}//{}/",
                         p.number,
                         p.state.as_str(),
                         p.protocol.as_str(),
                         service_name(p.number, p.protocol, p.service.name.as_deref(), services),
+                        version,
                     )
                 })
                 .collect();
@@ -243,6 +306,50 @@ fn xml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render the `<service …/>` element for a port. Without `-sV` (or with no probe
+/// result) it is the M1 table guess (`method="table" conf="3"`); with a `-sV`
+/// result it carries the probed name plus whatever version fields were determined,
+/// and `<cpe>` children.
+fn service_xml(table_name: &str, svc: &crate::model::ServiceInfo, service_version: bool) -> String {
+    // Prefer the probed name (svc.name) when present; else the table guess.
+    let name = svc.name.as_deref().unwrap_or(table_name);
+    let mut s = format!("<service name=\"{}\"", xml_escape(name));
+    let mut attr = |key: &str, val: &Option<String>| {
+        if let Some(v) = val {
+            s.push_str(&format!(" {key}=\"{}\"", xml_escape(v)));
+        }
+    };
+    if service_version {
+        attr("product", &svc.product);
+        attr("version", &svc.version);
+        attr("extrainfo", &svc.extra_info);
+        attr("ostype", &svc.ostype);
+        attr("devicetype", &svc.devicetype);
+        attr("hostname", &svc.hostname);
+    }
+    // Method/confidence are the probed values only under `-sV`; otherwise the
+    // service name is just the port-table guess.
+    let (method, conf) = if service_version {
+        (
+            svc.method.as_deref().unwrap_or("table"),
+            svc.conf.unwrap_or(3),
+        )
+    } else {
+        ("table", 3)
+    };
+    s.push_str(&format!(" method=\"{method}\" conf=\"{conf}\""));
+    if service_version && !svc.cpe.is_empty() {
+        s.push('>');
+        for c in &svc.cpe {
+            s.push_str(&format!("<cpe>{}</cpe>", xml_escape(c)));
+        }
+        s.push_str("</service>");
+    } else {
+        s.push_str("/>");
+    }
+    s
 }
 
 /// Render XML (`-oX`) output following nmap's DTD shape.
@@ -307,12 +414,12 @@ pub fn render_xml(
             let svc = service_name(p.number, p.protocol, p.service.name.as_deref(), services);
             let _ = writeln!(
                 out,
-                "<port protocol=\"{}\" portid=\"{}\"><state state=\"{}\" reason=\"{}\"/><service name=\"{}\" method=\"table\" conf=\"3\"/></port>",
+                "<port protocol=\"{}\" portid=\"{}\"><state state=\"{}\" reason=\"{}\"/>{}</port>",
                 p.protocol.as_str(),
                 p.number,
                 p.state.as_str(),
                 p.reason.as_str(),
-                xml_escape(svc)
+                service_xml(svc, &p.service, meta.service_version),
             );
         }
         let _ = writeln!(out, "</ports>");
@@ -377,7 +484,78 @@ mod tests {
             args: "nmap-rs -sT 127.0.0.1",
             started: "TIME",
             elapsed_secs: 1.0,
+            service_version: false,
         }
+    }
+
+    /// A host whose port 22 carries a full `-sV` result (OpenSSH 9.6).
+    fn sample_sv() -> ScanResults {
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        let mut p = Port::new(22, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+        p.service = crate::model::ServiceInfo {
+            name: Some("ssh".into()),
+            product: Some("OpenSSH".into()),
+            version: Some("9.6".into()),
+            extra_info: Some("protocol 2.0".into()),
+            cpe: vec!["cpe:/a:openbsd:openssh:9.6".into()],
+            method: Some("probed".into()),
+            conf: Some(10),
+            ..Default::default()
+        };
+        host.ports.push(p);
+        let mut r = ScanResults::new();
+        r.hosts.push(host);
+        r
+    }
+
+    fn meta_sv() -> ScanMeta<'static> {
+        ScanMeta {
+            service_version: true,
+            ..meta()
+        }
+    }
+
+    #[test]
+    fn normal_version_column_under_sv() {
+        let out = render_normal(&sample_sv(), &meta_sv(), None);
+        assert!(out.contains("SERVICE"));
+        assert!(out.contains("VERSION"));
+        // The assembled VERSION string: product version (extrainfo).
+        assert!(
+            out.contains("OpenSSH 9.6 (protocol 2.0)"),
+            "missing version column:\n{out}"
+        );
+    }
+
+    #[test]
+    fn xml_service_carries_version_and_cpe_under_sv() {
+        let out = render_xml(&sample_sv(), &meta_sv(), None);
+        assert!(out.contains("name=\"ssh\""));
+        assert!(out.contains("product=\"OpenSSH\""));
+        assert!(out.contains("version=\"9.6\""));
+        assert!(out.contains("extrainfo=\"protocol 2.0\""));
+        assert!(out.contains("method=\"probed\" conf=\"10\""));
+        assert!(out.contains("<cpe>cpe:/a:openbsd:openssh:9.6</cpe>"));
+    }
+
+    #[test]
+    fn grepable_carries_version_under_sv() {
+        let out = render_grepable(&sample_sv(), &meta_sv(), None);
+        // portno/state/proto//service//version/
+        assert!(
+            out.contains("22/open/tcp//ssh//OpenSSH 9.6 (protocol 2.0)/"),
+            "grep version field missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn no_version_column_without_sv() {
+        // Same data, but -sV not requested → no VERSION column, table method.
+        let out = render_normal(&sample_sv(), &meta(), None);
+        assert!(!out.contains("VERSION"));
+        let xml = render_xml(&sample_sv(), &meta(), None);
+        assert!(xml.contains("method=\"table\""));
+        assert!(!xml.contains("product="));
     }
 
     fn services() -> ServiceTable {

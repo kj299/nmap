@@ -22,6 +22,7 @@ pub mod probedb;
 pub mod targets;
 pub mod timing;
 pub mod trace;
+pub mod versioninfo;
 
 pub use congestion::{PerfVars, TimingVals};
 pub use engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict};
@@ -34,3 +35,4 @@ pub use ports::{parse_port_spec, PortList, PortSpecError, ServiceTable};
 pub use probedb::{MatchRule, Probe as ServiceProbe, ProbeDb, ProbeProtocol, ProbeWarning};
 pub use targets::{parse_target, Ipv4Ranges, TargetParseError, TargetSpec};
 pub use timing::{TimeoutInfo, TimingParams, TimingTemplate};
+pub use versioninfo::{build as build_version_info, VersionInfo};

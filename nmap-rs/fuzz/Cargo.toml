@@ -73,3 +73,10 @@ path = "fuzz_targets/matcher.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "versioninfo"
+path = "fuzz_targets/versioninfo.rs"
+test = false
+doc = false
+bench = false

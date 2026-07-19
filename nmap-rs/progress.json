@@ -6,6 +6,7 @@
     "core::matcher": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
+    "core::versioninfo": "unsafe_audited",
     "engine": "differential",
     "model": "differential",
     "net": "differential",

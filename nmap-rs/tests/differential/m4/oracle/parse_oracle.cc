@@ -9,6 +9,7 @@
 // Build: see build.sh (needs -DHAVE_CONFIG_H + nbase configured + the pcap.h stub).
 
 #include "IPv4Header.h"
+#include "TCPHeader.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,10 +32,35 @@ static std::vector<unsigned char> unhex(const std::string &s) {
   return out;
 }
 
-int main() {
+// Project a TCP header (used when argv[1]=="tcp").
+static int project_tcp(const std::vector<unsigned char> &pkt) {
+  TCPHeader tcp;
+  if (tcp.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = tcp.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  printf("hdr 0 tcp len=%d\n", vlen);
+  printf("  tcp sport=%u dport=%u flags=0x%02x off=%u win=%u seq=%u ack=%u\n",
+         tcp.getSourcePort(), tcp.getDestinationPort(), tcp.getFlags(),
+         tcp.getOffset(), tcp.getWindow(), tcp.getSeq(), tcp.getAck());
+  printf("result ok\n");
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
   { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
   std::vector<unsigned char> pkt = unhex(in);
+
+  if (strcmp(layer, "tcp") == 0) {
+    return project_tcp(pkt);
+  }
 
   IPv4Header ip;
   // storeRecvData mirrors nmap's receive path: it refuses < IP_HEADER_LEN.

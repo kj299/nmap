@@ -73,6 +73,9 @@ fn tcp_parser_matches_c_oracle_over_the_corpus() {
         );
         checked += 1;
     }
-    assert!(checked >= 10, "expected the full tcp corpus, checked {checked}");
+    assert!(
+        checked >= 10,
+        "expected the full tcp corpus, checked {checked}"
+    );
     eprintln!("tcp differential: {checked} vectors match the C oracle");
 }

@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bytes;
+pub mod checksum;
 pub mod congestion;
 pub mod engine;
 pub mod log;

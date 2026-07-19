@@ -208,6 +208,71 @@ narrower *rendering* of the same result.
       hostile banner cannot corrupt or flood the terminal. Display-only; the XML
       carries the same escaped text under `xml_escape`.
 
+## Milestone 4 — raw-packet infrastructure (planned; from the Phase-0 read in `docs/M4-ANALYSIS.md`)
+
+These are seeded from the Phase-0 flaw inventory (the heuristic `scan_c_flaws.py` was
+low-signal for this layer; the real hazards are parse-side bounds on attacker-
+controlled captured packets, found by reading the code). Each is a C defect the port
+**fixes rather than re-implements**; `[ ]` = to be discharged when the owning module
+lands, `[x]` = confirmed by that module's gates.
+
+### Security fixes (C defect closed by the port)
+
+- [ ] `udp-checksum-no-fixed-buffer` (`core::headers::udp`, ports `UDPHeader::setSum`):
+      the C sizes the checksum scratch buffer `u8 aux[65535-8]` = **65527 bytes**
+      (`UDPHeader.cc:197`) but then calls `dumpToBinaryBuffer(aux, 65536-8)` passing
+      **maxlen 65528** (`:209`); `dumpToBinaryBuffer` only aborts when a *single*
+      element exceeds the remaining budget (`PacketElement.h:171`), so a UDP+payload
+      chain whose total `getLen()` is 65528 writes one byte past the stack buffer — a
+      real, reachable **1-byte stack overflow (CWE-121)**. (The TCP path uses the same
+      constant for both and is correct; only UDP's two constants disagree.) The port
+      computes the checksum over a `&[u8]`/growing `Vec` sized from a single source, so
+      the overflow class does not exist. Fix, not re-port.
+- [ ] `parse-no-fatal-on-hostile` (`core::headers::*`, `core::packet_parser`, ports
+      `netutil.cc` `icmp_get_data`/`icmpv6_get_data` and the header `validate()`s): the
+      C `netutil_fatal()`s (process abort) on an attacker-chosen inner ICMP type
+      (`netutil.cc:848-878`) — a **remote DoS**: a single crafted ICMP error aborts the
+      scan. In a `#![forbid(unsafe_code)]` core every parse path returns
+      `Result::Err`/`None` and the scan continues (degrade, not abort). Proved by the
+      packet-parser fuzz target (no panic/abort on any input).
+- [ ] `idle-ipid-no-assert` (`core::ipid`, ports `idle_scan.cc`): the C
+      `assert(newipid < 0xffff)` (`idle_scan.cc:698`) is reachable with an
+      attacker-influenced IP-ID (a crafted or noisy zombie reply) → **panic-on-input**.
+      The port returns a recoverable "zombie unusable" error. Fix, not re-port.
+- [ ] `ethsend-surface-errors` (`sys::npcap`, reimplements `eth-win32.c` `eth_send`):
+      the C ignores `PacketSendPacket`'s BOOL and unconditionally returns `len`
+      (`eth-win32.c:104`), so a failed raw send looks successful. The port returns the
+      real send result. Additive robustness (Windows-only path).
+- [ ] `rawdata-no-signed-truncation` (`core::headers::raw`, ports `RawData::store`):
+      the C compares `int length >= (int)len` with `len` a `size_t` (`RawData.cc:147`);
+      `len > INT_MAX` casts negative and defeats the guard. The port carries lengths as
+      `usize` with checked slicing; the truncation/underflow class is removed by
+      construction. Bounded in practice today; hardened regardless.
+
+### Behavioral / structural (not security, ledgered)
+
+- [ ] `parser-owned-return` (`core::packet_parser`): the C returns a **`static`
+      `this_packet[]`** array by pointer (`PacketParser.cc:126`) — non-reentrant, not
+      thread-safe. The port returns an owned `Vec<Header>` by value; safe for the
+      concurrent driver by construction. No observable output change.
+- [ ] `build-no-static-myttl` (`core::build`): the C's "pure" `build_ip_raw` holds a
+      function-local `static int myttl` (`tcpip.cc:524`) — a reentrancy landmine. The
+      port threads TTL as an explicit parameter (as it does all `NmapOps o.*` reads the
+      builders touch: `o.badsum`, `o.ttl`, `o.ipopt_*`, decoys). No output change on the
+      shipped paths.
+- [ ] `send-payload-no-silent-truncation` (`core::build`, ports `build_icmp_raw`/
+      `build_igmp_raw`): the C copies an oversized data payload into fixed
+      `pingpkt.data[1500]`/`igmp.data[1500]` buffers via `MIN(dlen,datalen)`
+      (`tcpip.cc:940,1054`) — no overflow, but oversized payloads are **silently
+      truncated**. The port either sizes the buffer to the payload or rejects the
+      over-length request explicitly, never silently truncating. Behavioral divergence,
+      ledgered (not a memory bug).
+- [ ] `icmpv4-no-uninit-tail-read` (`core::headers::icmpv4`): the C's union-overlay
+      getters read the zero-filled tail of a fixed buffer on a truncated inner ICMP
+      (`ICMPv4Header.cc` getters via `is_response`) — not OOB, but returns bytes never
+      on the wire. The port's parser only exposes fields actually present (length-
+      checked), returning `None` otherwise. Observable only on truncated/hostile input.
+
 ## Platform / environment differences
 
 - [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the

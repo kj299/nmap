@@ -327,6 +327,21 @@ lands, `[x]` = confirmed by that module's gates.
 
 ## Platform / environment differences
 
+- [x] `capture-blocking-thread-not-poll` (`sys::capture`, realizes spike S1): nmap runs
+      its pcap handle **non-blocking and polls** it from the nsock event loop (Windows
+      Npcap exposes no selectable fd, so `pcap_get_selectable_fd` is never used). This
+      port uses a **dedicated blocking capture thread forwarding frames into a
+      `tokio::mpsc` channel** the async driver awaits — the spike-measured design
+      (~60 µs latency, 0 idle CPU, no readiness fd required, so it ports unchanged to
+      Npcap). A behavioral-shape divergence, not an output one: the frames delivered are
+      identical, only the delivery mechanism differs. The OS-agnostic plumbing holds
+      **0 `unsafe`** and is tested on CI against a mock source (ordered delivery,
+      backpressure, clean shutdown); the live libpcap/Npcap source is behind the
+      off-by-default `pcap` feature (the `pcap` crate's FFI is audited upstream, so it
+      too adds no first-party `unsafe`), validated on a privileged host.
+      *(Introduced at M4 `sys::capture`.)*
+
+
 - [x] `sys-osquery-safe-crate-default` (`sys::netif`, and the route/MTU needs it fills):
       the OS-query layer (interfaces, addresses+prefixes, MTU, MAC, default gateway) uses
       the vetted cross-platform `netdev` crate as its **default backend** rather than

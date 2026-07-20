@@ -23,7 +23,13 @@ netdev = "0.45"
 # Async runtime + safe socket API for the connect scan. tokio's networking is a
 # safe wrapper over the OS (Winsock/IOCP on Windows, epoll/kqueue elsewhere), so
 # this crate still holds ~0 unsafe for the MVP. Feature set kept minimal.
-tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "macros", "io-util", "sync"] }
+# Real packet-capture / injection backend (feature `pcap`). Wraps libpcap on Unix and
+# Npcap on Windows — the same library nmap uses — behind a mostly-safe API whose FFI
+# is audited upstream. Optional because it needs libpcap/Npcap headers at BUILD time,
+# which the default CI image lacks; the `capture` seam + async plumbing build and test
+# without it.
+pcap = { version = "2", optional = true }
 
 [features]
 default = []
@@ -32,6 +38,11 @@ default = []
 # agrees with the raw OS call, and (b) reach a field `netdev` might not expose. The
 # only place `unsafe` re-enters the OS-query layer, and always audited.
 raw-ffi = ["dep:libc"]
+# The real libpcap/Npcap capture backend. Off by default (needs libpcap at build
+# time). The OS-agnostic capture plumbing (blocking-thread -> tokio mpsc, per spike
+# S1) is always built and tested against a mock source; this feature swaps in the
+# live source, validated on a privileged host.
+pcap = ["dep:pcap"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }

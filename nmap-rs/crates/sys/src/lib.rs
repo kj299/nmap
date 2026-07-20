@@ -14,6 +14,7 @@
 //! [`scan`] wrap tokio's safe socket/task APIs, so the unsafe-audit gate reports
 //! 0 for this crate.
 
+pub mod capture;
 pub mod net;
 pub mod netif;
 pub mod scan;

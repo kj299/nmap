@@ -1,0 +1,3 @@
+hdr 0 icmp len=20
+  icmp type=13 code=0
+result ok

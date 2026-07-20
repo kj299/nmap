@@ -56,6 +56,12 @@ extern "C" void *safe_malloc(size_t size) {
   return malloc(size ? size : 1);
 }
 
+unsigned short in_cksum(const u16 *ptr, int nbytes) {
+  (void)ptr;
+  (void)nbytes;
+  return 0;
+}
+
 void tcppacketoptinfo(const u8 *optp, int len, char *result, int bufsize) {
   (void)optp;
   (void)len;

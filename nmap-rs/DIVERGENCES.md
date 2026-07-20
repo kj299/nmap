@@ -273,18 +273,32 @@ lands, `[x]` = confirmed by that module's gates.
       degrade behavior is pinned by `core::packet_parser` unit tests
       (`ipv6_icmpv6_degrades_to_raw_not_subparsed`). To be tightened as those parsers
       land (M5+). *(Introduced at M4 `core::packet_parser`.)*
-- [ ] `build-no-static-myttl` (`core::build`): the C's "pure" `build_ip_raw` holds a
+- [x] `build-no-static-myttl` (`core::build`): the C's "pure" `build_ip_raw` holds a
       function-local `static int myttl` (`tcpip.cc:524`) — a reentrancy landmine. The
       port threads TTL as an explicit parameter (as it does all `NmapOps o.*` reads the
-      builders touch: `o.badsum`, `o.ttl`, `o.ipopt_*`, decoys). No output change on the
-      shipped paths.
-- [ ] `send-payload-no-silent-truncation` (`core::build`, ports `build_icmp_raw`/
+      builders touch: `o.badsum` → `Ipv4Spec::bad_sum`, `o.ttl`, decoys). No retained
+      state between calls. *(Realized at M4 `core::build`.)*
+- [x] `build-explicit-fields-no-magic` (`core::build`): the C builders inject hidden
+      randomness and silent defaults — `ttl == -1` → random TTL (`build_ip_raw`),
+      `seq == 0 && SYN` → random ISN and `window == 0` → 1024 (`build_tcp`). Randomness
+      at the construction layer is untestable and non-reproducible. The port takes
+      concrete values only; the scan driver at the edge supplies any randomness. This
+      matches nmap's own `libnetutil` header-class setters (the build differential's
+      C oracle), so the ported builders agree with the class-level C byte-for-byte.
+      *(Introduced at M4 `core::build`.)*
+- [x] `build-unknown-icmp-no-fatal` (`core::build`, ports `build_icmp_raw`): the C
+      `fatal()`s (aborts the whole process) on an ICMP type/code it does not construct
+      (`tcpip.cc`). The port returns `BuildError::UnknownIcmpType` — a library never
+      aborts. *(Introduced at M4 `core::build`.)*
+- [x] `send-payload-no-silent-truncation` (`core::build`, ports `build_icmp_raw`/
       `build_igmp_raw`): the C copies an oversized data payload into fixed
       `pingpkt.data[1500]`/`igmp.data[1500]` buffers via `MIN(dlen,datalen)`
       (`tcpip.cc:940,1054`) — no overflow, but oversized payloads are **silently
-      truncated**. The port either sizes the buffer to the payload or rejects the
-      over-length request explicitly, never silently truncating. Behavioral divergence,
-      ledgered (not a memory bug).
+      truncated**; separately `build_ip_raw` narrows `int packetlen` into the `u16` IP
+      length, silently wrapping past 65535. The port sizes output to the payload (a
+      growing `Vec`) and returns `BuildError::PayloadTooLarge` past 65535 rather than
+      truncate or wrap; pinned by `oversized_payload_rejected_not_truncated`.
+      *(Realized at M4 `core::build`. IGMP builder deferred with the SCTP/IGMP scans.)*
 - [ ] `icmpv4-no-uninit-tail-read` (`core::headers::icmpv4`): the C's union-overlay
       getters read the zero-filled tail of a fixed buffer on a truncated inner ICMP
       (`ICMPv4Header.cc` getters via `is_response`) — not OOB, but returns bytes never

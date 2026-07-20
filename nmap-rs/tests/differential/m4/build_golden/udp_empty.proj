@@ -1,0 +1,4 @@
+pkt nhdrs=2
+hdr 0 ip4 off=0 len=20
+hdr 1 udp off=20 len=8
+result ok

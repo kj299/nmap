@@ -12,6 +12,7 @@
 #include "EthernetHeader.h"
 #include "ICMPv4Header.h"
 #include "IPv4Header.h"
+#include "IPv6Header.h"
 #include "TCPHeader.h"
 #include "UDPHeader.h"
 #include <cstdio>
@@ -146,6 +147,31 @@ static int project_arp(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Project an IPv6 base header (used when argv[1]=="ip6").
+static int project_ip6(const std::vector<unsigned char> &pkt) {
+  IPv6Header ip6;
+  if (ip6.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = ip6.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  const u8 *s = ip6.getSourceAddress();
+  const u8 *d = ip6.getDestinationAddress();
+  printf("hdr 0 ip6 len=%d\n", vlen);
+  printf("  ip6 ver=%u tc=%u flow=%u plen=%u nh=%u hlim=%u src=", ip6.getVersion(),
+         ip6.getTrafficClass(), ip6.getFlowLabel(), ip6.getPayloadLength(),
+         ip6.getNextHeader(), ip6.getHopLimit());
+  for (int i = 0; i < 16; i++) printf("%02x", s[i]);
+  printf(" dst=");
+  for (int i = 0; i < 16; i++) printf("%02x", d[i]);
+  printf("\nresult ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
@@ -154,6 +180,9 @@ int main(int argc, char **argv) {
 
   if (strcmp(layer, "eth") == 0) {
     return project_eth(pkt);
+  }
+  if (strcmp(layer, "ip6") == 0) {
+    return project_ip6(pkt);
   }
   if (strcmp(layer, "arp") == 0) {
     return project_arp(pkt);

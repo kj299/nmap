@@ -8,6 +8,7 @@
 //
 // Build: see build.sh (needs -DHAVE_CONFIG_H + nbase configured + the pcap.h stub).
 
+#include "ARPHeader.h"
 #include "EthernetHeader.h"
 #include "ICMPv4Header.h"
 #include "IPv4Header.h"
@@ -115,6 +116,36 @@ static int project_eth(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Project an ARP header (used when argv[1]=="arp").
+static int project_arp(const std::vector<unsigned char> &pkt) {
+  ARPHeader arp;
+  if (arp.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = arp.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  const u8 *sha = arp.getSenderMAC();
+  const u8 *tha = arp.getTargetMAC();
+  u32 sip = arp.getSenderIP();
+  u32 tip = arp.getTargetIP();
+  const u8 *sb = (const u8 *)&sip;
+  const u8 *tb = (const u8 *)&tip;
+  printf("hdr 0 arp len=%d\n", vlen);
+  printf("  arp hrd=%u pro=0x%04x hln=%u pln=%u op=%u "
+         "sha=%02x:%02x:%02x:%02x:%02x:%02x sip=%u.%u.%u.%u "
+         "tha=%02x:%02x:%02x:%02x:%02x:%02x tip=%u.%u.%u.%u\n",
+         arp.getHardwareType(), arp.getProtocolType(), arp.getHwAddrLen(),
+         arp.getProtoAddrLen(), arp.getOpCode(), sha[0], sha[1], sha[2], sha[3],
+         sha[4], sha[5], sb[0], sb[1], sb[2], sb[3], tha[0], tha[1], tha[2],
+         tha[3], tha[4], tha[5], tb[0], tb[1], tb[2], tb[3]);
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
@@ -123,6 +154,9 @@ int main(int argc, char **argv) {
 
   if (strcmp(layer, "eth") == 0) {
     return project_eth(pkt);
+  }
+  if (strcmp(layer, "arp") == 0) {
+    return project_arp(pkt);
   }
   if (strcmp(layer, "tcp") == 0) {
     return project_tcp(pkt);

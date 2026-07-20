@@ -1,0 +1,4 @@
+pkt nhdrs=2
+hdr 0 eth off=0 len=14
+hdr 1 raw off=14 len=4
+result ok

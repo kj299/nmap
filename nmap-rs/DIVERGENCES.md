@@ -255,10 +255,24 @@ lands, `[x]` = confirmed by that module's gates.
 
 ### Behavioral / structural (not security, ledgered)
 
-- [ ] `parser-owned-return` (`core::packet_parser`): the C returns a **`static`
-      `this_packet[]`** array by pointer (`PacketParser.cc:126`) — non-reentrant, not
-      thread-safe. The port returns an owned `Vec<Header>` by value; safe for the
-      concurrent driver by construction. No observable output change.
+- [x] `parser-owned-return` (`core::packet_parser`): the C returns a **`static`
+      `this_packet[MAX_HEADERS_IN_PACKET+1]`** array by pointer (`PacketParser.cc:126`) —
+      non-reentrant, not thread-safe; a second call clobbers a live result. The port
+      returns an owned `Vec<Header>` by value (reentrant, `Send`), and each element
+      carries the fully-parsed typed header rather than the C's bare `(type, length)`
+      pair, so callers read TCP flags / ICMP type / addresses without re-parsing. The
+      differential compares the `(type, length, offset)` projection, which is identical.
+      *(Realized at M4 `core::packet_parser`.)*
+- [x] `packet-parser-ported-subset-degrades-to-raw` (`core::packet_parser`): where the C
+      walk would descend into a header this milestone has **not** ported — ICMPv6
+      (IPv6 `next_header == 58`), the IPv6 extension-header chain (`0`/`43`/`44`/`60`),
+      SCTP, etc. — the port stops sub-parsing and records the remainder as a single
+      `Header::Raw` instead. This is strictly *safer* (it never parses un-audited
+      bytes) and conservative (no field is fabricated). The differential corpus is
+      restricted to chains within the ported set so C and Rust agree byte-for-byte; the
+      degrade behavior is pinned by `core::packet_parser` unit tests
+      (`ipv6_icmpv6_degrades_to_raw_not_subparsed`). To be tightened as those parsers
+      land (M5+). *(Introduced at M4 `core::packet_parser`.)*
 - [ ] `build-no-static-myttl` (`core::build`): the C's "pure" `build_ip_raw` holds a
       function-local `static int myttl` (`tcpip.cc:524`) — a reentrancy landmine. The
       port threads TTL as an explicit parameter (as it does all `NmapOps o.*` reads the

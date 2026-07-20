@@ -13,6 +13,7 @@
 #include "ICMPv4Header.h"
 #include "IPv4Header.h"
 #include "IPv6Header.h"
+#include "PacketParser.h"
 #include "TCPHeader.h"
 #include "UDPHeader.h"
 #include <cstdio>
@@ -172,12 +173,51 @@ static int project_ip6(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Map a libnetutil HEADER_TYPE_* to the canonical short token the Rust side emits.
+static const char *hdr_token(u32 t) {
+  switch (t) {
+  case HEADER_TYPE_ETHERNET: return "eth";
+  case HEADER_TYPE_ARP:      return "arp";
+  case HEADER_TYPE_IPv4:     return "ip4";
+  case HEADER_TYPE_IPv6:     return "ip6";
+  case HEADER_TYPE_TCP:      return "tcp";
+  case HEADER_TYPE_UDP:      return "udp";
+  case HEADER_TYPE_ICMPv4:   return "icmp";
+  case HEADER_TYPE_RAW_DATA: return "raw";
+  default:                   return "other";
+  }
+}
+
+// Project the full multi-header walk (used when argv[1]=="pkt_eth" / "pkt_ip").
+// Links nmap's REAL PacketParser::parse_packet state machine.
+static int project_packet(const std::vector<unsigned char> &pkt, bool eth_included) {
+  pkt_type_t *hs = PacketParser::parse_packet(pkt.data(), pkt.size(), eth_included);
+  // The array is terminated by a sentinel entry with length==0.
+  int n = 0;
+  for (int i = 0; hs[i].length != 0; i++) n++;
+  printf("pkt nhdrs=%d\n", n);
+  unsigned long off = 0;
+  for (int i = 0; i < n; i++) {
+    printf("hdr %d %s off=%lu len=%lu\n", i, hdr_token(hs[i].type), off,
+           (unsigned long)hs[i].length);
+    off += hs[i].length;
+  }
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
   { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
   std::vector<unsigned char> pkt = unhex(in);
 
+  if (strcmp(layer, "pkt_eth") == 0) {
+    return project_packet(pkt, true);
+  }
+  if (strcmp(layer, "pkt_ip") == 0) {
+    return project_packet(pkt, false);
+  }
   if (strcmp(layer, "eth") == 0) {
     return project_eth(pkt);
   }

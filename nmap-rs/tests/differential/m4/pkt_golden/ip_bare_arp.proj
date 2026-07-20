@@ -1,0 +1,3 @@
+pkt nhdrs=1
+hdr 0 arp off=0 len=28
+result ok

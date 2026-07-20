@@ -19,6 +19,7 @@ pub mod matcher;
 pub mod model;
 pub mod options;
 pub mod output;
+pub mod packet_parser;
 pub mod pcre_translate;
 pub mod ports;
 pub mod probedb;

@@ -1,0 +1,4 @@
+pkt nhdrs=2
+hdr 0 ip6 off=0 len=40
+hdr 1 tcp off=40 len=20
+result ok

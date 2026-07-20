@@ -12,6 +12,7 @@
 pub mod build;
 pub mod bytes;
 pub mod checksum;
+pub mod classify;
 pub mod congestion;
 pub mod engine;
 pub mod headers;

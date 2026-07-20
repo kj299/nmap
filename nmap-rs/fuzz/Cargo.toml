@@ -130,3 +130,8 @@ test = false
 name = "validate_packet"
 path = "fuzz_targets/validate_packet.rs"
 test = false
+
+[[bin]]
+name = "classify"
+path = "fuzz_targets/classify.rs"
+test = false

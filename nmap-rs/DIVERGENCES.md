@@ -290,6 +290,16 @@ lands, `[x]` = confirmed by that module's gates.
       `fatal()`s (aborts the whole process) on an ICMP type/code it does not construct
       (`tcpip.cc`). The port returns `BuildError::UnknownIcmpType` — a library never
       aborts. *(Introduced at M4 `core::build`.)*
+- [x] `classify-ipv4-icmp-only-for-now` (`core::classify`): the port classifies
+      TCP/UDP/ICMPv4/SCTP responses; the C's ICMPv6 response branch
+      (`scan_engine_raw.cc:1933`) is deferred with the rest of the IPv6 raw path (M5+),
+      consistent with the other IPv4-only-for-now scoping. The IPv4 decision logic is
+      exhaustively differential-checked (12504 cases — every scan × all 256 TCP flag
+      bytes × ICMP type/code/from-target × SCTP chunk — 0 mismatches). This is also a
+      *structural* safety win over the C: nmap's nested `switch`es with fall-through and
+      an unset `newstate` become total functions returning `Option<PortState>`, so an
+      unhandled response is an explicit `None`, never an accidental stale state.
+      *(Introduced at M4 `core::classify`.)*
 - [x] `recv-validate-ipv4-only-for-now` (`core::recv_validate`, ports `validatepkt`):
       the C `validatepkt` validates both IPv4 and IPv6 (the latter walking the
       extension-header chain via `ipv6_get_data`). This port validates the IPv4 path

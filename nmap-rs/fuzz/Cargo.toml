@@ -120,3 +120,8 @@ test = false
 name = "parse_packet"
 path = "fuzz_targets/parse_packet.rs"
 test = false
+
+[[bin]]
+name = "build_packet"
+path = "fuzz_targets/build_packet.rs"
+test = false

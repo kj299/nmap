@@ -100,3 +100,8 @@ test = false
 name = "parse_icmpv4"
 path = "fuzz_targets/parse_icmpv4.rs"
 test = false
+
+[[bin]]
+name = "parse_ethernet"
+path = "fuzz_targets/parse_ethernet.rs"
+test = false

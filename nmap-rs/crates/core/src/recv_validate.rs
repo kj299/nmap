@@ -110,10 +110,8 @@ pub fn validate_packet(buf: &[u8]) -> Result<Validated, Reject> {
                 return Err(Reject::BadTcpOptions);
             }
         }
-        IPPROTO_UDP => {
-            if datalen < UDP_HEADER_LEN {
-                return Err(Reject::IncompleteUdpHeader);
-            }
+        IPPROTO_UDP if datalen < UDP_HEADER_LEN => {
+            return Err(Reject::IncompleteUdpHeader);
         }
         _ => {}
     }

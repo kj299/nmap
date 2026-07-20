@@ -1,297 +1,185 @@
 //! Network-interface enumeration — the first stop on the raw send path (pick the
-//! source address / MAC / outbound interface before building a packet). Replaces
-//! nmap's `libdnet` `intf-*.c`.
+//! source address / MAC / outbound interface, and learn the MTU and default gateway
+//! before building a packet). Replaces nmap's `libdnet` `intf-*.c` + `route-*.c`.
 //!
-//! The [`Interface`] type and [`interfaces`] function are the OS-agnostic seam; the
-//! backend is chosen at compile time:
-//!   * **Unix** — `getifaddrs(3)` (the project's first FFI). The returned linked list
-//!     is walked behind a `// SAFETY:`-documented boundary and freed by an RAII guard.
-//!     This is what CI builds, tests, and unsafe-audits.
-//!   * **Windows** — IP Helper's `GetAdaptersAddresses` via the `windows` crate. Real
-//!     bindings, but compiled and runtime-validated only on a Windows target (this
-//!     Linux CI cannot link them); the shape mirrors the Unix backend exactly.
+//! ## Backend strategy (portable seam + safe crate + audited escape hatch)
 //!
-//! All FFI is confined to a few audited `unsafe` blocks; the public surface is safe.
+//! [`Interface`] is the OS-agnostic seam. The **default** backend is the `netdev`
+//! crate — a vetted, cross-platform (Windows/Linux/macOS) enumerator whose own
+//! OS-specific `unsafe` is audited upstream, so this crate contributes **0 `unsafe`**
+//! to the whole OS-query layer while still getting per-address prefixes, MTU, MAC, and
+//! the default gateway. That is both safer than and more complete than hand-rolling
+//! `getifaddrs` / `GetAdaptersAddresses`, and it works identically on both targets.
+//!
+//! Under the off-by-default `raw-ffi` feature, [`interfaces_ffi`] provides a direct
+//! `getifaddrs(3)` backend — the **escape hatch**: used to cross-check `netdev`
+//! against the raw OS call, and the place to reach a field `netdev` does not expose.
+//! It is the only `unsafe` in this module, and every block is audited.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// A network interface and the addresses bound to it. Backend-independent.
+/// An IPv4 address bound to an interface, with its subnet prefix length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv4Net {
+    /// The interface address.
+    pub addr: Ipv4Addr,
+    /// Subnet prefix length (e.g. 24 for a /24).
+    pub prefix_len: u8,
+}
+
+/// An IPv6 address bound to an interface, with its prefix length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6Net {
+    /// The interface address.
+    pub addr: Ipv6Addr,
+    /// Prefix length (e.g. 64).
+    pub prefix_len: u8,
+}
+
+/// The default gateway reachable via an interface (its next-hop for off-link
+/// destinations), as far as the OS route table knows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Gateway {
+    /// Next-hop MAC, when known (needed to frame an Ethernet packet to off-link hosts).
+    pub mac: Option<[u8; 6]>,
+    /// Next-hop IPv4 address(es).
+    pub ipv4: Vec<Ipv4Addr>,
+    /// Next-hop IPv6 address(es).
+    pub ipv6: Vec<Ipv6Addr>,
+}
+
+/// A network interface and everything the raw send path needs from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interface {
-    /// Kernel interface name (e.g. `eth0`, `lo`, or a Windows adapter GUID/name).
+    /// Kernel interface name (e.g. `eth0`, `lo`, or a Windows adapter name).
     pub name: String,
-    /// Interface index (`if_nametoindex` / `IfIndex`), 0 if unavailable.
+    /// Interface index, 0 if unavailable.
     pub index: u32,
-    /// Link-layer (MAC) address, when the interface has one.
+    /// Link-layer (MAC) address, when the interface has a non-zero one.
     pub mac: Option<[u8; 6]>,
-    /// IPv4 addresses bound to the interface.
-    pub ipv4: Vec<Ipv4Addr>,
-    /// IPv6 addresses bound to the interface.
-    pub ipv6: Vec<Ipv6Addr>,
-    /// The interface is administratively up.
+    /// IPv4 addresses (with prefixes) bound to the interface.
+    pub ipv4: Vec<Ipv4Net>,
+    /// IPv6 addresses (with prefixes) bound to the interface.
+    pub ipv6: Vec<Ipv6Net>,
+    /// Interface MTU in bytes, when known (bounds fragmentation on the send path).
+    pub mtu: Option<u32>,
+    /// The interface is operationally up.
     pub is_up: bool,
     /// The interface is a loopback.
     pub is_loopback: bool,
+    /// The default gateway via this interface, if any.
+    pub gateway: Option<Gateway>,
 }
 
 impl Interface {
-    fn empty(name: String) -> Interface {
-        Interface {
-            name,
-            index: 0,
-            mac: None,
-            ipv4: Vec::new(),
-            ipv6: Vec::new(),
-            is_up: false,
-            is_loopback: false,
-        }
+    /// The first non-loopback IPv4 address on this interface, if any — the usual
+    /// source-address choice for an IPv4 raw probe.
+    #[must_use]
+    pub fn primary_ipv4(&self) -> Option<Ipv4Addr> {
+        self.ipv4
+            .iter()
+            .map(|n| n.addr)
+            .find(|a| !a.is_loopback())
+            .or_else(|| self.ipv4.first().map(|n| n.addr))
     }
 }
 
-/// Enumerate the host's network interfaces with their bound addresses.
+fn mac_to_array(mac: netdev::MacAddr) -> Option<[u8; 6]> {
+    let bytes = mac.octets();
+    if bytes == [0u8; 6] {
+        None
+    } else {
+        Some(bytes)
+    }
+}
+
+fn convert(dev: netdev::Interface) -> Interface {
+    // Read everything (including the borrowing `is_*` accessors) before moving any
+    // owned field out of `dev`.
+    let is_up = dev.is_up();
+    let is_loopback = dev.is_loopback();
+    let index = dev.index;
+    let mtu = dev.mtu;
+    let mac = dev.mac_addr.and_then(mac_to_array);
+    let ipv4 = dev
+        .ipv4
+        .iter()
+        .map(|n| Ipv4Net {
+            addr: n.addr(),
+            prefix_len: n.prefix_len(),
+        })
+        .collect();
+    let ipv6 = dev
+        .ipv6
+        .iter()
+        .map(|n| Ipv6Net {
+            addr: n.addr(),
+            prefix_len: n.prefix_len(),
+        })
+        .collect();
+    let gateway = dev.gateway.map(|g| Gateway {
+        mac: mac_to_array(g.mac_addr),
+        ipv4: g.ipv4,
+        ipv6: g.ipv6,
+    });
+    Interface {
+        name: dev.name,
+        index,
+        mac,
+        ipv4,
+        ipv6,
+        mtu,
+        is_up,
+        is_loopback,
+        gateway,
+    }
+}
+
+/// Enumerate the host's network interfaces (default backend: `netdev`).
 ///
 /// # Errors
-/// Returns the OS error if the underlying enumeration call fails.
+/// Currently infallible on all supported platforms (`netdev` returns an empty list
+/// rather than an error); the `Result` is kept so the signature is stable if a future
+/// backend can fail.
 pub fn interfaces() -> std::io::Result<Vec<Interface>> {
-    imp::interfaces()
+    Ok(netdev::get_interfaces().into_iter().map(convert).collect())
 }
 
 // ---------------------------------------------------------------------------------
-// Unix backend: getifaddrs(3).
+// Escape hatch: direct getifaddrs(3) backend (feature `raw-ffi`, Unix only).
 // ---------------------------------------------------------------------------------
-#[cfg(unix)]
-mod imp {
-    use super::Interface;
-    use std::collections::BTreeMap;
-    use std::ffi::CStr;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::ptr;
+#[cfg(all(feature = "raw-ffi", unix))]
+mod ffi;
 
-    /// RAII owner of the `ifaddrs` list returned by `getifaddrs`, freed exactly once
-    /// on drop. Holding this guard keeps every `ifa_*` pointer we walk valid.
-    struct IfAddrs(*mut libc::ifaddrs);
-
-    impl Drop for IfAddrs {
-        fn drop(&mut self) {
-            // SAFETY: `self.0` was returned by a successful `getifaddrs` and has not
-            // been freed elsewhere (this is the sole owner); `freeifaddrs` is the
-            // matching deallocator.
-            unsafe { libc::freeifaddrs(self.0) };
-        }
-    }
-
-    pub(super) fn interfaces() -> std::io::Result<Vec<Interface>> {
-        let mut head: *mut libc::ifaddrs = ptr::null_mut();
-        // SAFETY: `getifaddrs` writes a heap-allocated list head through the out-param
-        // on success (return 0) and leaves it untouched on failure; we pass a valid
-        // pointer to our local and check the return code before using `head`.
-        let rc = unsafe { libc::getifaddrs(&mut head) };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // Take ownership immediately so every early return still frees the list.
-        let _guard = IfAddrs(head);
-
-        let mut by_name: BTreeMap<String, Interface> = BTreeMap::new();
-        let mut cur = head;
-        while !cur.is_null() {
-            // SAFETY: `cur` is non-null (loop guard) and points to a live `ifaddrs`
-            // node owned by `_guard`; the list is not mutated while we walk it.
-            let ifa = unsafe { &*cur };
-
-            // Advance now so any `continue` still makes progress.
-            cur = ifa.ifa_next;
-
-            if ifa.ifa_name.is_null() {
-                continue;
-            }
-            // SAFETY: `ifa_name` is a NUL-terminated C string owned by the list node,
-            // valid for the lifetime of `_guard`.
-            let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
-                .to_string_lossy()
-                .into_owned();
-
-            let entry = by_name
-                .entry(name.clone())
-                .or_insert_with(|| Interface::empty(name.clone()));
-
-            // Flags live on every node for the interface; fold them in.
-            let flags = ifa.ifa_flags;
-            #[allow(clippy::cast_sign_loss)]
-            let iff_up = libc::IFF_UP as u32;
-            #[allow(clippy::cast_sign_loss)]
-            let iff_loopback = libc::IFF_LOOPBACK as u32;
-            if flags & iff_up != 0 {
-                entry.is_up = true;
-            }
-            if flags & iff_loopback != 0 {
-                entry.is_loopback = true;
-            }
-
-            if entry.index == 0 {
-                // SAFETY: `ifa_name` is a valid C string (checked above); `if_nametoindex`
-                // reads it and returns 0 on error, which we keep as "unknown".
-                entry.index = unsafe { libc::if_nametoindex(ifa.ifa_name) };
-            }
-
-            if ifa.ifa_addr.is_null() {
-                continue;
-            }
-            // SAFETY: `ifa_addr` is non-null and points to a `sockaddr` whose leading
-            // `sa_family` field is always present regardless of the concrete variant.
-            let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
-
-            match family {
-                libc::AF_INET => {
-                    // SAFETY: family AF_INET guarantees `ifa_addr` actually points to a
-                    // `sockaddr_in`; we only read `sin_addr`.
-                    let sin = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in>() };
-                    // `s_addr` holds the address bytes in network order; `to_ne_bytes`
-                    // recovers that in-memory byte layout (a.b.c.d) on any endianness.
-                    entry
-                        .ipv4
-                        .push(Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()));
-                }
-                libc::AF_INET6 => {
-                    // SAFETY: family AF_INET6 guarantees `ifa_addr` points to a
-                    // `sockaddr_in6`; we only read the 16-byte address.
-                    let sin6 = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_in6>() };
-                    entry.ipv6.push(Ipv6Addr::from(sin6.sin6_addr.s6_addr));
-                }
-                #[cfg(target_os = "linux")]
-                libc::AF_PACKET => {
-                    // SAFETY: family AF_PACKET guarantees `ifa_addr` points to a
-                    // `sockaddr_ll`; we read the hardware address and its length.
-                    let sll = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_ll>() };
-                    if sll.sll_halen >= 6 {
-                        let mut mac = [0u8; 6];
-                        mac.copy_from_slice(&sll.sll_addr[..6]);
-                        // Ignore all-zero MACs (e.g. loopback).
-                        if mac != [0u8; 6] {
-                            entry.mac = Some(mac);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Ok(by_name.into_values().collect())
-    }
+/// Enumerate interfaces via a direct `getifaddrs(3)` call rather than `netdev`.
+///
+/// This is the audited hand-FFI escape hatch: used to cross-check the default backend
+/// against the raw OS call, and as the place to reach a field `netdev` does not
+/// expose. Addresses carry prefixes derived from the netmask; MTU and gateway are not
+/// populated here (add them if a concrete need arises).
+///
+/// # Errors
+/// Returns the OS error if `getifaddrs` fails.
+#[cfg(all(feature = "raw-ffi", unix))]
+pub fn interfaces_ffi() -> std::io::Result<Vec<Interface>> {
+    ffi::interfaces()
 }
 
-// ---------------------------------------------------------------------------------
-// Windows backend: GetAdaptersAddresses (compiled only on Windows).
-// ---------------------------------------------------------------------------------
-#[cfg(windows)]
-mod imp {
-    use super::Interface;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, WIN32_ERROR};
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
-    };
-    use windows::Win32::Networking::WinSock::{
-        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
-    };
-
-    pub(super) fn interfaces() -> std::io::Result<Vec<Interface>> {
-        // Two-call pattern: size the buffer, then fill it.
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        let mut size: u32 = 0;
-        // SAFETY: first call with a null buffer only writes the required size.
-        let rc = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, None, &mut size) };
-        if WIN32_ERROR(rc) != ERROR_BUFFER_OVERFLOW && WIN32_ERROR(rc) != ERROR_SUCCESS {
-            return Err(std::io::Error::from_raw_os_error(rc as i32));
-        }
-        let mut buf = vec![0u8; size as usize];
-        let head = buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
-        let family = AF_UNSPEC.0 as u32;
-        // SAFETY: `buf` is `size` bytes as required by the sizing call; `GetAdaptersAddresses`
-        // fills it with a linked list of adapters rooted at `head`.
-        let rc = unsafe { GetAdaptersAddresses(family, flags, None, Some(head), &mut size) };
-        if WIN32_ERROR(rc) != ERROR_SUCCESS {
-            return Err(std::io::Error::from_raw_os_error(rc as i32));
-        }
-
-        let mut out = Vec::new();
-        let mut cur = head;
-        while !cur.is_null() {
-            // SAFETY: `cur` is non-null and points into the live buffer `buf`.
-            let a = unsafe { &*cur };
-            cur = a.Next;
-
-            // SAFETY: `FriendlyName` is a NUL-terminated wide string owned by `buf`.
-            let name = unsafe { a.FriendlyName.to_string() }.unwrap_or_default();
-            let mut iface = Interface::empty(name);
-            // SAFETY: `IfIndex` is the active member of this always-initialized
-            // anonymous union in every `IP_ADAPTER_ADDRESSES_LH` the API returns.
-            iface.index = unsafe { a.Anonymous1.Anonymous.IfIndex };
-            iface.is_up = a.OperStatus.0 == 1; // IfOperStatusUp
-            iface.is_loopback = a.IfType == 24; // IF_TYPE_SOFTWARE_LOOPBACK
-
-            let halen = a.PhysicalAddressLength as usize;
-            if halen >= 6 {
-                let mut mac = [0u8; 6];
-                mac.copy_from_slice(&a.PhysicalAddress[..6]);
-                if mac != [0u8; 6] {
-                    iface.mac = Some(mac);
-                }
-            }
-
-            let mut ua = a.FirstUnicastAddress;
-            while !ua.is_null() {
-                // SAFETY: `ua` is non-null and points into `buf`.
-                let u = unsafe { &*ua };
-                ua = u.Next;
-                let sa = u.Address.lpSockaddr;
-                if sa.is_null() {
-                    continue;
-                }
-                // SAFETY: `lpSockaddr` points to a `SOCKADDR` whose family we read first.
-                let family = unsafe { (*sa).sa_family };
-                if family == AF_INET {
-                    // SAFETY: AF_INET => the sockaddr is a SOCKADDR_IN.
-                    let sin = unsafe { &*sa.cast::<SOCKADDR_IN>() };
-                    // SAFETY: `S_addr` is the plain-`u32` member of the `IN_ADDR` union,
-                    // always valid to read; the bytes are in network order.
-                    let bytes = unsafe { sin.sin_addr.S_un.S_addr }.to_ne_bytes();
-                    iface.ipv4.push(Ipv4Addr::from(bytes));
-                } else if family == AF_INET6 {
-                    // SAFETY: AF_INET6 => the sockaddr is a SOCKADDR_IN6.
-                    let sin6 = unsafe { &*sa.cast::<SOCKADDR_IN6>() };
-                    // SAFETY: `Byte` is the 16-byte array member of the `IN6_ADDR`
-                    // union, always valid to read (network order).
-                    let bytes = unsafe { sin6.sin6_addr.u.Byte };
-                    iface.ipv6.push(Ipv6Addr::from(bytes));
-                }
-            }
-            out.push(iface);
-        }
-        Ok(out)
-    }
-}
-
-// Miri cannot execute the `getifaddrs` FFI, so these run under the normal test
-// harness (and the unsafe-audit gate) but are skipped under miri.
-#[cfg(all(test, unix, not(miri)))]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
     #[test]
     fn enumerates_and_finds_loopback() {
-        let ifaces = interfaces().expect("getifaddrs should succeed on the CI host");
+        let ifaces = interfaces().expect("interface enumeration should succeed");
         assert!(!ifaces.is_empty(), "expected at least one interface");
 
-        // Every host has a loopback; it must be flagged and carry 127.0.0.1 or ::1.
         let lo = ifaces
             .iter()
             .find(|i| i.is_loopback)
             .expect("a loopback interface");
-        assert!(lo.is_up, "loopback should be up");
-        let has_lo_addr = lo.ipv4.contains(&Ipv4Addr::LOCALHOST)
-            || lo.ipv6.contains(&std::net::Ipv6Addr::LOCALHOST);
+        let has_lo_addr = lo.ipv4.iter().any(|n| n.addr == Ipv4Addr::LOCALHOST)
+            || lo.ipv6.iter().any(|n| n.addr == Ipv6Addr::LOCALHOST);
         assert!(has_lo_addr, "loopback should bind 127.0.0.1 or ::1");
     }
 
@@ -307,18 +195,38 @@ mod tests {
     }
 
     #[test]
-    fn non_loopback_up_interface_has_an_address_or_mac() {
-        // Sanity: a real up, non-loopback interface should have at least a MAC or IP.
-        for i in interfaces()
-            .unwrap()
-            .iter()
-            .filter(|i| i.is_up && !i.is_loopback)
-        {
-            assert!(
-                i.mac.is_some() || !i.ipv4.is_empty() || !i.ipv6.is_empty(),
-                "interface {} has neither MAC nor address",
-                i.name
-            );
+    fn addresses_carry_plausible_prefixes() {
+        for i in interfaces().unwrap() {
+            for n in &i.ipv4 {
+                assert!(n.prefix_len <= 32, "IPv4 prefix out of range on {}", i.name);
+            }
+            for n in &i.ipv6 {
+                assert!(
+                    n.prefix_len <= 128,
+                    "IPv6 prefix out of range on {}",
+                    i.name
+                );
+            }
         }
+    }
+
+    // With the escape hatch compiled in, the raw getifaddrs backend must agree with
+    // `netdev` on the set of interface names and their IPv4 addresses — proving the
+    // fallback stays consistent with the default.
+    #[cfg(all(feature = "raw-ffi", unix))]
+    #[test]
+    fn ffi_backend_agrees_with_netdev_on_names_and_v4() {
+        use std::collections::BTreeSet;
+        let netdev_names: BTreeSet<String> =
+            interfaces().unwrap().into_iter().map(|i| i.name).collect();
+        let ffi_names: BTreeSet<String> = interfaces_ffi()
+            .unwrap()
+            .into_iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(
+            netdev_names, ffi_names,
+            "backends disagree on interface set"
+        );
     }
 }

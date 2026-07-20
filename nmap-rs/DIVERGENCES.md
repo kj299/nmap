@@ -327,15 +327,20 @@ lands, `[x]` = confirmed by that module's gates.
 
 ## Platform / environment differences
 
-- [x] `sys-windows-backend-validated-on-windows` (`sys::netif`, and the raw-I/O modules
-      to come): the `sys` OS-acquisition layer has per-target backends. CI is Linux, so
-      the **Unix backend** (`getifaddrs`) is the one that clears build/test/miri/
-      unsafe-audit here; the **Windows backend** (IP Helper `GetAdaptersAddresses`, later
-      Npcap) is written against the same seam, unsafe-audited by review (the audit
-      harness scans all `cfg` branches), but compiled and run only on a Windows target
-      (this host lacks the msvc std). Not a behavioral divergence — a gate-coverage note:
-      the Windows path's *runtime* validation defers to a real Windows run. Both backends
-      populate the identical `Interface` shape. *(Introduced at M4 `sys::netif`.)*
+- [x] `sys-osquery-safe-crate-default` (`sys::netif`, and the route/MTU needs it fills):
+      the OS-query layer (interfaces, addresses+prefixes, MTU, MAC, default gateway) uses
+      the vetted cross-platform `netdev` crate as its **default backend** rather than
+      hand-rolled `getifaddrs`/`GetAdaptersAddresses`. This keeps the first-party
+      OS-query code at **0 `unsafe`** on *both* Windows and Linux (netdev's own OS
+      `unsafe` is audited upstream) and is more complete than a hand port — a *safer*
+      choice than faithfully re-implementing libdnet's `intf-*.c`/`route-*.c`. `unsafe`
+      is thereby reserved for Npcap, where no safe equivalent exists. An off-by-default
+      `raw-ffi` feature keeps a direct `getifaddrs` backend (`interfaces_ffi`) as an
+      audited escape hatch — cross-checked in CI to agree with `netdev` on the interface
+      set — for any field `netdev` does not expose. Accepted supply-chain cost: netdev
+      pulls the unmaintained-but-not-vulnerable `paste` proc-macro (RUSTSEC-2024-0436,
+      ignored in `deny.toml` with justification). *(Introduced at M4 `sys::netif`;
+      supersedes the hand-FFI-per-OS approach.)*
 
 
 - [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the

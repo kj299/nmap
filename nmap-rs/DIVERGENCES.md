@@ -290,6 +290,16 @@ lands, `[x]` = confirmed by that module's gates.
       `fatal()`s (aborts the whole process) on an ICMP type/code it does not construct
       (`tcpip.cc`). The port returns `BuildError::UnknownIcmpType` — a library never
       aborts. *(Introduced at M4 `core::build`.)*
+- [x] `recv-validate-ipv4-only-for-now` (`core::recv_validate`, ports `validatepkt`):
+      the C `validatepkt` validates both IPv4 and IPv6 (the latter walking the
+      extension-header chain via `ipv6_get_data`). This port validates the IPv4 path
+      and rejects IPv6 with `Reject::Ipv6Unsupported`, deferring IPv6
+      receive-validation to the milestone that lands the IPv6 extension-header parser
+      (M5+), consistent with `packet-parser-ported-subset-degrades-to-raw`. The
+      IPv4 accept/reject decision — including the security-critical `validateTCPhdr`
+      option walk — matches nmap byte-for-byte (differential 18/18 + a 6000-packet
+      randomized C-vs-Rust cross-check, 0 mismatches). *(Introduced at M4
+      `core::recv_validate`.)*
 - [x] `send-payload-no-silent-truncation` (`core::build`, ports `build_icmp_raw`/
       `build_igmp_raw`): the C copies an oversized data payload into fixed
       `pingpkt.data[1500]`/`igmp.data[1500]` buffers via `MIN(dlen,datalen)`

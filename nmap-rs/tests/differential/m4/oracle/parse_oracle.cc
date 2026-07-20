@@ -8,6 +8,7 @@
 //
 // Build: see build.sh (needs -DHAVE_CONFIG_H + nbase configured + the pcap.h stub).
 
+#include "EthernetHeader.h"
 #include "ICMPv4Header.h"
 #include "IPv4Header.h"
 #include "TCPHeader.h"
@@ -91,12 +92,38 @@ static int project_icmp(const std::vector<unsigned char> &pkt) {
   return 0;
 }
 
+// Project an Ethernet header (used when argv[1]=="eth").
+static int project_eth(const std::vector<unsigned char> &pkt) {
+  EthernetHeader eth;
+  if (eth.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int vlen = eth.validate();
+  if (vlen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  const u8 *d = eth.getDstMAC();
+  const u8 *s = eth.getSrcMAC();
+  printf("hdr 0 eth len=%d\n", vlen);
+  printf("  eth dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x "
+         "type=0x%04x\n",
+         d[0], d[1], d[2], d[3], d[4], d[5], s[0], s[1], s[2], s[3], s[4], s[5],
+         eth.getEtherType());
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
   { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
   std::vector<unsigned char> pkt = unhex(in);
 
+  if (strcmp(layer, "eth") == 0) {
+    return project_eth(pkt);
+  }
   if (strcmp(layer, "tcp") == 0) {
     return project_tcp(pkt);
   }

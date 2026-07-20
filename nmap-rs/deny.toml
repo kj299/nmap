@@ -6,7 +6,16 @@
 # Fail on any RUSTSEC advisory (vulnerabilities/unmaintained/unsound are always
 # denied in v2); also refuse yanked crates.
 yanked = "deny"
-ignore = []            # add "RUSTSEC-XXXX-YYYY" only with a written justification
+# Add "RUSTSEC-XXXX-YYYY" only with a written justification.
+ignore = [
+    # `paste` (proc-macro helper) is unmaintained but NOT vulnerable: it is a
+    # compile-time-only macro with no runtime code and no unsafe, is feature-complete,
+    # and is pulled transitively by `netdev` (the safe cross-platform interface
+    # enumerator that lets the OS-query layer stay at 0 first-party unsafe). Accepted
+    # supply-chain cost of choosing a vetted crate over hand-rolled FFI; revisit if
+    # `netdev` drops it or an actual vulnerability is filed.
+    "RUSTSEC-2024-0436",
+]
 
 [bans]
 # Multiple versions of the same crate bloat the trusted surface; warn and prune.

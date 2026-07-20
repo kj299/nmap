@@ -12,10 +12,29 @@ rust-version.workspace = true
 # MVP (connect scan) this crate is expected to hold ~0 unsafe.
 [dependencies]
 nmap-core = { path = "../core" }
+# Interface / route / MTU enumeration — the DEFAULT backend. `netdev` is a vetted,
+# cross-platform (Windows/Linux/macOS) crate whose own OS-specific `unsafe` is
+# audited upstream, so THIS crate stays at 0 `unsafe` for the whole OS-query layer.
+# It supplies exactly the fields the raw send path needs (per-address prefix, MTU,
+# MAC, default gateway) — safer and more complete than hand-rolling `getifaddrs` /
+# `GetAdaptersAddresses` ourselves. `unsafe` is thus reserved for Npcap, where no
+# safe equivalent exists.
+netdev = "0.45"
 # Async runtime + safe socket API for the connect scan. tokio's networking is a
 # safe wrapper over the OS (Winsock/IOCP on Windows, epoll/kqueue elsewhere), so
 # this crate still holds ~0 unsafe for the MVP. Feature set kept minimal.
 tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "macros", "io-util"] }
+
+[features]
+default = []
+# The hand-FFI ESCAPE HATCH (Option C). Off by default. Enables a direct
+# `getifaddrs(3)` backend (`interfaces_ffi`) used to (a) cross-check that `netdev`
+# agrees with the raw OS call, and (b) reach a field `netdev` might not expose. The
+# only place `unsafe` re-enters the OS-query layer, and always audited.
+raw-ffi = ["dep:libc"]
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [lints]
 workspace = true

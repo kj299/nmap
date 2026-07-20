@@ -110,3 +110,8 @@ test = false
 name = "parse_arp"
 path = "fuzz_targets/parse_arp.rs"
 test = false
+
+[[bin]]
+name = "parse_ipv6"
+path = "fuzz_targets/parse_ipv6.rs"
+test = false

@@ -16,6 +16,7 @@ pub mod classify;
 pub mod congestion;
 pub mod engine;
 pub mod headers;
+pub mod ipid;
 pub mod log;
 pub mod matcher;
 pub mod model;

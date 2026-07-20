@@ -135,3 +135,8 @@ test = false
 name = "classify"
 path = "fuzz_targets/classify.rs"
 test = false
+
+[[bin]]
+name = "ipid"
+path = "fuzz_targets/ipid.rs"
+test = false

@@ -1,0 +1,3 @@
+hdr 0 arp len=28
+  arp hrd=1 pro=0x0800 hln=6 pln=4 op=1 sha=ff:ff:ff:ff:ff:ff sip=192.168.1.1 tha=00:00:00:00:00:00 tip=192.168.1.254
+result ok

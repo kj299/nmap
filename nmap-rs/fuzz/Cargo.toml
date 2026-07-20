@@ -105,3 +105,8 @@ test = false
 name = "parse_ethernet"
 path = "fuzz_targets/parse_ethernet.rs"
 test = false
+
+[[bin]]
+name = "parse_arp"
+path = "fuzz_targets/parse_arp.rs"
+test = false

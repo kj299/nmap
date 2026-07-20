@@ -41,7 +41,16 @@ $CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/ICMPv4Header.cc"          -o "$H
 $CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/PacketElement.cc"         -o "$HERE/pe.o"
 $CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/NetworkLayerElement.cc"   -o "$HERE/nle.o"
 $CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/TransportLayerElement.cc" -o "$HERE/tle.o"
+# The multi-header PacketParser::parse_packet chains every header class plus the
+# ICMPv6 + IPv6 extension-header classes it can dispatch into (project_packet mode).
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/PacketParser.cc"          -o "$HERE/pp.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/ICMPv6Header.cc"          -o "$HERE/icmp6.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/HopByHopHeader.cc"        -o "$HERE/hbh.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/DestOptsHeader.cc"        -o "$HERE/dopts.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/FragmentHeader.cc"        -o "$HERE/frag.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/RoutingHeader.cc"         -o "$HERE/routing.o"
+$CXX -DHAVE_CONFIG_H $INC -c "$NROOT/libnetutil/RawData.cc"               -o "$HERE/rawdata.o"
 $CXX -DHAVE_CONFIG_H $INC -c "$HERE/stubs.cc"                             -o "$HERE/stubs.o"
 $CXX -DHAVE_CONFIG_H $INC -c "$HERE/parse_oracle.cc"                      -o "$HERE/po.o"
-$CXX "$HERE"/po.o "$HERE"/eth.o "$HERE"/arp.o "$HERE"/ipv4.o "$HERE"/ipv6.o "$HERE"/tcp.o "$HERE"/udp.o "$HERE"/icmp.o "$HERE"/pe.o "$HERE"/nle.o "$HERE"/tle.o "$HERE"/stubs.o -o "$HERE/parse_oracle"
+$CXX "$HERE"/po.o "$HERE"/eth.o "$HERE"/arp.o "$HERE"/ipv4.o "$HERE"/ipv6.o "$HERE"/tcp.o "$HERE"/udp.o "$HERE"/icmp.o "$HERE"/pp.o "$HERE"/icmp6.o "$HERE"/hbh.o "$HERE"/dopts.o "$HERE"/frag.o "$HERE"/routing.o "$HERE"/rawdata.o "$HERE"/pe.o "$HERE"/nle.o "$HERE"/tle.o "$HERE"/stubs.o -o "$HERE/parse_oracle"
 echo "built $HERE/parse_oracle"

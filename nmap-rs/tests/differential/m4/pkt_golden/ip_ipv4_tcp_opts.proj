@@ -1,0 +1,5 @@
+pkt nhdrs=3
+hdr 0 ip4 off=0 len=20
+hdr 1 tcp off=20 len=24
+hdr 2 raw off=44 len=4
+result ok

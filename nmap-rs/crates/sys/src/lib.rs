@@ -15,6 +15,7 @@
 //! 0 for this crate.
 
 pub mod net;
+pub mod netif;
 pub mod scan;
 pub mod servicescan;
 

@@ -327,6 +327,17 @@ lands, `[x]` = confirmed by that module's gates.
 
 ## Platform / environment differences
 
+- [x] `sys-windows-backend-validated-on-windows` (`sys::netif`, and the raw-I/O modules
+      to come): the `sys` OS-acquisition layer has per-target backends. CI is Linux, so
+      the **Unix backend** (`getifaddrs`) is the one that clears build/test/miri/
+      unsafe-audit here; the **Windows backend** (IP Helper `GetAdaptersAddresses`, later
+      Npcap) is written against the same seam, unsafe-audited by review (the audit
+      harness scans all `cfg` branches), but compiled and run only on a Windows target
+      (this host lacks the msvc std). Not a behavioral divergence — a gate-coverage note:
+      the Windows path's *runtime* validation defers to a real Windows run. Both backends
+      populate the identical `Interface` shape. *(Introduced at M4 `sys::netif`.)*
+
+
 - [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the
       port; the differential compares the semantic projection, which excludes the
       version banner entirely. (Confirmed at M1 CLI.)

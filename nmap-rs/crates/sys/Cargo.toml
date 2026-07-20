@@ -17,5 +17,21 @@ nmap-core = { path = "../core" }
 # this crate still holds ~0 unsafe for the MVP. Feature set kept minimal.
 tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "macros", "io-util"] }
 
+# Interface enumeration backend. On Unix we bind `getifaddrs(3)` directly (the same
+# call nmap's libdnet uses) via the `libc` crate — the project's first FFI, wrapped
+# in an audited safe fn with an RAII free. On Windows the equivalent is IP Helper's
+# GetAdaptersAddresses via the `windows` crate; both are target-scoped so a Linux
+# build never pulls the Windows bindings and vice-versa.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
 [lints]
 workspace = true

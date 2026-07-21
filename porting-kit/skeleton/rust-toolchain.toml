@@ -1,0 +1,13 @@
+# Pin the toolchain so local `cargo fmt`/`cargo clippy` use the EXACT versions CI
+# runs — a floating `dtolnay/rust-toolchain@stable` in CI silently upgrades under
+# you, so a rustfmt/clippy rule that changed between your local stable and CI's
+# fails the PR on a machine you can't see (LESSONS #16: two skews this port —
+# a rustfmt reflow at M4 module 4, a new clippy lint at module 12). `rustup`
+# reads this file for every `cargo` invocation in the tree, so `cargo fmt` locally
+# == `cargo fmt` in CI. Bump this deliberately (its own PR), never by drift.
+#
+# The nightly gates (miri, fuzz) are unaffected: `cargo +nightly …` explicitly
+# overrides this pin, so keep invoking them with the `+nightly` selector.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

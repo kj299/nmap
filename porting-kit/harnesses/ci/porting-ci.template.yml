@@ -86,9 +86,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz
       # Short smoke in CI; schedule a nightly deep run separately.
+      # Use +nightly explicitly: cargo-fuzz needs -Zsanitizer, and a pinned
+      # rust-toolchain.toml (shipped from skeleton/, a *directory* override) would
+      # otherwise outrank the job's nightly default and fail the inner build
+      # (LESSONS #16 — the stable pin interacts with nightly-only gates).
       - run: |
-          for t in $(cargo fuzz list 2>/dev/null); do
-            cargo fuzz run "$t" -- -max_total_time=60
+          for t in $(cargo +nightly fuzz list 2>/dev/null); do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60
           done
 
   supply-chain:

@@ -473,7 +473,17 @@ These entries are the M2 retrospective.
   jobs switched from `@stable` to `@master` + an explicit pinned `toolchain:` that
   reads the file. Nightly gates (miri, fuzz) stay `@nightly` — `cargo +nightly`
   overrides the pin. Bump the pin deliberately, in its own PR, never by drift.
-- **Section amended:** `skeleton/rust-toolchain.toml` (new); `harnesses/ci/porting-ci.template.yml`; PLAYBOOK · Phase 3 preflight.
+- **Second-order catch (found by this very patch):** a `rust-toolchain.toml` is a
+  *directory override*, which **outranks a `rustup default nightly`**. So a
+  nightly-only CI job that leans on the *default* being nightly — the fuzz gate ran
+  bare `cargo fuzz run`, not `cargo +nightly fuzz run` — breaks the instant the pin
+  lands: cargo-fuzz's inner build picks the pinned stable and dies on
+  `-Zsanitizer=address` ("`Z` is only accepted on the nightly compiler"). The PR that
+  added the pin caught its own regression (#49 fuzz failure). Fix: every nightly gate
+  selects the toolchain **explicitly** (`cargo +nightly …`, which sets
+  `RUSTUP_TOOLCHAIN` and beats the directory override) rather than relying on the
+  rustup default; the template's fuzz job and the skeleton toml comment now say so.
+- **Section amended:** `skeleton/rust-toolchain.toml` (new); `harnesses/ci/porting-ci.template.yml` (stable pin + `+nightly` on the fuzz gate); PLAYBOOK · Phase 3 preflight.
 
 ## 017. A liveness spike must gate on *teardown*, and its stand-in must match how the real API blocks
 

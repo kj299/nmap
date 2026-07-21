@@ -97,8 +97,12 @@ jobs:
           cargo install cargo-fuzz --locked
           # Fuzz each target from its hand-authored seed corpus. Any panic/crash
           # on arbitrary input is a release blocker (Phase 4, gate 3).
-          for t in $(cargo fuzz list); do
-            cargo fuzz run "$t" fuzz/seeds/"$t" -- -max_total_time=60 -print_final_stats=1
+          # Invoke with +nightly explicitly: cargo-fuzz needs -Zsanitizer, and the
+          # repo's rust-toolchain.toml (a *directory* override, pinning stable) would
+          # otherwise outrank the job's nightly default and fail the inner build
+          # (LESSONS #16 — the pin interacts with nightly-only gates).
+          for t in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$t" fuzz/seeds/"$t" -- -max_total_time=60 -print_final_stats=1
           done
 
   differential:

@@ -327,6 +327,17 @@ lands, `[x]` = confirmed by that module's gates.
 
 ## Platform / environment differences
 
+- [x] `rawio-safe-socket2-l3-plus-pcap-l2` (`sys::rawio`, ports the `send_ip_packet*` /
+      `send_eth_packet` chokepoint): the send half of the raw path mirrors nmap's
+      L3-vs-L2 choice (`send_ip_packet_eth_or_sd`) behind a `RawSender` seam. The
+      **default L3 sender** is an `IP_HDRINCL` raw IPv4 socket via the safe `socket2`
+      crate (**0 first-party `unsafe`**; the packet's own IPv4 dst field drives kernel
+      routing); the **L2 sender** (feature `pcap`) injects via libpcap/Npcap
+      `sendpacket` (audited-upstream FFI, still no first-party `unsafe`). Same
+      safe-crate-first Option-C shape as `netif`/`capture`. Privileged runtime paths
+      self-skip when unprivileged (CI), and are validated as root here — including a
+      real loopback send and (feature-gated, `#[ignore]`) an end-to-end
+      build→send→capture→parse round trip. *(Introduced at M4 `sys::rawio`.)*
 - [x] `capture-blocking-thread-not-poll` (`sys::capture`, realizes spike S1): nmap runs
       its pcap handle **non-blocking and polls** it from the nsock event loop (Windows
       Npcap exposes no selectable fd, so `pcap_get_selectable_fd` is never used). This

@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "ma
 # which the default CI image lacks; the `capture` seam + async plumbing build and test
 # without it.
 pcap = { version = "2", optional = true }
+socket2 = "0.6.5"
 
 [features]
 default = []

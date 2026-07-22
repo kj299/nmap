@@ -455,6 +455,86 @@ These entries are the M2 retrospective.
   port's accumulating regression memory.
 - **Section amended:** PLAYBOOK · Phase 4 gate 3 (Fuzz).
 
+## 016. Pin the toolchain — a floating `@stable` in CI fails PRs on a version you never ran
+
+- **Date:** 2026-07-21
+- **Codebase:** nmap M4 — raw-packet infrastructure (CI `dtolnay/rust-toolchain@stable`)
+- **What happened:** Two separate M4 slices went green locally and **red in CI on a
+  formatting/lint rule the author never saw**: module 4 (`headers::tcp`) hit a
+  rustfmt reflow, module 12 (`recv_validate`) a new `collapsible_match` clippy lint.
+  Both because CI installed `dtolnay/rust-toolchain@stable`, which floats to whatever
+  stable is current the day the job runs, while local dev sat on an older stable. The
+  M3 retrospective had already *noted* "pin a rust-toolchain.toml" as a to-do; it was
+  never wired, so the same skew recurred a milestone later. A CI-only fmt/clippy
+  failure is pure friction — the code is correct, the machine disagrees with itself.
+- **Kit change:** `skeleton/` now ships a **`rust-toolchain.toml` pinning an exact
+  stable** (`channel`, `components = [clippy, rustfmt]`); `rustup` reads it for every
+  in-tree `cargo` call, so local `cargo fmt`/`clippy` == CI. The CI template's stable
+  jobs switched from `@stable` to `@master` + an explicit pinned `toolchain:` that
+  reads the file. Nightly gates (miri, fuzz) stay `@nightly` — `cargo +nightly`
+  overrides the pin. Bump the pin deliberately, in its own PR, never by drift.
+- **Second-order catch (found by this very patch):** a `rust-toolchain.toml` is a
+  *directory override*, which **outranks a `rustup default nightly`**. So a
+  nightly-only CI job that leans on the *default* being nightly — the fuzz gate ran
+  bare `cargo fuzz run`, not `cargo +nightly fuzz run` — breaks the instant the pin
+  lands: cargo-fuzz's inner build picks the pinned stable and dies on
+  `-Zsanitizer=address` ("`Z` is only accepted on the nightly compiler"). The PR that
+  added the pin caught its own regression (#49 fuzz failure). Fix: every nightly gate
+  selects the toolchain **explicitly** (`cargo +nightly …`, which sets
+  `RUSTUP_TOOLCHAIN` and beats the directory override) rather than relying on the
+  rustup default; the template's fuzz job and the skeleton toml comment now say so.
+- **Section amended:** `skeleton/rust-toolchain.toml` (new); `harnesses/ci/porting-ci.template.yml` (stable pin + `+nightly` on the fuzz gate); PLAYBOOK · Phase 3 preflight.
+
+## 017. A liveness spike must gate on *teardown*, and its stand-in must match how the real API blocks
+
+- **Date:** 2026-07-21
+- **Codebase:** nmap M4 — `sys::capture` (pcap-in-async, spike `SPIKES.md` M4-1)
+- **What happened:** The top M4 hazard — bridging a no-readiness-fd pcap source into
+  tokio — was correctly spiked *before* scheduling, and its written decision gate
+  (latency < 2 ms, no busy-spin, no readiness fd) was met by a **BlockingThread →
+  channel** design with an RAII `Drop`-join. It still shipped a **shutdown
+  deadlock**: a blocking capture thread against an *idle* link cannot be woken for
+  its join, so `Drop` hung forever. Two blind spots combined: (a) the gate measured
+  the *hot path* and never named *teardown*, the one state a throughput test can't
+  enter; (b) the spike's `std`-socket stand-in silently had cancellation the real API
+  lacks (libpcap's blocking read ignores its timeout on an idle link). Worse, the
+  capture module passed all six gates against a **mock** source and merged (#47) — the
+  hang lived in the *real* source's `Drop` path, which the unprivileged differential
+  (the kit's liveness backstop) structurally cannot reach, and only surfaced two
+  slices later in a root-only e2e (#48). Fix: `setnonblock` + a bounded idle poll
+  (essentially the PollTask fallback the spike had rejected on latency).
+- **Kit change:** the spike-and-gate ritual now **requires a teardown criterion**
+  ("prove it can be stopped while idle, cleanly, within a bounded time") for any
+  resource-holding/blocking-thread design, and **requires the stand-in to reproduce
+  the property under test** — for a liveness spike, how the call blocks *and unblocks*
+  (a `std` `recv` is not a model of `pcap_next_ex`). Gate 4 adds: a `sys` module that
+  owns a blocking OS resource needs a `#[ignore]` **root-only real-resource teardown
+  test in its own slice** — a mock proves the plumbing, never the teardown of what it
+  stands in for.
+- **Section amended:** PLAYBOOK · Phase 4 (spike-and-gate ritual; gate 4 liveness).
+
+## 018. The safest `unsafe` is the one you never write — classify "is there a safe crate?" at Phase 0
+
+- **Date:** 2026-07-21
+- **Codebase:** nmap M4 — `sys::netif`/`capture`/`rawio` (the "unsafe lives here" milestone)
+- **What happened:** M4 was scoped as the milestone where hand-written FFI `unsafe`
+  finally lands (interface enumeration, raw send, capture) and budgeted accordingly.
+  A **mid-milestone review — prompted by the user, not the kit** — found that
+  `netdev`, `socket2`, and `pcap` already wrap that exact surface safely and are
+  maintained/audit-clean, so the default build shipped with **0 first-party `unsafe`**
+  (11 documented blocks, all in an optional `getifaddrs` escape hatch that is off by
+  default). The right outcome, reached by luck of a review rather than by process:
+  nothing in Phase 0 asked "does a vetted safe crate already cover this?" so the
+  default assumption was hand-FFI.
+- **Kit change:** Phase 0's FFI classification gains a **fourth property per FFI item
+  — "does a vetted, maintained, safe crate wrap it?"** — and if yes, that crate is the
+  **default backend**, hand-FFI a feature-gated audited escape hatch with a
+  cross-check test (the **Option-C pattern**, now in `ARCHITECTURE-TEMPLATE.md`).
+  A wrapper crate that clears the supply-chain gate and removes first-party `unsafe`
+  is a net safety win, not a new liability — so this is classified up front, not
+  discovered after the `unsafe` is written.
+- **Section amended:** PLAYBOOK · Phase 0 (Do); `ARCHITECTURE-TEMPLATE.md` (conventions).
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

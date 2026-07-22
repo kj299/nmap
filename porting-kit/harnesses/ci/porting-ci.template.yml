@@ -29,8 +29,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: clippy, rustfmt }
+      # LESSONS #16 — pin the toolchain, do not float `@stable`. `@stable` installs
+      # whatever stable is current the day CI runs, so a rustfmt reflow or a new
+      # clippy lint that landed since your local stable fails the PR on a version you
+      # never ran. `@master` reads the repo's `rust-toolchain.toml` (ship it from
+      # skeleton/) so `cargo fmt`/`cargo clippy` here use the EXACT version you ran
+      # locally. Nightly gates below stay `@nightly` (they override the pin).
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.97.0", components: clippy, rustfmt }
       - run: cargo fmt --all -- --check
       # -D warnings escalates the workspace safety lints (see skeleton Cargo.toml
       # [workspace.lints]) to hard errors. The explicit -D flags below are
@@ -80,9 +86,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz
       # Short smoke in CI; schedule a nightly deep run separately.
+      # Use +nightly explicitly: cargo-fuzz needs -Zsanitizer, and a pinned
+      # rust-toolchain.toml (shipped from skeleton/, a *directory* override) would
+      # otherwise outrank the job's nightly default and fail the inner build
+      # (LESSONS #16 — the stable pin interacts with nightly-only gates).
       - run: |
-          for t in $(cargo fuzz list 2>/dev/null); do
-            cargo fuzz run "$t" -- -max_total_time=60
+          for t in $(cargo +nightly fuzz list 2>/dev/null); do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60
           done
 
   supply-chain:
@@ -90,7 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master  # pinned via rust-toolchain.toml (LESSONS #16)
+        with: { toolchain: "1.97.0" }
       - run: cargo install cargo-audit cargo-deny
       - run: bash porting-kit/harnesses/supply-chain/run_supply_chain.sh .
 
@@ -99,7 +110,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master  # pinned via rust-toolchain.toml (LESSONS #16)
+        with: { toolchain: "1.97.0" }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       # Build both, then diff over the input matrix. If the C reference can't run

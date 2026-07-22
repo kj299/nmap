@@ -56,6 +56,24 @@ per-module control ledger the phases refer to.
   hang cost seven commits precisely because `NtQueryObject`'s blocking behavior
   was never classified up front — the spike-first rule can't trigger on a hazard
   no one wrote down.
+- **For each FFI item, record a fourth property: does a *vetted, maintained, safe*
+  crate already wrap it? — and if so, make that crate the default backend, hand-FFI
+  a feature-gated escape hatch** (LESSONS #18). The prime directive is *safer than
+  the C*, and the safest `unsafe` is the one you never write: a well-audited wrapper
+  crate moves the `unsafe` (and its upstream fuzzing/CI/soak time) out of your tree
+  entirely. M4 was scoped as "the milestone where `unsafe` lives" and budgeted a
+  hand-FFI raw layer; a mid-milestone review found `netdev`/`socket2`/`pcap` already
+  cover interface enumeration, raw L3 send, and L2 capture safely, and the default
+  build shipped with **0 first-party `unsafe`** (11 documented blocks, all in an
+  *optional* `getifaddrs` escape hatch that is off by default). That the review was
+  *user-prompted*, not kit-prompted, is the gap this closes — the safe-crate check
+  belongs in the Phase-0 classification so the next FFI milestone starts
+  safe-crate-first instead of discovering it after writing the `unsafe`. Vet the
+  crate like any dependency (maintained, audited, license/advisory-clean via the
+  supply-chain gate); reserve hand-FFI for the surface no safe crate covers (an
+  Npcap-class driver), and keep it behind a feature flag with a cross-check test
+  against the safe default. This is the **Option-C pattern**; see
+  `ARCHITECTURE-TEMPLATE.md`.
 - Write a one-page **threat model**: trust boundaries (untrusted input, privilege
   transitions, IPC, parsing of external data), and what "secure" means for this
   tool. `SECURITY-CHECKLIST.md` has the template.
@@ -155,7 +173,12 @@ The invariant it encodes:
 target actually links here (winlsof lost time to an MSVC-vs-GNU linker mismatch)
 and that the build directory is not a synced/locked folder (OneDrive locked
 `target\` → `os error 5`). Cheap checks that prevent days of "is it my code or my
-machine?".
+machine?". **Pin the toolchain** so local `cargo fmt`/`clippy` run the exact
+versions CI does: `skeleton/` ships a `rust-toolchain.toml` (exact `channel` +
+`components`), and the CI stable jobs read it (`@master` + pinned `toolchain:`)
+rather than floating `@stable`. A floating stable silently upgrades under you and
+fails the PR on a rustfmt reflow or new clippy lint you never ran — it bit two M4
+slices (LESSONS #16). Bump the pin deliberately, in its own PR.
 
 **Entry criteria:** oracle in place.
 **Exit criteria:** workspace builds; `core` is `forbid(unsafe_code)`; unsafe-audit
@@ -187,6 +210,25 @@ says "stop, document as a platform limit"; (c) on hitting the gate, do a **pivot
 check** — is there an adjacent, reachable goal? (winlsof's ETW spike couldn't get
 the "real FD" but pivoted to extending `-i` to raw/ICMP/AF_UNIX, which shipped).
 A closed sub-goal must not kill the shippable one beside it.
+
+**A spike's decision gate must include *teardown*, not just steady-state — and the
+stand-in must match the real API's *blocking/cancellation* semantics, not just its
+data-flow** (LESSONS #17). A liveness spike naturally measures the hot path (does a
+frame arrive? how fast? does it busy-spin?) and can pass every such criterion while
+the design still deadlocks *on shutdown* — the state the throughput test never
+enters. M4's pcap-in-async spike (`SPIKES.md` M4-1) gated on latency, no-busy-spin,
+and no-readiness-fd, all met by a **BlockingThread → channel** design with an RAII
+`Drop`-join; it shipped a hang because a blocking-capture thread against an *idle*
+link cannot be woken for its join, and the spike's `std`-socket stand-in silently
+had cancellation the real API (libpcap's blocking read ignores its timeout on an
+idle link) lacks. So: (1) every spike of a resource-holding or blocking-in-a-thread
+design must add a gate criterion **"prove it can be *stopped while idle*, cleanly,
+within a bounded time"** — exercise `Drop`/cancel with no traffic in flight, not
+just under load; and (2) when a spike uses a stand-in for the real API, the stand-in
+must reproduce the property under test — for a *liveness* spike that means matching
+**how the call blocks and how it unblocks** (a `std` `recv` is not a model of
+`pcap_next_ex` blocking mode). If you can't model teardown faithfully, the spike is
+not discharged until the real resource's teardown is tested (see gate 4 below).
 
 Then the loop — each step is a CI-enforced gate:
 
@@ -285,6 +327,21 @@ Then the loop — each step is a CI-enforced gate:
    loop the safe default with work still outstanding is **retry/continue (re-poll,
    sleep-then-continue), never `break`** — reserve `break` for a proven-terminal
    condition (queue empty), not for "confused."
+   **A `sys` module whose real path is *privileged* is invisible to the differential
+   backstop — give it a real-resource *teardown* test in its own slice** (LESSONS
+   #17). The differential harness's per-case timeout is the kit's liveness backstop
+   (gate 2), but it runs *unprivileged* so it never exercises a raw-socket/capture
+   path — that code executes only under `CAP_NET_RAW`/root, outside every automated
+   gate. M4's capture module passed all six gates against a **mock** `PacketSource`
+   and merged (#47); the shutdown deadlock lived in the *real* pcap source's
+   `Drop`-join and only surfaced two slices later when a root-only end-to-end test
+   first wired the real source in (#48) — the same "green gate is a floor" trap as
+   LESSONS #15, but for teardown liveness instead of a fuzz branch. So for any `sys`
+   module that owns a blocking OS resource, add a **`#[ignore]` root-only test that
+   opens the *real* resource and asserts clean shutdown while idle** (construct →
+   no traffic → `Drop`/`stop()` returns within a bounded time), and run it in that
+   module's own slice — a mock backend proves the channel plumbing, never the
+   teardown of the thing the mock stands in for.
 5. **Unsafe-audit** (`harnesses/unsafe-audit/audit_unsafe.py`): every `unsafe`
    block has a `// SAFETY:` justifying its invariants — **hard fail** otherwise.
 6. **Review & merge.** Update the `progress` table (the module advances

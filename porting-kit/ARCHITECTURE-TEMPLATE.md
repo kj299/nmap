@@ -45,6 +45,18 @@ workspace/
   fuzz gate enforces "never panic on arbitrary bytes."
 - **Dependencies are liabilities.** Each one must clear the supply-chain gate.
   A rewrite for safety that pulls unsafety in through the dep tree has failed.
+- **Safe-crate-first for FFI (the Option-C pattern).** Before hand-writing FFI in
+  `sys`, check whether a vetted, maintained crate already wraps that OS surface —
+  the safest `unsafe` is the one you never write, because its invariants are
+  upheld (and fuzzed, and soaked) upstream. The default backend is the safe crate;
+  hand-FFI stays a **feature-gated, audited escape hatch** with a cross-check test
+  against the safe default, reserved for surface no safe crate covers (an
+  Npcap-class driver). nmap's M4 raw layer landed at **0 first-party `unsafe` by
+  default** this way — `netdev`/`socket2`/`pcap` for enumeration/L3-send/L2-capture,
+  a `getifaddrs` escape hatch behind an off-by-default feature. This does not
+  contradict "dependencies are liabilities": a wrapper crate that clears the
+  supply-chain gate and *removes* first-party `unsafe` is a net safety win, not a
+  new liability. Classify this at Phase 0 (PLAYBOOK · Phase 0, LESSONS #18).
 
 ## If your port *is* cross-platform
 

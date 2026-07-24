@@ -150,3 +150,8 @@ test = false
 name = "match_udp"
 path = "fuzz_targets/match_udp.rs"
 test = false
+
+[[bin]]
+name = "match_flag"
+path = "fuzz_targets/match_flag.rs"
+test = false

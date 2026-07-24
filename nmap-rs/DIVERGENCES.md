@@ -395,6 +395,28 @@ the driver-specific choices.
 - [x] `udpscan-single-host-first-slice` (`sys::udpscan`): single host per call, same
       scope as the SYN driver; no output divergence for one target.
 
+## Milestone 4 — TCP flag scans (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`)
+
+One generalized `core::flagscan` + `sys::flagscan`, parametrized by
+`classify::ScanType`, covers all six stateless flag scans (the C spreads them across
+`scan_engine_raw.cc`). The port-state decisions are the already-ledgered
+`core::classify` behavior; these entries cover the shared driver's choices.
+
+- [x] `flagscan-match-on-port-not-sequence` (`core::flagscan`): a flag-scan reply is an
+      RST that (per RFC 793) takes its sequence from our *ack* field and carries no ack
+      of its own, so — unlike a SYN/ACK — it cannot reflect our sequence. The matcher
+      keys purely on the reply's destination port (= our per-attempt encoded source
+      port); the pcap BPF filter scopes capture to that range, excluding our own
+      outgoing probes. No behavioral divergence; a structural note on how matching
+      differs from the SYN scan.
+- [x] `flagscan-icmp-match-deferred` (`core::flagscan`): like the SYN scan, ICMP-derived
+      *filtered* is left to the no-response default (`default_port_state`) rather than
+      matching the ICMP-embedded probe; the UDP scan's `embedded_udp_ports` machinery
+      can back-fill it. Observable only when a host answers with ICMP fast enough to beat
+      the retransmit timeout.
+- [x] `flagscan-single-host-first-slice` (`sys::flagscan`): single host per call, same
+      scope as the SYN/UDP drivers.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

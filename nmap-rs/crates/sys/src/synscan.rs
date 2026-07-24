@@ -199,6 +199,67 @@ where
     host
 }
 
+/// Run a SYN scan over several targets, doing route/source selection, per-scan key
+/// generation, and pcap capture setup — the CLI-facing entry point (feature `pcap`).
+///
+/// Returns one [`Host`] per target in order (a `Down` placeholder for an IPv6 target
+/// or one with no route, keeping the result aligned with the input). A
+/// `PermissionDenied` from opening the raw socket propagates so the caller can fall
+/// back to a connect scan.
+///
+/// # Errors
+/// Propagates a raw-socket / capture-open error (notably `PermissionDenied` without
+/// `CAP_NET_RAW`) and any interface-enumeration error.
+#[cfg(feature = "pcap")]
+pub async fn syn_scan_targets(
+    targets: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_parallelism: usize,
+) -> std::io::Result<nmap_core::model::ScanResults> {
+    use crate::capture::pcap_source::PcapSource;
+    use crate::rawio::RawIpv4Sender;
+    use crate::route::{random_scan_keys, route_for};
+    use nmap_core::model::ScanResults;
+
+    // Probe raw-socket capability up front; PermissionDenied here is the fallback signal.
+    drop(RawIpv4Sender::new()?);
+
+    let mut results = ScanResults::new();
+    for &ip in targets {
+        let IpAddr::V4(v4) = ip else {
+            // IPv6 SYN scan awaits the IPv6 receive path (validate-ipv4-only-for-now).
+            results.hosts.push(Host::new(ip, HostState::Down));
+            continue;
+        };
+        let Some(route) = route_for(v4)? else {
+            results.hosts.push(Host::new(ip, HostState::Down));
+            continue;
+        };
+        let (seqmask, base_port) = random_scan_keys();
+        let config = SynScanConfig {
+            ports: ports.to_vec(),
+            template,
+            max_parallelism,
+            eth_included: route.eth_included,
+            base_port,
+            seqmask,
+        };
+        let sender = RawIpv4Sender::new()?;
+        let bpf = format!(
+            "tcp and dst host {} and dst portrange {}-{}",
+            route.src,
+            base_port,
+            base_port.saturating_add(16)
+        );
+        let source = PcapSource::open(&route.iface, 65535, 100, Some(&bpf))?;
+        results
+            .hosts
+            .push(syn_scan(route.src, v4, sender, source, &config).await);
+    }
+    Ok(results)
+}
+
 /// Microseconds since the scan started, saturating into `i64`.
 fn now_us(start: Instant) -> i64 {
     i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)

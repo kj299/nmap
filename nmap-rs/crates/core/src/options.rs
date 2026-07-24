@@ -15,10 +15,26 @@
 const MAX_LEVEL: u8 = 10;
 
 /// Parsed command-line configuration. Grows toward the full `NmapOps` surface.
+/// Which scan technique to run. `-sT` connect (unprivileged, the default) or the
+/// privileged raw scans `-sS` (SYN) / `-sU` (UDP), which fall back to connect when
+/// the process lacks raw-socket capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScanKind {
+    /// `-sT`: unprivileged TCP connect scan.
+    #[default]
+    Connect,
+    /// `-sS`: raw TCP SYN (half-open) scan.
+    Syn,
+    /// `-sU`: UDP scan.
+    Udp,
+}
+
 // No `Eq`: `min_rate`/`max_rate` are `f64` (only `PartialEq`). Equality is used
 // solely by tests via `assert_eq!`, which needs only `PartialEq`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunConfig {
+    /// Scan technique (`-sT`/`-sS`/`-sU`); defaults to connect.
+    pub scan: ScanKind,
     /// Verbosity level (nmap `o.verbose`, 0..=10).
     pub verbose: u8,
     /// Debugging level (nmap `o.debugging`, 0..=10).
@@ -58,6 +74,7 @@ pub struct RunConfig {
 impl Default for RunConfig {
     fn default() -> RunConfig {
         RunConfig {
+            scan: ScanKind::Connect,
             verbose: 0,
             debugging: 0,
             show_version: false,
@@ -202,7 +219,9 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             }
             "-6" => cfg.ipv6 = true,
             "-Pn" => cfg.assume_up = true,
-            "-sT" => {} // connect scan — the only scan type in M1 (the default)
+            "-sT" => cfg.scan = ScanKind::Connect,
+            "-sS" => cfg.scan = ScanKind::Syn,
+            "-sU" => cfg.scan = ScanKind::Udp,
             "-sV" => cfg.service_version = true,
             "--version-light" => {
                 cfg.service_version = true;
@@ -395,6 +414,16 @@ mod tests {
         assert_eq!(c.port_spec.as_deref(), Some("1-100"));
         assert_eq!(c.targets, vec!["scanme.nmap.org"]);
         assert!(c.unrecognized.is_empty());
+    }
+
+    #[test]
+    fn scan_technique_selection() {
+        assert_eq!(cfg(&["10.0.0.1"]).scan, ScanKind::Connect); // default
+        assert_eq!(cfg(&["-sT", "10.0.0.1"]).scan, ScanKind::Connect);
+        assert_eq!(cfg(&["-sS", "10.0.0.1"]).scan, ScanKind::Syn);
+        assert_eq!(cfg(&["-sU", "10.0.0.1"]).scan, ScanKind::Udp);
+        // Last technique flag wins, like nmap's getopt.
+        assert_eq!(cfg(&["-sS", "-sT", "10.0.0.1"]).scan, ScanKind::Connect);
     }
 
     #[test]

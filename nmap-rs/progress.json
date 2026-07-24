@@ -22,6 +22,7 @@
     "core::probedb": "unsafe_audited",
     "core::recv_validate": "unsafe_audited",
     "core::servicescan": "unsafe_audited",
+    "core::synscan": "unsafe_audited",
     "core::versioninfo": "unsafe_audited",
     "engine": "differential",
     "model": "differential",
@@ -33,6 +34,7 @@
     "sys::netif": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
     "sys::servicescan": "unsafe_audited",
+    "sys::synscan": "unsafe_audited",
     "targets": "unsafe_audited",
     "timing": "differential"
   }

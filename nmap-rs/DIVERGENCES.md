@@ -325,6 +325,46 @@ lands, `[x]` = confirmed by that module's gates.
       on the wire. The port's parser only exposes fields actually present (length-
       checked), returning `None` otherwise. Observable only on truncated/hostile input.
 
+## Milestone 4 — SYN scan driver (`-sS`)
+
+The first raw scan type, wiring `core::build` (probe) + `sys::rawio` (send) +
+`sys::capture` (receive) + `core::recv_validate` + `core::classify` into a
+bounded-concurrency scan over the pure `core::engine::HostScheduler`. The port-state
+*decisions* are the already-ledgered `core::classify` behavior; these entries cover
+the driver-specific choices.
+
+- [x] `synscan-icmp-match-deferred` (`core::synscan`): the C maps an ICMP
+      unreachable/time-exceeded whose embedded packet is one of our probes to
+      `PORT_FILTERED` (`scan_engine_raw.cc:1888`). This first slice matches **TCP**
+      replies (SYN/ACK → open, RST → closed) and leaves ICMP-derived *filtered* to the
+      no-response default (`default_port_state(Syn) == Filtered`). Observable only where
+      a host answers a filtered port with an ICMP error *fast enough to beat the
+      retransmit timeout* — the common firewall-drop case is already `Filtered` either
+      way. `classify_icmp` is ported; wiring the embedded-probe match is a follow-up.
+- [x] `synscan-late-reply-no-grace-window` (`sys::synscan`): nmap keeps a probe
+      matchable for `10*min(1s,RTO)` past its timeout (`probeExpireTime`,
+      `scan_engine.cc:525`), so a very late reply can still resolve a port. This driver
+      resolves a probe when its timeout elapses (retransmit or, at the retry cap,
+      `Filtered`) and drops a reply arriving after that. A safe, simpler policy — it can
+      only mislabel a genuinely-open port that answered *after* every retransmission
+      expired as `filtered`, the same conservative direction nmap's own timeout takes.
+- [x] `synscan-bpf-self-probe-filter` (`sys::synscan` + `core::synscan`): on loopback
+      the scanner sees its **own** outgoing SYNs. nmap drops them with an ipid
+      self-probe guard (`scan_engine_raw.cc:1675`); this port instead scopes the pcap
+      BPF filter to `tcp and dst portrange base..base+max_tryno` — a reply's destination
+      is our encoded source port (in range), our own probe's destination is the scanned
+      service port (out of range) — so self-probes never reach the matcher. Behavioral
+      shape, not output: replies delivered are identical.
+- [x] `synscan-single-host-first-slice` (`sys::synscan`, scope): scans one host per
+      call. nmap's `ultra_scan` drives a whole host group through one shared capture,
+      demultiplexed by source address. Deferred to a follow-up, mirroring how the
+      connect scan landed single-host (M1) before the M2 group loop. No output
+      divergence for a single target.
+
+  Inherits `build-explicit-fields-no-magic` (the driver passes `window=1024` and the
+  encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
+  `validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
+
 ## Platform / environment differences
 
 - [x] `rawio-safe-socket2-l3-plus-pcap-l2` (`sys::rawio`, ports the `send_ip_packet*` /

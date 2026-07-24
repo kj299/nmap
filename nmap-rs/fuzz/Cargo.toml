@@ -140,3 +140,8 @@ test = false
 name = "ipid"
 path = "fuzz_targets/ipid.rs"
 test = false
+
+[[bin]]
+name = "match_syn"
+path = "fuzz_targets/match_syn.rs"
+test = false

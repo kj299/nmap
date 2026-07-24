@@ -56,6 +56,24 @@ pub enum PortState {
     Unknown,
 }
 
+impl From<PortState> for crate::model::PortState {
+    /// Bridge the classifier's port state into the result model's `PortState`
+    /// (same seven states, different declaration). This is where a scan driver turns
+    /// a `classify_*` verdict into a value the output model can store.
+    fn from(s: PortState) -> Self {
+        use crate::model::PortState as M;
+        match s {
+            PortState::Open => M::Open,
+            PortState::Closed => M::Closed,
+            PortState::Filtered => M::Filtered,
+            PortState::Unfiltered => M::Unfiltered,
+            PortState::OpenFiltered => M::OpenFiltered,
+            PortState::ClosedFiltered => M::ClosedFiltered,
+            PortState::Unknown => M::Unknown,
+        }
+    }
+}
+
 // TCP flag bits.
 /// SYN flag.
 pub const TH_SYN: u8 = 0x02;

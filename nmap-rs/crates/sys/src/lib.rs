@@ -20,6 +20,7 @@ pub mod netif;
 pub mod rawio;
 pub mod scan;
 pub mod servicescan;
+pub mod synscan;
 
 pub use scan::{connect_scan, ConnectScanConfig};
 pub use servicescan::{service_scan, HostVersions, PortVersion, ServiceScanConfig};

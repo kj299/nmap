@@ -79,6 +79,8 @@ pub enum Reason {
     ConnAccept,
     /// TCP connection refused (RST) → port closed (`ER_CONREFUSED`).
     ConnRefused,
+    /// A raw RST from the peer → port closed (`ER_RESETPEER`, SYN scan's "reset").
+    Reset,
     /// No response within the timeout → filtered (`ER_NORESPONSE`).
     NoResponse,
     /// Host administratively unreachable → filtered (`ER_HOSTUNREACH`).
@@ -97,6 +99,7 @@ impl Reason {
         match self {
             Reason::ConnAccept => "syn-ack",
             Reason::ConnRefused => "conn-refused",
+            Reason::Reset => "reset",
             Reason::NoResponse => "no-response",
             Reason::HostUnreach => "host-unreach",
             Reason::NetUnreach => "net-unreach",

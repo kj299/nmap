@@ -28,6 +28,7 @@ pub mod ports;
 pub mod probedb;
 pub mod recv_validate;
 pub mod servicescan;
+pub mod synscan;
 pub mod targets;
 pub mod timing;
 pub mod trace;

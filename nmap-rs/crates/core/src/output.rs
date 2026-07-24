@@ -158,16 +158,23 @@ fn render_host_normal(
     }
     let _ = writeln!(out, "Host is up.");
 
-    // "Not shown" summary of ignored states.
+    // "Not shown" summary of ignored states. The protocol label follows the host's
+    // ports (a `-sU` scan reports "udp ports"), defaulting to tcp.
     let ignored = ignored_states(host);
     if !ignored.is_empty() {
+        let proto = host
+            .ports
+            .first()
+            .map_or(Protocol::Tcp, |p| p.protocol)
+            .as_str();
         let parts: Vec<String> = ignored
             .iter()
             .map(|(st, n)| {
                 format!(
-                    "{} {} tcp ports ({})",
+                    "{} {} {} ports ({})",
                     n,
                     st.as_str(),
+                    proto,
                     ignored_reason(host, *st)
                 )
             })

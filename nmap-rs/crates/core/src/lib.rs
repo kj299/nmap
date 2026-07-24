@@ -32,6 +32,7 @@ pub mod synscan;
 pub mod targets;
 pub mod timing;
 pub mod trace;
+pub mod udpscan;
 pub mod versioninfo;
 
 pub use congestion::{PerfVars, TimingVals};

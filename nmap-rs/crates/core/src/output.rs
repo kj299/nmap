@@ -93,12 +93,17 @@ fn ignored_states(host: &Host) -> Vec<(PortState, usize)> {
     out
 }
 
-/// The reason token nmap prints for an ignored-state summary.
-fn ignored_reason(state: PortState) -> &'static str {
-    match state {
-        PortState::Closed => "conn-refused",
-        _ => "no-response",
-    }
+/// The reason token nmap prints for an ignored-state summary. Taken from a real port
+/// of that state so it is correct across scan types (a connect scan's closed ports
+/// carry `conn-refused`, a SYN scan's carry `reset`) rather than a hardcoded guess.
+fn ignored_reason(host: &Host, state: PortState) -> &'static str {
+    host.ports.iter().find(|p| p.state == state).map_or_else(
+        || match state {
+            PortState::Closed => "conn-refused",
+            _ => "no-response",
+        },
+        |p| p.reason.as_str(),
+    )
 }
 
 /// Render the full normal (default, human-readable) report.
@@ -158,7 +163,14 @@ fn render_host_normal(
     if !ignored.is_empty() {
         let parts: Vec<String> = ignored
             .iter()
-            .map(|(st, n)| format!("{} {} tcp ports ({})", n, st.as_str(), ignored_reason(*st)))
+            .map(|(st, n)| {
+                format!(
+                    "{} {} tcp ports ({})",
+                    n,
+                    st.as_str(),
+                    ignored_reason(host, *st)
+                )
+            })
             .collect();
         let _ = writeln!(out, "Not shown: {}", parts.join(", "));
     }

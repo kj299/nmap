@@ -18,6 +18,7 @@ pub mod capture;
 pub mod net;
 pub mod netif;
 pub mod rawio;
+pub mod route;
 pub mod scan;
 pub mod servicescan;
 pub mod synscan;

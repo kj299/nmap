@@ -365,6 +365,27 @@ the driver-specific choices.
   encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
   `validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
 
+- [x] `route-minimal-onlink-then-gateway` (`sys::route`, minimal port of
+      `nmap_route_dst`): source/interface selection tries loopback → an interface whose
+      subnet contains the target → the first up interface with a default gateway, rather
+      than a full longest-prefix routing-table lookup. Correct for the common
+      single-subnet / default-route host; a full route table read is a later
+      refinement. The capture is assumed to carry a link header (`eth_included = true`),
+      correct for Linux `lo` and Ethernet — the datalinks the parser handles.
+- [x] `raw-scan-pcap-feature-gated-fallback` (`cli`): `-sS` needs the `pcap` capture
+      backend (a build-time libpcap/Npcap dependency) and `CAP_NET_RAW`. When the build
+      lacks `pcap`, or the process lacks privilege, the CLI **prints a notice and falls
+      back to the connect scan** rather than failing — the "degrade gracefully, never
+      hard-fail" posture from the plan. nmap similarly needs libpcap and root for `-sS`.
+
+## Milestone 4 — CLI scan-technique selection
+
+- [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"
+      ignored-state summary now takes its reason token from a real port of that state
+      (a connect scan's closed ports carry `conn-refused`, a SYN scan's carry `reset`)
+      instead of the M1 hardcoded `closed → conn-refused`. A fidelity fix — nmap prints
+      the actual reason — observable as `Not shown: N closed tcp ports (reset)` under `-sS`.
+
 ## Platform / environment differences
 
 - [x] `rawio-safe-socket2-l3-plus-pcap-l2` (`sys::rawio`, ports the `send_ip_packet*` /

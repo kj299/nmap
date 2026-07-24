@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
-use nmap_core::options::RunConfig;
+use nmap_core::options::{RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
@@ -77,19 +77,13 @@ async fn main() -> ExitCode {
     // observed RTTs and paces probes by the congestion window, so the CLI passes
     // the timing *template* rather than a fixed timeout. (`-T` selection is a
     // later CLI refinement; the default is Normal / -T3.)
-    let timing = TimingParams::default();
-    let scan_cfg = ConnectScanConfig {
-        ports,
-        template: TimingTemplate::Normal,
-        max_parallelism: timing.max_parallelism as usize,
-        min_rate: cfg.min_rate,
-        max_rate: cfg.max_rate,
-    };
+    let max_par = TimingParams::default().max_parallelism as usize;
+    let template = TimingTemplate::Normal;
 
     let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
     let started = now_string();
     let clock = Instant::now();
-    let mut results = connect_scan(&ips, &scan_cfg).await;
+    let mut results = run_scan(&cfg, &ips, &ports, template, max_par).await;
     let elapsed = clock.elapsed().as_secs_f64();
 
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
@@ -119,6 +113,83 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Dispatch to the requested scan technique. The privileged raw scans fall back to a
+/// connect scan when unavailable (no privilege, or a build without `pcap`).
+async fn run_scan(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ScanResults {
+    match cfg.scan {
+        ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
+        ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par).await,
+        ScanKind::Udp => {
+            eprintln!(
+                "nmap-rs: -sU (UDP scan) is not yet implemented; running a connect scan (-sT)"
+            );
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+    }
+}
+
+/// Assemble a connect-scan config from the run config and resolved ports.
+fn connect_cfg(
+    cfg: &RunConfig,
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ConnectScanConfig {
+    ConnectScanConfig {
+        ports: ports.to_vec(),
+        template,
+        max_parallelism: max_par,
+        min_rate: cfg.min_rate,
+        max_rate: cfg.max_rate,
+    }
+}
+
+/// Run a `-sS` SYN scan, falling back to a connect scan on missing privilege or setup
+/// failure (built with `pcap`).
+#[cfg(feature = "pcap")]
+async fn syn_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ScanResults {
+    match nmap_sys::synscan::syn_scan_targets(ips, ports, template, max_par).await {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "nmap-rs: -sS requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
+            );
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+        Err(e) => {
+            eprintln!("nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)");
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+    }
+}
+
+/// Without the `pcap` feature there is no raw-scan backend; `-sS` runs a connect scan.
+#[cfg(not(feature = "pcap"))]
+async fn syn_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ScanResults {
+    eprintln!(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)"
+    );
+    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
 }
 
 /// Run `-sV` over every open TCP port and merge the results back into `results`.
@@ -230,9 +301,12 @@ fn printable_escape(bytes: &[u8]) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: nmap-rs [-sT] [-sV [--version-intensity <0-9>|--version-light|--version-all]]\n              [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
+        "Usage: nmap-rs [-sT|-sS] [-sV [--version-intensity <0-9>|--version-light|--version-all]]\n              [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
     );
-    println!("  Unprivileged TCP connect scan (-sT) + service/version detection (-sV).");
+    println!("  TCP connect scan (-sT, default) or raw SYN scan (-sS, needs root +");
+    println!(
+        "  a --features pcap build; falls back to -sT otherwise), plus -sV version detection."
+    );
 }
 
 /// Choose the TCP ports to scan.

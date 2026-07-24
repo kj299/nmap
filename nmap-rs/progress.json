@@ -33,6 +33,7 @@
     "sys::capture": "unsafe_audited",
     "sys::netif": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
+    "sys::route": "unsafe_audited",
     "sys::servicescan": "unsafe_audited",
     "sys::synscan": "unsafe_audited",
     "targets": "unsafe_audited",

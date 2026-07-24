@@ -18,5 +18,12 @@ nmap-sys = { path = "../sys" }
 # Async runtime to drive the scan; the socket/DNS primitives live in nmap-sys.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
+[features]
+default = []
+# Enable the privileged raw scans (`-sS`/`-sU`) by pulling in the libpcap/Npcap
+# capture backend. Off by default so the connect-scan build needs no libpcap at
+# build time; without it, `-sS`/`-sU` warn and fall back to the connect scan.
+pcap = ["nmap-sys/pcap"]
+
 [lints]
 workspace = true

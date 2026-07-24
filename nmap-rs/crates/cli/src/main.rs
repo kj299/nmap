@@ -127,12 +127,7 @@ async fn run_scan(
     match cfg.scan {
         ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
         ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par).await,
-        ScanKind::Udp => {
-            eprintln!(
-                "nmap-rs: -sU (UDP scan) is not yet implemented; running a connect scan (-sT)"
-            );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
-        }
+        ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par).await,
     }
 }
 
@@ -188,6 +183,47 @@ async fn syn_or_fallback(
 ) -> ScanResults {
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)"
+    );
+    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+}
+
+/// Run a `-sU` UDP scan, falling back to a connect scan on missing privilege or setup
+/// failure (built with `pcap`). A UDP scan reports UDP ports; the connect fallback can
+/// only report TCP, so the fallback is a genuine degradation (noted to the user).
+#[cfg(feature = "pcap")]
+async fn udp_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ScanResults {
+    match nmap_sys::udpscan::udp_scan_targets(ips, ports, template, max_par).await {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "nmap-rs: -sU requires root/CAP_NET_RAW; falling back to a TCP connect scan (-sT)"
+            );
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+        Err(e) => {
+            eprintln!("nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)");
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+    }
+}
+
+/// Without the `pcap` feature there is no raw-scan backend; `-sU` runs a connect scan.
+#[cfg(not(feature = "pcap"))]
+async fn udp_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+) -> ScanResults {
+    eprintln!(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
     );
     connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
 }

@@ -378,6 +378,23 @@ the driver-specific choices.
       back to the connect scan** rather than failing — the "degrade gracefully, never
       hard-fail" posture from the plan. nmap similarly needs libpcap and root for `-sS`.
 
+## Milestone 4 — UDP scan driver (`-sU`)
+
+- [x] `udpscan-empty-payload` (`core::udpscan`): the UDP probe carries an **empty
+      payload**. nmap ships protocol-specific payloads for well-known UDP ports
+      (`payload.cc`) that coax replies from more services; without them some genuinely
+      open UDP ports read as `open|filtered` instead of `open`. A safe, less-complete
+      first slice — the payload DB is a follow-up. No false *closed*/*open* is produced;
+      the divergence only widens the `open|filtered` bucket.
+- [x] `udpscan-icmp-embedded-match` (`core::udpscan`): the UDP matcher parses the
+      **IPv4/UDP packet quoted inside an ICMP error** to tie a port-unreachable (→
+      closed) or other unreachable/time-exceeded (→ filtered) back to the probe it
+      answers — the embedded-probe match `synscan` deferred (`synscan-icmp-match-deferred`).
+      Bounds-checked and fuzzed (the nested parse is a second untrusted-input surface).
+      This machinery can back-fill the SYN scan's ICMP path in a later slice.
+- [x] `udpscan-single-host-first-slice` (`sys::udpscan`): single host per call, same
+      scope as the SYN driver; no output divergence for one target.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

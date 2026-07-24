@@ -15,6 +15,7 @@ pub mod checksum;
 pub mod classify;
 pub mod congestion;
 pub mod engine;
+pub mod flagscan;
 pub mod headers;
 pub mod ipid;
 pub mod log;

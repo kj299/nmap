@@ -15,6 +15,7 @@
 //! 0 for this crate.
 
 pub mod capture;
+pub mod flagscan;
 pub mod net;
 pub mod netif;
 pub mod rawio;

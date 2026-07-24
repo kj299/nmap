@@ -124,10 +124,25 @@ async fn run_scan(
     template: TimingTemplate,
     max_par: usize,
 ) -> ScanResults {
+    use nmap_core::classify::ScanType;
     match cfg.scan {
         ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
         ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par).await,
         ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par).await,
+        ScanKind::Ack => flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Ack).await,
+        ScanKind::Window => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Window).await
+        }
+        ScanKind::Maimon => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Maimon).await
+        }
+        ScanKind::Fin => flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Fin).await,
+        ScanKind::Null => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Null).await
+        }
+        ScanKind::Xmas => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Xmas).await
+        }
     }
 }
 
@@ -221,6 +236,48 @@ async fn udp_or_fallback(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+) -> ScanResults {
+    eprintln!(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
+    );
+    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+}
+
+/// Run a stateless TCP flag scan (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`), falling back to
+/// a connect scan on missing privilege or setup failure (built with `pcap`).
+#[cfg(feature = "pcap")]
+async fn flag_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+    scan: nmap_core::classify::ScanType,
+) -> ScanResults {
+    match nmap_sys::flagscan::flag_scan_targets(scan, ips, ports, template, max_par).await {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "nmap-rs: this scan requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
+            );
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+        Err(e) => {
+            eprintln!("nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)");
+            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+        }
+    }
+}
+
+/// Without the `pcap` feature there is no raw-scan backend; the flag scans run a connect scan.
+#[cfg(not(feature = "pcap"))]
+async fn flag_or_fallback(
+    cfg: &RunConfig,
+    ips: &[IpAddr],
+    ports: &[u16],
+    template: TimingTemplate,
+    max_par: usize,
+    _scan: nmap_core::classify::ScanType,
 ) -> ScanResults {
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
@@ -337,12 +394,12 @@ fn printable_escape(bytes: &[u8]) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: nmap-rs [-sT|-sS] [-sV [--version-intensity <0-9>|--version-light|--version-all]]\n              [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
+        "Usage: nmap-rs [-sT|-sS|-sU|-sA|-sW|-sM|-sF|-sN|-sX] [-sV [...]]\n              [-p <ports>] [-6] [-Pn] [-oN|-oX|-oG <file|->] [-v|-d] <target...>"
     );
-    println!("  TCP connect scan (-sT, default) or raw SYN scan (-sS, needs root +");
-    println!(
-        "  a --features pcap build; falls back to -sT otherwise), plus -sV version detection."
-    );
+    println!("  Scan types: -sT connect (default) | -sS SYN | -sU UDP | -sA ACK | -sW Window");
+    println!("              | -sM Maimon | -sF FIN | -sN Null | -sX Xmas. The raw scans need");
+    println!("              root + a --features pcap build; they fall back to -sT otherwise.");
+    println!("  Plus -sV service/version detection.");
 }
 
 /// Choose the TCP ports to scan.

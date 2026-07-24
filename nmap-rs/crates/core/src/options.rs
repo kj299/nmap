@@ -27,6 +27,18 @@ pub enum ScanKind {
     Syn,
     /// `-sU`: UDP scan.
     Udp,
+    /// `-sA`: TCP ACK scan (firewall-rule mapping).
+    Ack,
+    /// `-sW`: TCP Window scan.
+    Window,
+    /// `-sM`: TCP Maimon scan.
+    Maimon,
+    /// `-sF`: TCP FIN scan.
+    Fin,
+    /// `-sN`: TCP Null scan.
+    Null,
+    /// `-sX`: TCP Xmas scan.
+    Xmas,
 }
 
 // No `Eq`: `min_rate`/`max_rate` are `f64` (only `PartialEq`). Equality is used
@@ -222,6 +234,12 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-sT" => cfg.scan = ScanKind::Connect,
             "-sS" => cfg.scan = ScanKind::Syn,
             "-sU" => cfg.scan = ScanKind::Udp,
+            "-sA" => cfg.scan = ScanKind::Ack,
+            "-sW" => cfg.scan = ScanKind::Window,
+            "-sM" => cfg.scan = ScanKind::Maimon,
+            "-sF" => cfg.scan = ScanKind::Fin,
+            "-sN" => cfg.scan = ScanKind::Null,
+            "-sX" => cfg.scan = ScanKind::Xmas,
             "-sV" => cfg.service_version = true,
             "--version-light" => {
                 cfg.service_version = true;
@@ -424,6 +442,13 @@ mod tests {
         assert_eq!(cfg(&["-sU", "10.0.0.1"]).scan, ScanKind::Udp);
         // Last technique flag wins, like nmap's getopt.
         assert_eq!(cfg(&["-sS", "-sT", "10.0.0.1"]).scan, ScanKind::Connect);
+        // The stateless TCP flag scans.
+        assert_eq!(cfg(&["-sA", "10.0.0.1"]).scan, ScanKind::Ack);
+        assert_eq!(cfg(&["-sW", "10.0.0.1"]).scan, ScanKind::Window);
+        assert_eq!(cfg(&["-sM", "10.0.0.1"]).scan, ScanKind::Maimon);
+        assert_eq!(cfg(&["-sF", "10.0.0.1"]).scan, ScanKind::Fin);
+        assert_eq!(cfg(&["-sN", "10.0.0.1"]).scan, ScanKind::Null);
+        assert_eq!(cfg(&["-sX", "10.0.0.1"]).scan, ScanKind::Xmas);
     }
 
     #[test]

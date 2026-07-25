@@ -165,3 +165,8 @@ test = false
 name = "osdb_parse"
 path = "fuzz_targets/osdb_parse.rs"
 test = false
+
+[[bin]]
+name = "osdb_score"
+path = "fuzz_targets/osdb_score.rs"
+test = false

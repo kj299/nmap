@@ -589,6 +589,55 @@ it is parsed before any scanning happens — the same threat-model boundary
       the record's other tests, which loses less detection capability for the same input.
       Unreachable on the shipped file.
 
+## Milestone 5 — the fingerprint match scorer
+
+`core::osdb::score` ports `AVal_match`, `compare_fingerprints` and `match_fingerprint`
+from `osscan.cc`. Both inputs are attacker-influenced: the reference database comes from
+`--osscandb`, and the observed fingerprint is assembled from probe responses the target
+host chooses freely. Verified against the shipped database with a concrete Linux
+observation — a perfect 1.0 on `Linux 3.2 - 4.14` with a coherent ranking behind it —
+plus the early-exit invariant checked over all 6,108 records (`osdb_score_corpus.rs`),
+and fuzzed (`osdb_score`, 3.5M runs).
+
+- [x] `osdb-score-admits-zero-without-aborting` (`core::osdb::score`): the C inserts a
+      new match by scanning its fixed 36-slot array for a slot whose accuracy is
+      *strictly less* than the new score, and `fatal()`s — killing the process — if it
+      finds none. A record scoring exactly `0.0` finds none, and is admitted whenever the
+      threshold is `0.0` (since `0.0 >= 0.0` passes the entrance test). nmap's own callers
+      all pass `OSSCAN_GUESS_THRESHOLD` (0.85), so this is not reachable from the C CLI
+      today, but it is reachable through the function's own documented interface. This
+      port appends instead, which is the same placement without the abort — exercised
+      against the real database by `a_zero_threshold_admits_everything_without_aborting`.
+- [x] `osdb-score-missing-matchpoints-degrades` (`core::osdb::score`): the C reaches
+      `DB->MatchPoints->getTestDef()` with no null check, so scoring against a database
+      whose `MatchPoints` block is missing or was rejected is a null-pointer dereference.
+      Here an absent block scores as an all-zero weight table: every attribute is worth
+      nothing, nothing clears the threshold, and the answer is `NoMatches`. Losing OS
+      detection on a broken database is the right failure; crashing mid-scan is not.
+- [x] `osdb-score-out-of-range-threshold-clamped` (`core::osdb::score`): the C asserts
+      `0 <= threshold <= 1` in `match_fingerprint` but not in `compare_fingerprints`,
+      which computes `unsigned long max_mismatch = (1.0 - threshold) * numprints`. A
+      threshold above 1 makes that product negative, and converting a negative double to
+      an unsigned integer type is undefined behaviour. Both entry points clamp here (and
+      map `NaN` to `0.0`), so an out-of-range threshold is merely useless.
+- [x] `osdb-score-negative-weights-unrepresentable` (`core::osdb::score`): `AVal_match`
+      `fatal()`s on a negative point value. Our match-point weights are `u32`, so a
+      negative weight cannot be represented and the check has nothing to catch — the
+      parser rejects non-positive-integer point values at the source
+      (`osdb-parse-degrade`).
+- [x] `osdb-score-early-exit-is-not-a-lower-bound` (`core::osdb::score`): **not a
+      divergence — a documented C property this port reproduces exactly**, recorded
+      because it is easy to get wrong. `compare_fingerprints` stops once the lost weight
+      exceeds `(1 - threshold) * num_points` and returns the partial ratio. That value is
+      guaranteed strictly below `threshold`, but it is *not* the record's true accuracy
+      and *not* a lower bound on it — abandoning the remaining tests discards their
+      mismatches as well as their matches, so the partial ratio can land above the exact
+      one (observed on the shipped database: 0.80530 returned where the exact score is
+      0.80527). It is therefore only meaningful as "did not clear the bar", and two
+      rejected records must never be ranked against each other by it. `match_fingerprint`
+      is unaffected: every record it *keeps* was scored without the early exit firing, so
+      the reported list is exact. The corpus gate asserts this over all 6,108 records.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

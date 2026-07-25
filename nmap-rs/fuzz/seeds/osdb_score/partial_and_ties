@@ -1,0 +1,19 @@
+MatchPoints
+SEQ(SP=25%GCD=75)
+T1(R=100%DF=20)
+
+Fingerprint OS A
+SEQ(SP=1-9%GCD=1)
+T1(R=Y%DF=Y)
+
+Fingerprint OS B
+SEQ(SP=1-9%GCD=2)
+T1(R=Y%DF=N)
+
+Fingerprint OS A
+SEQ(SP=5%GCD=1)
+T1(R=Y%DF=Y)
+%%%
+Fingerprint observed
+SEQ(SP=5%GCD=1)
+T1(R=Y%DF=Y)

@@ -19,18 +19,22 @@
 //! capture to that range, so our own outgoing probes (destined to the scanned service
 //! port) never come back as replies.
 //!
+//! An **ICMP** error is a second kind of answer: a type-3/11 message quoting our probe
+//! means the port is *filtered* somewhere on the path. That quote contains our original
+//! packet, so — unlike a RST — our encoded sequence *is* recoverable and is verified.
+//! Handled by [`crate::synscan::match_tcp_icmp_error`], shared with the SYN scan because
+//! the quote-matching rules are identical.
+//!
 //! ## Scope / divergences
 //!
-//! Inherits `validate-ipv4-only-for-now`. ICMP-derived *filtered* is left to the
-//! no-response default (`default_port_state`), as in the SYN scan
-//! (`synscan-icmp-match-deferred`); the UDP scan's embedded-ICMP matcher can back-fill
-//! it later.
+//! Inherits `validate-ipv4-only-for-now`.
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
-use crate::packet_parser::{parse_packet, Header};
+use crate::icmp_quote::ipv4_offset;
+use crate::model::Reason;
 use crate::recv_validate::validate_packet;
-use crate::synscan::{seq32_encode, sport_encode};
+use crate::synscan::{match_tcp_icmp_error, seq32_encode, sport_encode, MatchCtx};
 
 // TCP flag bits not already exported by `classify`.
 const TH_FIN: u8 = 0x01;
@@ -38,6 +42,7 @@ const TH_PSH: u8 = 0x08;
 const TH_URG: u8 = 0x20;
 
 const IPPROTO_TCP: u8 = 6;
+const IPPROTO_ICMP: u8 = 1;
 const TCP_MIN: usize = 20;
 
 /// The window a flag probe advertises. Immaterial to classification (the Window scan
@@ -97,8 +102,13 @@ pub fn build_flag_probe(
 pub struct FlagMatchCtx {
     /// Which flag scan this is — selects the [`classify_tcp`] interpretation.
     pub scan: ScanType,
+    /// Our own source address, for validating the packet quoted in an ICMP error.
+    pub our_ip: [u8; 4],
     /// Base TCP source port (the `tryno == 0` source port).
     pub base_port: u16,
+    /// Per-scan random sequence mask — verifiable in an ICMP quote (which contains our
+    /// original packet) even though a RST reflects no sequence of ours.
+    pub seqmask: u32,
     /// Highest attempt number in flight.
     pub max_tryno: u32,
 }
@@ -115,6 +125,8 @@ pub struct FlagReply {
     pub tryno: u32,
     /// The port state the reply implies (per the scan type).
     pub state: PortState,
+    /// Why: `reset` for a RST, or the specific ICMP unreachable code for an error.
+    pub reason: Reason,
 }
 
 /// Decide whether a captured frame answers one of our flag probes, and to what state.
@@ -129,8 +141,26 @@ pub fn match_flag_response(
     let ip_off = ipv4_offset(frame, eth_included)?;
     let ip = frame.get(ip_off..)?;
     let v = validate_packet(ip).ok()?;
+    if v.proto == IPPROTO_ICMP {
+        // An ICMP error quoting our probe: filtered, whichever flag scan this is. Shared
+        // with the SYN scan, since the quote-matching rules are identical.
+        let sctx = MatchCtx {
+            our_ip: ctx.our_ip,
+            base_port: ctx.base_port,
+            seqmask: ctx.seqmask,
+            max_tryno: ctx.max_tryno,
+        };
+        let m = match_tcp_icmp_error(frame, eth_included, ctx.scan, &sctx)?;
+        return Some(FlagReply {
+            src_ip: m.src_ip,
+            port: m.port,
+            tryno: m.tryno,
+            state: m.state,
+            reason: m.reason,
+        });
+    }
     if v.proto != IPPROTO_TCP {
-        return None; // ICMP-derived filtered deferred to the no-response default.
+        return None;
     }
     let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
     let tcp = ip.get(v.data_offset..)?;
@@ -154,19 +184,9 @@ pub fn match_flag_response(
         port: resp_sport,
         tryno,
         state,
+        // Every flag-scan reply we act on is a RST, whatever state it implies.
+        reason: Reason::Reset,
     })
-}
-
-/// Byte offset of the IPv4 header inside a captured frame.
-fn ipv4_offset(frame: &[u8], eth_included: bool) -> Option<usize> {
-    let mut off = 0usize;
-    for h in parse_packet(frame, eth_included) {
-        if matches!(h, Header::Ipv4(_)) {
-            return Some(off);
-        }
-        off = off.checked_add(h.len())?;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -175,10 +195,15 @@ mod tests {
 
     const TH_RST: u8 = 0x04;
 
+    const US: [u8; 4] = [10, 0, 0, 1];
+    const SEQMASK: u32 = 0x1234_5678;
+
     fn ctx(scan: ScanType) -> FlagMatchCtx {
         FlagMatchCtx {
             scan,
+            our_ip: US,
             base_port: 40000,
+            seqmask: SEQMASK,
             max_tryno: 11,
         }
     }
@@ -204,6 +229,92 @@ mod tests {
         f[12] = 0x08;
         f.extend_from_slice(&seg);
         f
+    }
+
+    /// An ICMP type/code error from `sender`, quoting the flag probe we sent to
+    /// `TARGET`'s `dport` as attempt `tryno`.
+    fn icmp_quoting_our_probe(
+        sender: [u8; 4],
+        icmp_type: u8,
+        icmp_code: u8,
+        scan: ScanType,
+        dport: u16,
+        tryno: u32,
+    ) -> Vec<u8> {
+        const TARGET: [u8; 4] = [10, 0, 0, 2];
+        let spec = Ipv4Spec::new(US, TARGET, 64, 0x1234);
+        let flags = flags_for(scan).unwrap();
+        let probe = build_flag_probe(&spec, 40000, dport, tryno, SEQMASK, flags).unwrap();
+        let mut icmp = vec![icmp_type, icmp_code, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&probe);
+        let mut ip = vec![
+            0x45,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            64,
+            IPPROTO_ICMP,
+            0,
+            0,
+            sender[0],
+            sender[1],
+            sender[2],
+            sender[3],
+            US[0],
+            US[1],
+            US[2],
+            US[3],
+        ];
+        let total = u16::try_from(ip.len().saturating_add(icmp.len())).unwrap();
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&icmp);
+        let mut f = vec![0u8; 14];
+        f[12] = 0x08;
+        f.extend_from_slice(&ip);
+        f
+    }
+
+    #[test]
+    fn icmp_error_makes_every_flag_scan_report_filtered() {
+        // The back-fill's payoff: for FIN/Null/Xmas/Maimon an unanswered port defaults to
+        // open|filtered, so an ICMP error is the only way to learn it is *filtered*.
+        for scan in [
+            ScanType::Ack,
+            ScanType::Window,
+            ScanType::Maimon,
+            ScanType::Fin,
+            ScanType::Null,
+            ScanType::Xmas,
+        ] {
+            let frame = icmp_quoting_our_probe([10, 0, 0, 2], 3, 13, scan, 80, 2);
+            let m = match_flag_response(&frame, true, &ctx(scan))
+                .unwrap_or_else(|| panic!("{scan:?} should match its ICMP error"));
+            assert_eq!(m.state, PortState::Filtered, "{scan:?}");
+            assert_eq!(m.port, 80);
+            assert_eq!(m.tryno, 2);
+            assert_eq!(m.src_ip, [10, 0, 0, 2]);
+        }
+    }
+
+    #[test]
+    fn icmp_error_quoting_someone_elses_probe_is_ignored() {
+        // A quote whose source is not us, faked by rewriting the quoted source address.
+        let mut frame = icmp_quoting_our_probe([10, 0, 0, 2], 3, 3, ScanType::Fin, 80, 0);
+        let quoted_src_off = 14 + 20 + 8 + 12; // eth + outer ip + icmp + quoted ip src
+        frame[quoted_src_off..quoted_src_off + 4].copy_from_slice(&[9, 9, 9, 9]);
+        assert!(match_flag_response(&frame, true, &ctx(ScanType::Fin)).is_none());
+    }
+
+    #[test]
+    fn icmp_error_with_a_foreign_sequence_is_ignored() {
+        let mut frame = icmp_quoting_our_probe([10, 0, 0, 2], 3, 3, ScanType::Ack, 80, 0);
+        let seq_off = 14 + 20 + 8 + 20 + 4;
+        frame[seq_off..seq_off + 4].copy_from_slice(&0x1111_2222u32.to_be_bytes());
+        assert!(match_flag_response(&frame, true, &ctx(ScanType::Ack)).is_none());
     }
 
     #[test]

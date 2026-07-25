@@ -16,6 +16,7 @@
     "core::headers::ipv6": "unsafe_audited",
     "core::headers::tcp": "unsafe_audited",
     "core::headers::udp": "unsafe_audited",
+    "core::icmp_quote": "unsafe_audited",
     "core::ipid": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::packet_parser": "unsafe_audited",

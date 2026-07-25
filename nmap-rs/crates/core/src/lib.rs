@@ -17,6 +17,7 @@ pub mod congestion;
 pub mod engine;
 pub mod flagscan;
 pub mod headers;
+pub mod icmp_quote;
 pub mod ipid;
 pub mod log;
 pub mod matcher;

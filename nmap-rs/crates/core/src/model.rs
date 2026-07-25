@@ -93,6 +93,18 @@ pub enum Reason {
     NetUnreach,
     /// Loopback / local address (`ER_LOCALHOST`).
     Localhost,
+    /// ICMP protocol-unreachable → filtered (`ER_PROTOUNREACH`).
+    ProtoUnreach,
+    /// ICMP destination-unreachable with a code we do not name (`ER_DESTUNREACH`).
+    DestUnreach,
+    /// ICMP net administratively prohibited, code 9 (`ER_NETPROHIBITED`).
+    NetProhibited,
+    /// ICMP host administratively prohibited, code 10 (`ER_HOSTPROHIBITED`).
+    HostProhibited,
+    /// ICMP communication administratively prohibited, code 13 (`ER_ADMINPROHIBITED`).
+    AdminProhibited,
+    /// ICMP time-exceeded → filtered (`ER_TIMEEXCEEDED`).
+    TimeExceeded,
     /// Reason not otherwise classified (`ER_UNKNOWN`).
     Unknown,
 }
@@ -109,6 +121,12 @@ impl Reason {
             Reason::NoResponse => "no-response",
             Reason::HostUnreach => "host-unreach",
             Reason::NetUnreach => "net-unreach",
+            Reason::ProtoUnreach => "proto-unreach",
+            Reason::DestUnreach => "dest-unreach",
+            Reason::NetProhibited => "net-prohibited",
+            Reason::HostProhibited => "host-prohibited",
+            Reason::AdminProhibited => "admin-prohibited",
+            Reason::TimeExceeded => "time-exceeded",
             Reason::Localhost => "localhost-response",
             Reason::Unknown => "unknown",
         }

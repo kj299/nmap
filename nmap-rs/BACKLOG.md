@@ -38,9 +38,10 @@ and IPv6 tracks are approved. Port order, leaf-first:
    differential over all 23 packets), `osprobe::analyze::tcp_option_string` (the
    `O`/`O1`-`O6` encoder, C-oracle differential over 428 cases), and `osprobe::seq`
    (`makeTSeqFP` — SP/GCD/ISR/TI/CI/II/SS/TS, C-oracle differential over 354 cases).
-   Remaining: the per-reply attribute extraction in `processT1_7Resp` /
-   `processTEcnResp` / `processTUdpResp` / `processTIcmpResp` / `makeTWinFP`, which is
-   mechanical field-reading by comparison.
+   `osprobe::tcpreply` (`processT1_7Resp` / `processTEcnResp` / `processTOpsResp` /
+   `processTWinResp` plus the `T`/`TG` post-pass from `makeFP`). Remaining: the two
+   ICMP-shaped extractors — `processTUdpResp` (the `U1` test, which also yields the hop
+   distance that resolves `T`) and `processTIcmpResp` (the `IE` test).
 6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.
 7. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.

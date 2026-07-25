@@ -794,6 +794,37 @@ analyses and 215 timestamp analyses, all matching. IP-ID classification is cover
       unpredictable. `SP` is therefore not a pure function of the rate ratios, and the
       unit test `the_gcd_is_divided_out_only_when_it_is_large` pins both sides.
 
+### Response analysis — per-reply TCP attributes
+
+`core::osprobe::tcpreply` ports `processT1_7Resp`, `processTEcnResp`, `processTOpsResp`,
+`processTWinResp` and the `T`/`TG` post-pass from `makeFP`. Fuzzed
+(`osprobe_tcpreply`, 2.6M runs).
+
+- [x] `tcpreply-t-and-tg-are-exclusive` (`core::osprobe::tcpreply`): **not a divergence** —
+      recorded because the two-stage handling is easy to miss and silently wrong if you
+      do. Per-reply extraction stores the **observed** TTL in `T`, which is *not* what the
+      database holds. A post-pass then resolves it exactly one of two ways: with a known
+      hop distance (from the `U1` probe's ICMP quote) `T` becomes
+      `observed + distance - 1`, the reconstructed initial TTL; without one, `TG` gets the
+      rounded guess (32/64/128/255) and **`T` is deleted**, because an uncorrected
+      observed TTL would match entries for a completely different initial value. Porting
+      only the extraction would leave every test carrying a raw observed TTL that
+      essentially never matches. The fuzz target asserts the two stay mutually exclusive
+      for every distance.
+- [x] `tcpreply-empty-option-value-is-not-absent` (`core::osprobe::tcpreply`): where the
+      option block cannot be summarised, the C sets the `O` attribute to the **empty
+      string** rather than leaving it unset. The distinction is load-bearing for the
+      scorer: an unset attribute is skipped (neither match nor mismatch), while an empty
+      one is matched against the database's `O=` and can agree with it. Reproduced.
+- [x] `tcpreply-flag-order-is-a-wire-contract` (`core::osprobe::tcpreply`): the `F`
+      attribute lists flags in the fixed order `E U A P R S F`, which is not bit order.
+      A different order would never match any database entry. Pinned by
+      `flags_are_listed_in_the_c_order_not_bit_order`.
+- [x] `tcpreply-zero-distance-does-not-underflow` (`core::osprobe::tcpreply`): the C
+      computes `ttl + hss->distance - 1` where `distance` is an `int` the caller is
+      trusted to have set above zero. The subtraction saturates here rather than resting
+      on that.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

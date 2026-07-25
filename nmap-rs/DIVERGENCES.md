@@ -378,12 +378,10 @@ the driver-specific choices.
 
 ## Milestone 4 — UDP scan driver (`-sU`)
 
-- [x] `udpscan-empty-payload` (`core::udpscan`): the UDP probe carries an **empty
-      payload**. nmap ships protocol-specific payloads for well-known UDP ports
-      (`payload.cc`) that coax replies from more services; without them some genuinely
-      open UDP ports read as `open|filtered` instead of `open`. A safe, less-complete
-      first slice — the payload DB is a follow-up. No false *closed*/*open* is produced;
-      the divergence only widens the `open|filtered` bucket.
+- [x] ~~`udpscan-empty-payload`~~ — **resolved**: `core::payload` supplies nmap's
+      protocol-specific UDP payloads (see the payload section below), so an open UDP port
+      running a real service now resolves to `open` rather than `open|filtered`. Ports
+      with no registered payload still get a bare datagram, as in the C.
 - [x] `udpscan-icmp-embedded-match` (`core::udpscan`): the UDP matcher parses the
       **IPv4/UDP packet quoted inside an ICMP error** to tie a port-unreachable (→
       closed) or other unreachable/time-exceeded (→ filtered) back to the probe it
@@ -450,6 +448,40 @@ One generalized `core::flagscan` + `sys::flagscan`, parametrized by
       Per-scan verdicts are unchanged (the retired drivers' unit tests were ported onto
       the engine, and the privileged on-the-wire differential + loopback e2e gates for
       each scan now exercise it directly).
+
+## Milestone 4 — UDP probe payloads (`payload.cc`)
+
+`payload.cc` has no data file of its own: `init_payloads()` **derives** the payload table
+from `nmap-service-probes` — every `Probe UDP` line not flagged `no-payload` contributes
+its probe string to each port in its `ports` directive (`probablePorts`, *not*
+`sslports`). Our `core::payload` is the same derivation over the already-ported
+`core::probedb`, so it introduces no new file format and no new untrusted-input parser.
+Over the shipped file both implementations agree on all **33 205** (port, payload) pairs
+across **33 110** ports (`payload_corpus.rs`, ground truth from an independent
+derivation).
+
+- [x] `payload-cap-warns-not-fatal` (`core::payload`): the C `fatal()`s — killing the
+      whole scan — if one port accumulates more than `MAX_PAYLOADS_PER_PORT` (0xff)
+      payloads, a limit that exists only because its count/index are `u8`. We keep the
+      same ceiling so the payload *sequence* matches, but **truncate and report** the
+      port via `capped_ports()` instead of aborting: an over-generous data file should
+      cost a little detection depth, not the run. Unreachable with the shipped file
+      (max observed is 4); asserted in the corpus gate and exercised by a unit test.
+- [x] `payload-missing-db-degrades` (`cli`): C nmap `fatal()`s when it cannot load
+      `nmap-service-probes`, so a `-sU` scan fails outright on a stripped install. We
+      warn and scan with bare datagrams — more ports read `open|filtered`, but the scan
+      still runs. Same posture as `-sV` (`probedb-parse-degrade`): an absent *optional*
+      data file must not be fatal.
+- [x] `payload-one-datagram-per-payload` (`sys::group`): a port with N registered
+      payloads sends N datagrams per attempt, all from the same encoded source port —
+      matching the C's `for (i < MAX(udp_payload_count(dport), 1))` loop. Because they
+      share a source port, a reply cannot be attributed to a particular payload (the C
+      notes this too), so the engine keeps **one** outstanding entry per `(port, tryno)`
+      and matches replies by port. Consequence, ledgered: the group congestion window
+      counts *logical probes*, not datagrams, so a port with several payloads puts more
+      bytes on the wire per admitted probe than a SYN scan does. Not an output
+      divergence; it makes `-sU` pacing slightly more permissive than the C's
+      per-datagram accounting.
 
 ## Milestone 4 — CLI scan-technique selection
 

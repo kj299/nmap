@@ -213,7 +213,7 @@ async fn udp_or_fallback(
     template: TimingTemplate,
     max_par: usize,
 ) -> ScanResults {
-    match nmap_sys::udpscan::udp_scan_targets(ips, ports, template, max_par).await {
+    match nmap_sys::udpscan::udp_scan_targets(ips, ports, template, max_par, udp_payloads()).await {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
@@ -226,6 +226,41 @@ async fn udp_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
         }
     }
+}
+
+/// Build the UDP probe-payload table from `nmap-service-probes` (nmap derives its
+/// payloads from the same file rather than shipping a separate payload DB).
+///
+/// Degrades gracefully: if the file is missing or unreadable the scan proceeds with bare
+/// datagrams — more ports read `open|filtered`, but the scan still runs. C nmap
+/// `fatal()`s when it cannot load this file, even for `-sU`; refusing to scan over an
+/// absent *optional* data file is a worse outcome than scanning with less detection.
+#[cfg(feature = "pcap")]
+fn udp_payloads() -> nmap_core::payload::UdpPayloads {
+    use nmap_core::payload::{UdpPayloads, MAX_PAYLOADS_PER_PORT};
+
+    let Some(text) = load_probe_db_text() else {
+        eprintln!(
+            "nmap-rs: nmap-service-probes not found; -sU will send bare datagrams \
+             (more ports will read open|filtered)"
+        );
+        return UdpPayloads::empty();
+    };
+    let payloads = UdpPayloads::from_probe_db(&ProbeDb::parse(&text));
+    for &port in payloads.capped_ports() {
+        nmap_core::verbose!(
+            1,
+            "UDP port {} has more payloads than the {} limit; extras dropped",
+            port,
+            MAX_PAYLOADS_PER_PORT
+        );
+    }
+    nmap_core::verbose!(
+        2,
+        "loaded UDP payloads for {} ports",
+        payloads.ports_with_payloads()
+    );
+    payloads
 }
 
 /// Without the `pcap` feature there is no raw-scan backend; `-sU` runs a connect scan.

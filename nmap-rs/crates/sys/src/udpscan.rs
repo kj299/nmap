@@ -11,12 +11,17 @@
 use std::net::IpAddr;
 
 #[cfg(feature = "pcap")]
+use nmap_core::payload::UdpPayloads;
+#[cfg(feature = "pcap")]
 use nmap_core::timing::TimingTemplate;
 
 /// Run a UDP scan over several targets with route/source selection and pcap capture —
 /// the CLI-facing entry point (feature `pcap`). Targets sharing an egress route are
 /// scanned concurrently through one capture. One [`nmap_core::model::Host`] per target,
 /// in order.
+///
+/// `payloads` supplies the protocol-specific probe payloads (see
+/// [`nmap_core::payload`]); pass [`UdpPayloads::empty`] to send bare datagrams.
 ///
 /// # Errors
 /// Propagates a raw-socket / capture-open error (notably `PermissionDenied`) and any
@@ -27,14 +32,9 @@ pub async fn udp_scan_targets(
     ports: &[u16],
     template: TimingTemplate,
     max_parallelism: usize,
+    payloads: UdpPayloads,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
     // UDP has no sequence to mask; the base port alone encodes the attempt.
-    crate::group::group_scan_targets(
-        &crate::group::UdpKind,
-        targets,
-        ports,
-        template,
-        max_parallelism,
-    )
-    .await
+    let kind = crate::group::UdpKind::new(payloads);
+    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism).await
 }

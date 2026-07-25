@@ -19,6 +19,7 @@
     "core::ipid": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::packet_parser": "unsafe_audited",
+    "core::payload": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
     "core::recv_validate": "unsafe_audited",

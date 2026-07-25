@@ -355,11 +355,9 @@ the driver-specific choices.
       is our encoded source port (in range), our own probe's destination is the scanned
       service port (out of range) — so self-probes never reach the matcher. Behavioral
       shape, not output: replies delivered are identical.
-- [x] `synscan-single-host-first-slice` (`sys::synscan`, scope): scans one host per
-      call. nmap's `ultra_scan` drives a whole host group through one shared capture,
-      demultiplexed by source address. Deferred to a follow-up, mirroring how the
-      connect scan landed single-host (M1) before the M2 group loop. No output
-      divergence for a single target.
+- [x] ~~`synscan-single-host-first-slice`~~ — **resolved**: `-sS` runs on the shared
+      multi-host group engine (`sys::group::SynKind`), driving a whole host group through
+      one capture demultiplexed by source address, as nmap's `ultra_scan` does.
 
   Inherits `build-explicit-fields-no-magic` (the driver passes `window=1024` and the
   encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
@@ -392,8 +390,20 @@ the driver-specific choices.
       answers — the embedded-probe match `synscan` deferred (`synscan-icmp-match-deferred`).
       Bounds-checked and fuzzed (the nested parse is a second untrusted-input surface).
       This machinery can back-fill the SYN scan's ICMP path in a later slice.
-- [x] `udpscan-single-host-first-slice` (`sys::udpscan`): single host per call, same
-      scope as the SYN driver; no output divergence for one target.
+- [x] ~~`udpscan-single-host-first-slice`~~ — **resolved**: `-sU` now runs on the shared
+      multi-host group engine (`sys::group::UdpKind`), so the single-host limit is gone.
+- [x] `udpscan-icmp-attributed-to-quoted-destination` (`core::udpscan`): an ICMP error is
+      attributed to the **destination of the probe it quotes** — the host we scanned —
+      rather than to whichever address sent the ICMP, which is legitimately an
+      intermediate router. `from_target` (the test that promotes a port-unreachable from
+      *filtered* to *closed*) is correspondingly "the sender is the host the quoted probe
+      was addressed to", computed from the packet alone. This makes the matcher a pure
+      function of the frame — no ambient target to pass in, which is what lets one matcher
+      serve a whole host group — and it is **stricter than the C**, which compares the
+      ICMP source against the host whose probe list is being searched: a host that quotes
+      a probe we sent to a *different* host can no longer have its error counted as an
+      authoritative *closed* for that other host. Same verdicts on well-formed traffic;
+      the divergence is only visible under spoofed or misdirected ICMP.
 
 ## Milestone 4 — TCP flag scans (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`)
 
@@ -414,8 +424,8 @@ One generalized `core::flagscan` + `sys::flagscan`, parametrized by
       matching the ICMP-embedded probe; the UDP scan's `embedded_udp_ports` machinery
       can back-fill it. Observable only when a host answers with ICMP fast enough to beat
       the retransmit timeout.
-- [x] `flagscan-single-host-first-slice` (`sys::flagscan`): single host per call, same
-      scope as the SYN/UDP drivers.
+- [x] ~~`flagscan-single-host-first-slice`~~ — **resolved**: all six flag scans now run on
+      the shared multi-host group engine (`sys::group::FlagKind`).
 
 ## Milestone 4 — multi-host group scan engine
 
@@ -430,6 +440,16 @@ One generalized `core::flagscan` + `sys::flagscan`, parametrized by
       targets by egress route (interface + source) and runs one shared-capture group per
       bucket; targets reachable through different interfaces scan as separate groups
       rather than one. Matches nmap's per-interface capture; no output divergence.
+- [x] `group-scan-one-engine-for-every-raw-scan` (`sys::group`): every raw scan — `-sS`,
+      `-sU`, and the six flag scans — runs on **one** driver loop, with the scan-specific
+      parts (probe build, reply match, no-response default, BPF filter) behind the
+      `RawScanKind` trait. The three near-identical single-host drivers this replaces are
+      deleted rather than left beside it; a single host is simply a group of one. The C
+      spreads the equivalent logic across `scan_engine_raw.cc` per technique. Structural:
+      one loop to audit, fuzz, and keep correct instead of four that can drift apart.
+      Per-scan verdicts are unchanged (the retired drivers' unit tests were ported onto
+      the engine, and the privileged on-the-wire differential + loopback e2e gates for
+      each scan now exercise it directly).
 
 ## Milestone 4 — CLI scan-technique selection
 

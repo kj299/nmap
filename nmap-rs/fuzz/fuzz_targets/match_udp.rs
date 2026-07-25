@@ -12,7 +12,6 @@ fuzz_target!(|data: &[u8]| {
     let ctx = UdpMatchCtx {
         base_port: 40000,
         max_tryno: 11,
-        target: [10, 0, 0, 2],
     };
     for eth in [true, false] {
         if let Some(reply) = match_udp_response(data, eth, &ctx) {

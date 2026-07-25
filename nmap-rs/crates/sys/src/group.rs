@@ -11,8 +11,9 @@
 //! IP** — every host can share one encoded source-port range because the source address
 //! disambiguates them.
 //!
-//! This slice wires [`SynKind`] (`-sS`); the UDP and flag scans move onto the same
-//! engine next.
+//! Every raw scan runs on this one engine: [`SynKind`] (`-sS`), [`UdpKind`] (`-sU`), and
+//! [`FlagKind`] (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`). A single host is just a group of
+//! one, so there is no separate per-host driver to keep in step.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -21,9 +22,11 @@ use std::time::{Duration, Instant};
 use nmap_core::build::{BuildError, Ipv4Spec};
 use nmap_core::classify::{default_port_state, PortState as ClassState, ScanType};
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe};
+use nmap_core::flagscan::{build_flag_probe, flags_for, match_flag_response, FlagMatchCtx};
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason};
 use nmap_core::synscan::{build_syn_probe, match_syn_response, MatchCtx};
 use nmap_core::timing::{TimingParams, TimingTemplate};
+use nmap_core::udpscan::{build_udp_probe, match_udp_response, UdpMatchCtx};
 
 use crate::capture::{AsyncCapture, PacketSource};
 use crate::rawio::RawSender;
@@ -323,6 +326,146 @@ impl RawScanKind for SynKind {
     }
 }
 
+// ---- UDP scan kind ----------------------------------------------------------------
+
+/// `-sU` UDP scan behavior for the group engine.
+///
+/// Two things differ from the TCP kinds: the capture filter must also admit **ICMP**
+/// (an error is addressed to our source *address*, carrying no port of ours in its own
+/// header), and a port that never answers is `open|filtered` rather than `filtered`.
+pub struct UdpKind;
+
+impl RawScanKind for UdpKind {
+    fn protocol(&self) -> Protocol {
+        Protocol::Udp
+    }
+
+    fn build_probe(
+        &self,
+        spec: &Ipv4Spec,
+        base_port: u16,
+        dport: u16,
+        tryno: u32,
+    ) -> Result<Vec<u8>, BuildError> {
+        build_udp_probe(spec, base_port, dport, tryno)
+    }
+
+    fn match_reply(
+        &self,
+        frame: &[u8],
+        eth_included: bool,
+        base_port: u16,
+        max_tryno: u32,
+    ) -> Option<GroupReply> {
+        let ctx = UdpMatchCtx {
+            base_port,
+            max_tryno,
+        };
+        let r = match_udp_response(frame, eth_included, &ctx)?;
+        let reason = match r.state {
+            ClassState::Open => Reason::UdpResponse,
+            ClassState::Closed => Reason::PortUnreach,
+            _ => Reason::NoResponse,
+        };
+        // `src_ip` is the *quoted* destination for an ICMP error, so an error relayed by
+        // a router is still attributed to the host we probed.
+        Some(GroupReply {
+            src_ip: r.src_ip,
+            port: r.port,
+            tryno: r.tryno,
+            state: r.state.into(),
+            reason,
+        })
+    }
+
+    fn default_final(&self) -> (PortState, Reason) {
+        (
+            default_port_state(ScanType::Udp, false).into(),
+            Reason::NoResponse,
+        )
+    }
+
+    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
+        format!(
+            "(udp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
+            src,
+            base_port,
+            base_port.saturating_add(span),
+            src
+        )
+    }
+}
+
+// ---- Stateless TCP flag scan kinds --------------------------------------------------
+
+/// `-sA` / `-sW` / `-sM` / `-sF` / `-sN` / `-sX` behavior for the group engine — one
+/// impl for all six, parametrized by the scan type (which fixes both the probe's flag
+/// combination and how a RST-or-silence is read).
+pub struct FlagKind {
+    /// Which flag scan this is.
+    pub scan: ScanType,
+    /// Per-scan random sequence mask.
+    pub seqmask: u32,
+}
+
+impl RawScanKind for FlagKind {
+    fn protocol(&self) -> Protocol {
+        Protocol::Tcp
+    }
+
+    fn build_probe(
+        &self,
+        spec: &Ipv4Spec,
+        base_port: u16,
+        dport: u16,
+        tryno: u32,
+    ) -> Result<Vec<u8>, BuildError> {
+        // A non-flag scan type would be a caller bug; an all-clear (Null-scan) probe is
+        // the safe reading, never a panic on the scan path.
+        let flags = flags_for(self.scan).unwrap_or(0);
+        build_flag_probe(spec, base_port, dport, tryno, self.seqmask, flags)
+    }
+
+    fn match_reply(
+        &self,
+        frame: &[u8],
+        eth_included: bool,
+        base_port: u16,
+        max_tryno: u32,
+    ) -> Option<GroupReply> {
+        let ctx = FlagMatchCtx {
+            scan: self.scan,
+            base_port,
+            max_tryno,
+        };
+        let r = match_flag_response(frame, eth_included, &ctx)?;
+        Some(GroupReply {
+            src_ip: r.src_ip,
+            port: r.port,
+            tryno: r.tryno,
+            state: r.state.into(),
+            // Every flag-scan reply we act on is a RST, whatever state it implies.
+            reason: Reason::Reset,
+        })
+    }
+
+    fn default_final(&self) -> (PortState, Reason) {
+        (
+            default_port_state(self.scan, false).into(),
+            Reason::NoResponse,
+        )
+    }
+
+    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
+        format!(
+            "tcp and dst host {} and dst portrange {}-{}",
+            src,
+            base_port,
+            base_port.saturating_add(span)
+        )
+    }
+}
+
 /// Route + capture setup for a group scan: group the IPv4 targets that share an egress
 /// route, run each route-group through [`group_scan`] over one sender + capture, and
 /// return one [`Host`] per input target, in order (feature `pcap`).
@@ -401,13 +544,16 @@ pub async fn group_scan_targets<K: RawScanKind>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmap_core::build::build_tcp_raw;
+    use nmap_core::build::{build_tcp_raw, build_udp_raw};
     use nmap_core::synscan::{seq32_encode, sport_encode};
     use std::sync::{Arc, Mutex};
 
     const TH_SYN: u8 = 0x02;
     const TH_ACK: u8 = 0x10;
     const TH_RST: u8 = 0x04;
+
+    /// Our address in every unit test; replies are addressed back to it.
+    const US: [u8; 4] = [127, 0, 0, 1];
 
     struct MockSource {
         frames: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -434,10 +580,25 @@ mod tests {
         }
     }
 
-    /// A SYN/ACK from `from` back to us for `tryno == 0`.
-    fn synack(seqmask: u32, from: [u8; 4], scanned: u16, base: u16) -> Vec<u8> {
+    /// Wrap an IP packet in a 14-byte Ethernet header (IPv4 ethertype).
+    fn framed(ip: &[u8]) -> Vec<u8> {
+        let mut f = vec![0u8; 14];
+        f[12] = 0x08;
+        f.extend_from_slice(ip);
+        f
+    }
+
+    /// A TCP reply from `from` back to us for `tryno == 0`, with arbitrary flags/window.
+    fn tcp_reply(
+        seqmask: u32,
+        from: [u8; 4],
+        scanned: u16,
+        base: u16,
+        flags: u8,
+        window: u16,
+    ) -> Vec<u8> {
         let our_seq = seq32_encode(seqmask, 0);
-        let spec = Ipv4Spec::new(from, [127, 0, 0, 1], 64, 0x1);
+        let spec = Ipv4Spec::new(from, US, 64, 0x1);
         let seg = build_tcp_raw(
             &spec,
             scanned,
@@ -445,18 +606,87 @@ mod tests {
             5,
             our_seq.wrapping_add(1),
             0,
-            TH_SYN | TH_ACK,
-            8192,
+            flags,
+            window,
             0,
             &[],
             &[],
         )
         .unwrap();
-        let mut f = vec![0u8; 14];
-        f[12] = 0x08;
-        f.extend_from_slice(&seg);
-        f
+        framed(&seg)
     }
+
+    /// A SYN/ACK from `from` back to us for `tryno == 0`.
+    fn synack(seqmask: u32, from: [u8; 4], scanned: u16, base: u16) -> Vec<u8> {
+        tcp_reply(seqmask, from, scanned, base, TH_SYN | TH_ACK, 8192)
+    }
+
+    /// A UDP datagram from `from`'s `scanned` port back to our `tryno == 0` source port.
+    fn udp_reply(from: [u8; 4], scanned: u16, base: u16) -> Vec<u8> {
+        let spec = Ipv4Spec::new(from, US, 64, 0x1);
+        framed(&build_udp_raw(&spec, scanned, sport_encode(base, 0), b"hi").unwrap())
+    }
+
+    /// An ICMP type/code error *sent by* `sender`, quoting the UDP probe we sent to
+    /// `probed`'s `scanned` port. `sender == probed` is the ordinary case; a different
+    /// sender models an intermediate router.
+    fn icmp_error(
+        sender: [u8; 4],
+        probed: [u8; 4],
+        icmp_type: u8,
+        icmp_code: u8,
+        scanned: u16,
+        base: u16,
+    ) -> Vec<u8> {
+        let pspec = Ipv4Spec::new(US, probed, 64, 0x2);
+        let probe = build_udp_raw(&pspec, sport_encode(base, 0), scanned, &[]).unwrap();
+        let mut icmp = vec![icmp_type, icmp_code, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&probe);
+        let mut ip = vec![
+            0x45, 0, 0, 0, 0, 0, 0, 0, 64, 1, /* proto ICMP */
+            0, 0, sender[0], sender[1], sender[2], sender[3], US[0], US[1], US[2], US[3],
+        ];
+        let total = u16::try_from(ip.len().saturating_add(icmp.len())).unwrap();
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&icmp);
+        framed(&ip)
+    }
+
+    /// Drive `group_scan` over `targets` with scripted reply frames.
+    async fn run<K: RawScanKind>(
+        kind: &K,
+        targets: &[Ipv4Addr],
+        ports: &[u16],
+        base: u16,
+        frames: Vec<Vec<u8>>,
+    ) -> Vec<Host> {
+        group_scan(
+            Ipv4Addr::from(US),
+            targets,
+            ports,
+            MockSender::default(),
+            MockSource {
+                frames: Arc::new(Mutex::new(frames)),
+            },
+            kind,
+            TimingTemplate::Insane,
+            0,
+            base,
+            true,
+        )
+        .await
+    }
+
+    /// Look up one port's resolved state on one host.
+    fn port_of(hosts: &[Host], host_idx: usize, number: u16) -> &Port {
+        hosts[host_idx]
+            .ports
+            .iter()
+            .find(|p| p.number == number)
+            .expect("port resolved")
+    }
+
+    // ---- SYN --------------------------------------------------------------------
 
     #[cfg_attr(
         miri,
@@ -468,22 +698,15 @@ mod tests {
         let base = 40000u16;
         // Host .2 answers port 80 open; host .3 answers port 80 open. Same port, same
         // encoded source port — only the source IP distinguishes them.
-        let frames = Arc::new(Mutex::new(vec![
-            synack(seqmask, [127, 0, 0, 3], 80, base),
-            synack(seqmask, [127, 0, 0, 2], 80, base),
-        ]));
-        let kind = SynKind { seqmask };
-        let hosts = group_scan(
-            Ipv4Addr::new(127, 0, 0, 1),
+        let hosts = run(
+            &SynKind { seqmask },
             &[Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3)],
             &[80],
-            MockSender::default(),
-            MockSource { frames },
-            &kind,
-            TimingTemplate::Insane,
-            0,
             base,
-            true,
+            vec![
+                synack(seqmask, [127, 0, 0, 3], 80, base),
+                synack(seqmask, [127, 0, 0, 2], 80, base),
+            ],
         )
         .await;
 
@@ -501,21 +724,43 @@ mod tests {
         ignore = "spawns a capture thread; miri cannot run real threads/time"
     )]
     #[tokio::test]
+    async fn syn_rst_resolves_closed() {
+        let seqmask = 0x5555_AAAA;
+        let base = 40000u16;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let hosts = run(
+            &SynKind { seqmask },
+            &[target],
+            &[81],
+            base,
+            vec![tcp_reply(
+                seqmask,
+                target.octets(),
+                81,
+                base,
+                TH_RST | TH_ACK,
+                0,
+            )],
+        )
+        .await;
+        let p = port_of(&hosts, 0, 81);
+        assert_eq!(p.state, PortState::Closed);
+        assert_eq!(p.reason, Reason::Reset);
+        assert_eq!(hosts[0].state, HostState::Up);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
     async fn no_reply_resolves_filtered_across_hosts() {
-        let kind = SynKind { seqmask: 1 };
-        let hosts = group_scan(
-            Ipv4Addr::new(127, 0, 0, 1),
+        let hosts = run(
+            &SynKind { seqmask: 1 },
             &[Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3)],
             &[9],
-            MockSender::default(),
-            MockSource {
-                frames: Arc::new(Mutex::new(Vec::new())),
-            },
-            &kind,
-            TimingTemplate::Insane,
-            0,
             40000,
-            true,
+            Vec::new(),
         )
         .await;
         assert_eq!(hosts.len(), 2);
@@ -523,8 +768,186 @@ mod tests {
             let p = h.ports.iter().find(|p| p.number == 9).unwrap();
             assert_eq!(p.state, PortState::Filtered);
         }
-        // A RST reply not matching any probe is ignored (no panic); covered by the
-        // demux miss path above returning None.
-        let _ = TH_RST;
+    }
+
+    // ---- UDP --------------------------------------------------------------------
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn udp_datagram_resolves_open() {
+        let base = 40000u16;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let hosts = run(
+            &UdpKind,
+            &[target],
+            &[53],
+            base,
+            vec![udp_reply(target.octets(), 53, base)],
+        )
+        .await;
+        let p = port_of(&hosts, 0, 53);
+        assert_eq!(p.state, PortState::Open);
+        assert_eq!(p.reason, Reason::UdpResponse);
+        assert_eq!(p.protocol, Protocol::Udp);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn udp_no_reply_is_open_filtered() {
+        let hosts = run(
+            &UdpKind,
+            &[Ipv4Addr::new(127, 0, 0, 2)],
+            &[9999],
+            40000,
+            Vec::new(),
+        )
+        .await;
+        let p = port_of(&hosts, 0, 9999);
+        assert_eq!(p.state, PortState::OpenFiltered);
+        assert_eq!(p.reason, Reason::NoResponse);
+        // open|filtered alone is not proof of life.
+        assert_eq!(hosts[0].state, HostState::Down);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn udp_icmp_errors_demux_by_the_quoted_destination() {
+        let base = 40000u16;
+        let h2 = Ipv4Addr::new(127, 0, 0, 2);
+        let h3 = Ipv4Addr::new(127, 0, 0, 3);
+        // .2 answers its own probe with a port-unreachable → closed.
+        // .3's probe is answered by a *router*, which is not proof the port is closed —
+        // and the verdict must still land on .3, the host we probed, not on the router.
+        let hosts = run(
+            &UdpKind,
+            &[h2, h3],
+            &[53],
+            base,
+            vec![
+                icmp_error([192, 168, 0, 1], h3.octets(), 3, 3, 53, base),
+                icmp_error(h2.octets(), h2.octets(), 3, 3, 53, base),
+            ],
+        )
+        .await;
+        assert_eq!(port_of(&hosts, 0, 53).state, PortState::Closed);
+        assert_eq!(port_of(&hosts, 0, 53).reason, Reason::PortUnreach);
+        assert_eq!(port_of(&hosts, 1, 53).state, PortState::Filtered);
+    }
+
+    // ---- Stateless TCP flag scans ------------------------------------------------
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ack_scan_rst_resolves_unfiltered() {
+        let base = 40000u16;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let hosts = run(
+            &FlagKind {
+                scan: ScanType::Ack,
+                seqmask: 7,
+            },
+            &[target],
+            &[80],
+            base,
+            vec![tcp_reply(7, target.octets(), 80, base, TH_RST | TH_ACK, 0)],
+        )
+        .await;
+        let p = port_of(&hosts, 0, 80);
+        assert_eq!(p.state, PortState::Unfiltered);
+        assert_eq!(p.reason, Reason::Reset);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn window_scan_reads_the_reply_window() {
+        let base = 40000u16;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        // A non-zero window on the RST means open for `-sW`; zero means closed.
+        for (window, want) in [(8192u16, PortState::Open), (0, PortState::Closed)] {
+            let hosts = run(
+                &FlagKind {
+                    scan: ScanType::Window,
+                    seqmask: 7,
+                },
+                &[target],
+                &[80],
+                base,
+                vec![tcp_reply(
+                    7,
+                    target.octets(),
+                    80,
+                    base,
+                    TH_RST | TH_ACK,
+                    window,
+                )],
+            )
+            .await;
+            assert_eq!(port_of(&hosts, 0, 80).state, want, "window {window}");
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn flag_scan_no_reply_defaults_are_per_scan_type() {
+        // `-sA` treats silence as filtered; `-sF` cannot tell open from filtered.
+        for (scan, want) in [
+            (ScanType::Ack, PortState::Filtered),
+            (ScanType::Fin, PortState::OpenFiltered),
+        ] {
+            let hosts = run(
+                &FlagKind { scan, seqmask: 7 },
+                &[Ipv4Addr::new(127, 0, 0, 2)],
+                &[1234],
+                40000,
+                Vec::new(),
+            )
+            .await;
+            let p = port_of(&hosts, 0, 1234);
+            assert_eq!(p.state, want, "{scan:?}");
+            assert_eq!(p.reason, Reason::NoResponse);
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn flag_scan_demuxes_two_hosts() {
+        let base = 40000u16;
+        let h2 = Ipv4Addr::new(127, 0, 0, 2);
+        let h3 = Ipv4Addr::new(127, 0, 0, 3);
+        // Only .3 answers; .2's silence must not be filled in by .3's RST.
+        let hosts = run(
+            &FlagKind {
+                scan: ScanType::Fin,
+                seqmask: 7,
+            },
+            &[h2, h3],
+            &[80],
+            base,
+            vec![tcp_reply(7, h3.octets(), 80, base, TH_RST | TH_ACK, 0)],
+        )
+        .await;
+        assert_eq!(port_of(&hosts, 0, 80).state, PortState::OpenFiltered);
+        assert_eq!(port_of(&hosts, 1, 80).state, PortState::Closed);
     }
 }

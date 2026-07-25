@@ -106,6 +106,9 @@ pub struct FlagMatchCtx {
 /// A captured packet matched to an outstanding flag probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlagReply {
+    /// Source IPv4 of the reply — which scanned host answered. Lets one matcher serve a
+    /// whole host group (see `nmap_sys::group`).
+    pub src_ip: [u8; 4],
     /// The scanned port that answered (the reply's TCP source port).
     pub port: u16,
     /// Which attempt this reply answers.
@@ -129,6 +132,7 @@ pub fn match_flag_response(
     if v.proto != IPPROTO_TCP {
         return None; // ICMP-derived filtered deferred to the no-response default.
     }
+    let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
     let tcp = ip.get(v.data_offset..)?;
     if tcp.len() < TCP_MIN {
         return None;
@@ -146,6 +150,7 @@ pub fn match_flag_response(
     // scan-type-specific verdict comes straight from the flags/window.
     let state = classify_tcp(ctx.scan, flags, window)?;
     Some(FlagReply {
+        src_ip,
         port: resp_sport,
         tryno,
         state,

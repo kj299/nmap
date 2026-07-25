@@ -7,3 +7,5 @@
 //! observed values fed into it come off the wire.
 
 pub mod expr;
+pub mod model;
+pub mod parse;

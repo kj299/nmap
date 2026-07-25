@@ -562,6 +562,33 @@ differential:
       against the *entire* following hex run, not the minimum needed. Since `B` is a hex
       digit, `M[1-6]ST11` does **not** match `M5B4ST11` — the run is `5B4`.
 
+## Milestone 5 — the `nmap-os-db` parser
+
+`core::osdb::{model,parse}` port `parse_fingerprint_file()` and its helpers from
+`osscan.cc`. `--osscandb <file>` makes the 5.1 MB database **attacker-supplyable**, and
+it is parsed before any scanning happens — the same threat-model boundary
+`nmap-service-probes` has. Verified against the shipped file: **6,108 fingerprints,
+7,100 `Class` lines, 6,968 `CPE` lines, 79,404 record test lines, zero warnings**
+(`osdb_corpus.rs`), and fuzzed (`osdb_parse`, 2.0M runs).
+
+- [x] `osdb-parse-degrade` (`core::osdb::parse`): **no input aborts the parse.** The C
+      `fatal()`s — killing the whole scan — on a second `MatchPoints` block, a
+      `MatchPoints` attribute that is not a positive integer, a `Fingerprint` line with
+      no terminator or an empty OS name, a `Class` line with fewer than four `|` fields,
+      and a `CPE` line with no preceding `Class`. Each becomes a `DbWarning` here and
+      parsing continues, so a corrupt or hostile database costs fingerprints rather than
+      the run. The same deliberate divergence M1 made for `nmap-services`
+      (`services-parse-degrade`) and M3 for `nmap-service-probes`
+      (`probedb-parse-degrade`). On the shipped, well-formed file the behavior is
+      identical to the C — the corpus gate parses it with zero warnings and the exact
+      structural counts — so this is observable only on malformed input.
+- [x] `osdb-parse-skips-only-the-bad-line` (`core::osdb::parse`): on a malformed test
+      line the C executes `goto top`, abandoning the **rest of the current record** (its
+      remaining lines are then reported as stray top-level parse errors, and the partial
+      record stays in the database). This port drops just the offending line and keeps
+      the record's other tests, which loses less detection capability for the same input.
+      Unreachable on the shipped file.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

@@ -28,7 +28,8 @@ draft PR when picked up. Kept in-repo so it survives across sessions.
 Phase 0 done (inventory + cflaw-scan + threat model + FPModel spike); both the IPv4
 and IPv6 tracks are approved. Port order, leaf-first:
 1. ~~`core::osdb::expr`~~ — **done**, C-oracle differential over 23.8k cases.
-2. `core::osdb::model` / `parse` — `nmap-os-db` types + parser (fuzz + corpus gate).
+2. ~~`core::osdb::model` / `parse`~~ — **done**, corpus gate over the real 5.1 MB file
+   (6,108 fingerprints, zero warnings) + fuzz.
 3. `core::osdb::score` — `compare_fingerprints` / `match_fingerprint`.
 4. `core::macvendor` — `nmap-mac-prefixes` (52,085 entries) parse + lookup.
 5. `core::osprobe` — the 16 IPv4 probe builders + response→fingerprint parse.

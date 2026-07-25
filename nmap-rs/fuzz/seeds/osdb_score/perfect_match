@@ -1,0 +1,13 @@
+MatchPoints
+SEQ(SP=25%GCD=75%ISR=25%TI=100%CI=50%II=100%SS=80%TS=100)
+T1(R=100%DF=20%T=15%TG=15%S=20%A=20%F=30%RD=20%Q=20)
+
+Fingerprint Linux 3.2
+Class Linux | Linux | 3.X | general purpose
+CPE cpe:/o:linux:linux_kernel:3
+SEQ(SP=100-110%GCD=1-6%TI=Z)
+T1(R=Y%DF=Y%T=40%S=O%A=S+%F=AS%RD=0%Q=)
+%%%
+Fingerprint observed
+SEQ(SP=105%GCD=1%TI=Z)
+T1(R=Y%DF=Y%T=40%S=O%A=S+%F=AS%RD=0%Q=)

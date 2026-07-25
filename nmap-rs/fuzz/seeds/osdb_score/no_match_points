@@ -1,0 +1,7 @@
+Fingerprint OS with no weights
+SEQ(SP=0-FF)
+T1(R=Y%DF=Y)
+%%%
+Fingerprint observed
+SEQ(SP=5)
+T1(R=Y%DF=Y)

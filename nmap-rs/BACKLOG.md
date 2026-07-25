@@ -30,7 +30,8 @@ and IPv6 tracks are approved. Port order, leaf-first:
 1. ~~`core::osdb::expr`~~ — **done**, C-oracle differential over 23.8k cases.
 2. ~~`core::osdb::model` / `parse`~~ — **done**, corpus gate over the real 5.1 MB file
    (6,108 fingerprints, zero warnings) + fuzz.
-3. `core::osdb::score` — `compare_fingerprints` / `match_fingerprint`.
+3. ~~`core::osdb::score`~~ — **done**, corpus gate over the real database (perfect match
+   on a concrete Linux observation) + the early-exit invariant over all 6,108 records.
 4. `core::macvendor` — `nmap-mac-prefixes` (52,085 entries) parse + lookup.
 5. `core::osprobe` — the 16 IPv4 probe builders + response→fingerprint parse.
 6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.

@@ -170,3 +170,8 @@ test = false
 name = "osdb_score"
 path = "fuzz_targets/osdb_score.rs"
 test = false
+
+[[bin]]
+name = "macvendor_parse"
+path = "fuzz_targets/macvendor_parse.rs"
+test = false

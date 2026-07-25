@@ -638,6 +638,48 @@ and fuzzed (`osdb_score`, 3.5M runs).
       is unaffected: every record it *keeps* was scored without the early exit firing, so
       the reported list is exact. The corpus gate asserts this over all 6,108 records.
 
+## Milestone 5 — MAC vendor lookup
+
+`core::macvendor` ports `MACLookup.cc`. `nmap-mac-prefixes` is loaded from the data-file
+search path, so like the other databases it is untrusted-input-shaped. Verified against
+the shipped file: **52,085 prefixes (38,930 MA-L + 6,262 MA-M + 6,893 MA-S), zero
+warnings**, with every prefix's resolution cross-checked against an oracle built from the
+raw text by string operations — including the **410 assignments shadowed by a longer
+one** (`macvendor_corpus.rs`) — and fuzzed (`macvendor_parse`, 5.5M runs).
+
+- [x] `macvendor-parse-degrade` (`core::macvendor`): **one bad line no longer discards the
+      rest of the file.** The C prints an error and then `break`s out of its read loop on
+      any unparseable line — a wrong digit count, a prefix not followed by whitespace, a
+      leading byte that is not a hex digit. Since the loop is abandoned rather than
+      continued, a single stray byte near the top of the file silently costs *all*
+      remaining vendor entries, degrading MAC attribution across the whole scan with only
+      one line of warning. A blank line does it too, since a blank line is "not a hex
+      digit". Here each bad line becomes a `MacDbWarning` and parsing continues; blank
+      lines are skipped silently, as they carry no information. Same shape as
+      `services-parse-degrade`, `probedb-parse-degrade` and `osdb-parse-degrade`. On the
+      shipped file the behaviour is identical — it parses with zero warnings.
+- [x] `macvendor-empty-vendor-skipped` (`core::macvendor`): a line holding a valid prefix
+      and no vendor name reaches an `assert(*endptr)` in the C, aborting a debug build. In
+      a release build (`NDEBUG`) the assert vanishes and the entry is stored with an
+      **empty** organisation name, which would later be reported as the host's vendor.
+      Here the line is warned about and skipped, so no address can resolve to a blank
+      registrant.
+- [x] `macvendor-no-fgets-truncation` (`core::macvendor`): the C reads lines into a
+      128-byte `fgets` buffer, so a longer line is split and its tail is parsed as if it
+      were a new line — which fails the hex-digit check and (per
+      `macvendor-parse-degrade`) abandons the file. This port reads whole lines. The
+      shipped file's longest line is 105 bytes, so the two agree on it today; the
+      divergence only shows on a file with a long vendor name.
+- [x] `macvendor-lookup-order-preserved` (`core::macvendor`): **not a divergence** —
+      recorded because it is load-bearing and easy to lose. Prefix keys are tagged with
+      their digit count in the high bits exactly as the C's `(len << 36)` does, so the
+      three IEEE assignment sizes occupy disjoint key ranges and iterate MA-L, then MA-M,
+      then MA-S. `find_prefix` (the `--spoof-mac <vendor>` path) returns the *first*
+      match in that order, so the tagging decides which of several matching registrants is
+      chosen. Lookup independently tries the most specific block first, so a host inside a
+      36-bit assignment is attributed to that registrant rather than to the holder of the
+      enclosing 24-bit block.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

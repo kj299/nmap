@@ -417,6 +417,20 @@ One generalized `core::flagscan` + `sys::flagscan`, parametrized by
 - [x] `flagscan-single-host-first-slice` (`sys::flagscan`): single host per call, same
       scope as the SYN/UDP drivers.
 
+## Milestone 4 — multi-host group scan engine
+
+- [x] `group-scan-shared-capture-demux-by-src` (`sys::group`): a whole host group is
+      scanned through **one** raw sender + **one** pcap capture (nmap's `ultra_scan`
+      host-group model), with a per-host `HostScheduler` and a `GroupScheduler` bounding
+      total probes in flight. A captured reply is routed to the host that sent it by its
+      **source IP**, so every host shares one encoded source-port range — the source
+      address disambiguates them (`SynReply` now carries `src_ip`). Structural, not an
+      output divergence; the per-host verdicts are identical to the single-host path.
+- [x] `group-scan-per-route-bucketing` (`sys::group`): the CLI entry point buckets
+      targets by egress route (interface + source) and runs one shared-capture group per
+      bucket; targets reachable through different interfaces scan as separate groups
+      rather than one. Matches nmap's per-interface capture; no output divergence.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

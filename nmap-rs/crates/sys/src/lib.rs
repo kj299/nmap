@@ -16,6 +16,7 @@
 
 pub mod capture;
 pub mod flagscan;
+pub mod group;
 pub mod net;
 pub mod netif;
 pub mod rawio;

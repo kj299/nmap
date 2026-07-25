@@ -34,6 +34,7 @@
     "ports": "unsafe_audited",
     "sys::capture": "unsafe_audited",
     "sys::flagscan": "unsafe_audited",
+    "sys::group": "unsafe_audited",
     "sys::netif": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
     "sys::route": "unsafe_audited",

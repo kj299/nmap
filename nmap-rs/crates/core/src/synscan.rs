@@ -140,6 +140,8 @@ pub struct MatchCtx {
 /// A captured packet matched to an outstanding SYN probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SynReply {
+    /// The host that answered (the reply's IPv4 source address), for multi-host demux.
+    pub src_ip: [u8; 4],
     /// The scanned port that answered (the reply's TCP source port).
     pub port: u16,
     /// Which attempt this reply answers (for RTT accounting / retransmit bookkeeping).
@@ -194,8 +196,10 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
         }
     }
 
+    let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
     let state = classify_tcp(ScanType::Syn, flags, window)?;
     Some(SynReply {
+        src_ip,
         port: resp_sport,
         tryno,
         state,

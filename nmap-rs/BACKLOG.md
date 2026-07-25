@@ -34,7 +34,12 @@ and IPv6 tracks are approved. Port order, leaf-first:
    on a concrete Linux observation) + the early-exit invariant over all 6,108 records.
 4. ~~`core::macvendor`~~ — **done**, corpus gate over the real file (52,085 prefixes,
    zero warnings) cross-checked against a text-derived oracle.
-5. `core::osprobe` — the 16 IPv4 probe builders + response→fingerprint parse.
+5. `core::osprobe` — **in progress**. Done: `osprobe::build` (the probe battery, C-oracle
+   differential over all 23 packets) and `osprobe::analyze::tcp_option_string` (the
+   `O`/`O1`-`O6` encoder, C-oracle differential over 428 cases). Remaining in `analyze`:
+   `makeTSeqFP` (SP/GCD/ISR/TI/CI/II/SS/TS from the six SEQ replies — can reuse
+   `core::ipid`), and the per-reply attribute extraction in `processT1_7Resp` /
+   `processTEcnResp` / `processTUdpResp` / `processTIcmpResp` / `makeTWinFP`.
 6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.
 7. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.

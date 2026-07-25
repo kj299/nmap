@@ -175,3 +175,13 @@ test = false
 name = "macvendor_parse"
 path = "fuzz_targets/macvendor_parse.rs"
 test = false
+
+[[bin]]
+name = "osprobe_build"
+path = "fuzz_targets/osprobe_build.rs"
+test = false
+
+[[bin]]
+name = "osprobe_tcpopt"
+path = "fuzz_targets/osprobe_tcpopt.rs"
+test = false

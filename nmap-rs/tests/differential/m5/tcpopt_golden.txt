@@ -1,0 +1,428 @@
+tcpopt len=11 str=WANM5B4T10S|result ok|
+tcpopt len=11 str=M578W0ST10L|result ok|
+tcpopt len=12 str=T10NNW5NM280|result ok|
+tcpopt len=7 str=ST10WAL|result ok|
+tcpopt len=11 str=M218ST10WAL|result ok|
+tcpopt len=8 str=M109ST10|result ok|
+tcpopt len=10 str=WANM5B4SNN|result ok|
+tcpopt len=11 str=WANM109T10S|result ok|
+tcpopt len=11 str=WFNM109T10S|result ok|
+tcpopt len=1 str=L|result ok|
+tcpopt len=1 str=N|result ok|
+tcpopt len=4 str=M5B4|result ok|
+tcpopt len=2 str=M1|result ok|
+tcpopt len=5 str=MFFFF|result ok|
+tcpopt len=2 str=W0|result ok|
+tcpopt len=2 str=WA|result ok|
+tcpopt len=3 str=WFF|result ok|
+tcpopt len=1 str=S|result ok|
+tcpopt len=3 str=T00|result ok|
+tcpopt len=3 str=T10|result ok|
+tcpopt len=3 str=T01|result ok|
+tcpopt len=3 str=T11|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=1 str=S|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=1 str=S|result ok|
+tcpopt len=4 str=NLLS|result ok|
+tcpopt len=0 str=|result ok|
+tcpopt len=3 str=LNS|result ok|
+tcpopt len=4 str=LLLL|result ok|
+tcpopt len=4 str=SLW7|result ok|
+tcpopt len=0 str=|result ok|
+result err:-1|
+result err:-1|
+tcpopt len=1 str=S|result ok|
+tcpopt len=3 str=SNN|result ok|
+tcpopt len=40 str=NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=18 str=SW35SSM30B3T11NSSS|result ok|
+tcpopt len=19 str=MF6D5SSSW86WE5NT11N|result ok|
+tcpopt len=22 str=NLM8936MB6AAWC7LMF985S|result ok|
+tcpopt len=10 str=M1604T11SL|result ok|
+tcpopt len=14 str=T11SWB7SNLNT11|result ok|
+tcpopt len=20 str=WF6NT11WC5WB2NSMC759|result ok|
+tcpopt len=18 str=W31T11LW65LNMF3ADN|result ok|
+tcpopt len=13 str=LLNLLLM9717SN|result ok|
+tcpopt len=11 str=SM72D5NSW87|result ok|
+tcpopt len=17 str=NNST11M314EWC6SNN|result ok|
+tcpopt len=11 str=T11WB6T11SS|result ok|
+tcpopt len=13 str=W73T11T11NT11|result ok|
+tcpopt len=26 str=LSMD240SNT11MC06FM6324LSSN|result ok|
+tcpopt len=14 str=LLWE7LM9471W81|result ok|
+tcpopt len=25 str=W25NLT11M1656LW3M6FDDSW36|result ok|
+tcpopt len=10 str=ST11NNSW62|result ok|
+tcpopt len=11 str=T11W4DT11W4|result ok|
+tcpopt len=4 str=W1AN|result ok|
+tcpopt len=26 str=W4FW27W97LLW5DM6518LNM58EC|result ok|
+tcpopt len=14 str=T11MC188LM56FS|result ok|
+tcpopt len=10 str=LM169AT11S|result ok|
+tcpopt len=8 str=WFEMB62C|result ok|
+tcpopt len=13 str=M2FDBSNNT11NL|result ok|
+tcpopt len=15 str=LLMBB96MDE9AT11|result ok|
+tcpopt len=6 str=SNST11|result ok|
+tcpopt len=7 str=LW88T11|result ok|
+tcpopt len=25 str=WE9W53NMF22DNLNMD499MB8A4|result ok|
+tcpopt len=9 str=LT11T11NS|result ok|
+tcpopt len=15 str=T11LT11NM22FDNN|result ok|
+tcpopt len=16 str=WCNLNLSW34M4B4CL|result ok|
+tcpopt len=29 str=LSSSMB8CEM397DW9W66M5FA8M5B32|result ok|
+tcpopt len=10 str=NNM7A13W4C|result ok|
+tcpopt len=19 str=W84ST11NT11W78MEF82|result ok|
+tcpopt len=26 str=W9DMC25DWAESNNMDA41MCC7W12|result ok|
+tcpopt len=19 str=WA6W9FSSST11NM5234L|result ok|
+tcpopt len=21 str=MC29FNMF812SLW83M97D0|result ok|
+tcpopt len=10 str=T11LLSSW36|result ok|
+tcpopt len=15 str=SSSLM47DFT11T11|result ok|
+tcpopt len=8 str=LT11SNSN|result ok|
+tcpopt len=11 str=MD68CNLSWD1|result ok|
+tcpopt len=20 str=WANW5FST11NMD5A8NT11|result ok|
+tcpopt len=14 str=LM3E4ESSMBA2BS|result ok|
+tcpopt len=11 str=SW99SM253LS|result ok|
+tcpopt len=24 str=LM7D36M800ELT11NM62B8LNN|result ok|
+tcpopt len=18 str=NT11WEBT11W3CM38D5|result ok|
+tcpopt len=13 str=T11SLLSWFET11|result ok|
+tcpopt len=26 str=M7B80W95SM8734W1EWD0W3ET11|result ok|
+tcpopt len=9 str=LSNM9CE1L|result ok|
+tcpopt len=20 str=WB2LLT11MCB9ANWADWF2|result ok|
+tcpopt len=13 str=W8AW40LST11LS|result ok|
+tcpopt len=24 str=W57W2FWB9W9DSLM3058LLWE4|result ok|
+tcpopt len=17 str=W57NLWD0M2A22T11L|result ok|
+tcpopt len=25 str=W3AMD967SSNW32NT11LW93T11|result ok|
+tcpopt len=13 str=SLSLT11MB64CL|result ok|
+tcpopt len=13 str=LW93SSNSW34LN|result ok|
+tcpopt len=11 str=SNWC1WB8T11|result ok|
+tcpopt len=17 str=SSNM4E44SSNNSW39N|result ok|
+tcpopt len=18 str=WB9NLMD059T11LT11N|result ok|
+tcpopt len=21 str=T11SNSM3DFCW5M1274WBC|result ok|
+tcpopt len=7 str=W23T11N|result ok|
+tcpopt len=7 str=WB3ST11|result ok|
+tcpopt len=15 str=SWF8SNNT11MD41E|result ok|
+tcpopt len=5 str=NW53L|result ok|
+tcpopt len=14 str=WF8NNSSST11NNL|result ok|
+tcpopt len=13 str=MD38BSLNST11N|result ok|
+tcpopt len=13 str=LLNNT11M5816L|result ok|
+tcpopt len=5 str=WADLN|result ok|
+tcpopt len=17 str=WF7LWDASW7CSLNW42|result ok|
+tcpopt len=14 str=LNT11LNT11LWE0|result ok|
+tcpopt len=31 str=NW36LNSM2000W7EM29FBSWAEWE1LLLN|result ok|
+tcpopt len=15 str=NWD9M86A0MFB2BL|result ok|
+tcpopt len=11 str=T11MAD07T11|result ok|
+tcpopt len=23 str=NNT11T11M897FM9ADASW53L|result ok|
+tcpopt len=7 str=LST11LN|result ok|
+tcpopt len=14 str=ME8B3LLLLNLT11|result ok|
+tcpopt len=16 str=SLSLMA578LLLLT11|result ok|
+tcpopt len=3 str=SSS|result ok|
+tcpopt len=17 str=LNT11LW2EME5E4LLL|result ok|
+tcpopt len=25 str=M841CSWC4NW2EW5BWC8MC65AS|result ok|
+tcpopt len=22 str=NWE3W6EW20W8FNLW9AM36E|result ok|
+tcpopt len=26 str=LNME40FM9DB6SW5CNLM6FE0W3B|result ok|
+tcpopt len=3 str=SSL|result ok|
+tcpopt len=13 str=M5424M178BSSN|result ok|
+tcpopt len=19 str=WDCLM1F5DT11W2BW5ES|result ok|
+tcpopt len=18 str=MF84ASW5ALNSMC3E8L|result ok|
+tcpopt len=9 str=T11LT11LS|result ok|
+tcpopt len=26 str=MC9B5WFCWBAWE7WF7NT11SNT11|result ok|
+tcpopt len=10 str=ST11M89A2S|result ok|
+tcpopt len=16 str=W3DMAF3DT11M8BE0|result ok|
+tcpopt len=18 str=T11M2CEFST11T11WA3|result ok|
+tcpopt len=18 str=LT11SME5CDNW7AT11S|result ok|
+tcpopt len=13 str=M4A2AW7ELLT11|result ok|
+tcpopt len=7 str=W3DLSNL|result ok|
+tcpopt len=12 str=NST11W12W16S|result ok|
+tcpopt len=26 str=T11SSLW4EMD7A2LNLM3620T11N|result ok|
+tcpopt len=13 str=SW59T11WDAW3E|result ok|
+tcpopt len=17 str=M33D5NLSM9596ST11|result ok|
+tcpopt len=23 str=LWAWE0W9SW4FW47WADLNW85|result ok|
+tcpopt len=20 str=NLWE8SSM369AM306BSLN|result ok|
+tcpopt len=6 str=ST11SS|result ok|
+tcpopt len=23 str=M19F9SW91W7FLM71A0LNWB5|result ok|
+tcpopt len=18 str=LSM645CT11T11MDD35|result ok|
+tcpopt len=13 str=M4E4CT11T11LS|result ok|
+tcpopt len=11 str=NSLNNNM1B34|result ok|
+tcpopt len=15 str=M60DFWFDLSM1C90|result ok|
+tcpopt len=14 str=W20T11W2BM6FF2|result ok|
+tcpopt len=16 str=MA3B7SST11SMB8BF|result ok|
+tcpopt len=19 str=M2630M716CT11T11LLN|result ok|
+tcpopt len=9 str=LSNT11W4F|result ok|
+tcpopt len=13 str=T11MFA45ST11N|result ok|
+tcpopt len=19 str=ST11M952LLLSW83LWB8|result ok|
+tcpopt len=14 str=SW76ST11W4DT11|result ok|
+tcpopt len=9 str=SSW5EW58L|result ok|
+tcpopt len=21 str=NW9NW69LLLMADCANT11NN|result ok|
+tcpopt len=26 str=LT11LM5EDANM1861M5739NSW1A|result ok|
+tcpopt len=20 str=M685DM98D2T11LWCCW9F|result ok|
+tcpopt len=12 str=WB5WD9LLW78S|result ok|
+tcpopt len=19 str=MD2FFT11MCB61SM541D|result ok|
+tcpopt len=11 str=LNNST11W72L|result ok|
+tcpopt len=8 str=T11LLT11|result ok|
+tcpopt len=14 str=T11T11T11SNWEA|result ok|
+tcpopt len=12 str=SLM6E02NWD2S|result ok|
+tcpopt len=9 str=W98NNNT11|result ok|
+tcpopt len=5 str=W8DNL|result ok|
+tcpopt len=8 str=SSW8ELSL|result ok|
+tcpopt len=7 str=W55LT11|result ok|
+tcpopt len=8 str=T11WE5NL|result ok|
+tcpopt len=21 str=WC1LLM8E4DT11NLW1BWFS|result ok|
+tcpopt len=16 str=NMCDDCMB484T11LL|result ok|
+tcpopt len=15 str=LW3LM1C04NNWD5S|result ok|
+tcpopt len=13 str=ST11NMF23DT11|result ok|
+tcpopt len=11 str=W41LLLW2ANL|result ok|
+tcpopt len=22 str=M8430LSSW2FT11W4BMD039|result ok|
+tcpopt len=24 str=M5277NM344ALT11M6D75W8EN|result ok|
+tcpopt len=9 str=SM204DT11|result ok|
+tcpopt len=9 str=ST11NW34S|result ok|
+tcpopt len=19 str=WF1W4ANLLNSLLSNSW40|result ok|
+tcpopt len=17 str=LW7DMD818T11M7882|result ok|
+tcpopt len=22 str=M34CDM9B7ET11LW9ASNWAB|result ok|
+tcpopt len=13 str=NLLWDDT11T11N|result ok|
+tcpopt len=13 str=NWF0NLT11WCEN|result ok|
+tcpopt len=15 str=NNNW5CMA063SSLN|result ok|
+tcpopt len=14 str=SNLNW6T11NSWEE|result ok|
+tcpopt len=31 str=LME9E9M4A65SWFCT11NNSSWBANMAFAA|result ok|
+tcpopt len=14 str=LMB3B0LNM76B5L|result ok|
+tcpopt len=21 str=SWB7T11NM4A4ST11SWC4L|result ok|
+tcpopt len=19 str=W2ANNSLNLW98W5DSWF7|result ok|
+tcpopt len=16 str=LSM8FAENNSM7609N|result ok|
+tcpopt len=9 str=SST11W2AS|result ok|
+tcpopt len=8 str=LLNLNT11|result ok|
+tcpopt len=17 str=MB854T11NW56W47SS|result ok|
+tcpopt len=14 str=ME90ASW72NW46S|result ok|
+tcpopt len=16 str=NLT11SLT11W64WEE|result ok|
+tcpopt len=14 str=LM1B2FW92T11W5|result ok|
+tcpopt len=9 str=M44AAW14N|result ok|
+tcpopt len=10 str=SSWEBNNT11|result ok|
+tcpopt len=11 str=SWD3NM17DAS|result ok|
+tcpopt len=18 str=SWC3SNT11WESMAC5DN|result ok|
+tcpopt len=16 str=SMB755WE3W82W59L|result ok|
+tcpopt len=15 str=W29NT11LM97E8NN|result ok|
+tcpopt len=20 str=MA7AST11WE1T11LSNW2N|result ok|
+tcpopt len=15 str=T11T11WDAMB9FAL|result ok|
+tcpopt len=19 str=LLM6A5ALNT11LMFAB0N|result ok|
+tcpopt len=14 str=M20A8LW5DM1AC3|result ok|
+tcpopt len=23 str=ME1DCM91CAM4D1BNT11NWC0|result ok|
+tcpopt len=9 str=T11NSWD0S|result ok|
+tcpopt len=14 str=T11M4252SM8170|result ok|
+tcpopt len=10 str=LNNT11NT11|result ok|
+tcpopt len=28 str=W85W14LM30E4T11M82EFLW1W3ALN|result ok|
+tcpopt len=13 str=T11ST11W63WAC|result ok|
+tcpopt len=18 str=LWADW97NSWA2NM5A59|result ok|
+tcpopt len=19 str=MCC40SW87T11NME41FN|result ok|
+tcpopt len=16 str=LLW4W17SSNLSNT11|result ok|
+tcpopt len=21 str=MEBF2WEDNW8ALT11M8B5F|result ok|
+tcpopt len=12 str=T11T11SM1962|result ok|
+tcpopt len=20 str=T11WB5NWDCLM8FE3LSLS|result ok|
+tcpopt len=14 str=T11W22NSNW20LL|result ok|
+tcpopt len=24 str=T11M5570SWB9LLSLNM5746LL|result ok|
+tcpopt len=18 str=M3852SLW65MEF19WC7|result ok|
+tcpopt len=12 str=T11M2B14T11L|result ok|
+tcpopt len=8 str=M5F39T11|result ok|
+tcpopt len=6 str=LW50SS|result ok|
+tcpopt len=20 str=NLSNSSLM52BCLWDDLW91|result ok|
+tcpopt len=8 str=T11NT11L|result ok|
+tcpopt len=20 str=LW18W44NM123EM56E4NN|result ok|
+tcpopt len=22 str=NLM3E8FT11MC367SM67C1L|result ok|
+tcpopt len=12 str=NNW3AW72T11S|result ok|
+tcpopt len=13 str=NNW58M4D6NWEC|result ok|
+tcpopt len=19 str=WC3LLMBF3BW51W4DW2L|result ok|
+tcpopt len=9 str=SWD6LLT11|result ok|
+tcpopt len=14 str=WBESNW1EMA8D8L|result ok|
+tcpopt len=14 str=T11LNM863FW86L|result ok|
+tcpopt len=14 str=WE5MA3E2W7AWBB|result ok|
+tcpopt len=23 str=MBF9FT11M30C0M659FMCDCN|result ok|
+tcpopt len=8 str=T11M2998|result ok|
+tcpopt len=9 str=NSST11NNN|result ok|
+tcpopt len=23 str=M39DFLW42M9A67LNM4B32LL|result ok|
+tcpopt len=18 str=T11W70WB8W6NMBEBEL|result ok|
+tcpopt len=22 str=SW24T11W6EW7EW89NLLWFB|result ok|
+tcpopt len=10 str=T11NSNLWE9|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=0 str=|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=0 str=|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+tcpopt len=0 str=|result ok|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|
+result err:-1|

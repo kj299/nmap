@@ -17,6 +17,7 @@
 #include "TCPHeader.h"
 #include "UDPHeader.h"
 #include <cstdio>
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -206,12 +207,204 @@ static int project_packet(const std::vector<unsigned char> &pkt, bool eth_includ
   return 0;
 }
 
+// Project a whole OS-detection probe packet: the IPv4 header plus the full detail of
+// its transport layer, using nmap's REAL header classes. Used when argv[1]=="osprobe".
+//
+// Richer than the generic per-layer projections because the OS probes are defined
+// precisely by the fields those omit — TOS, DF, IP ID, TTL, the TCP option bytes, the
+// urgent pointer and the reserved bits are the whole point of the battery.
+static int project_osprobe(const std::vector<unsigned char> &pkt) {
+  IPv4Header ip;
+  if (ip.storeRecvData(pkt.data(), pkt.size()) != 0) {
+    printf("result err:truncated\n");
+    return 0;
+  }
+  int iplen = ip.validate();
+  if (iplen <= 0) {
+    printf("result err:invalid\n");
+    return 0;
+  }
+  const u8 *s = ip.getSourceAddress();
+  const u8 *d = ip.getDestinationAddress();
+  printf("ip4 src=%u.%u.%u.%u dst=%u.%u.%u.%u ihl=%u tos=%u totlen=%u id=%u df=%d "
+         "ttl=%u proto=%u\n",
+         s[0], s[1], s[2], s[3], d[0], d[1], d[2], d[3],
+         ip.getHeaderLength(), ip.getTOS(), ip.getTotalLength(),
+         ip.getIdentification(), ip.getDF() ? 1 : 0, ip.getTTL(), ip.getNextProto());
+
+  const unsigned char *l4 = pkt.data() + iplen;
+  size_t l4len = pkt.size() - (size_t)iplen;
+
+  if (ip.getNextProto() == 6) {
+    TCPHeader tcp;
+    if (tcp.storeRecvData(l4, l4len) != 0 || tcp.validate() <= 0) {
+      printf("result err:tcp\n");
+      return 0;
+    }
+    size_t optslen = 0;
+    const u8 *opts = tcp.getOptions(&optslen);
+    printf("tcp sport=%u dport=%u seq=%u ack=%u off=%u reserved=%u flags=0x%02x "
+           "win=%u urp=%u optlen=%u\n",
+           tcp.getSourcePort(), tcp.getDestinationPort(), tcp.getSeq(), tcp.getAck(),
+           tcp.getOffset(), tcp.getReserved(), tcp.getFlags(), tcp.getWindow(),
+           tcp.getUrgPointer(), (unsigned)optslen);
+    printf("tcpopts ");
+    for (size_t i = 0; i < optslen && opts != NULL; i++) printf("%02x", opts[i]);
+    printf("\n");
+  } else if (ip.getNextProto() == 17) {
+    UDPHeader udp;
+    if (udp.storeRecvData(l4, l4len) != 0 || udp.validate() <= 0) {
+      printf("result err:udp\n");
+      return 0;
+    }
+    printf("udp sport=%u dport=%u ulen=%u\n", udp.getSourcePort(),
+           udp.getDestinationPort(), udp.getTotalLength());
+    // The U1 payload is a fixed pattern; report its length and whether it holds.
+    size_t dlen = l4len > 8 ? l4len - 8 : 0;
+    int uniform = 1;
+    for (size_t i = 8; i < l4len; i++) if (l4[i] != l4[8]) uniform = 0;
+    printf("udpdata len=%u byte=%02x uniform=%d\n", (unsigned)dlen,
+           dlen ? l4[8] : 0, uniform);
+  } else if (ip.getNextProto() == 1) {
+    ICMPv4Header icmp;
+    if (icmp.storeRecvData(l4, l4len) != 0 || icmp.validate() <= 0) {
+      printf("result err:icmp\n");
+      return 0;
+    }
+    printf("icmp type=%u code=%u id=%u seq=%u\n", icmp.getType(), icmp.getCode(),
+           icmp.getIdentifier(), icmp.getSequence());
+    size_t dlen = l4len > 8 ? l4len - 8 : 0;
+    int allzero = 1;
+    for (size_t i = 8; i < l4len; i++) if (l4[i] != 0) allzero = 0;
+    printf("icmpdata len=%u allzero=%d\n", (unsigned)dlen, allzero);
+  } else {
+    printf("result err:proto\n");
+    return 0;
+  }
+  printf("result ok\n");
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Project nmap's TCP-option summary (used when argv[1]=="tcpopt").
+//
+// `tcpopt_string_ctx` and `tcpopt_tostring` below are copied VERBATIM from
+// osscan2.cc so the oracle exercises nmap's own encoder, driven by nmap's own
+// TCPOptions walk from libnetutil/TCPHeader.cc. Only `get_tcpopt_string`'s
+// wrapper is re-expressed here, because the original is a HostOsScan method.
+// ---------------------------------------------------------------------------
+struct tcpopt_string_ctx {
+  char *p;
+  char *end;
+  bool valid;
+  tcpopt_string_ctx() : p(NULL), end(NULL), valid(true) {}
+  bool check_length(int len) const {
+    return (end - p) >= len;
+  }
+  void put(char c) {
+    assert(end > p);
+    *p++ = c;
+  }
+  void put_hex(unsigned int u) {
+    int w = sprintf(p, "%X", u);
+    p += w;
+  }
+};
+
+static bool tcpopt_tostring(u8 op, u8 oplen, const u8 *data, void *ctx)
+{
+  tcpopt_string_ctx *args = static_cast<tcpopt_string_ctx *>(ctx);
+
+  if (!args->check_length(1))
+    return false;
+
+  const u8 *q = data + 2;
+
+  switch (op) {
+    case 0: /* End of List */
+      args->put('L');
+      break;
+    case 1: /* No Op */
+      args->put('N');
+      break;
+    case 2: /* MSS */
+      if (oplen < 4) {
+        args->valid = false;
+        break; /* MSS has 4 bytes */
+      }
+      args->put('M');
+      if (!args->check_length(4))
+        return false;
+      args->put_hex((q[0] << 8) + q[1]);
+      break;
+    case 3:/* Window Scale */
+      if (oplen < 3) {
+        args->valid = false;
+        break; /* Window Scale option has 3 bytes */
+      }
+      args->put('W');
+      if (!args->check_length(2))
+        return false;
+      args->put_hex(q[0]);
+      break;
+    case 4:/* SACK permitted */
+      if (oplen < 2) {
+        args->valid = false;
+        break; /* SACK permitted option has 2 bytes */
+      }
+      args->put('S');
+      break;
+    case 8: /* Timestamp */
+      if (oplen < 10) {
+        args->valid = false;
+        break; /* Timestamp option has 10 bytes */
+      }
+      args->put('T');
+      if (!args->check_length(2))
+        return false;
+      args->put((q[0] || q[1] || q[2] || q[3]) ? '1' : '0');
+      args->put((q[4] || q[5] || q[6] || q[7]) ? '1' : '0');
+      break;
+    default:
+      break;
+  }
+  return args->valid;
+}
+
+static int project_tcpopt(const std::vector<unsigned char> &pkt) {
+  char result[512];
+  memset(result, 0, sizeof(result));
+
+  TCPOptions opts;
+  if (!opts.fromTCPPacket(pkt.data(), (int)pkt.size())) {
+    printf("result err:-1\n");
+    return 0;
+  }
+  tcpopt_string_ctx ctx;
+  ctx.p = result;
+  ctx.end = result + sizeof(result) - 1;
+
+  if (!opts.foreachOpt(tcpopt_tostring, &ctx) || !ctx.valid) {
+    printf("result err:-1\n");
+    return 0;
+  }
+  printf("tcpopt len=%d str=%s\n", (int)(ctx.p - result), result);
+  printf("result ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *layer = (argc > 1) ? argv[1] : "ip4";
   std::string in;
   { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
   std::vector<unsigned char> pkt = unhex(in);
 
+  if (strcmp(layer, "tcpopt") == 0) {
+    return project_tcpopt(pkt);
+  }
+  if (strcmp(layer, "osprobe") == 0) {
+    return project_osprobe(pkt);
+  }
   if (strcmp(layer, "pkt_eth") == 0) {
     return project_packet(pkt, true);
   }

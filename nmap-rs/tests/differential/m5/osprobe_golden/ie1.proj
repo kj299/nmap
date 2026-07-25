@@ -1,0 +1,4 @@
+ip4 src=10.0.0.1 dst=10.0.0.2 ihl=5 tos=4 totlen=178 id=48879 df=0 ttl=255 proto=1
+icmp type=8 code=0 id=4661 seq=296
+icmpdata len=150 allzero=1
+result ok

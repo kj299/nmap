@@ -10,4 +10,5 @@
 //! `SEQ`/`OPS`/`WIN`/`ECN`/`T1`–`T7`/`U1`/`IE` attributes that
 //! [`crate::osdb::score`] consumes) follows in a later slice.
 
+pub mod analyze;
 pub mod build;

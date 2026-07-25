@@ -719,6 +719,40 @@ reserved bits (`osprobe_differential.rs`, oracle mode `osprobe`). Fuzzed
       silently change what the probes measure, since the reply's TTL is part of the
       fingerprint.
 
+### Response analysis — the TCP option summary
+
+`core::osprobe::analyze::tcp_option_string` ports `get_tcpopt_string` and its
+`tcpopt_tostring` callback, plus the `TCPOptions` walk that drives them. The value it
+produces is the `OPS` test's `O1`–`O6` and the `O` attribute of `ECN` and `T1`–`T7`, so it
+is matched against every database entry — getting it subtly wrong would not fail loudly,
+it would identify the wrong operating system. Verified by a **C-oracle differential** over
+**428 cases** (nmap's own `prbOpts[]` blocks, every option kind at valid and short
+lengths, the malformed-length rejections, the data-offset clamp, and seeded
+randomly-assembled well-formed sequences): **236 summaries and 192 rejections, all
+matching**, against `tcpopt_string_ctx`/`tcpopt_tostring` copied verbatim into the oracle.
+Fuzzed (`osprobe_tcpopt`, 87.8M runs).
+
+- [x] `tcpopt-no-silent-truncation` (`core::osprobe::analyze`): the C writes the summary
+      into a caller-supplied fixed buffer, checking for room before each write. When the
+      room runs out its callback returns `false`, which **stops the option walk** — but
+      `TCPOptions::foreachOpt` treats a `false` callback return as normal termination and
+      returns `true`, and `valid` is never cleared, so `get_tcpopt_string` returns a
+      **silently truncated** summary instead of the `-1` its own comment claims ("2. The
+      option string is too long"). Worse, the truncation can land mid-option: the MSS case
+      emits `'M'` *before* checking room for its four hex digits, so the result can end in
+      a bare `M`. A truncated summary is not a noticed parse failure — it is a different
+      fingerprint, matched against the database as if it were real. Building a `String`
+      removes the failure mode by construction: there is no buffer to overrun, and the
+      output is bounded anyway because options are capped at 40 bytes.
+- [x] `tcpopt-eol-does-not-terminate` (`core::osprobe::analyze`): **not a divergence** —
+      recorded because it looks like a bug and must not be "fixed". RFC 793 makes the
+      end-of-list option terminate the option block, but the C emits `L` and **keeps
+      walking**, so padding and any options after an EOL still contribute to the summary.
+      Every fingerprint in the shipped `nmap-os-db` was generated with this behaviour, so
+      correcting it would silently invalidate the database. Pinned by
+      `end_of_list_does_not_stop_the_walk` and by the corpus cases in section 6 of
+      `gen_tcpopt_cases.py`.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

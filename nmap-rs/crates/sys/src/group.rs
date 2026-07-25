@@ -24,9 +24,10 @@ use nmap_core::classify::{default_port_state, PortState as ClassState, ScanType}
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe};
 use nmap_core::flagscan::{build_flag_probe, flags_for, match_flag_response, FlagMatchCtx};
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason};
+use nmap_core::payload::UdpPayloads;
 use nmap_core::synscan::{build_syn_probe, match_syn_response, MatchCtx};
 use nmap_core::timing::{TimingParams, TimingTemplate};
-use nmap_core::udpscan::{build_udp_probe, match_udp_response, UdpMatchCtx};
+use nmap_core::udpscan::{build_udp_probe_with, match_udp_response, UdpMatchCtx};
 
 use crate::capture::{AsyncCapture, PacketSource};
 use crate::rawio::RawSender;
@@ -53,17 +54,21 @@ pub struct GroupReply {
 pub trait RawScanKind {
     /// The transport protocol of the scanned ports (for the result model).
     fn protocol(&self) -> Protocol;
-    /// Build a probe packet for `(dport, tryno)`.
+    /// Build the packet(s) one logical probe of `(dport, tryno)` puts on the wire.
+    ///
+    /// Usually exactly one. The UDP scan sends **several** — one per payload registered
+    /// for the port, all sharing the encoded source port — which is why this returns a
+    /// list rather than a single packet. An empty list is treated as a build failure.
     ///
     /// # Errors
     /// Propagates a [`BuildError`] from the underlying packet builder.
-    fn build_probe(
+    fn build_probes(
         &self,
         spec: &Ipv4Spec,
         base_port: u16,
         dport: u16,
         tryno: u32,
-    ) -> Result<Vec<u8>, BuildError>;
+    ) -> Result<Vec<Vec<u8>>, BuildError>;
     /// Match a captured frame to a probe, or `None` if it is not a reply for us.
     fn match_reply(
         &self,
@@ -150,9 +155,14 @@ where
                 };
                 ipid = ipid.wrapping_add(1);
                 let spec = Ipv4Spec::new(src.octets(), ctx.target.octets(), DEFAULT_TTL, ipid);
-                match kind.build_probe(&spec, base_port, probe.port, probe.tryno) {
-                    Ok(pkt) => {
-                        let _ = sender.send(&pkt);
+                match kind.build_probes(&spec, base_port, probe.port, probe.tryno) {
+                    // One logical probe, one outstanding entry, however many datagrams
+                    // it takes — a reply is matched by (port, tryno), and for UDP we
+                    // cannot tell which payload provoked it anyway.
+                    Ok(pkts) if !pkts.is_empty() => {
+                        for pkt in &pkts {
+                            let _ = sender.send(pkt);
+                        }
                         group.on_send();
                         let now = now_us(start);
                         outstanding.insert(
@@ -160,7 +170,9 @@ where
                             (now, now.saturating_add(ctx.sched.probe_timeout_us())),
                         );
                     }
-                    Err(_) => {
+                    // A build error, or a kind that produced nothing to send: this
+                    // attempt cannot be made, so retire it as a timeout would.
+                    Ok(_) | Err(_) => {
                         let before = ctx.sched.resolved();
                         ctx.sched.on_timeout(probe);
                         if ctx.sched.resolved() > before {
@@ -272,14 +284,20 @@ impl RawScanKind for SynKind {
         Protocol::Tcp
     }
 
-    fn build_probe(
+    fn build_probes(
         &self,
         spec: &Ipv4Spec,
         base_port: u16,
         dport: u16,
         tryno: u32,
-    ) -> Result<Vec<u8>, BuildError> {
-        build_syn_probe(spec, base_port, dport, tryno, self.seqmask)
+    ) -> Result<Vec<Vec<u8>>, BuildError> {
+        Ok(vec![build_syn_probe(
+            spec,
+            base_port,
+            dport,
+            tryno,
+            self.seqmask,
+        )?])
     }
 
     fn match_reply(
@@ -330,24 +348,63 @@ impl RawScanKind for SynKind {
 
 /// `-sU` UDP scan behavior for the group engine.
 ///
-/// Two things differ from the TCP kinds: the capture filter must also admit **ICMP**
+/// Three things differ from the TCP kinds: the capture filter must also admit **ICMP**
 /// (an error is addressed to our source *address*, carrying no port of ours in its own
-/// header), and a port that never answers is `open|filtered` rather than `filtered`.
-pub struct UdpKind;
+/// header), a port that never answers is `open|filtered` rather than `filtered`, and one
+/// logical probe sends **one datagram per registered payload** for the port.
+pub struct UdpKind {
+    /// Protocol-specific probe payloads by port, derived from `nmap-service-probes`.
+    /// [`UdpPayloads::empty`] reproduces the bare-datagram behavior.
+    pub payloads: UdpPayloads,
+}
+
+impl UdpKind {
+    /// A UDP scan sending protocol-specific payloads from `payloads`.
+    #[must_use]
+    pub fn new(payloads: UdpPayloads) -> Self {
+        Self { payloads }
+    }
+
+    /// A UDP scan sending bare, zero-length datagrams.
+    #[must_use]
+    pub fn bare() -> Self {
+        Self {
+            payloads: UdpPayloads::empty(),
+        }
+    }
+}
 
 impl RawScanKind for UdpKind {
     fn protocol(&self) -> Protocol {
         Protocol::Udp
     }
 
-    fn build_probe(
+    fn build_probes(
         &self,
         spec: &Ipv4Spec,
         base_port: u16,
         dport: u16,
         tryno: u32,
-    ) -> Result<Vec<u8>, BuildError> {
-        build_udp_probe(spec, base_port, dport, tryno)
+    ) -> Result<Vec<Vec<u8>>, BuildError> {
+        // One datagram per payload, all from the same encoded source port — nmap's
+        // `for (i < MAX(udp_payload_count(dport), 1))` loop. A port with no registered
+        // payload still gets one empty datagram.
+        //
+        // A payload that cannot be built (only reachable if it would overflow the maximum
+        // packet size) is skipped rather than suppressing its siblings; the probe fails
+        // only if nothing at all could be built, which the caller retires as a timeout.
+        let mut pkts = Vec::new();
+        let mut last_err = None;
+        for payload in self.payloads.probe_payloads(dport) {
+            match build_udp_probe_with(spec, base_port, dport, tryno, payload) {
+                Ok(pkt) => pkts.push(pkt),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        match last_err {
+            Some(e) if pkts.is_empty() => Err(e),
+            _ => Ok(pkts),
+        }
     }
 
     fn match_reply(
@@ -413,17 +470,24 @@ impl RawScanKind for FlagKind {
         Protocol::Tcp
     }
 
-    fn build_probe(
+    fn build_probes(
         &self,
         spec: &Ipv4Spec,
         base_port: u16,
         dport: u16,
         tryno: u32,
-    ) -> Result<Vec<u8>, BuildError> {
+    ) -> Result<Vec<Vec<u8>>, BuildError> {
         // A non-flag scan type would be a caller bug; an all-clear (Null-scan) probe is
         // the safe reading, never a panic on the scan path.
         let flags = flags_for(self.scan).unwrap_or(0);
-        build_flag_probe(spec, base_port, dport, tryno, self.seqmask, flags)
+        Ok(vec![build_flag_probe(
+            spec,
+            base_port,
+            dport,
+            tryno,
+            self.seqmask,
+            flags,
+        )?])
     }
 
     fn match_reply(
@@ -781,7 +845,7 @@ mod tests {
         let base = 40000u16;
         let target = Ipv4Addr::new(127, 0, 0, 2);
         let hosts = run(
-            &UdpKind,
+            &UdpKind::bare(),
             &[target],
             &[53],
             base,
@@ -794,6 +858,114 @@ mod tests {
         assert_eq!(p.protocol, Protocol::Udp);
     }
 
+    /// Decode `(dest_port, payload)` out of a built IPv4/UDP datagram.
+    fn udp_dport_and_payload(pkt: &[u8]) -> (u16, Vec<u8>) {
+        let v = nmap_core::recv_validate::validate_packet(pkt).expect("valid IPv4 packet");
+        let udp = &pkt[v.data_offset..];
+        let dport = u16::from_be_bytes([udp[2], udp[3]]);
+        (dport, udp[8..].to_vec())
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn udp_probe_sends_one_datagram_per_registered_payload() {
+        use nmap_core::payload::UdpPayloads;
+        use nmap_core::probedb::ProbeDb;
+
+        // Port 53 has two payloads, port 161 one, port 9999 none.
+        let db = ProbeDb::parse(concat!(
+            "Probe UDP A q|\\x01\\x02\\x03|\nports 53\n",
+            "Probe UDP B q|\\x04\\x05|\nports 53,161\n",
+        ));
+        let payloads = UdpPayloads::from_probe_db(&db);
+        assert_eq!(payloads.count(53), 2, "test fixture sanity");
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sender = MockSender {
+            sent: Arc::clone(&sent),
+        };
+        // No replies: every port retransmits and then resolves open|filtered. We only
+        // care about what went on the wire.
+        let _ = group_scan(
+            Ipv4Addr::from(US),
+            &[Ipv4Addr::new(127, 0, 0, 2)],
+            &[53, 161, 9999],
+            sender,
+            MockSource {
+                frames: Arc::new(Mutex::new(Vec::new())),
+            },
+            &UdpKind::new(payloads),
+            TimingTemplate::Insane,
+            0,
+            40000,
+            true,
+        )
+        .await;
+
+        // Group the distinct payloads observed per destination port.
+        let mut by_port: HashMap<u16, Vec<Vec<u8>>> = HashMap::new();
+        for pkt in sent.lock().unwrap().iter() {
+            let (dport, payload) = udp_dport_and_payload(pkt);
+            let seen = by_port.entry(dport).or_default();
+            if !seen.contains(&payload) {
+                seen.push(payload);
+            }
+        }
+
+        let mut p53 = by_port.remove(&53).expect("port 53 was probed");
+        p53.sort();
+        assert_eq!(
+            p53,
+            vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05]],
+            "both registered payloads for 53 must reach the wire"
+        );
+        assert_eq!(
+            by_port.remove(&161).expect("port 161 was probed"),
+            vec![vec![0x04, 0x05]],
+            "port 161's single payload"
+        );
+        assert_eq!(
+            by_port.remove(&9999).expect("port 9999 was probed"),
+            vec![Vec::<u8>::new()],
+            "a port with no payload still gets one bare datagram"
+        );
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn bare_udp_kind_sends_a_single_empty_datagram() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let _ = group_scan(
+            Ipv4Addr::from(US),
+            &[Ipv4Addr::new(127, 0, 0, 2)],
+            &[53],
+            MockSender {
+                sent: Arc::clone(&sent),
+            },
+            MockSource {
+                frames: Arc::new(Mutex::new(Vec::new())),
+            },
+            &UdpKind::bare(),
+            TimingTemplate::Insane,
+            0,
+            40000,
+            true,
+        )
+        .await;
+        // Every datagram is empty and addressed to 53 — no payload table, no extras.
+        for pkt in sent.lock().unwrap().iter() {
+            let (dport, payload) = udp_dport_and_payload(pkt);
+            assert_eq!(dport, 53);
+            assert!(payload.is_empty(), "bare kind must not attach a payload");
+        }
+    }
+
     #[cfg_attr(
         miri,
         ignore = "spawns a capture thread; miri cannot run real threads/time"
@@ -801,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn udp_no_reply_is_open_filtered() {
         let hosts = run(
-            &UdpKind,
+            &UdpKind::bare(),
             &[Ipv4Addr::new(127, 0, 0, 2)],
             &[9999],
             40000,
@@ -828,7 +1000,7 @@ mod tests {
         // .3's probe is answered by a *router*, which is not proof the port is closed —
         // and the verdict must still land on .3, the host we probed, not on the router.
         let hosts = run(
-            &UdpKind,
+            &UdpKind::bare(),
             &[h2, h3],
             &[53],
             base,

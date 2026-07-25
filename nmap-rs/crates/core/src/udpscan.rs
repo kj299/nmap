@@ -32,10 +32,9 @@
 //!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
-//! * `udpscan-empty-payload` — the probe carries an empty payload. nmap sends
-//!   protocol-specific payloads for well-known UDP ports (`payload.cc`) which elicit
-//!   replies from more services; without them some open UDP ports read as
-//!   `open|filtered`. A safe, less-complete first slice; the payload DB is a follow-up.
+//! * Protocol-specific probe payloads live in [`crate::payload`]; pass one to
+//!   [`build_udp_probe_with`]. [`build_udp_probe`] keeps the bare, zero-length datagram
+//!   for callers that have no payload table (and for the on-the-wire differential).
 //! * Inherits `validate-ipv4-only-for-now`.
 
 use crate::build::{build_udp_raw, BuildError, Ipv4Spec};
@@ -53,7 +52,8 @@ const IP_MIN: usize = 20;
 /// Bytes of a UDP header we read (source + dest ports).
 const UDP_PORTS_LEN: usize = 4;
 
-/// The UDP probe payload. Empty for this slice (see `udpscan-empty-payload`).
+/// The payload of a *bare* UDP probe — empty. Ports with a protocol-specific payload
+/// registered in [`crate::payload`] send that instead (see [`build_udp_probe_with`]).
 pub const UDP_PROBE_PAYLOAD: &[u8] = &[];
 
 /// Build a raw UDP probe packet for `(dport, tryno)`, encoding the attempt in the
@@ -68,8 +68,27 @@ pub fn build_udp_probe(
     dport: u16,
     tryno: u32,
 ) -> Result<Vec<u8>, BuildError> {
+    build_udp_probe_with(spec, base_port, dport, tryno, UDP_PROBE_PAYLOAD)
+}
+
+/// Build a raw UDP probe carrying an explicit `payload` — the protocol-specific payload
+/// [`crate::payload`] registers for the port. Otherwise identical to [`build_udp_probe`]:
+/// the attempt is encoded in the source port, so every payload sent for one logical
+/// probe shares that source port (as nmap does).
+///
+/// # Errors
+/// Propagates [`BuildError`] from [`build_udp_raw`] — notably when the payload would
+/// push the datagram past the maximum packet size, which is rejected rather than
+/// truncated.
+pub fn build_udp_probe_with(
+    spec: &Ipv4Spec,
+    base_port: u16,
+    dport: u16,
+    tryno: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, BuildError> {
     let sport = sport_encode(base_port, tryno);
-    build_udp_raw(spec, sport, dport, UDP_PROBE_PAYLOAD)
+    build_udp_raw(spec, sport, dport, payload)
 }
 
 /// The per-scan constants a captured reply is matched against. Deliberately carries no

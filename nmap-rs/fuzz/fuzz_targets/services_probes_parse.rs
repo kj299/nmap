@@ -17,6 +17,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use nmap_core::model::Protocol;
+use nmap_core::payload::{UdpPayloads, MAX_PAYLOADS_PER_PORT};
 use nmap_core::probedb::ProbeDb;
 
 fuzz_target!(|data: &[u8]| {
@@ -25,6 +26,27 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let db = ProbeDb::parse(text);
+
+    // The UDP payload table is *derived* from this same untrusted file
+    // (`payload.cc: init_payloads`), so it is fuzzed here rather than from its own
+    // target: same input domain, same corpus. The C `fatal()`s when a port collects
+    // too many payloads; we must instead stay total and honor the cap.
+    let payloads = UdpPayloads::from_probe_db(&db);
+    for port in [0u16, 53, 161, 5353, 65535] {
+        let n = payloads.count(port);
+        assert!(n <= MAX_PAYLOADS_PER_PORT, "payload cap exceeded for {port}");
+        assert_eq!(payloads.for_port(port).len(), n);
+        // Indexing must be total for any index, including the wrap and overflow edges.
+        for idx in [0usize, 1, n, n.saturating_add(1), usize::MAX] {
+            let got = payloads.get(port, idx);
+            if n == 0 {
+                assert!(got.is_empty(), "no payload registered must yield empty");
+            }
+        }
+        // One logical probe always yields at least one datagram to send.
+        assert!(!payloads.probe_payloads(port).is_empty());
+    }
+    let _ = payloads.capped_ports().len();
 
     // Drive the query paths too — exclusion lookups do bounded work over the
     // parsed port lists.

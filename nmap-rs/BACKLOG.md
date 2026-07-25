@@ -11,9 +11,11 @@ draft PR when picked up. Kept in-repo so it survives across sessions.
   **every** raw scan now runs on it via `RawScanKind`: `SynKind` (`-sS`), `UdpKind`
   (`-sU`), `FlagKind` (the six flag scans). The three single-host drivers it replaced
   are deleted. Ledgered: `group-scan-one-engine-for-every-raw-scan`.
-- **UDP protocol payloads** (`payload.cc`): protocol-specific probe payloads that
-  elicit replies from more services, shrinking the `open|filtered` bucket. Ledgered:
-  `udpscan-empty-payload`.
+- ~~**UDP protocol payloads** (`payload.cc`)~~ — **done**. `core::payload` derives the
+  payload table from `nmap-service-probes` (nmap has no separate payload DB), and
+  `sys::group::UdpKind` sends one datagram per registered payload. Ledgered:
+  `payload-cap-warns-not-fatal`, `payload-missing-db-degrades`,
+  `payload-one-datagram-per-payload`.
 - **Back-fill the SYN/flag scans' ICMP path** with the embedded-probe match machinery
   the UDP scan introduced (`core::udpscan::embedded_probe` generalizes — it already
   returns the quoted destination, which is what attributes an error to the right host

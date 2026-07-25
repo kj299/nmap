@@ -5,9 +5,14 @@
 //!
 //! [`FlagKind`]: crate::group::FlagKind
 
+// Only the `pcap` entry point below uses these; without the feature this module is
+// empty, and an ungated import would be an unused-import warning (CI runs `-D warnings`).
+#[cfg(feature = "pcap")]
 use std::net::IpAddr;
 
+#[cfg(feature = "pcap")]
 use nmap_core::classify::ScanType;
+#[cfg(feature = "pcap")]
 use nmap_core::timing::TimingTemplate;
 
 /// Run a flag scan of type `scan` over several targets with route/source selection and

@@ -6,7 +6,9 @@
 //!     (`ER_UDPRESPONSE`);
 //!   * an **ICMP port-unreachable** (type 3 code 3) whose *embedded* packet is our
 //!     probe → the port is **closed** (`ER_PORTUNREACH`); other ICMP unreachable /
-//!     time-exceeded codes → **filtered**.
+//!     time-exceeded codes → **filtered**. A port-unreachable is only *closed* when it
+//!     comes from the host the quoted probe was addressed to; from anywhere else
+//!     (a router) it is *filtered*.
 //!
 //! Nothing back at all → `open|filtered` (the driver's default). This module is a
 //! total function of its inputs — no clock, no I/O, no randomness — so it is
@@ -17,6 +19,16 @@
 //! destination port (our source port) or, for an ICMP error, from the **embedded**
 //! probe's source port. The pcap BPF filter scopes capture to our encoded
 //! source-port range plus ICMP, so our own outgoing datagrams never match.
+//!
+//! ## Which host a reply is about
+//!
+//! [`UdpReply::src_ip`] names the **scanned host the reply concerns**, so one matcher
+//! can serve a whole host group (see `nmap_sys::group`). For a direct datagram that is
+//! simply the reply's source address. For an ICMP error it is the **destination of the
+//! quoted probe** — the host we sent it to — *not* the ICMP sender, which is legitimately
+//! an intermediate router. `from_target` (which decides port-unreachable → *closed*
+//! rather than *filtered*) is then just "the ICMP came from the host it quotes a probe
+//! to", needing no external knowledge of what is being scanned.
 //!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
@@ -60,20 +72,22 @@ pub fn build_udp_probe(
     build_udp_raw(spec, sport, dport, UDP_PROBE_PAYLOAD)
 }
 
-/// The per-scan constants a captured reply is matched against.
+/// The per-scan constants a captured reply is matched against. Deliberately carries no
+/// target address — see the module docs on which host a reply is about.
 #[derive(Debug, Clone, Copy)]
 pub struct UdpMatchCtx {
     /// Base UDP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Highest attempt number in flight.
     pub max_tryno: u32,
-    /// The target address, to decide `from_target` for ICMP classification.
-    pub target: [u8; 4],
 }
 
 /// A captured packet matched to an outstanding UDP probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UdpReply {
+    /// The scanned host this reply is about: the sender for a direct datagram, or the
+    /// destination of the quoted probe for an ICMP error.
+    pub src_ip: [u8; 4],
     /// The scanned port that answered.
     pub port: u16,
     /// Which attempt this reply answers.
@@ -107,6 +121,7 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
             let our_sport = u16::from_be_bytes([udp[2], udp[3]]);
             let tryno = attempt_from_sport(our_sport, ctx)?;
             Some(UdpReply {
+                src_ip,
                 port: scanned,
                 tryno,
                 state: classify_udp_response(),
@@ -120,12 +135,15 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
             let (icmp_type, icmp_code) = (icmp[0], icmp[1]);
             // The ICMP error quotes our original probe after the 8-byte ICMP header.
             let embedded = icmp.get(ICMP_HEADER_LEN..)?;
-            let (embedded_sport, embedded_dport) = embedded_udp_ports(embedded)?;
-            let tryno = attempt_from_sport(embedded_sport, ctx)?;
-            let from_target = src_ip == ctx.target;
+            let probe = embedded_probe(embedded)?;
+            let tryno = attempt_from_sport(probe.sport, ctx)?;
+            // The quoted probe names the host we scanned; the error is authoritative
+            // for "closed" only if that host is the one that sent it.
+            let from_target = src_ip == probe.dst_ip;
             let state = classify_icmp(ScanType::Udp, icmp_type, icmp_code, from_target)?;
             Some(UdpReply {
-                port: embedded_dport,
+                src_ip: probe.dst_ip,
+                port: probe.dport,
                 tryno,
                 state,
             })
@@ -141,10 +159,20 @@ fn attempt_from_sport(sport: u16, ctx: &UdpMatchCtx) -> Option<u32> {
     (tryno <= ctx.max_tryno).then_some(tryno)
 }
 
-/// Parse `(src_port, dst_port)` out of the IPv4+UDP packet embedded in an ICMP error.
-/// The quote may be truncated to the first 8 bytes of the UDP header, which still
-/// covers both ports. Returns `None` unless it is a well-formed IPv4/UDP quote.
-fn embedded_udp_ports(embedded: &[u8]) -> Option<(u16, u16)> {
+/// The parts of our original probe recovered from an ICMP error's quoted packet.
+struct EmbeddedProbe {
+    /// Where the quoted probe was addressed — the host we scanned.
+    dst_ip: [u8; 4],
+    /// Our encoded source port (→ the attempt).
+    sport: u16,
+    /// The scanned port.
+    dport: u16,
+}
+
+/// Parse the IPv4+UDP packet embedded in an ICMP error. The quote may be truncated to
+/// the first 8 bytes of the UDP header, which still covers both ports. Returns `None`
+/// unless it is a well-formed IPv4/UDP quote.
+fn embedded_probe(embedded: &[u8]) -> Option<EmbeddedProbe> {
     if embedded.len() < IP_MIN {
         return None;
     }
@@ -155,13 +183,18 @@ fn embedded_udp_ports(embedded: &[u8]) -> Option<(u16, u16)> {
     if ihl < IP_MIN || embedded[9] != IPPROTO_UDP {
         return None;
     }
+    let dst_ip: [u8; 4] = embedded.get(16..20)?.try_into().ok()?;
     let udp = embedded.get(ihl..)?;
     if udp.len() < UDP_PORTS_LEN {
         return None;
     }
     let sport = u16::from_be_bytes([udp[0], udp[1]]);
     let dport = u16::from_be_bytes([udp[2], udp[3]]);
-    Some((sport, dport))
+    Some(EmbeddedProbe {
+        dst_ip,
+        sport,
+        dport,
+    })
 }
 
 /// Byte offset of the IPv4 header inside a captured frame.
@@ -185,7 +218,6 @@ mod tests {
         UdpMatchCtx {
             base_port: 40000,
             max_tryno: 11,
-            target: [10, 0, 0, 2],
         }
     }
 
@@ -217,6 +249,8 @@ mod tests {
         assert_eq!(m.port, 53);
         assert_eq!(m.tryno, 0);
         assert_eq!(m.state, PortState::Open);
+        // A direct datagram is about the host that sent it.
+        assert_eq!(m.src_ip, [10, 0, 0, 2]);
     }
 
     /// Build an ICMP type/code error quoting an embedded IPv4/UDP probe (our sport →
@@ -285,6 +319,20 @@ mod tests {
         // Same error but from a different source (not the target) → filtered.
         let ip = icmp_quoting([192, 168, 0, 1], 3, 3, 40000, 53);
         let m = match_udp_response(&framed(&ip), true, &ctx()).unwrap();
+        assert_eq!(m.state, PortState::Filtered);
+        // Still attributed to the host we probed, not to the router that answered.
+        assert_eq!(m.src_ip, [10, 0, 0, 2]);
+    }
+
+    #[test]
+    fn icmp_error_is_attributed_to_the_quoted_destination() {
+        // A host that answers with an error quoting a probe we sent to a *different*
+        // host cannot launder that into a verdict about itself: the reply is attributed
+        // to the quoted destination, and — since sender != quoted destination — the
+        // port-unreachable reads as filtered rather than closed.
+        let ip = icmp_quoting([10, 0, 0, 9], 3, 3, 40000, 53);
+        let m = match_udp_response(&framed(&ip), true, &ctx()).unwrap();
+        assert_eq!(m.src_ip, [10, 0, 0, 2], "attributed to the probed host");
         assert_eq!(m.state, PortState::Filtered);
     }
 

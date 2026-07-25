@@ -20,7 +20,7 @@ use nmap_core::model::{PortState, Reason};
 use nmap_core::packet_parser::{parse_packet, Header};
 
 use nmap_sys::capture::AsyncCapture;
-use nmap_sys::flagscan::{flag_scan, FlagScanConfig};
+use nmap_sys::group::{group_scan, FlagKind};
 use nmap_sys::rawio::{RawIpv4Sender, RawSender};
 
 const IPPROTO_TCP: u8 = 6;
@@ -115,14 +115,6 @@ async fn ack_and_fin_scans_resolve_a_closed_port() {
         drop(closed);
 
         let base_port = 55000u16;
-        let config = FlagScanConfig {
-            scan,
-            ports: vec![closed_port],
-            template: nmap_core::timing::TimingTemplate::Insane,
-            max_parallelism: 0,
-            eth_included: true,
-            base_port,
-        };
         let bpf = format!(
             "tcp and dst host 127.0.0.1 and dst portrange {}-{}",
             base_port,
@@ -131,20 +123,32 @@ async fn ack_and_fin_scans_resolve_a_closed_port() {
         let source = nmap_sys::capture::pcap_source::PcapSource::open("lo", 65535, 100, Some(&bpf))
             .expect("open lo capture");
 
-        let host = tokio::time::timeout(
+        let hosts = tokio::time::timeout(
             Duration::from_secs(10),
-            flag_scan(
+            group_scan(
                 Ipv4Addr::LOCALHOST,
-                Ipv4Addr::LOCALHOST,
+                &[Ipv4Addr::LOCALHOST],
+                &[closed_port],
                 sender,
                 source,
-                &config,
+                &FlagKind {
+                    scan,
+                    seqmask: 0x2468_ACE0,
+                },
+                nmap_core::timing::TimingTemplate::Insane,
+                0,
+                base_port,
+                true,
             ),
         )
         .await
         .expect("scan completed within 10s");
 
-        let p = host.ports.iter().find(|p| p.number == closed_port).unwrap();
+        let p = hosts[0]
+            .ports
+            .iter()
+            .find(|p| p.number == closed_port)
+            .unwrap();
         assert_eq!(p.state, expect, "{scan:?} on a closed port");
         assert_eq!(p.reason, Reason::Reset);
     }

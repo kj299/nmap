@@ -26,8 +26,8 @@ use nmap_core::packet_parser::{parse_packet, Header};
 use nmap_core::synscan::build_syn_probe;
 
 use nmap_sys::capture::AsyncCapture;
+use nmap_sys::group::{group_scan, SynKind};
 use nmap_sys::rawio::{RawIpv4Sender, RawSender};
-use nmap_sys::synscan::{syn_scan, SynScanConfig};
 
 const IPPROTO_TCP: u8 = 6;
 
@@ -159,14 +159,6 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
     // Encoded source-port range well clear of the scanned ports; the BPF filter scopes
     // capture to it so our own outgoing SYNs are excluded (the self-probe guard).
     let base_port = 55000u16;
-    let config = SynScanConfig {
-        ports: vec![open_port, closed_port],
-        template: nmap_core::timing::TimingTemplate::Insane,
-        max_parallelism: 0,
-        eth_included: true,
-        base_port,
-        seqmask: 0x2468_ACE0,
-    };
     let bpf = format!(
         "tcp and dst host 127.0.0.1 and dst portrange {}-{}",
         base_port,
@@ -175,19 +167,27 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
     let source = nmap_sys::capture::pcap_source::PcapSource::open("lo", 65535, 100, Some(&bpf))
         .expect("open lo capture");
 
-    let host = tokio::time::timeout(
+    let hosts = tokio::time::timeout(
         Duration::from_secs(10),
-        syn_scan(
+        group_scan(
             Ipv4Addr::LOCALHOST,
-            Ipv4Addr::LOCALHOST,
+            &[Ipv4Addr::LOCALHOST],
+            &[open_port, closed_port],
             sender,
             source,
-            &config,
+            &SynKind {
+                seqmask: 0x2468_ACE0,
+            },
+            nmap_core::timing::TimingTemplate::Insane,
+            0,
+            base_port,
+            true,
         ),
     )
     .await
     .expect("scan completed within 10s");
 
+    let host = &hosts[0];
     assert_eq!(host.state, HostState::Up);
     let open = host.ports.iter().find(|p| p.number == open_port).unwrap();
     assert_eq!(open.state, PortState::Open, "listener port should be Open");

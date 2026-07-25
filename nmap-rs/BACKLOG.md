@@ -24,10 +24,17 @@ draft PR when picked up. Kept in-repo so it survives across sessions.
   `icmp-quote-requires-our-source`, `icmp-quote-verifies-our-sequence`,
   `icmp-reason-fidelity`, `icmp-bpf-widened-for-tcp-scans`.
 
-### 3. M5 — OS detection
-The next milestone in the plan of record. Consumes this raw send/capture layer:
-IPv4 `osscan2` probe engine + `nmap-os-db` fingerprint match; IPv6 `FPEngine`
-inference. See the milestone plan for the full breakdown.
+### 3. M5 — OS detection  ⟵ **IN PROGRESS**
+Phase 0 done (inventory + cflaw-scan + threat model + FPModel spike); both the IPv4
+and IPv6 tracks are approved. Port order, leaf-first:
+1. ~~`core::osdb::expr`~~ — **done**, C-oracle differential over 23.8k cases.
+2. `core::osdb::model` / `parse` — `nmap-os-db` types + parser (fuzz + corpus gate).
+3. `core::osdb::score` — `compare_fingerprints` / `match_fingerprint`.
+4. `core::macvendor` — `nmap-mac-prefixes` (52,085 entries) parse + lookup.
+5. `core::osprobe` — the 16 IPv4 probe builders + response→fingerprint parse.
+6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.
+7. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
+   f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

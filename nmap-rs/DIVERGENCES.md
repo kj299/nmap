@@ -521,6 +521,47 @@ of a generic `no-response`.
       at the kernel and the port fell back to the no-response default. Matches the UDP
       filter's existing shape.
 
+## Milestone 5 — OS detection: the `nmap-os-db` expression matcher
+
+`core::osdb::expr` ports `expr_match()` from `osscan.cc` — the matcher every OS
+fingerprint attribute goes through. Both of its inputs are attacker-influenced: the
+*expression* comes from `nmap-os-db`, which `--osscandb` lets a user point at any file,
+and the *value* is derived from packets the scanned host sent back. It is verified
+against a verbatim transcription of the C over **23,812** cases (23,200 comparable,
+2,047 of them matches) drawn from the grammar's shapes, the shipped 5 MB database, and a
+deterministic random cross-product.
+
+### Security fix (C defect closed by the port)
+
+- [x] `osdb-expr-unterminated-nest-no-abort` (`core::osdb::expr`): an expression
+      containing `[` with no closing `]` makes the C's `assert(q1)` fire. Measured, not
+      inferred — **612 of the 23,812 corpus cases abort the C outright**, which is a
+      denial of service reachable from a malformed or hostile `nmap-os-db`. Release
+      builds define `NDEBUG`, which compiles the assert out and instead evaluates
+      `q1 - nest` and `q1 + 1` with `q1 == NULL` — undefined behavior. In practice the
+      resulting `explen` is huge, so `p_end` wraps below `p` and the scan loops run zero
+      times; five hand-built variants under ASan returned "no match" without an
+      out-of-bounds read, so the observable release-build symptom is a wrong-ish answer
+      rather than a crash. The port treats an unterminated `[` as **no match** and
+      continues with the remaining alternatives — total on all input, proven by the
+      `osdb_expr` fuzz target (3.0M runs) and asserted case-by-case in
+      `expr_differential.rs`.
+
+### Faithfully reproduced C quirks (deliberately *not* fixed)
+
+Both look like bugs, but the shipped database was authored against them, so "fixing"
+them would mis-match real fingerprints. Reproduced deliberately and pinned by the
+differential:
+
+- [x] `osdb-expr-vlen-persists-across-alternatives` (`core::osdb::expr`): the C declares
+      `subval` inside the alternation loop (reset per alternative) but `vlen` is the
+      function parameter, so stripping leading zeros while testing one alternative
+      permanently shortens the value every later alternative sees. Our port keeps `vlen`
+      outside the loop for exactly this reason.
+- [x] `osdb-expr-nested-run-is-greedy` (`core::osdb::expr`): a `[...]` group is tested
+      against the *entire* following hex run, not the minimum needed. Since `B` is a hex
+      digit, `M[1-6]ST11` does **not** match `M5B4ST11` — the run is `5B4`.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

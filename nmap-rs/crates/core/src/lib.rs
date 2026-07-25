@@ -23,6 +23,7 @@ pub mod log;
 pub mod matcher;
 pub mod model;
 pub mod options;
+pub mod osdb;
 pub mod output;
 pub mod packet_parser;
 pub mod payload;

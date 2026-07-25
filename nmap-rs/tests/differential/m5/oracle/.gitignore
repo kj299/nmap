@@ -1,0 +1,3 @@
+# Oracle build artifacts (rebuild with build_expr_oracle.sh).
+*.o
+expr_oracle

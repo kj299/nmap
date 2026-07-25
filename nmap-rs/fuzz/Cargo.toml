@@ -155,3 +155,8 @@ test = false
 name = "match_flag"
 path = "fuzz_targets/match_flag.rs"
 test = false
+
+[[bin]]
+name = "osdb_expr"
+path = "fuzz_targets/osdb_expr.rs"
+test = false

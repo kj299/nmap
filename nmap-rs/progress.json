@@ -26,6 +26,7 @@
     "core::osdb::score": "differential",
     "core::osprobe::analyze": "differential",
     "core::osprobe::build": "differential",
+    "core::osprobe::seq": "differential",
     "core::packet_parser": "unsafe_audited",
     "core::payload": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",

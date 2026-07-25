@@ -12,3 +12,4 @@
 
 pub mod analyze;
 pub mod build;
+pub mod seq;

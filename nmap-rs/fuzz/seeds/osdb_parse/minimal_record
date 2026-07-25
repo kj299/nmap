@@ -1,0 +1,9 @@
+MatchPoints
+SEQ(SP=25%GCD=75%ISR=25)
+T1(R=100%DF=20%T=15)
+
+Fingerprint Linux 5.4
+Class Linux | Linux | 5.X | general purpose
+CPE cpe:/o:linux:linux_kernel:5 auto
+SEQ(SP=100-10A%GCD=1-6%ISR=105-10F)
+T1(R=Y%DF=Y%T=3B-45)

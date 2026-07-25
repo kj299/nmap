@@ -20,6 +20,8 @@
     "core::ipid": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::osdb::expr": "differential",
+    "core::osdb::model": "differential",
+    "core::osdb::parse": "differential",
     "core::packet_parser": "unsafe_audited",
     "core::payload": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",

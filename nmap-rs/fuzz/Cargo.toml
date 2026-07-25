@@ -160,3 +160,8 @@ test = false
 name = "osdb_expr"
 path = "fuzz_targets/osdb_expr.rs"
 test = false
+
+[[bin]]
+name = "osdb_parse"
+path = "fuzz_targets/osdb_parse.rs"
+test = false

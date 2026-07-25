@@ -753,6 +753,47 @@ Fuzzed (`osprobe_tcpopt`, 87.8M runs).
       `end_of_list_does_not_stop_the_walk` and by the corpus cases in section 6 of
       `gen_tcpopt_cases.py`.
 
+### Response analysis — the `SEQ` test
+
+`core::osprobe::seq` ports `makeTSeqFP`: the ISN-predictability analysis (`SP`, `GCD`,
+`ISR`), the three IP-ID classifications plus the shared-counter test (`TI`, `CI`, `II`,
+`SS`), and the TCP-timestamp frequency buckets (`TS`). Verified by a **C-oracle
+differential over 354 cases** whose oracle carries `gcd_n_uint`, the ISN rate/standard-
+deviation block and the `TS` bucketing copied **verbatim** from `osscan2.cc` — 143 ISN
+analyses and 215 timestamp analyses, all matching. IP-ID classification is covered by
+`core::ipid`'s own M4 differential. Fuzzed (`osprobe_seq`, 10.4M runs).
+
+- [x] `seq-isr-no-negative-cast` (`core::osprobe::seq`): the C computes the ISN rate as
+      `seq_rate = log(rate)/log(2.0); (unsigned int)(seq_rate * 8 + 0.5)`. When the
+      counter advances slower than once per second the logarithm is **negative**, and
+      converting a negative `double` to an unsigned integer type is **undefined
+      behaviour**; a zero rate makes it `-inf`, which is worse. In practice it wraps: the
+      committed golden records `ISR=FFFFFFA2` for probes an hour apart with a one-step
+      advance, i.e. a nonsense "4.29 billion" rate fed straight into fingerprint
+      matching. This port saturates to `0`. **Reachable, not theoretical** — the
+      differential corpus hits it, and the test asserts both that our value is `0` and
+      that every other attribute on those lines still agrees exactly, so the divergence
+      stays exactly this wide.
+- [x] `seq-ss-divisor-guarded` (`core::osprobe::seq`): the shared-counter test divides by
+      `good_tcp_ipid_num - 1`. That is only safe because the enclosing branch requires an
+      incremental classification, which requires three samples — a coupling across ~60
+      lines and two functions. The divisor is checked directly here instead of resting on
+      it.
+- [x] `seq-isn-zero-is-a-real-sample` (`core::osprobe::seq`): the C stores replies in an
+      array where `seqs[i] == 0` means "no reply", so a host whose ISN is genuinely zero
+      has that sample silently dropped from the ISN analysis — changing `GCD`, `SP` and
+      `ISR`, and the response count with them. Replies are `Option`-shaped here, so
+      absence and a zero ISN are distinct. Observable only against a host that returns
+      ISN 0, which is a 1-in-2^32 accident per probe.
+- [x] `seq-gcd-divide-only-when-large` (`core::osprobe::seq`): **not a divergence** —
+      recorded because it looks like a bug and is easy to "simplify" away. The rate
+      standard deviation is divided by the GCD **only when the GCD exceeds 9**. The C's
+      own comment explains why: dividing always would produce an artificially low value
+      "about 1/32 of the time if the responses all happen to be even", while never
+      dividing would make a stack that deliberately steps by 64,000 look wildly
+      unpredictable. `SP` is therefore not a pure function of the rate ratios, and the
+      unit test `the_gcd_is_divided_out_only_when_it_is_large` pins both sides.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

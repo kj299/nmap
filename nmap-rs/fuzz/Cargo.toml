@@ -185,3 +185,8 @@ test = false
 name = "osprobe_tcpopt"
 path = "fuzz_targets/osprobe_tcpopt.rs"
 test = false
+
+[[bin]]
+name = "osprobe_seq"
+path = "fuzz_targets/osprobe_seq.rs"
+test = false

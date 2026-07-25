@@ -1,3 +1,3 @@
-# Oracle build artifacts (rebuild with build_expr_oracle.sh).
-*.o
+# Compiled oracles: rebuild from the .cc sources (see their header comments).
 expr_oracle
+seq_oracle

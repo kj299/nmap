@@ -20,6 +20,7 @@ pub mod headers;
 pub mod icmp_quote;
 pub mod ipid;
 pub mod log;
+pub mod macvendor;
 pub mod matcher;
 pub mod model;
 pub mod options;

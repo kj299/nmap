@@ -18,6 +18,7 @@
     "core::headers::udp": "unsafe_audited",
     "core::icmp_quote": "unsafe_audited",
     "core::ipid": "unsafe_audited",
+    "core::macvendor": "differential",
     "core::matcher": "unsafe_audited",
     "core::osdb::expr": "differential",
     "core::osdb::model": "differential",

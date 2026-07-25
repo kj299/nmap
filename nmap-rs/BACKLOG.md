@@ -38,3 +38,9 @@ inference. See the milestone plan for the full breakdown.
 - **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
   `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
   in the next scan-driver retrospective (cousin of LESSONS #15).
+- **Lint both feature configurations before pushing**: `--all-features` turns `pcap`
+  on, so it never sees an import that is only used by a `#[cfg(feature = "pcap")]`
+  item. CI runs clippy with **and** without the feature under `-D warnings`; a
+  local `--all-features`-only check passes code CI rejects. (Cost a red run on #55.)
+  Same shape as the fuzz `+nightly` note in LESSONS #16: the local convenience
+  invocation is not the CI invocation. For the next retrospective.

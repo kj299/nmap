@@ -18,6 +18,8 @@ fuzz_target!(|data: &[u8]| {
         ScanType::Xmas,
     ] {
         let ctx = FlagMatchCtx {
+            our_ip: [10, 0, 0, 1],
+            seqmask: 0xABCD_1234,
             scan,
             base_port: 40000,
             max_tryno: 11,

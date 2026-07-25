@@ -333,14 +333,9 @@ bounded-concurrency scan over the pure `core::engine::HostScheduler`. The port-s
 *decisions* are the already-ledgered `core::classify` behavior; these entries cover
 the driver-specific choices.
 
-- [x] `synscan-icmp-match-deferred` (`core::synscan`): the C maps an ICMP
-      unreachable/time-exceeded whose embedded packet is one of our probes to
-      `PORT_FILTERED` (`scan_engine_raw.cc:1888`). This first slice matches **TCP**
-      replies (SYN/ACK → open, RST → closed) and leaves ICMP-derived *filtered* to the
-      no-response default (`default_port_state(Syn) == Filtered`). Observable only where
-      a host answers a filtered port with an ICMP error *fast enough to beat the
-      retransmit timeout* — the common firewall-drop case is already `Filtered` either
-      way. `classify_icmp` is ported; wiring the embedded-probe match is a follow-up.
+- [x] ~~`synscan-icmp-match-deferred`~~ — **resolved**: `match_syn_response` now matches
+      an ICMP unreachable/time-exceeded quoting one of our SYNs and reports *filtered*
+      with the specific ICMP reason. See the ICMP back-fill section below.
 - [x] `synscan-late-reply-no-grace-window` (`sys::synscan`): nmap keeps a probe
       matchable for `10*min(1s,RTO)` past its timeout (`probeExpireTime`,
       `scan_engine.cc:525`), so a very late reply can still resolve a port. This driver
@@ -387,7 +382,8 @@ the driver-specific choices.
       closed) or other unreachable/time-exceeded (→ filtered) back to the probe it
       answers — the embedded-probe match `synscan` deferred (`synscan-icmp-match-deferred`).
       Bounds-checked and fuzzed (the nested parse is a second untrusted-input surface).
-      This machinery can back-fill the SYN scan's ICMP path in a later slice.
+      Generalized to TCP and shared with the SYN and flag scans in the ICMP back-fill
+      section below (`core::icmp_quote`).
 - [x] ~~`udpscan-single-host-first-slice`~~ — **resolved**: `-sU` now runs on the shared
       multi-host group engine (`sys::group::UdpKind`), so the single-host limit is gone.
 - [x] `udpscan-icmp-attributed-to-quoted-destination` (`core::udpscan`): an ICMP error is
@@ -397,11 +393,13 @@ the driver-specific choices.
       *filtered* to *closed*) is correspondingly "the sender is the host the quoted probe
       was addressed to", computed from the packet alone. This makes the matcher a pure
       function of the frame — no ambient target to pass in, which is what lets one matcher
-      serve a whole host group — and it is **stricter than the C**, which compares the
-      ICMP source against the host whose probe list is being searched: a host that quotes
-      a probe we sent to a *different* host can no longer have its error counted as an
-      authoritative *closed* for that other host. Same verdicts on well-formed traffic;
-      the divergence is only visible under spoofed or misdirected ICMP.
+      serve a whole host group.
+
+      **Structural only — this matches the C.** An earlier revision of this entry claimed
+      the rule was *stricter* than the C; that was wrong, and is corrected here.
+      `scan_engine_raw.cc` looks the host up by `encaps_hdr.dst` (the quoted destination)
+      and then computes `from_target` against the outer ICMP source, which is exactly the
+      rule above. No behavioral divergence.
 
 ## Milestone 4 — TCP flag scans (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`)
 
@@ -417,11 +415,10 @@ One generalized `core::flagscan` + `sys::flagscan`, parametrized by
       port); the pcap BPF filter scopes capture to that range, excluding our own
       outgoing probes. No behavioral divergence; a structural note on how matching
       differs from the SYN scan.
-- [x] `flagscan-icmp-match-deferred` (`core::flagscan`): like the SYN scan, ICMP-derived
-      *filtered* is left to the no-response default (`default_port_state`) rather than
-      matching the ICMP-embedded probe; the UDP scan's `embedded_udp_ports` machinery
-      can back-fill it. Observable only when a host answers with ICMP fast enough to beat
-      the retransmit timeout.
+- [x] ~~`flagscan-icmp-match-deferred`~~ — **resolved**: all six flag scans match ICMP
+      errors through the shared `match_tcp_icmp_error`. This matters most for
+      `-sF`/`-sN`/`-sX`/`-sM`, whose no-response default is `open|filtered`: only the ICMP
+      error can tell those apart from *filtered*. See the ICMP back-fill section below.
 - [x] ~~`flagscan-single-host-first-slice`~~ — **resolved**: all six flag scans now run on
       the shared multi-host group engine (`sys::group::FlagKind`).
 
@@ -482,6 +479,47 @@ derivation).
       bytes on the wire per admitted probe than a SYN scan does. Not an output
       divergence; it makes `-sU` pacing slightly more permissive than the C's
       per-datagram accounting.
+
+## Milestone 4 — ICMP back-fill for the TCP scans (`core::icmp_quote`)
+
+An ICMP destination-unreachable (type 3) or time-exceeded (type 11) quotes the packet
+that provoked it, so it can be matched back to the probe it answers. The UDP scan used
+this from the start; `core::icmp_quote` generalizes the quote parser to TCP and shares it
+with `-sS` and all six flag scans, closing `synscan-icmp-match-deferred` and
+`flagscan-icmp-match-deferred`.
+
+It matters most for `-sF`/`-sN`/`-sX`/`-sM`, whose no-response default is `open|filtered`:
+without ICMP matching there is no way for those scans to report a port as *filtered* at
+all. The three matchers also now carry the **reason** they matched on, so a filtered port
+reports the specific code (`host-unreach`, `admin-prohibited`, `time-exceeded`, …) instead
+of a generic `no-response`.
+
+- [x] `icmp-quote-requires-our-source` (`core::icmp_quote`, **fixes a gap in our own
+      earlier slice**): an ICMP error is only considered when the packet it quotes has
+      **our** source address — the C's `if (sockaddr_storage_cmp(USI->SourceSockAddr(),
+      &encaps_hdr.src) != 0) continue;`, *"If it didn't come from us, we don't care."* The
+      UDP matcher shipped without this check (its port/attempt encoding limited the
+      impact, but a crafted error quoting a third party's packet could be accepted). All
+      three scans now enforce it, which is why every match context carries `our_ip`.
+      Matches the C; no divergence in behavior, a hardening relative to what we shipped.
+- [x] `icmp-quote-verifies-our-sequence` (`core::synscan`): for a TCP scan the quote
+      contains our original packet, so — unlike a RST, which reflects no sequence of ours
+      (`flagscan-match-on-port-not-sequence`) — the encoded sequence *is* present and is
+      verified against `seq32_encode(seqmask, tryno)`. Ports the C's
+      `ntohl(tcp.th_seq) != probe->tcpseq()` check. This makes a flag scan's ICMP path
+      strictly better authenticated than its RST path.
+- [x] `icmp-reason-fidelity` (`core::icmp_quote`, `core::model`): ports
+      `portreasons.cc: icmp_to_reason`, adding the reasons nmap distinguishes —
+      `proto-unreach`, `dest-unreach`, `net-prohibited`, `host-prohibited`,
+      `admin-prohibited`, `time-exceeded`. Note codes 9/10/13 are **three different**
+      reasons in nmap, not one "admin-prohibited". Previously an ICMP-derived *filtered*
+      reported `no-response`, which was inaccurate; UDP's ICMP-filtered ports change
+      reason string accordingly (the *state* is unchanged).
+- [x] `icmp-bpf-widened-for-tcp-scans` (`sys::group`): the SYN and flag BPF filters now
+      also admit `icmp and dst host <us>`. An ICMP error is addressed to our *address* and
+      carries no port of ours in its own header, so a purely port-scoped filter dropped it
+      at the kernel and the port fell back to the no-response default. Matches the UDP
+      filter's existing shape.
 
 ## Milestone 4 — CLI scan-technique selection
 

@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use nmap_core::build::{BuildError, Ipv4Spec};
-use nmap_core::classify::{default_port_state, PortState as ClassState, ScanType};
+use nmap_core::classify::{default_port_state, ScanType};
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe};
 use nmap_core::flagscan::{build_flag_probe, flags_for, match_flag_response, FlagMatchCtx};
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason};
@@ -49,6 +49,19 @@ pub struct GroupReply {
     pub reason: Reason,
 }
 
+/// The per-scan constants every matcher needs, gathered so the trait method does not grow
+/// a parameter per scan feature.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchParams {
+    /// Our own source address — required to confirm that the packet quoted inside an ICMP
+    /// error is one we actually sent.
+    pub our_ip: [u8; 4],
+    /// Base source port; the attempt is `sport - base_port`.
+    pub base_port: u16,
+    /// Highest attempt number in flight.
+    pub max_tryno: u32,
+}
+
 /// The scan-type-specific behavior the shared group loop needs. One impl per scan
 /// technique; the loop itself is scan-agnostic.
 pub trait RawScanKind {
@@ -74,8 +87,7 @@ pub trait RawScanKind {
         &self,
         frame: &[u8],
         eth_included: bool,
-        base_port: u16,
-        max_tryno: u32,
+        params: &MatchParams,
     ) -> Option<GroupReply>;
     /// The `(state, reason)` for a port that never answered (this scan's default).
     fn default_final(&self) -> (PortState, Reason);
@@ -115,6 +127,11 @@ where
     let max_par = u32::try_from(max_parallelism).unwrap_or(u32::MAX);
     let params = TimingParams::for_template(template);
     let max_tryno = params.max_retransmissions;
+    let match_params = MatchParams {
+        our_ip: src.octets(),
+        base_port,
+        max_tryno,
+    };
 
     let mut ctxs: Vec<HostCtx> = targets
         .iter()
@@ -202,7 +219,7 @@ where
         tokio::select! {
             frame = capture.recv() => {
                 if let Some(f) = frame {
-                    if let Some(reply) = kind.match_reply(&f.data, eth_included, base_port, max_tryno) {
+                    if let Some(reply) = kind.match_reply(&f.data, eth_included, &match_params) {
                         if let Some(&idx) = by_ip.get(&reply.src_ip) {
                             if let Some((send_us, _)) =
                                 outstanding.remove(&(idx, reply.port, reply.tryno))
@@ -304,26 +321,23 @@ impl RawScanKind for SynKind {
         &self,
         frame: &[u8],
         eth_included: bool,
-        base_port: u16,
-        max_tryno: u32,
+        params: &MatchParams,
     ) -> Option<GroupReply> {
         let ctx = MatchCtx {
-            base_port,
+            our_ip: params.our_ip,
+            base_port: params.base_port,
             seqmask: self.seqmask,
-            max_tryno,
+            max_tryno: params.max_tryno,
         };
         let r = match_syn_response(frame, eth_included, &ctx)?;
-        let reason = match r.state {
-            ClassState::Open => Reason::ConnAccept,
-            ClassState::Closed => Reason::Reset,
-            _ => Reason::NoResponse,
-        };
         Some(GroupReply {
             src_ip: r.src_ip,
             port: r.port,
             tryno: r.tryno,
             state: r.state.into(),
-            reason,
+            // The matcher reports how it matched — `syn-ack`, `reset`, or the specific
+            // ICMP unreachable code — rather than the driver guessing from the state.
+            reason: r.reason,
         })
     }
 
@@ -335,11 +349,15 @@ impl RawScanKind for SynKind {
     }
 
     fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
+        // ICMP must be admitted too: an error quoting our probe is addressed to our
+        // *address* and carries no port of ours in its own header, so a port-scoped
+        // filter would drop it and the port would fall back to the no-response default.
         format!(
-            "tcp and dst host {} and dst portrange {}-{}",
+            "(tcp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
             src,
             base_port,
-            base_port.saturating_add(span)
+            base_port.saturating_add(span),
+            src
         )
     }
 }
@@ -411,19 +429,14 @@ impl RawScanKind for UdpKind {
         &self,
         frame: &[u8],
         eth_included: bool,
-        base_port: u16,
-        max_tryno: u32,
+        params: &MatchParams,
     ) -> Option<GroupReply> {
         let ctx = UdpMatchCtx {
-            base_port,
-            max_tryno,
+            our_ip: params.our_ip,
+            base_port: params.base_port,
+            max_tryno: params.max_tryno,
         };
         let r = match_udp_response(frame, eth_included, &ctx)?;
-        let reason = match r.state {
-            ClassState::Open => Reason::UdpResponse,
-            ClassState::Closed => Reason::PortUnreach,
-            _ => Reason::NoResponse,
-        };
         // `src_ip` is the *quoted* destination for an ICMP error, so an error relayed by
         // a router is still attributed to the host we probed.
         Some(GroupReply {
@@ -431,7 +444,7 @@ impl RawScanKind for UdpKind {
             port: r.port,
             tryno: r.tryno,
             state: r.state.into(),
-            reason,
+            reason: r.reason,
         })
     }
 
@@ -494,13 +507,14 @@ impl RawScanKind for FlagKind {
         &self,
         frame: &[u8],
         eth_included: bool,
-        base_port: u16,
-        max_tryno: u32,
+        params: &MatchParams,
     ) -> Option<GroupReply> {
         let ctx = FlagMatchCtx {
             scan: self.scan,
-            base_port,
-            max_tryno,
+            our_ip: params.our_ip,
+            base_port: params.base_port,
+            seqmask: self.seqmask,
+            max_tryno: params.max_tryno,
         };
         let r = match_flag_response(frame, eth_included, &ctx)?;
         Some(GroupReply {
@@ -508,8 +522,7 @@ impl RawScanKind for FlagKind {
             port: r.port,
             tryno: r.tryno,
             state: r.state.into(),
-            // Every flag-scan reply we act on is a RST, whatever state it implies.
-            reason: Reason::Reset,
+            reason: r.reason,
         })
     }
 
@@ -521,11 +534,15 @@ impl RawScanKind for FlagKind {
     }
 
     fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
+        // ICMP must be admitted too: an error quoting our probe is addressed to our
+        // *address* and carries no port of ours in its own header, so a port-scoped
+        // filter would drop it and the port would fall back to the no-response default.
         format!(
-            "tcp and dst host {} and dst portrange {}-{}",
+            "(tcp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
             src,
             base_port,
-            base_port.saturating_add(span)
+            base_port.saturating_add(span),
+            src
         )
     }
 }
@@ -1096,6 +1113,158 @@ mod tests {
             assert_eq!(p.state, want, "{scan:?}");
             assert_eq!(p.reason, Reason::NoResponse);
         }
+    }
+
+    /// An ICMP type/code error from `sender`, quoting the TCP probe we sent to `probed`'s
+    /// `dport` as attempt 0 with `flags`.
+    fn icmp_quoting_tcp(
+        sender: [u8; 4],
+        probed: [u8; 4],
+        (icmp_type, icmp_code): (u8, u8),
+        dport: u16,
+        base: u16,
+        seqmask: u32,
+        flags: u8,
+    ) -> Vec<u8> {
+        let spec = Ipv4Spec::new(US, probed, 64, 0x2);
+        let probe = build_tcp_raw(
+            &spec,
+            sport_encode(base, 0),
+            dport,
+            seq32_encode(seqmask, 0),
+            0,
+            0,
+            flags,
+            1024,
+            0,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let mut icmp = vec![icmp_type, icmp_code, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&probe);
+        let mut ip = vec![
+            0x45, 0, 0, 0, 0, 0, 0, 0, 64, 1, /* proto ICMP */
+            0, 0, sender[0], sender[1], sender[2], sender[3], US[0], US[1], US[2], US[3],
+        ];
+        let total = u16::try_from(ip.len().saturating_add(icmp.len())).unwrap();
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&icmp);
+        framed(&ip)
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn icmp_error_resolves_a_syn_port_as_filtered() {
+        let base = 40000u16;
+        let seqmask = 0x0BAD_F00D;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let hosts = run(
+            &SynKind { seqmask },
+            &[target],
+            &[443],
+            base,
+            vec![icmp_quoting_tcp(
+                target.octets(),
+                target.octets(),
+                (3, 13),
+                443,
+                base,
+                seqmask,
+                TH_SYN,
+            )],
+        )
+        .await;
+        let p = port_of(&hosts, 0, 443);
+        assert_eq!(p.state, PortState::Filtered);
+        // The specific code is reported, not a generic "no-response".
+        assert_eq!(p.reason, Reason::AdminProhibited);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn icmp_error_upgrades_a_fin_scan_port_from_open_filtered() {
+        // `-sF`'s no-response default is open|filtered; the ICMP error is the only way to
+        // learn the port is actually filtered. This is the back-fill's whole point.
+        let base = 40000u16;
+        let seqmask = 0x0BAD_F00D;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let kind = FlagKind {
+            scan: ScanType::Fin,
+            seqmask,
+        };
+        let flags = nmap_core::flagscan::flags_for(ScanType::Fin).unwrap();
+
+        // Without the error the port is open|filtered ...
+        let quiet = run(&kind, &[target], &[443], base, Vec::new()).await;
+        assert_eq!(port_of(&quiet, 0, 443).state, PortState::OpenFiltered);
+
+        // ... and with it, filtered.
+        let hosts = run(
+            &kind,
+            &[target],
+            &[443],
+            base,
+            vec![icmp_quoting_tcp(
+                target.octets(),
+                target.octets(),
+                (3, 1),
+                443,
+                base,
+                seqmask,
+                flags,
+            )],
+        )
+        .await;
+        let p = port_of(&hosts, 0, 443);
+        assert_eq!(p.state, PortState::Filtered);
+        assert_eq!(p.reason, Reason::HostUnreach);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn icmp_error_from_a_router_is_attributed_to_the_probed_host() {
+        // A router relays the error for host .3; it must not land on .2.
+        let base = 40000u16;
+        let seqmask = 0x0BAD_F00D;
+        let h2 = Ipv4Addr::new(127, 0, 0, 2);
+        let h3 = Ipv4Addr::new(127, 0, 0, 3);
+        let hosts = run(
+            &SynKind { seqmask },
+            &[h2, h3],
+            &[443],
+            base,
+            vec![icmp_quoting_tcp(
+                [192, 168, 0, 1],
+                h3.octets(),
+                (3, 0),
+                443,
+                base,
+                seqmask,
+                TH_SYN,
+            )],
+        )
+        .await;
+        // Both end up filtered (that is .2's default), but only .3 has an ICMP reason.
+        assert_eq!(
+            port_of(&hosts, 0, 443).reason,
+            Reason::NoResponse,
+            "host .2"
+        );
+        assert_eq!(
+            port_of(&hosts, 1, 443).reason,
+            Reason::NetUnreach,
+            "host .3"
+        );
     }
 
     #[cfg_attr(

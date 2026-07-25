@@ -10,6 +10,7 @@ use nmap_core::udpscan::{match_udp_response, UdpMatchCtx};
 
 fuzz_target!(|data: &[u8]| {
     let ctx = UdpMatchCtx {
+        our_ip: [10, 0, 0, 1],
         base_port: 40000,
         max_tryno: 11,
     };

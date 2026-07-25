@@ -39,16 +39,12 @@
 
 use crate::build::{build_udp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_icmp, classify_udp_response, PortState, ScanType};
-use crate::packet_parser::{parse_packet, Header};
+use crate::icmp_quote::{icmp_to_reason, ipv4_offset, parse_icmp_error, IPPROTO_UDP};
+use crate::model::Reason;
 use crate::recv_validate::validate_packet;
 use crate::synscan::sport_encode;
 
 const IPPROTO_ICMP: u8 = 1;
-const IPPROTO_UDP: u8 = 17;
-/// Fixed ICMPv4 header length; the embedded packet begins after it.
-const ICMP_HEADER_LEN: usize = 8;
-/// Minimum IPv4 header length.
-const IP_MIN: usize = 20;
 /// Bytes of a UDP header we read (source + dest ports).
 const UDP_PORTS_LEN: usize = 4;
 
@@ -95,6 +91,10 @@ pub fn build_udp_probe_with(
 /// target address — see the module docs on which host a reply is about.
 #[derive(Debug, Clone, Copy)]
 pub struct UdpMatchCtx {
+    /// Our own source address. An ICMP error is only about a probe of ours if the packet
+    /// it quotes was sent *from* here — the C's "If it didn't come from us, we don't
+    /// care."
+    pub our_ip: [u8; 4],
     /// Base UDP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Highest attempt number in flight.
@@ -113,6 +113,8 @@ pub struct UdpReply {
     pub tryno: u32,
     /// The port state the reply implies.
     pub state: PortState,
+    /// Why: `udp-response` for a datagram, or the specific ICMP unreachable code.
+    pub reason: Reason,
 }
 
 /// Decide whether a captured frame answers one of our UDP probes, and to what state.
@@ -144,27 +146,32 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
                 port: scanned,
                 tryno,
                 state: classify_udp_response(),
+                reason: Reason::UdpResponse,
             })
         }
         IPPROTO_ICMP => {
-            let icmp = ip.get(v.data_offset..)?;
-            if icmp.len() < ICMP_HEADER_LEN {
+            let quote = parse_icmp_error(frame, eth_included)?;
+            if quote.proto != IPPROTO_UDP {
+                return None; // an error about something other than our UDP probe
+            }
+            // The quoted packet must be one *we* sent.
+            if quote.quoted_src != ctx.our_ip {
                 return None;
             }
-            let (icmp_type, icmp_code) = (icmp[0], icmp[1]);
-            // The ICMP error quotes our original probe after the 8-byte ICMP header.
-            let embedded = icmp.get(ICMP_HEADER_LEN..)?;
-            let probe = embedded_probe(embedded)?;
-            let tryno = attempt_from_sport(probe.sport, ctx)?;
-            // The quoted probe names the host we scanned; the error is authoritative
-            // for "closed" only if that host is the one that sent it.
-            let from_target = src_ip == probe.dst_ip;
-            let state = classify_icmp(ScanType::Udp, icmp_type, icmp_code, from_target)?;
+            let tryno = attempt_from_sport(quote.sport, ctx)?;
+            let state = classify_icmp(
+                ScanType::Udp,
+                quote.icmp_type,
+                quote.icmp_code,
+                quote.from_target(),
+            )?;
             Some(UdpReply {
-                src_ip: probe.dst_ip,
-                port: probe.dport,
+                // The verdict belongs to the host we probed, not to whoever relayed it.
+                src_ip: quote.quoted_dst,
+                port: quote.dport,
                 tryno,
                 state,
+                reason: icmp_to_reason(quote.icmp_type, quote.icmp_code),
             })
         }
         _ => None,
@@ -178,56 +185,6 @@ fn attempt_from_sport(sport: u16, ctx: &UdpMatchCtx) -> Option<u32> {
     (tryno <= ctx.max_tryno).then_some(tryno)
 }
 
-/// The parts of our original probe recovered from an ICMP error's quoted packet.
-struct EmbeddedProbe {
-    /// Where the quoted probe was addressed — the host we scanned.
-    dst_ip: [u8; 4],
-    /// Our encoded source port (→ the attempt).
-    sport: u16,
-    /// The scanned port.
-    dport: u16,
-}
-
-/// Parse the IPv4+UDP packet embedded in an ICMP error. The quote may be truncated to
-/// the first 8 bytes of the UDP header, which still covers both ports. Returns `None`
-/// unless it is a well-formed IPv4/UDP quote.
-fn embedded_probe(embedded: &[u8]) -> Option<EmbeddedProbe> {
-    if embedded.len() < IP_MIN {
-        return None;
-    }
-    if embedded[0] >> 4 != 4 {
-        return None; // not IPv4
-    }
-    let ihl = usize::from(embedded[0] & 0x0F).checked_mul(4)?;
-    if ihl < IP_MIN || embedded[9] != IPPROTO_UDP {
-        return None;
-    }
-    let dst_ip: [u8; 4] = embedded.get(16..20)?.try_into().ok()?;
-    let udp = embedded.get(ihl..)?;
-    if udp.len() < UDP_PORTS_LEN {
-        return None;
-    }
-    let sport = u16::from_be_bytes([udp[0], udp[1]]);
-    let dport = u16::from_be_bytes([udp[2], udp[3]]);
-    Some(EmbeddedProbe {
-        dst_ip,
-        sport,
-        dport,
-    })
-}
-
-/// Byte offset of the IPv4 header inside a captured frame.
-fn ipv4_offset(frame: &[u8], eth_included: bool) -> Option<usize> {
-    let mut off = 0usize;
-    for h in parse_packet(frame, eth_included) {
-        if matches!(h, Header::Ipv4(_)) {
-            return Some(off);
-        }
-        off = off.checked_add(h.len())?;
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +192,7 @@ mod tests {
 
     fn ctx() -> UdpMatchCtx {
         UdpMatchCtx {
+            our_ip: [10, 0, 0, 1],
             base_port: 40000,
             max_tryno: 11,
         }

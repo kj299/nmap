@@ -11,6 +11,7 @@ use nmap_core::synscan::{match_syn_response, MatchCtx};
 
 fuzz_target!(|data: &[u8]| {
     let ctx = MatchCtx {
+        our_ip: [10, 0, 0, 1],
         base_port: 40000,
         seqmask: 0xABCD_1234,
         max_tryno: 11,

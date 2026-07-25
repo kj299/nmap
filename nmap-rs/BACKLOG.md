@@ -16,11 +16,13 @@ draft PR when picked up. Kept in-repo so it survives across sessions.
   `sys::group::UdpKind` sends one datagram per registered payload. Ledgered:
   `payload-cap-warns-not-fatal`, `payload-missing-db-degrades`,
   `payload-one-datagram-per-payload`.
-- **Back-fill the SYN/flag scans' ICMP path** with the embedded-probe match machinery
-  the UDP scan introduced (`core::udpscan::embedded_probe` generalizes — it already
-  returns the quoted destination, which is what attributes an error to the right host
-  in a group scan). Ledgered: `synscan-icmp-match-deferred`,
-  `flagscan-icmp-match-deferred`.
+- ~~**Back-fill the SYN/flag scans' ICMP path**~~ — **done**. `core::icmp_quote` is the
+  shared quote parser for all three raw scans; `-sS` and the six flag scans now report
+  *filtered* (with the specific ICMP reason) instead of falling back to the no-response
+  default. Also closed a gap in our own UDP path: the quoted packet's source is now
+  checked against our address, as the C does. Ledgered:
+  `icmp-quote-requires-our-source`, `icmp-quote-verifies-our-sequence`,
+  `icmp-reason-fidelity`, `icmp-bpf-widened-for-tcp-scans`.
 
 ### 3. M5 — OS detection
 The next milestone in the plan of record. Consumes this raw send/capture layer:
@@ -33,10 +35,9 @@ inference. See the milestone plan for the full breakdown.
   Ledgered: `route-minimal-onlink-then-gateway`.
 - **Non-Ethernet datalinks** (Linux SLL, BSD NULL) in the capture path; today
   `eth_included` is assumed true (correct for `lo`/Ethernet).
-- **DRY the scan matchers** — partly done: the three *drivers* collapsed into one
-  (`sys::group`). Still outstanding on the `core` side: `synscan`/`udpscan`/`flagscan`
-  each carry their own copy of `ipv4_offset` and a similar frame-decode preamble;
-  extract a shared helper.
+- ~~**DRY the scan matchers**~~ — **done**. The three drivers collapsed into one
+  (`sys::group`), and the duplicated `ipv4_offset` plus the ICMP-quote decode now live
+  once in `core::icmp_quote`.
 - **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
   `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
   in the next scan-driver retrospective (cousin of LESSONS #15).

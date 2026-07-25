@@ -26,24 +26,28 @@
 //! self-probe guard (`scan_engine_raw.cc:1675`) plays — so this matcher needs no
 //! self-probe special-case.
 //!
+//! Two kinds of answer are matched. A **TCP** reply gives open (SYN/ACK) or closed
+//! (RST). An **ICMP** type-3/11 error quoting our probe means *filtered* somewhere on the
+//! path; because the quote carries our original packet, the encoded sequence is
+//! recoverable there and is verified. [`match_tcp_icmp_error`] implements that arm and is
+//! shared with the stateless flag scans, whose quote-matching rules are identical.
+//!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
-//! * `synscan-icmp-match-deferred` — the C also maps an ICMP unreachable/time-exceeded
-//!   whose embedded packet is one of our probes to `PORT_FILTERED`
-//!   (`scan_engine_raw.cc:1888`). This first slice matches TCP replies (open/closed)
-//!   and leaves ICMP-derived *filtered* to the no-response default; wiring the
-//!   embedded-probe ICMP match is a follow-up (`classify_icmp` already exists).
 //! * Inherits `validate-ipv4-only-for-now` from [`crate::recv_validate`].
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
-use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
-use crate::packet_parser::{parse_packet, Header};
+use crate::classify::{classify_icmp, classify_tcp, PortState, ScanType, TH_ACK};
+use crate::icmp_quote::{icmp_to_reason, ipv4_offset, parse_icmp_error, IPPROTO_TCP as QUOTED_TCP};
+use crate::model::Reason;
 use crate::recv_validate::validate_packet;
 
 /// TCP flag for a bare SYN probe.
 const TH_SYN: u8 = 0x02;
-/// IP protocol number for TCP (the only L4 this matcher resolves; see scope note).
+/// IP protocol number for TCP — a direct reply to our probe.
 const IPPROTO_TCP: u8 = 6;
+/// IP protocol number for ICMP — an error quoting our probe.
+const IPPROTO_ICMP: u8 = 1;
 /// Minimum bytes of a TCP header we must read (ports/seq/ack/flags/window).
 const TCP_MIN: usize = 20;
 
@@ -129,6 +133,9 @@ pub fn build_syn_probe(
 /// The per-scan constants a captured reply is matched against.
 #[derive(Debug, Clone, Copy)]
 pub struct MatchCtx {
+    /// Our own source address. An ICMP error only concerns us if the packet it quotes was
+    /// sent from here — the C's "If it didn't come from us, we don't care."
+    pub our_ip: [u8; 4],
     /// Base TCP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Per-scan random sequence mask.
@@ -148,6 +155,9 @@ pub struct SynReply {
     pub tryno: u32,
     /// The port state the reply implies (`Open` on SYN/ACK or bare SYN, `Closed` on RST).
     pub state: PortState,
+    /// Why: the reply kind that decided it, so the driver need not re-derive it from the
+    /// state (an ICMP-derived *filtered* reports the specific unreachable code).
+    pub reason: Reason,
 }
 
 /// Decide whether a captured frame answers one of our SYN probes, and to what state.
@@ -165,8 +175,19 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
 
     // Validate the IPv4 packet as untrusted input (bounds, fragment, TCP options).
     let v = validate_packet(ip).ok()?;
+    if v.proto == IPPROTO_ICMP {
+        // An ICMP error quoting our SYN: the port is filtered somewhere on the path.
+        let m = match_tcp_icmp_error(frame, eth_included, ScanType::Syn, ctx)?;
+        return Some(SynReply {
+            src_ip: m.src_ip,
+            port: m.port,
+            tryno: m.tryno,
+            state: m.state,
+            reason: m.reason,
+        });
+    }
     if v.proto != IPPROTO_TCP {
-        return None; // ICMP-derived filtered is deferred (see scope note).
+        return None;
     }
 
     // The TCP header begins at `data_offset`; `validate_packet` guarantees >= 20
@@ -198,31 +219,91 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
 
     let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
     let state = classify_tcp(ScanType::Syn, flags, window)?;
+    let reason = match state {
+        PortState::Open => Reason::ConnAccept, // "syn-ack"
+        PortState::Closed => Reason::Reset,
+        _ => Reason::Unknown,
+    };
     Some(SynReply {
         src_ip,
         port: resp_sport,
         tryno,
         state,
+        reason,
     })
 }
 
-/// Byte offset of the IPv4 header inside a captured frame, walking the parsed layer
-/// stack and summing the lengths of any link/lower headers before it. `None` if the
-/// frame has no IPv4 layer.
-fn ipv4_offset(frame: &[u8], eth_included: bool) -> Option<usize> {
-    let mut off = 0usize;
-    for h in parse_packet(frame, eth_included) {
-        if matches!(h, Header::Ipv4(_)) {
-            return Some(off);
-        }
-        off = off.checked_add(h.len())?;
+/// An ICMP error matched to one of our outstanding **TCP** probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpIcmpMatch {
+    /// The scanned host the verdict belongs to: the destination of the quoted probe.
+    pub src_ip: [u8; 4],
+    /// The scanned port, from the quoted probe's destination port.
+    pub port: u16,
+    /// Which attempt the quoted probe was.
+    pub tryno: u32,
+    /// The state the error implies for this scan type (filtered, for every TCP scan).
+    pub state: PortState,
+    /// The specific ICMP reason nmap reports (`host-unreach`, `admin-prohibited`, ...).
+    pub reason: Reason,
+}
+
+/// Match an ICMP error that quotes one of our TCP probes — shared by the SYN scan and
+/// every stateless flag scan, which differ only in the [`ScanType`] passed to
+/// [`classify_icmp`].
+///
+/// Ports the ICMP arm of nmap's `scan_engine_raw.cc` probe search:
+///   * the quote must be TCP, and its **source must be us** ("If it didn't come from us,
+///     we don't care");
+///   * the attempt comes from the quoted source port, and — unlike a RST, which reflects
+///     no sequence of ours — the quote *contains our original packet*, so the encoded
+///     sequence is verifiable and is verified (the C compares `th_seq` to
+///     `probe->tcpseq()`);
+///   * the verdict is attributed to the **quoted destination**, so an error relayed by a
+///     router still lands on the host we probed.
+///
+/// Returns `None` for anything that is not an ICMP error about one of our probes, or
+/// whose type/code carries no verdict. Total on all input.
+#[must_use]
+pub fn match_tcp_icmp_error(
+    frame: &[u8],
+    eth_included: bool,
+    scan: ScanType,
+    ctx: &MatchCtx,
+) -> Option<TcpIcmpMatch> {
+    let quote = parse_icmp_error(frame, eth_included)?;
+    if quote.proto != QUOTED_TCP || quote.quoted_src != ctx.our_ip {
+        return None;
     }
-    None
+    let tryno = u32::from(quote.sport.wrapping_sub(ctx.base_port));
+    if tryno > ctx.max_tryno {
+        return None;
+    }
+    // Our own packet is quoted back, so our encoded sequence must be there verbatim.
+    if quote.seq != Some(seq32_encode(ctx.seqmask, tryno)) {
+        return None;
+    }
+    let state = classify_icmp(scan, quote.icmp_type, quote.icmp_code, quote.from_target())?;
+    Some(TcpIcmpMatch {
+        src_ip: quote.quoted_dst,
+        port: quote.dport,
+        tryno,
+        state,
+        reason: icmp_to_reason(quote.icmp_type, quote.icmp_code),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet_parser::{parse_packet, Header};
+
+    /// Our address in these tests; replies and quotes are built around it.
+    const OUR_IP: [u8; 4] = [10, 0, 0, 1];
+    /// The scanned host.
+    const TARGET: [u8; 4] = [10, 0, 0, 2];
+    /// An intermediate router, which is not the target.
+    const ROUTER: [u8; 4] = [192, 168, 0, 1];
 
     #[test]
     fn sport_encode_varies_per_attempt() {
@@ -279,10 +360,153 @@ mod tests {
 
     fn ctx() -> MatchCtx {
         MatchCtx {
+            our_ip: OUR_IP,
             base_port: 40000,
             seqmask: 0xABCD_1234,
             max_tryno: 11,
         }
+    }
+
+    /// An ICMP `type`/`code` error from `sender`, quoting a SYN probe we sent from
+    /// `quoted_src` to `quoted_dst`'s `dport` as attempt `tryno`.
+    fn icmp_quoting_our_syn(
+        sender: [u8; 4],
+        icmp_type: u8,
+        icmp_code: u8,
+        quoted_src: [u8; 4],
+        quoted_dst: [u8; 4],
+        dport: u16,
+        tryno: u32,
+    ) -> Vec<u8> {
+        let spec = Ipv4Spec::new(quoted_src, quoted_dst, 64, 0x1234);
+        let probe = build_syn_probe(&spec, 40000, dport, tryno, ctx().seqmask).unwrap();
+        let mut icmp = vec![icmp_type, icmp_code, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&probe);
+        let mut ip = vec![
+            0x45,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            64,
+            IPPROTO_ICMP,
+            0,
+            0,
+            sender[0],
+            sender[1],
+            sender[2],
+            sender[3],
+            OUR_IP[0],
+            OUR_IP[1],
+            OUR_IP[2],
+            OUR_IP[3],
+        ];
+        let total = u16::try_from(ip.len().saturating_add(icmp.len())).unwrap();
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&icmp);
+        let mut f = vec![0u8; 14];
+        f[12] = 0x08;
+        f.extend_from_slice(&ip);
+        f
+    }
+
+    #[test]
+    fn icmp_error_quoting_our_syn_is_filtered() {
+        // Every unreachable code, and time-exceeded, read as filtered for a SYN scan.
+        for (t, c) in [
+            (3u8, 0u8),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (3, 9),
+            (3, 10),
+            (3, 13),
+            (11, 0),
+        ] {
+            let frame = icmp_quoting_our_syn(TARGET, t, c, OUR_IP, TARGET, 443, 3);
+            let m = match_syn_response(&frame, true, &ctx())
+                .unwrap_or_else(|| panic!("type {t} code {c} should match"));
+            assert_eq!(m.state, PortState::Filtered, "type {t} code {c}");
+            assert_eq!(m.port, 443, "the scanned port comes from the quote");
+            assert_eq!(m.tryno, 3, "the attempt comes from the quoted source port");
+            assert_eq!(m.src_ip, TARGET, "attributed to the host we probed");
+        }
+    }
+
+    #[test]
+    fn icmp_error_relayed_by_a_router_still_lands_on_the_target() {
+        let frame = icmp_quoting_our_syn(ROUTER, 3, 1, OUR_IP, TARGET, 443, 0);
+        let m = match_syn_response(&frame, true, &ctx()).unwrap();
+        assert_eq!(m.src_ip, TARGET, "not the router that sent the error");
+        assert_eq!(m.state, PortState::Filtered);
+    }
+
+    #[test]
+    fn icmp_error_quoting_someone_elses_packet_is_ignored() {
+        // The quoted packet's source is not us → not about a probe of ours. This is the
+        // C's "If it didn't come from us, we don't care."
+        let frame = icmp_quoting_our_syn(TARGET, 3, 3, ROUTER, TARGET, 443, 0);
+        assert!(match_syn_response(&frame, true, &ctx()).is_none());
+    }
+
+    #[test]
+    fn icmp_error_with_a_foreign_sequence_is_ignored() {
+        // Same ports, but the quoted probe carries a sequence we never generated: the
+        // quote contains our original packet, so the encoding must be present verbatim.
+        let mut frame = icmp_quoting_our_syn(TARGET, 3, 3, OUR_IP, TARGET, 443, 0);
+        // The quoted TCP sequence sits after: eth(14) + outer ip(20) + icmp(8) +
+        // quoted ip(20) + quoted sport/dport(4).
+        let seq_off = 14 + 20 + 8 + 20 + 4;
+        frame[seq_off..seq_off + 4].copy_from_slice(&0xFFFF_0000u32.to_be_bytes());
+        assert!(match_syn_response(&frame, true, &ctx()).is_none());
+    }
+
+    #[test]
+    fn icmp_error_with_an_out_of_range_attempt_is_ignored() {
+        // Quoted source port far outside base..base+max_tryno.
+        let frame = icmp_quoting_our_syn(TARGET, 3, 3, OUR_IP, TARGET, 443, 5000);
+        assert!(match_syn_response(&frame, true, &ctx()).is_none());
+    }
+
+    #[test]
+    fn icmp_error_quoting_a_udp_packet_is_not_ours() {
+        // A UDP quote cannot answer a SYN probe (the C checks the quoted protocol).
+        let spec = Ipv4Spec::new(OUR_IP, TARGET, 64, 1);
+        let udp = crate::build::build_udp_raw(&spec, 40000, 53, &[]).unwrap();
+        let mut icmp = vec![3u8, 3, 0, 0, 0, 0, 0, 0];
+        icmp.extend_from_slice(&udp);
+        let mut ip = vec![
+            0x45,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            64,
+            IPPROTO_ICMP,
+            0,
+            0,
+            TARGET[0],
+            TARGET[1],
+            TARGET[2],
+            TARGET[3],
+            OUR_IP[0],
+            OUR_IP[1],
+            OUR_IP[2],
+            OUR_IP[3],
+        ];
+        let total = u16::try_from(ip.len().saturating_add(icmp.len())).unwrap();
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&icmp);
+        let mut f = vec![0u8; 14];
+        f[12] = 0x08;
+        f.extend_from_slice(&ip);
+        assert!(match_syn_response(&f, true, &ctx()).is_none());
     }
 
     #[test]

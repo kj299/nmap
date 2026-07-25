@@ -1,0 +1,4 @@
+ip4 src=10.0.0.1 dst=10.0.0.2 ihl=5 tos=0 totlen=56 id=48879 df=0 ttl=255 proto=6
+tcp sport=40005 dport=22 seq=268435461 ack=2863315899 off=9 reserved=0 flags=0x02 win=512 urp=0 optlen=16
+tcpopts 020401090402080affffffff00000000
+result ok

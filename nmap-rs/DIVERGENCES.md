@@ -680,6 +680,45 @@ one** (`macvendor_corpus.rs`) — and fuzzed (`macvendor_parse`, 5.5M runs).
       36-bit assignment is attributed to that registrant rather than to the holder of the
       enclosing 24-bit block.
 
+## Milestone 5 — the IPv4 OS-detection probes
+
+`core::osprobe::build` ports the probe-construction half of `osscan2.cc`. Verified by a
+**C-oracle differential**: all 23 packets are decoded by nmap's own
+`IPv4Header`/`TCPHeader`/`UDPHeader`/`ICMPv4Header` classes and must project identically
+under the Rust parsers, over a projection that includes every field the battery is
+defined by — TOS, DF, IP ID, TTL, the exact TCP option bytes, the urgent pointer and the
+reserved bits (`osprobe_differential.rs`, oracle mode `osprobe`). Fuzzed
+(`osprobe_build`, 2.7M runs).
+
+- [x] `osprobe-missing-port-is-an-error` (`core::osprobe::build`): each of the C's senders
+      begins `if (hss->openTCPPort == -1) return;` (or the closed-port equivalent) and
+      returns *success*, so the driver cannot distinguish "probe skipped, no suitable
+      port" from "probe sent, no reply". Those mean different things to the fingerprint —
+      an unanswered probe is evidence about the stack, an unsent one is evidence about
+      nothing — and the C's `FingerPrint` records them identically. Here the missing port
+      is a typed error (`NoOpenTcpPort`/`NoClosedTcpPort`/`NoClosedUdpPort`) and the
+      caller decides.
+- [x] `osprobe-index-out-of-range-is-an-error` (`core::osprobe::build`): `sendTSeqProbe`,
+      `sendTOpsProbe`, `sendT1_7Probe` and `sendTIcmpProbe` each open with an `assert()`
+      on the probe index, aborting the process in a debug build and running off the ends
+      of `prbOpts[]`/`prbWindowSz[]` in a release build where the assert is compiled out.
+      Every table lookup here is bounds-checked and an out-of-range index returns
+      `UnknownProbe`.
+- [x] `osprobe-params-are-explicit` (`core::osprobe::build`): the C reads the random
+      bases, the target ports and `o.ttl` from global and per-host mutable state at send
+      time, so a probe's bytes depend on when it is built. Everything is an input here,
+      making construction a pure function — which is what allows the differential above
+      to pin every byte, and the fuzz target to assert determinism. A continuation of the
+      M4 entry `build-explicit-fields-no-magic`.
+- [x] `osprobe-default-ttl-is-255` (`core::osprobe::build`): **not a divergence** —
+      recorded because it is surprising and easy to "fix" by mistake. nmap's `o.ttl`
+      defaults to `-1`, and `fill_ip_raw` assigns it straight into the 8-bit `ip_ttl`
+      field with no translation, so the TCP and ICMP OS-detection probes go out with
+      **TTL 255** unless `--ttl` says otherwise. `ProbeParams::ttl` is a `u8` with no
+      sentinel, so the driver must pass 255 to match the C default; a "sensible" 64 would
+      silently change what the probes measure, since the reply's TTL is part of the
+      fingerprint.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

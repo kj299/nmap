@@ -19,9 +19,10 @@
 
 /// How a host generates its IP identification field, as classified from a run of
 /// observed IP-IDs. Values mirror nmap's `IPID_SEQ_*` (`osscan2.h`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpidSequence {
     /// Could not be determined (too few samples, or no rule matched).
+    #[default]
     Unknown,
     /// Increments by one each packet.
     Incr,

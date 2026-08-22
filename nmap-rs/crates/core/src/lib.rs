@@ -26,6 +26,7 @@ pub mod model;
 pub mod options;
 pub mod osdb;
 pub mod osprobe;
+pub mod osscan;
 pub mod output;
 pub mod packet_parser;
 pub mod payload;

@@ -856,6 +856,45 @@ port slices it defensively and returns `None` on any malformed quote. Fuzzed
       altered the datagram *and* recomputed a fresh valid checksum; comparing against the
       original value catches it, matching the C exactly.
 
+### Assembling the observed fingerprint (`makeFP`) and rendering it
+
+`core::osprobe::assemble` ports `makeFP`: it runs the three aggregate analyses, collects
+the per-reply tests, defaults unanswered probes to `R=N`, and resolves every test's
+`T`/`TG` once the `U1` quote has yielded the hop count. `FingerPrint::render_tests` ports
+`fp2ascii`/`test2str`, the text nmap prints for an unrecognised host and asks users to
+submit. Gated by a corpus test that renders **every one of the ~6,100 shipped
+fingerprints** and parses the result back for an exact match, an end-to-end test that
+assembles a synthesised Linux host and confirms it is identified as Linux against the real
+database at nmap's own guess threshold, and fuzzing (`osprobe_assemble`).
+
+- [x] `fp-render-no-truncation` (`core::osdb::model`): `fp2ascii` renders into a
+      **2048-byte `static` buffer** and silently `break`s out of its loop when the buffer
+      fills, returning a truncated fingerprint with no indication that anything was lost.
+      That output is exactly what users are asked to paste into a submission, so a
+      truncated one is a corrupt submission — and `static` also makes the function
+      non-reentrant. This port returns an owned `String` that always contains the whole
+      fingerprint. Round-tripped against every shipped record.
+- [x] `fp-render-is-canonical` (`core::osdb::model`): tests are emitted in `TestID` order
+      regardless of the order they were collected in, so two runs that observed the same
+      things render byte-identical text. The C relies on `FP->tests[]` being index-ordered
+      by construction; making the order explicit here means a future caller that appends
+      tests out of order cannot silently change what gets submitted.
+- [x] `fp-silence-only-for-probes-we-sent` (`core::osprobe::assemble`): **faithfulness
+      note, and the subtlest part of `makeFP`.** An unanswered probe is recorded as `R=N`
+      — silence is evidence — but only when the probe was actually sendable: `ECN`/`T1`–
+      `T4` need an open TCP port and `T5`–`T7` a closed one (the C's index-range guards).
+      With no such port the test is left **absent** instead. Recording `R=N` for a probe
+      that was never sent would tell the database the host declined to answer something we
+      never asked, shifting the match away from the correct OS. Covered by
+      `silence_is_recorded_only_for_probes_we_could_send` and asserted over all inputs by
+      the fuzz target.
+- [x] `fp-ttl-resolved-once-per-test` (`core::osprobe::assemble`): the `T`/`TG` post-pass
+      runs exactly once per test, after `U1` has been extracted, and the two attributes
+      remain mutually exclusive — a test carrying both would be scored twice for one
+      observation. The C achieves this ordering implicitly (reply processing sets
+      `hss->distance` before `makeFP` runs); here `U1` is extracted in the first pass and
+      applied in a second, so the dependency is explicit rather than incidental.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

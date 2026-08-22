@@ -11,6 +11,7 @@
 //! [`crate::osdb::score`] consumes) follows in a later slice.
 
 pub mod analyze;
+pub mod assemble;
 pub mod build;
 pub mod icmpreply;
 pub mod seq;

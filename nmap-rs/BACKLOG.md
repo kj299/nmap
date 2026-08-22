@@ -42,8 +42,16 @@ and IPv6 tracks are approved. Port order, leaf-first:
    `processTWinResp` plus the `T`/`TG` post-pass from `makeFP`), and `osprobe::icmpreply`
    (`processTUdpResp` — the `U1` test + hop distance — and `processTIcmpResp` — the `IE`
    test). **`core::osprobe` is now complete: all 13 fingerprint tests can be built.**
-6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.
-7. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
+6. ~~`core::osprobe::assemble`~~ — **done**. Ports `makeFP`: aggregates + per-reply tests
+   into one observed `FingerPrint`, the `R=N` silence defaults (gated on actually having
+   had a port to probe), and the `T`/`TG` resolution once `U1` yields the hop count. Also
+   `FingerPrint::render_tests` (`fp2ascii`), gated by a render/parse round trip over
+   **every** shipped fingerprint plus an end-to-end "synthesised Linux host is identified
+   as Linux" test against the real database.
+7. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine. Sends the battery,
+   feeds replies into `osprobe::*`, calls `assemble`, scores, and renders `-O` output
+   (including the retry loop and the "please submit this fingerprint" path).
+8. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
 
 ## Smaller follow-ups (opportunistic)

@@ -48,10 +48,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
    `FingerPrint::render_tests` (`fp2ascii`), gated by a render/parse round trip over
    **every** shipped fingerprint plus an end-to-end "synthesised Linux host is identified
    as Linux" test against the real database.
-7. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine. Sends the battery,
-   feeds replies into `osprobe::*`, calls `assemble`, scores, and renders `-O` output
-   (including the retry loop and the "please submit this fingerprint" path).
-8. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
+7. ~~`core::osscan`~~ — **done**. The pure half of the driver: `endRound`'s completion
+   test and distance ladder, `findBestFPs`, `OmitSubmissionFP`, and `printosscanoutput`'s
+   plain-text rendering. No sockets, so it is fully unit/Miri/fuzz testable.
+8. `sys::osscan` + `cli -O` — the privileged driver on the M4 group engine: sends the
+   23-probe battery, demultiplexes replies into `osprobe::*`, calls `assemble`, drives the
+   retry rounds through `core::osscan`'s policy, and wires up the `-O` flag. First code in
+   the `sys` unsafe crate since M4; needs an end-to-end differential against C nmap's `-O`.
+9. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
 
 ## Smaller follow-ups (opportunistic)

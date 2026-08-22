@@ -895,6 +895,40 @@ database at nmap's own guess threshold, and fuzzing (`osprobe_assemble`).
       `hss->distance` before `makeFP` runs); here `U1` is extracted in the first pass and
       applied in a second, so the dependency is explicit rather than incidental.
 
+### Scan policy and `-O` reporting
+
+`core::osscan` ports the pure half of `os_scan_ipv4` (`endRound`'s completion test and
+distance ladder, `findBestFPs`), `OmitSubmissionFP`, and `printosscanoutput`'s plain-text
+output. None of it touches a socket, so all of it is unit- and Miri-testable and directly
+fuzzable — which matters because two of its inputs are attacker-influenced: OS names and
+accuracies come from the reference database (`--osscandb` makes that attacker-supplyable),
+and the sequence samples come off the wire from the target. Fuzzed (`osscan_policy`).
+
+- [x] `osscan-output-no-fatal-on-long-list` (`core::osscan`): `printosscanoutput` formats
+      the observed sequence numbers, IP IDs and timestamps into a fixed **512-byte** buffer
+      and calls **`fatal("STRANGE ERROR #3877")`** — aborting the entire scan and losing
+      every result for every host — if a list would overflow. Three call sites do this
+      (`#3876`, `#3877`, `#3878`). The sample counts come from the target, so this is a
+      remote input deciding whether the scan survives. Here the lists are grown `String`s,
+      which cannot overflow, so the abort has no counterpart.
+- [x] `osscan-negative-distance-unrepresentable` (`core::osscan`): `OmitSubmissionFP`
+      carries a `distance < -1` branch whose comment reads "This can happen if the TTL in
+      the response to the UDP probe is somehow greater than the TTL in the probe itself" —
+      the C detecting, after the fact, exactly the hostile-quote case that
+      `u1-distance-never-negative` rejects at the source. Our hop count is an unsigned
+      `Option<u8>`, so that state is unrepresentable and the branch has no counterpart: the
+      bug is excluded by the type rather than screened for downstream.
+- [x] `osscan-unfit-fingerprint-is-never-offered` (`core::osscan`): **faithfulness note,
+      and the invariant the fuzz target exists to protect.** When `submission_reason`
+      judges the observation untrustworthy — bad timing, missing ports, too many hops —
+      the fingerprint is never printed with a submission request. Submitting a fingerprint
+      taken under bad conditions would poison the shared database for every nmap user, so
+      "we could not measure this properly" must never render as "please send this in".
+- [x] `osscan-no-static-reason-buffer` (`core::osscan`): `OmitSubmissionFP` returns a
+      pointer into a `static char reason[128]`, so the string is overwritten by the next
+      call and the function is not reentrant — the same shape as `fp2ascii`'s static
+      buffer. This returns an owned `Option<String>`.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

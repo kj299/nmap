@@ -205,3 +205,8 @@ test = false
 name = "osprobe_assemble"
 path = "fuzz_targets/osprobe_assemble.rs"
 test = false
+
+[[bin]]
+name = "osscan_policy"
+path = "fuzz_targets/osscan_policy.rs"
+test = false

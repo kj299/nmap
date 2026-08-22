@@ -26,6 +26,7 @@
     "core::osdb::score": "differential",
     "core::osprobe::analyze": "differential",
     "core::osprobe::build": "differential",
+    "core::osprobe::icmpreply": "fuzzed",
     "core::osprobe::seq": "differential",
     "core::osprobe::tcpreply": "fuzzed",
     "core::packet_parser": "unsafe_audited",

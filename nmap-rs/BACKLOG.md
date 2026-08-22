@@ -34,14 +34,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
    on a concrete Linux observation) + the early-exit invariant over all 6,108 records.
 4. ~~`core::macvendor`~~ — **done**, corpus gate over the real file (52,085 prefixes,
    zero warnings) cross-checked against a text-derived oracle.
-5. `core::osprobe` — **in progress**. Done: `osprobe::build` (the probe battery, C-oracle
+5. ~~`core::osprobe`~~ — **done**. Modules: `osprobe::build` (the probe battery, C-oracle
    differential over all 23 packets), `osprobe::analyze::tcp_option_string` (the
    `O`/`O1`-`O6` encoder, C-oracle differential over 428 cases), and `osprobe::seq`
    (`makeTSeqFP` — SP/GCD/ISR/TI/CI/II/SS/TS, C-oracle differential over 354 cases).
    `osprobe::tcpreply` (`processT1_7Resp` / `processTEcnResp` / `processTOpsResp` /
-   `processTWinResp` plus the `T`/`TG` post-pass from `makeFP`). Remaining: the two
-   ICMP-shaped extractors — `processTUdpResp` (the `U1` test, which also yields the hop
-   distance that resolves `T`) and `processTIcmpResp` (the `IE` test).
+   `processTWinResp` plus the `T`/`TG` post-pass from `makeFP`), and `osprobe::icmpreply`
+   (`processTUdpResp` — the `U1` test + hop distance — and `processTIcmpResp` — the `IE`
+   test). **`core::osprobe` is now complete: all 13 fingerprint tests can be built.**
 6. `sys::osscan` + `cli -O` — privileged driver on the M4 group engine.
 7. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.

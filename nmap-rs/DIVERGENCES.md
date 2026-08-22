@@ -929,6 +929,46 @@ and the sequence samples come off the wire from the target. Fuzzed (`osscan_poli
       call and the function is not reentrant — the same shape as `fp2ascii`'s static
       buffer. This returns an owned `Option<String>`.
 
+### The privileged OS-detection driver (`sys::osscan`) and reply demultiplexing
+
+`core::osprobe::demux` attributes a captured frame to the probe that provoked it, and
+`sys::osscan` sends the battery and collects the replies. The driver contains **no
+`unsafe`** — the raw socket and capture handles are already safe abstractions from M4 —
+so the whole path is testable with a mock sender and a scripted packet source, no
+privilege required.
+
+- [x] `osscan-demux-identity-not-proximity` (`core::osprobe::demux`): every probe is
+      identified by something it actually put on the wire — TCP probes by the distinct
+      **source** port each used (so a reply's destination port names the probe), the two
+      `IE` probes by their ICMP identifier and sequence, and `U1` by the UDP source port
+      **quoted back inside** the ICMP error. Nothing is matched by arrival order or
+      proximity. This matters more than dropping a reply would: an attribute recorded
+      against the wrong test yields a well-formed fingerprint that matches the wrong OS.
+      Frames whose source address is not the host we probed are rejected outright.
+- [x] `osscan-seq-pacing-is-a-correctness-constraint` (`sys::osscan`): the six `SEQ`
+      probes are sent no faster than one per 100 ms (`OS_SEQ_PROBE_DELAY`), because
+      `makeTSeqFP` derives the ISN rate and timestamp frequency from the **actual** send
+      times. This is why the M4 group engine's `RawScanKind` is not used: that engine is
+      port-keyed (its scheduler walks a port list and yields `(port, tryno)` pairs
+      resolving to per-port states) and its congestion window exists to send as fast as
+      the network allows — which here would corrupt the fingerprint rather than merely
+      finish sooner. The driver reuses the layer below it (`AsyncCapture`, `RawSender`,
+      the timeout math) with its own schedule. Covered by
+      `the_seq_probes_are_paced_not_blasted`.
+- [x] `osscan-first-reply-wins` (`sys::osscan`): a duplicate or retransmitted reply never
+      replaces the first one recorded for a probe. The timing analysis was measured
+      against the first sample, so letting a later copy overwrite it would silently
+      decouple the recorded attributes from the send times they are divided by.
+- [x] `osscan-unsent-is-not-unanswered` (`sys::osscan`): probes that could not be built
+      (no open TCP port, no closed port) are recorded as **unsent** rather than being
+      allowed to look like silence. The C's senders `return` early in that case, so its
+      driver cannot tell the two apart — and they mean different things to the
+      fingerprint, which is exactly what `fp-silence-only-for-probes-we-sent` turns on.
+- [x] `osscan-cli-says-why-it-cannot-run` (`cli`): `-O` without a `--features pcap` build
+      and raw-socket privilege reports that plainly, and flags a host lacking an open or
+      closed TCP port, instead of printing nothing. Silence would leave the user unable to
+      distinguish "unidentifiable host" from "this build cannot do OS detection".
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

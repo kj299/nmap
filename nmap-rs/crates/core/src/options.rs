@@ -65,6 +65,13 @@ pub struct RunConfig {
     pub assume_up: bool,
     /// `-sV`: probe open ports to determine service/version info.
     pub service_version: bool,
+    /// `-O`: attempt OS detection via the fingerprint probe battery.
+    pub os_detection: bool,
+    /// `--osscan-guess` / `--fuzzy`: report near matches when nothing matches exactly.
+    pub osscan_guess: bool,
+    /// `--osscan-limit`: only fingerprint hosts with at least one open and one closed
+    /// TCP port, where the result stands a chance of being meaningful.
+    pub osscan_limit: bool,
     /// `--version-intensity <0..=9>` (default 7). `--version-light` = 2,
     /// `--version-all` = 9. Only meaningful when [`RunConfig::service_version`].
     pub version_intensity: u8,
@@ -96,6 +103,9 @@ impl Default for RunConfig {
             ipv6: false,
             assume_up: false,
             service_version: false,
+            os_detection: false,
+            osscan_guess: false,
+            osscan_limit: false,
             // nmap's default `--version-intensity` (`o.version_intensity = 7`).
             version_intensity: crate::servicescan::DEFAULT_INTENSITY,
             out_normal: None,
@@ -241,6 +251,15 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-sN" => cfg.scan = ScanKind::Null,
             "-sX" => cfg.scan = ScanKind::Xmas,
             "-sV" => cfg.service_version = true,
+            "-O" => cfg.os_detection = true,
+            // nmap accepts both spellings for the same behaviour.
+            "--osscan-guess" | "--fuzzy" => cfg.osscan_guess = true,
+            "--osscan-limit" => cfg.osscan_limit = true,
+            // `-A` turns on the aggressive set; OS detection is the part we implement.
+            "-A" => {
+                cfg.os_detection = true;
+                cfg.service_version = true;
+            }
             "--version-light" => {
                 cfg.service_version = true;
                 cfg.version_intensity = 2; // nmap: light = intensity 2
@@ -370,6 +389,17 @@ mod tests {
         assert_eq!(d.version_intensity, 7);
 
         assert!(cfg(&["-sV", "10.0.0.1"]).service_version);
+        // OS detection and its modifiers.
+        assert!(cfg(&["-O", "10.0.0.1"]).os_detection);
+        assert!(!cfg(&["10.0.0.1"]).os_detection);
+        assert!(cfg(&["-O", "--osscan-guess", "10.0.0.1"]).osscan_guess);
+        assert!(cfg(&["-O", "--fuzzy", "10.0.0.1"]).osscan_guess);
+        assert!(cfg(&["-O", "--osscan-limit", "10.0.0.1"]).osscan_limit);
+        // `-A` implies OS detection and version detection together.
+        let a = cfg(&["-A", "10.0.0.1"]);
+        assert!(a.os_detection && a.service_version);
+        // The modifiers do not turn detection on by themselves, matching nmap.
+        assert!(!cfg(&["--osscan-guess", "10.0.0.1"]).os_detection);
 
         let light = cfg(&["--version-light", "10.0.0.1"]);
         assert!(light.service_version);

@@ -13,6 +13,7 @@
 pub mod analyze;
 pub mod assemble;
 pub mod build;
+pub mod demux;
 pub mod icmpreply;
 pub mod seq;
 pub mod tcpreply;

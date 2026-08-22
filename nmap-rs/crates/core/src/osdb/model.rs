@@ -158,6 +158,54 @@ impl FingerTest {
         let i = self.id.attr_index(attr)?;
         self.values.get(i)?.as_deref()
     }
+
+    /// Record a value for a named attribute. An attribute this test does not define is
+    /// ignored rather than panicking — the C's `setAVal` looks the name up in the same
+    /// table and would run off the end.
+    pub fn set(&mut self, attr: &str, value: impl Into<String>) {
+        if let Some(i) = self.id.attr_index(attr) {
+            if let Some(slot) = self.values.get_mut(i) {
+                *slot = Some(value.into());
+            }
+        }
+    }
+
+    /// Remove a named attribute, returning it to the "not specified" state the scorer
+    /// skips.
+    pub fn clear(&mut self, attr: &str) {
+        if let Some(i) = self.id.attr_index(attr) {
+            if let Some(slot) = self.values.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Render as `NAME(A=v%B=v)` — the C's `test2str`, and the exact syntax
+    /// [`super::parse`] reads back.
+    ///
+    /// A test with no attribute set renders as `NAME()`. Unset attributes are skipped, so
+    /// the result names only what was actually observed.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(self.id.name());
+        out.push('(');
+        let mut first = true;
+        for (i, attr) in self.id.attrs().iter().enumerate() {
+            let Some(Some(value)) = self.values.get(i) else {
+                continue;
+            };
+            if !first {
+                out.push('%');
+            }
+            first = false;
+            out.push_str(attr);
+            out.push('=');
+            out.push_str(value);
+        }
+        out.push(')');
+        out
+    }
 }
 
 /// An `Class vendor | family | generation | device type` line, plus any `CPE` lines that
@@ -198,6 +246,36 @@ impl FingerPrint {
     #[must_use]
     pub fn test(&self, id: TestId) -> Option<&FingerTest> {
         self.tests.iter().find(|t| t.id == id)
+    }
+
+    /// Mutable access to the named test, if present.
+    pub fn test_mut(&mut self, id: TestId) -> Option<&mut FingerTest> {
+        self.tests.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Render the tests as the newline-separated block nmap prints for an unrecognised
+    /// host and asks the user to submit — the C's `fp2ascii`.
+    ///
+    /// Tests are emitted in [`TestId::ALL`] order regardless of insertion order, so the
+    /// output is canonical: two runs that observed the same things render identically.
+    ///
+    /// ## Divergence — `fp-render-no-truncation`
+    ///
+    /// The C renders into a **2048-byte `static` buffer** and silently `break`s out of the
+    /// loop when it fills, so a long fingerprint is truncated with no indication. That
+    /// output is precisely what users are asked to paste into a submission, and a
+    /// truncated one is a corrupt submission. `static` also makes it non-reentrant. This
+    /// returns an owned `String` that always holds the whole fingerprint.
+    #[must_use]
+    pub fn render_tests(&self) -> String {
+        let mut out = String::new();
+        for id in TestId::ALL {
+            if let Some(test) = self.test(id) {
+                out.push_str(&test.render());
+                out.push('\n');
+            }
+        }
+        out
     }
 }
 

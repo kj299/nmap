@@ -200,3 +200,8 @@ test = false
 name = "osprobe_icmpreply"
 path = "fuzz_targets/osprobe_icmpreply.rs"
 test = false
+
+[[bin]]
+name = "osprobe_assemble"
+path = "fuzz_targets/osprobe_assemble.rs"
+test = false

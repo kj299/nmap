@@ -825,6 +825,37 @@ analyses and 215 timestamp analyses, all matching. IP-ID classification is cover
       trusted to have set above zero. The subtraction saturates here rather than resting
       on that.
 
+### Response analysis — the `U1` and `IE` ICMP replies
+
+`core::osprobe::icmpreply` ports `processTUdpResp` (the `U1` test) and `processTIcmpResp`
+(the `IE` test). The `U1` quote is our own packet echoed back by the target, so it is
+fully attacker-shaped; the C walks it with `memcpy` after two length checks, while this
+port slices it defensively and returns `None` on any malformed quote. Fuzzed
+(`osprobe_icmpreply`, 12M runs).
+
+- [x] `u1-quote-parsed-defensively` (`core::osprobe::icmpreply`): the C dispatches into
+      `processTUdpResp` after `assert`ing the ICMP type/code, then reads the quoted IP and
+      UDP headers with `memcpy` guarded only by `icmplen < 8 + 20 + 8` and
+      `ip2hlen < 20 || icmplen < 8 + ip2hlen + 8`. Those cover the fixed-size reads, but
+      the port additionally bounds every field access, so a quote that passes the length
+      gates but is internally inconsistent still cannot read out of range — it yields
+      `None`. On a well-formed quote the two agree.
+- [x] `u1-distance-never-negative` (`core::osprobe::icmpreply`): the hop count is
+      `udpttl - quoted_ttl + 1`, computed as a C `int`. The quoted TTL is attacker-chosen,
+      so a value above the TTL we sent drives the count negative — and that number then
+      flows into **every** test through `finalize_ttl` (`T = observed + distance - 1`),
+      corrupting the whole fingerprint from one hostile byte. Here an out-of-range count
+      yields `None` (distance unknown), so the affected tests fall back to the `TG` guess
+      rather than to a garbage reconstructed TTL. Reachable and covered by
+      `a_lying_ttl_yields_no_distance_rather_than_a_negative_one`.
+- [x] `u1-ruck-compares-the-sent-checksum` (`core::osprobe::icmpreply`): **not a
+      divergence — a faithfulness note.** `RUCK` compares the quoted UDP checksum against
+      the exact value the sender placed on the probe (threaded through `U1Sent`), as the C
+      does (`udp.uh_sum == hss->upi.udpck`). Recomputing the "expected" checksum from the
+      quote instead — an easy shortcut — would wrongly report `G` for a target that
+      altered the datagram *and* recomputed a fresh valid checksum; comparing against the
+      original value catches it, matching the C exactly.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

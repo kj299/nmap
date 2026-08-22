@@ -12,5 +12,6 @@
 
 pub mod analyze;
 pub mod build;
+pub mod icmpreply;
 pub mod seq;
 pub mod tcpreply;

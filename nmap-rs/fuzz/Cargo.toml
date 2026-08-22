@@ -195,3 +195,8 @@ test = false
 name = "osprobe_tcpreply"
 path = "fuzz_targets/osprobe_tcpreply.rs"
 test = false
+
+[[bin]]
+name = "osprobe_icmpreply"
+path = "fuzz_targets/osprobe_icmpreply.rs"
+test = false

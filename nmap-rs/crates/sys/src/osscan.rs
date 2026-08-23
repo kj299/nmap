@@ -29,6 +29,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use nmap_core::osdb::model::FingerPrintDb;
+use nmap_core::osdb::score::{match_fingerprint, MatchResults, GUESS_THRESHOLD};
 use nmap_core::osprobe::assemble::{
     assemble, IeReplies, Observation, Responses, TcpProbeReply, NUM_T_PROBES,
 };
@@ -37,6 +39,7 @@ use nmap_core::osprobe::demux::{demux, tcp_timestamp, Demuxed, ProbeReply};
 use nmap_core::osprobe::icmpreply::U1Sent;
 use nmap_core::osprobe::seq::{SeqInputs, SeqReply};
 use nmap_core::osprobe::tcpreply::ProbeContext;
+use nmap_core::osscan::{best_round, Round};
 
 use crate::capture::{AsyncCapture, PacketSource};
 use crate::rawio::RawSender;
@@ -212,10 +215,23 @@ where
     // The six SEQ probes, paced. Their send times are recorded because the ISN-rate
     // analysis divides by the real elapsed intervals, not the intended ones.
     let mut first_seq = None;
-    let mut last_seq = None;
+    let mut last_seq: Option<Instant> = None;
     for i in 0..NUM_SEQ_SAMPLES {
-        if i > 0 {
-            tokio::time::sleep(SEQ_PROBE_DELAY).await;
+        // Wait until 100 ms have passed *since the previous probe left*, not 100 ms plus
+        // however long the intervening work took. The C gates on exactly this
+        // (`hostSeqSendOK`: `packTime = now - lastProbeSent; if (packTime < maxWait) wait
+        // until lastProbeSent + maxWait`). Sleeping a flat 100 ms and then draining makes
+        // every interval overshoot, which inflates `timingRatio` — and a ratio above 1.4
+        // makes the run reject its own fingerprint as untrustworthy.
+        if let Some(previous) = last_seq {
+            // Checked throughout: `Instant` addition can overflow, and subtracting a
+            // later instant from an earlier one would panic.
+            if let Some(deadline) = previous.checked_add(SEQ_PROBE_DELAY) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    tokio::time::sleep(remaining).await;
+                }
+            }
         }
         let probe = OsProbe::Seq(i);
         match build_probe(probe, params) {
@@ -232,8 +248,9 @@ where
             }
             Err(_) => out.unsent.push(probe),
         }
-        // Drain anything that arrived while we were waiting, so replies to early SEQ
-        // probes are not lost to channel backpressure during the 500 ms pacing window.
+        // Drain what has already arrived, so replies to early SEQ probes are not lost to
+        // channel backpressure during the pacing window. This happens inside the interval
+        // — the next probe's deadline is measured from the send above, not from here.
         while let Ok(Some(frame)) =
             tokio::time::timeout(Duration::from_millis(0), capture.recv()).await
         {
@@ -313,6 +330,170 @@ where
     };
     let responses = to_responses(&capture, params, ctx);
     (assemble(&responses), capture)
+}
+
+/// Maximum OS-detection rounds, from the C's `o.maxOSTries()` default.
+pub const MAX_OS_TRIES: usize = 5;
+
+/// One host's finished OS detection.
+#[derive(Debug, Clone)]
+pub struct OsScanResult {
+    /// The round whose fingerprint is reported.
+    pub best: usize,
+    /// Every round's observation, in order.
+    pub rounds: Vec<Observation>,
+    /// Every round's match results, aligned with `rounds`.
+    pub matches: Vec<MatchResults>,
+    /// The worst timing ratio seen across the rounds, feeding `submission_reason`.
+    pub max_timing_ratio: f64,
+    /// Probes that could not be sent in the last round attempted.
+    pub unsent: Vec<OsProbe>,
+}
+
+impl OsScanResult {
+    /// The reported round's observation.
+    #[must_use]
+    pub fn observation(&self) -> Option<&Observation> {
+        self.rounds.get(self.best)
+    }
+    /// The reported round's match results.
+    #[must_use]
+    pub fn best_matches(&self) -> Option<&MatchResults> {
+        self.matches.get(self.best)
+    }
+}
+
+/// Run OS detection against one host, retrying until it matches or the tries run out.
+///
+/// Ports the loop in `os_scan_ipv4`: each round sends the whole battery afresh, because a
+/// probe dropped in one round may be answered in the next. A round that scores a **perfect
+/// match** ends the scan (`endRound`'s completion test); otherwise the best round across
+/// all attempts is reported (`findBestFPs`). Both decisions live in
+/// [`nmap_core::osscan`] and are called here rather than re-derived.
+///
+/// `open_source` is called once per round to obtain a fresh capture — a round consumes its
+/// capture, so it cannot be shared.
+pub async fn scan_host_rounds<S, P, F>(
+    sender: &mut S,
+    mut open_source: F,
+    params: &ProbeParams,
+    eth_included: bool,
+    db: &FingerPrintDb,
+    max_tries: usize,
+) -> OsScanResult
+where
+    S: RawSender,
+    P: PacketSource,
+    F: FnMut() -> std::io::Result<P>,
+{
+    let mut rounds: Vec<Observation> = Vec::new();
+    let mut matches: Vec<MatchResults> = Vec::new();
+    let mut policy_rounds: Vec<Round> = Vec::new();
+    let mut max_timing_ratio = 0.0f64;
+    let mut unsent = Vec::new();
+
+    for _ in 0..max_tries.max(1) {
+        let Ok(source) = open_source() else { break };
+        let (observation, capture) = scan_host(sender, source, params, eth_included).await;
+
+        // Recorded per round: the ratio describes how far the SEQ probes drifted from
+        // their intended spacing, and a later good round does not undo an earlier bad one.
+        max_timing_ratio = max_timing_ratio.max(capture.timing_ratio());
+        unsent = capture.unsent.clone();
+
+        let result = match_fingerprint(&observation.fingerprint, db, GUESS_THRESHOLD);
+        let round = Round {
+            fingerprint: observation.fingerprint.clone(),
+            matches: result.clone(),
+        };
+        let conclusive = round.is_conclusive();
+
+        rounds.push(observation);
+        matches.push(result);
+        policy_rounds.push(round);
+
+        // A perfect match ends the scan; retrying could only find the same answer again.
+        if conclusive {
+            break;
+        }
+    }
+
+    let best = best_round(&policy_rounds).unwrap_or(0);
+    OsScanResult {
+        best,
+        rounds,
+        matches,
+        max_timing_ratio,
+        unsent,
+    }
+}
+
+/// Run OS detection against one already-scanned host, end to end.
+///
+/// Resolves the route, picks the probe ports from the scan's own results, opens a fresh
+/// capture per round, and returns the reported observation with everything
+/// [`nmap_core::osscan::render`] needs.
+///
+/// # Errors
+/// Returns `PermissionDenied` without raw-socket privilege, or another OS error if the
+/// route cannot be resolved or the capture cannot be opened.
+#[cfg(feature = "pcap")]
+pub async fn os_scan_host(
+    target: std::net::Ipv4Addr,
+    ports: &[nmap_core::model::Port],
+    db: &FingerPrintDb,
+    max_tries: usize,
+) -> std::io::Result<(OsScanResult, nmap_core::osscan::ProbePorts, ProbeParams)> {
+    use crate::capture::pcap_source::PcapSource;
+    use crate::rawio::RawIpv4Sender;
+    use crate::route::route_for;
+    use nmap_core::osscan::select_probe_ports;
+
+    let mut sender = RawIpv4Sender::new()?;
+    let route = route_for(target)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no route to target")
+    })?;
+
+    // The probe ports come from what the scan actually found, not from a guess, wherever
+    // the scan found anything usable.
+    let selected = select_probe_ports(ports, rand_u32());
+    let params = ProbeParams {
+        src: route.src.octets(),
+        dst: target.octets(),
+        ttl: 64,
+        // The C randomises the U1 TTL separately as `(time % 14) + 51`.
+        udp_ttl: 57,
+        ip_id: 0x1042,
+        tcp_port_base: 33000u16.wrapping_add(u16::try_from(rand_u32() % 32261).unwrap_or(0)),
+        udp_port_base: 33000u16.wrapping_add(u16::try_from(rand_u32() % 32261).unwrap_or(0)),
+        tcp_seq_base: rand_u32(),
+        tcp_ack: rand_u32(),
+        icmp_echo_id: u16::try_from(rand_u32() & 0xffff).unwrap_or(0x1234),
+        icmp_echo_seq: nmap_core::osprobe::build::ICMP_ECHO_SEQ,
+        open_tcp_port: selected.open_tcp,
+        closed_tcp_port: selected.closed_tcp,
+        closed_udp_port: selected.closed_udp,
+    };
+
+    let iface = route.iface.clone();
+    let filter = bpf_filter(&params);
+    let result = scan_host_rounds(
+        &mut sender,
+        || PcapSource::open(&iface, 65535, 100, Some(&filter)),
+        &params,
+        route.eth_included,
+        db,
+        max_tries,
+    )
+    .await;
+    Ok((result, selected, params))
+}
+
+/// A scan-scoped random value. The probe identifiers must be unpredictable to a target
+/// that would otherwise recognise and special-case our battery.
+#[cfg(feature = "pcap")]
+fn rand_u32() -> u32 {
+    crate::route::random_scan_keys().0
 }
 
 /// Convenience: the target address a [`ProbeParams`] points at.

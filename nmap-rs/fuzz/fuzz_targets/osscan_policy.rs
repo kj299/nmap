@@ -168,19 +168,32 @@ fuzz_target!(|data: &[u8]| {
         osscan_guess: c.bool(),
         reliable: c.bool(),
         verbose: c.bool(),
+        always_show_fingerprint: c.bool(),
     };
 
     let out = render(&report);
     assert_eq!(render(&report), out, "rendering is not deterministic");
 
     // The invariant that protects the shared fingerprint database: a fingerprint judged
-    // unfit must never be printed for the user to submit.
+    // unfit must never be printed *for submission*. Showing it under -d is a different
+    // thing — the operator asked to see it — so the invariant is about the submission
+    // request, which must never appear for an unfit observation regardless of verbosity.
     if reason.is_some() {
         assert!(
             !out.contains("https://nmap.org/submit/"),
             "asked for submission of an unfit fingerprint:\n{out}"
         );
     }
+
+    // `-d` shows the observation in every branch; without it, an unfit fingerprint is
+    // withheld. Both must hold for any inputs.
+    let mut shown = report;
+    shown.always_show_fingerprint = true;
+    let with_debug = render(&shown);
+    assert!(
+        with_debug.len() >= out.len(),
+        "-d must not withhold what the default shows"
+    );
 
     // Whatever branch was taken, exactly one verdict line must be present.
     let verdicts = [

@@ -120,3 +120,11 @@ jobs:
       # Fixture listeners + both binaries + diff_run.py over the M1 matrix.
       # Fails on any UNLEDGERED divergence in port-state fidelity.
       - run: bash tests/differential/run_differential.sh
+      # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
+      # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
+      # building the 23-probe battery, capturing on a real interface, attributing replies,
+      # and assembling a fingerprint — against C nmap fingerprinting the same host.
+      # Needs raw sockets and a pcap build; the script SKIPs cleanly without them.
+      - run: sudo apt-get install -y libpcap-dev
+      - run: cargo build --release --features pcap
+      - run: sudo -E env "PATH=$PATH" bash tests/differential/m5/run_os_differential.sh

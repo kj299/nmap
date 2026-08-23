@@ -969,6 +969,67 @@ privilege required.
       closed TCP port, instead of printing nothing. Silence would leave the user unable to
       distinguish "unidentifiable host" from "this build cannot do OS detection".
 
+### Completing `-O`: rounds, port selection, and the on-wire differential
+
+`core::osscan::select_probe_ports` picks the ports the battery needs,
+`sys::osscan::scan_host_rounds` drives the retry loop through the already-ported policy,
+and `cli` renders the result. Gated by **the first on-wire differential in M5**
+(`tests/differential/m5/run_os_differential.sh`): C nmap and nmap-rs fingerprint the same
+loopback host and all thirteen tests must agree, after stripping only the fields that are
+legitimately run-to-run variable.
+
+- [x] `osscan-guessed-closed-port-is-recorded` (`core::osscan`): with no closed port
+      observed, the C invents one — `(get_random_uint() % 14781) + 30000` — and assumes it
+      is closed. If that assumption is wrong the resulting `T5`–`T7`/`U1` evidence is
+      meaningless, but the C keeps no record that it guessed, so nothing downstream can
+      weigh it. This port returns `closed_tcp_guessed`/`closed_udp_guessed` alongside the
+      choice, and the CLI feeds them into `submission_reason`.
+- [x] `osscan-u1-reply-proves-the-port-closed` (`cli`): **faithfulness note.** A guessed
+      UDP port that answers with an ICMP port-unreachable is thereby *proven* closed, so
+      it stops counting against submission. This is what the C does in `processTUdpResp`
+      (`if (osscan_closedudpport == -1) osscan_closedudpport = upi.dport`). An earlier
+      draft of this port treated any guessed port as permanently unproven, which wrongly
+      suppressed submission for exactly the runs that worked; the C's behaviour is the
+      correct one and is reproduced.
+- [x] `osscan-port-zero-avoided` (`core::osscan`): **faithfulness note.** Port 0 is skipped
+      when any alternative exists, as the C does. A probe to port 0 is not a normal
+      conversation and stacks answer it inconsistently — choosing it would record an
+      artefact of our own selection as the target's behaviour. When port 0 is genuinely
+      the only candidate it is still used rather than guessing.
+- [x] `osscan-debug-always-shows-the-fingerprint` (`core::osscan`, `cli`): `-d`/`-vv`
+      prints the raw observed fingerprint in **every** branch, as the C does — it gates
+      each `write_merged_fpr` call on `suggest_submission || o.debugging || o.verbose > 1`,
+      *including* the perfect-match branch. Asking to see the observation is a different
+      request from being invited to submit it, and that holds whether or not the host was
+      identified. This is also what makes the on-wire differential meaningful: without it,
+      either tool may withhold its fingerprint and two withheld fingerprints would "agree"
+      vacuously. A first draft covered only the branches that judge the run *unfit*, so
+      `-d` silently printed nothing whenever the host was actually identified — the case
+      the differential has the most to compare. Caught by that gate in CI.
+- [x] `osscan-seq-pacing-measured-from-the-last-send` (`sys::osscan`): the wait before each
+      `SEQ` probe runs until `last_sent + 100 ms`, not for a flat 100 ms after the
+      preceding work. The C gates on exactly this (`hostSeqSendOK` compares
+      `now - lastProbeSent` against the delay). Sleeping a flat interval and *then*
+      draining the capture makes every gap overshoot, inflating `timingRatio` — and a
+      ratio above 1.4 makes the scan reject its own fingerprint as untrustworthy. The
+      first draft of this port had that bug and rejected its own results intermittently.
+- [x] `osscan-ipid-sample-presence-is-not-comparable` (differential harness): the
+      *values* of `SEQ`'s `TI`/`CI`/`II` are properties of the target's IP-ID counters and
+      are compared strictly. Their *presence* is not comparable between the two tools.
+      Each needs at least two usable samples, and C nmap discards the sample from any
+      probe it retransmitted (`osscan2.cc`: "Retransmitted ipid is useless"), so under
+      packet loss it emits fewer of these than a clean run. This port re-sends the whole
+      battery per round rather than retransmitting individual probes, so its samples always
+      come from first transmissions. Comparing presence would diff the two tools' luck
+      rather than their fidelity — the CI runner produced exactly that, with C nmap
+      omitting `II` after an `IE` retransmission while this port emitted `II=I`. The
+      harness therefore skips an attribute only one side sampled, and still fails on any
+      value both sides have and disagree on.
+- [x] `osscan-output-follows-the-port-table` (`cli`): the OS block is rendered into a
+      string and printed after the scan report rather than as it is computed, matching
+      nmap's ordering. Printing during detection put the OS lines *before* the port table
+      they describe.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

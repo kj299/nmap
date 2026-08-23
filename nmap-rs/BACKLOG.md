@@ -51,10 +51,21 @@ and IPv6 tracks are approved. Port order, leaf-first:
 7. ~~`core::osscan`~~ — **done**. The pure half of the driver: `endRound`'s completion
    test and distance ladder, `findBestFPs`, `OmitSubmissionFP`, and `printosscanoutput`'s
    plain-text rendering. No sockets, so it is fully unit/Miri/fuzz testable.
-8. `sys::osscan` + `cli -O` — the privileged driver on the M4 group engine: sends the
-   23-probe battery, demultiplexes replies into `osprobe::*`, calls `assemble`, drives the
-   retry rounds through `core::osscan`'s policy, and wires up the `-O` flag. First code in
-   the `sys` unsafe crate since M4; needs an end-to-end differential against C nmap's `-O`.
+8. ~~`core::osprobe::demux` + `sys::osscan` + `cli -O`~~ — **done** (single round).
+   `demux` attributes a frame to its probe by identity (TCP source port, ICMP id/seq, the
+   UDP port quoted inside the error), `sys::osscan` sends the battery and collects
+   replies, and `-O`/`--osscan-guess`/`--osscan-limit`/`-A` parse. **Design note so it is
+   not relitigated:** this deliberately does *not* implement `group::RawScanKind`. That
+   engine is port-keyed (scheduler walks a port list, yields `(port, tryno)`, produces
+   per-port states) while `-O` sends 23 heterogeneous probes feeding 13 extractors; and
+   its congestion window wants to send as fast as possible whereas the six `SEQ` probes
+   must be paced at 100 ms or the ISN/timestamp analysis is wrong. It reuses the layer
+   below — `AsyncCapture`, `RawSender`, the timeout math.
+   **Remaining for a complete `-O`:** the multi-round retry loop wired to
+   `core::osscan::best_round`, real port selection from the scan results, plumbing the
+   observation into `printosscanoutput`/XML output, and an end-to-end differential against
+   C nmap's `-O` on a controlled target (the driver is tested today with a mock sender and
+   scripted capture, which proves attribution and pacing but not on-wire behaviour).
 9. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
 

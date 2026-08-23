@@ -99,6 +99,12 @@ async fn main() -> ExitCode {
         run_service_version(&cfg, &mut results).await;
     }
 
+    // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so this
+    // reports why it cannot run rather than silently producing nothing.
+    if cfg.os_detection {
+        run_os_detection(&cfg, &results);
+    }
+
     let meta = ScanMeta {
         scanner: "nmap-rs",
         version: env!("CARGO_PKG_VERSION"),
@@ -323,6 +329,50 @@ async fn flag_or_fallback(
 /// Run `-sV` over every open TCP port and merge the results back into `results`.
 /// Degrades gracefully: if the probe DB can't be found or parses to nothing, the
 /// scan proceeds without version info (a warning, never a failure).
+/// `-O`: report the state of OS detection for this run.
+///
+/// The fingerprint battery needs a raw socket and a live capture, which this build only
+/// has under `--features pcap` with root. Rather than print nothing (leaving the user to
+/// wonder whether the host is simply unidentifiable), say plainly why no result appears —
+/// and say what would make it work.
+fn run_os_detection(cfg: &RunConfig, results: &ScanResults) {
+    if !cfg!(feature = "pcap") {
+        eprintln!(
+            "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
+        );
+        return;
+    }
+    for host in &results.hosts {
+        let open = host
+            .ports
+            .iter()
+            .find(|p| p.state == PortState::Open)
+            .map(|p| p.number);
+        let closed = host
+            .ports
+            .iter()
+            .find(|p| p.state == PortState::Closed)
+            .map(|p| p.number);
+        // nmap's own precondition: without one open and one closed TCP port the
+        // fingerprint is missing the tests that carry most of the signal.
+        if open.is_none() || closed.is_none() {
+            if cfg.osscan_limit {
+                eprintln!(
+                    "nmap-rs: skipping OS detection for {} (--osscan-limit: needs an open and a closed TCP port)",
+                    host.address
+                );
+            } else {
+                eprintln!(
+                    "nmap-rs: OS detection for {} would be unreliable (no {} TCP port found)",
+                    host.address,
+                    if open.is_none() { "open" } else { "closed" }
+                );
+            }
+        }
+    }
+    eprintln!("nmap-rs: -O probe battery not yet wired to the scan loop; no OS results reported");
+}
+
 async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
     let Some(db_text) = load_probe_db_text() else {
         eprintln!(
@@ -434,7 +484,9 @@ fn print_usage() {
     println!("  Scan types: -sT connect (default) | -sS SYN | -sU UDP | -sA ACK | -sW Window");
     println!("              | -sM Maimon | -sF FIN | -sN Null | -sX Xmas. The raw scans need");
     println!("              root + a --features pcap build; they fall back to -sT otherwise.");
-    println!("  Plus -sV service/version detection.");
+    println!("  Plus -sV service/version detection and -O OS detection");
+    println!("       (--osscan-guess to report near matches, --osscan-limit to skip");
+    println!("        hosts without both an open and a closed port; -A implies -sV -O).");
 }
 
 /// Choose the TCP ports to scan.

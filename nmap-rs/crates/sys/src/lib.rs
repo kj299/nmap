@@ -19,6 +19,7 @@ pub mod flagscan;
 pub mod group;
 pub mod net;
 pub mod netif;
+pub mod osscan;
 pub mod rawio;
 pub mod route;
 pub mod scan;

@@ -74,8 +74,16 @@ and IPv6 tracks are approved. Port order, leaf-first:
    It verifies its own loopback fixture is listening before comparing — without that a
    failed bind leaves no open TCP port, and two fingerprints of a host with no open port
    agree trivially, turning the gate into a no-op that reports success.
-9. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
-   f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
+9. ~~`core::fpmodel`~~ — **done**. nmap's trained IPv6 classifier (101 classes x 695
+   features): `apply_scale`, `predict_values`, `novelty_of`, and the accept policy.
+   **liblinear is gone** — the one entry point nmap used reduces to a dot product for this
+   model. Model data extracted verbatim by `tools/extract_fpmodel.py` into a 1.7 MB
+   little-endian blob (vs 2.8 MB of generated C). Gated by a bit-exact differential
+   against liblinear's own `predict_values` over the real tables.
+10. `core::fp6::vectorize` — build the 695-element feature vector from IPv6 probe
+   responses (`FPEngine.cc`'s per-probe feature extraction). This is the remaining pure
+   piece before the IPv6 driver.
+11. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

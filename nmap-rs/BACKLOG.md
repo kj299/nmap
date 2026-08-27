@@ -51,21 +51,29 @@ and IPv6 tracks are approved. Port order, leaf-first:
 7. ~~`core::osscan`~~ — **done**. The pure half of the driver: `endRound`'s completion
    test and distance ladder, `findBestFPs`, `OmitSubmissionFP`, and `printosscanoutput`'s
    plain-text rendering. No sockets, so it is fully unit/Miri/fuzz testable.
-8. ~~`core::osprobe::demux` + `sys::osscan` + `cli -O`~~ — **done** (single round).
+8. ~~`core::osprobe::demux` + `sys::osscan` + `cli -O`~~ — **done. `-O` works end to end.**
    `demux` attributes a frame to its probe by identity (TCP source port, ICMP id/seq, the
-   UDP port quoted inside the error), `sys::osscan` sends the battery and collects
-   replies, and `-O`/`--osscan-guess`/`--osscan-limit`/`-A` parse. **Design note so it is
-   not relitigated:** this deliberately does *not* implement `group::RawScanKind`. That
-   engine is port-keyed (scheduler walks a port list, yields `(port, tryno)`, produces
-   per-port states) while `-O` sends 23 heterogeneous probes feeding 13 extractors; and
-   its congestion window wants to send as fast as possible whereas the six `SEQ` probes
-   must be paced at 100 ms or the ISN/timestamp analysis is wrong. It reuses the layer
-   below — `AsyncCapture`, `RawSender`, the timeout math.
-   **Remaining for a complete `-O`:** the multi-round retry loop wired to
-   `core::osscan::best_round`, real port selection from the scan results, plumbing the
-   observation into `printosscanoutput`/XML output, and an end-to-end differential against
-   C nmap's `-O` on a controlled target (the driver is tested today with a mock sender and
-   scripted capture, which proves attribution and pacing but not on-wire behaviour).
+   UDP port quoted inside the error); `sys::osscan` sends the battery, paces the `SEQ`
+   probes, and drives the retry rounds through `core::osscan`'s policy; port selection
+   comes from the scan's own results; and the CLI renders the result after the port table.
+   **Design note so it is not relitigated:** this deliberately does *not* implement
+   `group::RawScanKind` — that engine is port-keyed (scheduler walks a port list, yields
+   `(port, tryno)`, produces per-port states) while `-O` sends 23 heterogeneous probes
+   feeding 13 extractors, and its congestion window wants to send as fast as possible
+   whereas the six `SEQ` probes must be paced at 100 ms or the ISN/timestamp analysis is
+   wrong. It reuses the layer below — `AsyncCapture`, `RawSender`, the timeout math.
+   **Gated by the first on-wire differential in M5**
+   (`tests/differential/m5/run_os_differential.sh`, in CI): C nmap and nmap-rs fingerprint
+   the same loopback host and all 13 tests must agree.
+   Remaining polish (not blocking): XML/grepable `<os>` output, the `Uptime guess` and
+   `TCP Sequence Prediction` lines (the renderer supports them; the driver does not yet
+   collect `SeqReport`), and `--max-os-tries`.
+   **Harness note:** the differential compares the *final* round's fingerprint from each
+   tool's `-d` output and strips the fields that are measurements rather than properties
+   (the `SCAN` metadata line, `SEQ`'s `SP`/`GCD`/`ISR`, a numeric `SEQ.TS`, and `T`/`TG`).
+   It verifies its own loopback fixture is listening before comparing — without that a
+   failed bind leaves no open TCP port, and two fingerprints of a host with no open port
+   agree trivially, turning the gate into a no-op that reports success.
 9. IPv6: `core::fpmodel` (embed weights, port `predict_values`/`novelty_of` — pure
    f64, no liblinear FFI), `core::fp6::vectorize`, then `sys::fpengine` + CLI.
 
@@ -81,6 +89,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
 - **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
   `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
   in the next scan-driver retrospective (cousin of LESSONS #15).
+- **The fuzz crate is not in the workspace lint sweep.** `cargo clippy --workspace
+  --all-targets` does **not** build `fuzz/`, which is a separate crate compiled only by
+  `cargo +nightly fuzz build`. So adding a public field to a struct a fuzz target
+  constructs (here `osscan::Report`) passes every local check and then fails CI's fuzz
+  job on a plain compile error. Before pushing a change to any type a fuzz target names,
+  run `for t in $(cargo +nightly fuzz list); do cargo +nightly fuzz build $t; done`.
+  Same shape as the "lint both feature configurations" lesson: the local convenience
+  invocation is not the CI invocation. (Cost a red fuzz job on #69.)
 - **Lint both feature configurations before pushing**: `--all-features` turns `pcap`
   on, so it never sees an import that is only used by a `#[cfg(feature = "pcap")]`
   item. CI runs clippy with **and** without the feature under `-D warnings`; a

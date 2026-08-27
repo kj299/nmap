@@ -101,9 +101,18 @@ async fn main() -> ExitCode {
 
     // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so this
     // reports why it cannot run rather than silently producing nothing.
-    if cfg.os_detection {
-        run_os_detection(&cfg, &results);
-    }
+    let os_block = if cfg.os_detection {
+        #[cfg(feature = "pcap")]
+        {
+            run_os_detection(&cfg, &results).await
+        }
+        #[cfg(not(feature = "pcap"))]
+        {
+            run_os_detection(&cfg, &results)
+        }
+    } else {
+        String::new()
+    };
 
     let meta = ScanMeta {
         scanner: "nmap-rs",
@@ -117,6 +126,10 @@ async fn main() -> ExitCode {
     if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref()) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
+    }
+    // The OS block follows the port table, as nmap orders it.
+    if !os_block.is_empty() {
+        print!("{os_block}");
     }
     ExitCode::SUCCESS
 }
@@ -329,48 +342,128 @@ async fn flag_or_fallback(
 /// Run `-sV` over every open TCP port and merge the results back into `results`.
 /// Degrades gracefully: if the probe DB can't be found or parses to nothing, the
 /// scan proceeds without version info (a warning, never a failure).
-/// `-O`: report the state of OS detection for this run.
+/// `-O`: run the fingerprint battery against each up host and report what it found.
 ///
-/// The fingerprint battery needs a raw socket and a live capture, which this build only
-/// has under `--features pcap` with root. Rather than print nothing (leaving the user to
-/// wonder whether the host is simply unidentifiable), say plainly why no result appears —
-/// and say what would make it work.
-fn run_os_detection(cfg: &RunConfig, results: &ScanResults) {
-    if !cfg!(feature = "pcap") {
-        eprintln!(
-            "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
-        );
-        return;
+/// Needs a raw socket and a live capture, so a build without `pcap` or a run without
+/// privilege says so plainly rather than printing nothing — silence would leave the user
+/// unable to tell an unidentifiable host from a build that cannot look.
+#[cfg(feature = "pcap")]
+async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
+    use nmap_core::osdb::model::FingerPrintDb;
+    use nmap_core::osscan::{
+        attribute_distance, render, submission_reason, HostFacts, Report, SeqReport,
+        SubmissionInputs,
+    };
+
+    let mut out = String::new();
+    let Some(db_text) = load_os_db() else {
+        eprintln!("nmap-rs: -O requires nmap-os-db; skipping OS detection");
+        return out;
+    };
+    let db = FingerPrintDb::parse(&db_text);
+    if db.prints.is_empty() {
+        eprintln!("nmap-rs: nmap-os-db has no usable fingerprints; skipping OS detection");
+        return out;
     }
+
     for host in &results.hosts {
-        let open = host
-            .ports
-            .iter()
-            .find(|p| p.state == PortState::Open)
-            .map(|p| p.number);
-        let closed = host
-            .ports
-            .iter()
-            .find(|p| p.state == PortState::Closed)
-            .map(|p| p.number);
-        // nmap's own precondition: without one open and one closed TCP port the
-        // fingerprint is missing the tests that carry most of the signal.
-        if open.is_none() || closed.is_none() {
-            if cfg.osscan_limit {
-                eprintln!(
-                    "nmap-rs: skipping OS detection for {} (--osscan-limit: needs an open and a closed TCP port)",
-                    host.address
-                );
-            } else {
-                eprintln!(
-                    "nmap-rs: OS detection for {} would be unreliable (no {} TCP port found)",
-                    host.address,
-                    if open.is_none() { "open" } else { "closed" }
-                );
-            }
+        if host.state != HostState::Up {
+            continue;
         }
+        let IpAddr::V4(v4) = host.address else {
+            eprintln!("nmap-rs: -O supports IPv4 only; skipping {}", host.address);
+            continue;
+        };
+
+        let has_open = host.ports.iter().any(|p| p.state == PortState::Open);
+        let has_closed = host.ports.iter().any(|p| p.state == PortState::Closed);
+        // nmap's own precondition: without one open and one closed TCP port most of the
+        // fingerprint's signal is missing.
+        if cfg.osscan_limit && !(has_open && has_closed) {
+            eprintln!(
+                "nmap-rs: skipping OS detection for {} (--osscan-limit: needs an open and a closed TCP port)",
+                host.address
+            );
+            continue;
+        }
+
+        let outcome =
+            nmap_sys::osscan::os_scan_host(v4, &host.ports, &db, nmap_sys::osscan::MAX_OS_TRIES)
+                .await;
+        let (result, selected, _params) = match outcome {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("nmap-rs: -O requires root/CAP_NET_RAW; skipping OS detection");
+                return out;
+            }
+            Err(e) => {
+                eprintln!("nmap-rs: -O setup failed for {} ({e})", host.address);
+                continue;
+            }
+        };
+
+        let (Some(observation), Some(matches)) = (result.observation(), result.best_matches())
+        else {
+            eprintln!("nmap-rs: -O produced no result for {}", host.address);
+            continue;
+        };
+
+        // A `U1` reply *proves* the port was closed, whether or not we guessed it: the
+        // target answered port-unreachable. The C records exactly this in
+        // `processTUdpResp` (`if osscan_closedudpport == -1 ... = upi.dport`). A guessed
+        // TCP port gets no such confirmation, so it stays unproven.
+        let u1_answered = observation
+            .fingerprint
+            .test(nmap_core::osdb::model::TestId::U1)
+            .and_then(|t| t.get("R"))
+            == Some("Y");
+        let reason = submission_reason(&SubmissionInputs {
+            scan_delay_ms: 0,
+            timing_level: 3,
+            have_open_tcp_port: selected.open_tcp.is_some(),
+            have_closed_tcp_port: selected.closed_tcp.is_some() && !selected.closed_tcp_guessed,
+            have_closed_udp_port: selected.closed_udp.is_some()
+                && (!selected.closed_udp_guessed || u1_answered),
+            udp_scan_requested: false,
+            distance: observation.distance,
+            max_timing_ratio: result.max_timing_ratio,
+            incomplete: !result.unsent.is_empty(),
+        });
+
+        let facts = HostFacts {
+            is_localhost: v4.is_loopback(),
+            has_mac_address: false,
+        };
+        let distance = attribute_distance(facts, observation.distance);
+
+        let seq = SeqReport::default();
+        let report = Report {
+            matches,
+            fingerprint: &observation.fingerprint,
+            submission_reason: reason.as_deref(),
+            distance,
+            seq: &seq,
+            open_tcp_port: selected.open_tcp,
+            closed_tcp_port: selected.closed_tcp,
+            osscan_guess: cfg.osscan_guess,
+            reliable: has_open && has_closed,
+            verbose: cfg.verbose > 0,
+            // `-d` or `-vv`: show the raw observation even when it is unfit to submit.
+            // Asking to see it is not the same as being invited to send it in.
+            always_show_fingerprint: cfg.debugging > 0 || cfg.verbose > 1,
+        };
+        out.push_str(&render(&report));
     }
-    eprintln!("nmap-rs: -O probe battery not yet wired to the scan loop; no OS results reported");
+    out
+}
+
+/// Without the `pcap` feature there is no capture backend, so `-O` cannot run.
+#[cfg(not(feature = "pcap"))]
+fn run_os_detection(_cfg: &RunConfig, _results: &ScanResults) -> String {
+    eprintln!(
+        "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
+    );
+    String::new()
 }
 
 async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
@@ -579,6 +672,30 @@ fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
 /// Locate the `nmap-services` data file in a few conventional places. The port
 /// never fails if it is absent — it just loses frequency-ranked default ports
 /// and service names.
+/// Locate `nmap-os-db`, mirroring [`load_services`]'s search order. `None` if absent —
+/// `-O` then degrades to a warning rather than a silent no-op.
+#[cfg(feature = "pcap")]
+fn load_os_db() -> Option<String> {
+    let candidates = [
+        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
+            let mut p = std::path::PathBuf::from(d);
+            p.push("nmap-os-db");
+            p
+        }),
+        Some("nmap-os-db".into()),
+        Some("../nmap-os-db".into()),
+        Some("../../nmap-os-db".into()),
+        Some("/usr/share/nmap/nmap-os-db".into()),
+    ];
+    for cand in candidates.into_iter().flatten() {
+        if let Ok(text) = std::fs::read_to_string(&cand) {
+            nmap_core::debug!(1, "loaded os-db from {}", cand.display());
+            return Some(text);
+        }
+    }
+    None
+}
+
 fn load_services() -> Option<ServiceTable> {
     let candidates = [
         std::env::var_os("NMAP_RS_DATADIR").map(|d| {

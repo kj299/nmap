@@ -210,3 +210,8 @@ test = false
 name = "osscan_policy"
 path = "fuzz_targets/osscan_policy.rs"
 test = false
+
+[[bin]]
+name = "fpmodel"
+path = "fuzz_targets/fpmodel.rs"
+test = false

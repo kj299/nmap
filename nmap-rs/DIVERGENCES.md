@@ -1030,6 +1030,51 @@ legitimately run-to-run variable.
       nmap's ordering. Printing during detection put the OS lines *before* the port table
       they describe.
 
+## Milestone 5 — IPv6 OS detection: the classifier model
+
+IPv6 detection does not match expressions against a database. nmap ships a **trained
+logistic-regression model** — 101 OS classes over a 695-element feature vector — and
+classifies observations against it. `core::fpmodel` ports that.
+
+Gated by a differential that links **liblinear's own `predict_values`, verbatim, against
+nmap's real model tables** and requires **bit-exact** agreement across 124 feature vectors
+(695 scaled values + 101 decision values + 101 novelty distances each — ~111,000 `f64`
+comparisons at zero tolerance). Exactness is the point: the accept rule downstream turns
+on whether one class scores within 90% of the best, so an error in the last few bits can
+change which OS is reported. Verified to catch a transposed weight layout, a wrong default
+variance, and a wrong scaling formula.
+
+- [x] `fp6-no-liblinear` (`core::fpmodel`): the C delegates prediction to **liblinear**, a
+      bundled third-party C++ library, and compiles in a 2.8 MB generated model file. The
+      only prediction entry point nmap uses is `predict_values`, and for this model — 
+      linear, negative `bias` so no bias column, solver type 0 — that reduces to a dot
+      product. Porting it directly removes the entire library from the trust boundary. The
+      model *data* is copied verbatim into a little-endian `f64` blob
+      (`tools/extract_fpmodel.py`), so predictions are bit-identical.
+- [x] `fp6-nan-score-is-no-evidence` (`core::fpmodel`): **found by fuzzing.** A NaN or
+      infinite feature makes a decision value non-finite. The C feeds that into
+      `1.0/(1.0+exp(-v))` and then into two places that cannot cope: `label_prob_cmp`
+      orders with `>` and `<`, both false for NaN, so it reports "equal" for a NaN against
+      everything while other elements keep a strict order — **not a strict weak ordering,
+      making the `qsort` call undefined behaviour** — and the value then reaches the user
+      as a printed accuracy percentage. Here a non-finite score is treated as *no
+      evidence* (probability 0), the sort uses a total order, and a class the model gave
+      no answer for can never be promoted. The first draft of this port propagated the NaN
+      exactly as the C does; the fuzz target caught it.
+- [x] `fp6-novelty-label-bound` (`core::fpmodel`): `novelty_of` guards its label with
+      `assert(label < nr_feature)` — the wrong dimension. It then indexes `FPmean[label]`
+      and `FPvariance[label]`, which have `nr_class` rows: **695 vs 101**, so labels
+      101–694 pass the check and read out of bounds. Under `NDEBUG` the assert is gone
+      altogether. Here the label indexes a bounds-checked slice and an out-of-range one
+      returns `None`. Not reachable from the C's own call sites today, which pass labels
+      below `nr_class` — a latent defect rather than a live one.
+- [x] `fp6-model-blob-is-validated` (`core::fpmodel`): the embedded model carries a magic
+      and version, and a truncated or degenerate blob is rejected at load. The C's tables
+      are plain global arrays whose consistency with `nr_class`/`nr_feature` is assumed;
+      a mismatch would read past them silently. Also: `FpModel`'s `Debug` is hand-written
+      to print only the shape, because a derived one would dump ~210,000 floats into any
+      log line that happened to include the model.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

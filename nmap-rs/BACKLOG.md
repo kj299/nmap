@@ -97,6 +97,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
 - **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
   `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
   in the next scan-driver retrospective (cousin of LESSONS #15).
+- **An oracle must copy the C, not restate it.** The fp6 differential passed bit-exact
+  while both sides were wrong: the oracle's `apply_scale` had been retyped without nmap's
+  `if (val < 0) continue;` guard, under a comment claiming it was verbatim. A gate that
+  compares a port against a paraphrase of the C proves only self-consistency. When an
+  oracle copies a C function, paste it and diff it against the source; when that is
+  impractical (headers, globals), say in the comment exactly what was changed and why.
+  (Shipped a real fidelity bug in #70; caught while porting `fp6::vectorize`, which is
+  what surfaced the sentinel's meaning.)
 - **The fuzz crate is not in the workspace lint sweep.** `cargo clippy --workspace
   --all-targets` does **not** build `fuzz/`, which is a separate crate compiled only by
   `cargo +nightly fuzz build`. So adding a public field to a struct a fuzz target

@@ -190,10 +190,21 @@ impl FpModel {
 
     /// Scale a raw feature vector in place — the C's `apply_scale`, `x' = (x + a) * b`.
     ///
+    /// **A negative value is left alone.** `-1` is the "attribute absent" sentinel that
+    /// [`crate::fp6::vectorize`] initialises every feature to and leaves in place wherever
+    /// a probe went unanswered or an option was missing. Scaling it would map "no data"
+    /// onto an arbitrary in-range number that the model reads as real evidence — and since
+    /// most real scans leave some probes unanswered, that corrupts nearly every
+    /// classification rather than an edge case. The C guards this the same way
+    /// (`if (val < 0) continue;`).
+    ///
     /// Features beyond the model's width are ignored rather than scaled against a
     /// neighbouring feature's parameters.
     pub fn apply_scale(&self, features: &mut [f64]) {
         for (x, ab) in features.iter_mut().zip(self.scale.iter()) {
+            if *x < 0.0 {
+                continue;
+            }
             *x = (*x + ab[0]) * ab[1];
         }
     }
@@ -422,6 +433,32 @@ mod tests {
                 "a blob cut at {cut} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn scaling_leaves_the_absent_sentinel_alone() {
+        // `-1` means "attribute absent" — `vectorize` starts every feature there and
+        // leaves it wherever a probe went unanswered. Scaling it would map "no data" onto
+        // a number the model reads as evidence, and since most real scans leave some
+        // probes unanswered that would corrupt nearly every classification.
+        let m = model();
+        let mut v = vec![-1.0f64; m.n_feature()];
+        m.apply_scale(&mut v);
+        assert!(
+            v.iter().all(|&x| x == -1.0),
+            "the absent sentinel was scaled"
+        );
+
+        // Any negative is skipped, matching the C's `if (val < 0) continue;`.
+        let mut mixed = vec![0.0f64; m.n_feature()];
+        mixed[0] = -0.5;
+        mixed[1] = -1000.0;
+        mixed[2] = 0.0;
+        let before = mixed.clone();
+        m.apply_scale(&mut mixed);
+        assert_eq!(mixed[0], before[0], "a negative feature was scaled");
+        assert_eq!(mixed[1], before[1], "a negative feature was scaled");
+        assert_ne!(mixed[2], before[2], "a non-negative feature was not scaled");
     }
 
     #[test]

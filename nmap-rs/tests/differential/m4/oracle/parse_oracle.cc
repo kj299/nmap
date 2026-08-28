@@ -184,6 +184,11 @@ static const char *hdr_token(u32 t) {
   case HEADER_TYPE_TCP:      return "tcp";
   case HEADER_TYPE_UDP:      return "udp";
   case HEADER_TYPE_ICMPv4:   return "icmp";
+  case HEADER_TYPE_ICMPv6:   return "icmp6";
+  case HEADER_TYPE_IPv6_HOPOPT: return "hopopt";
+  case HEADER_TYPE_IPv6_OPTS:   return "dopts";
+  case HEADER_TYPE_IPv6_ROUTE:  return "route";
+  case HEADER_TYPE_IPv6_FRAG:   return "frag";
   case HEADER_TYPE_RAW_DATA: return "raw";
   default:                   return "other";
   }
@@ -204,6 +209,27 @@ static int project_packet(const std::vector<unsigned char> &pkt, bool eth_includ
     off += hs[i].length;
   }
   printf("result ok\n");
+  return 0;
+}
+
+// Batch mode (argv[1]=="pkt_ip_lines"): one hex packet per input line, each
+// projected under eth_included=false and prefixed with its 1-based case number. Used
+// for the randomised IPv6 chain corpus, which is far too large for one file per case.
+static int project_packet_lines(const std::string &in) {
+  size_t start = 0;
+  int caseno = 0;
+  while (start <= in.size()) {
+    size_t nl = in.find('\n', start);
+    std::string line = in.substr(start, nl == std::string::npos ? std::string::npos
+                                                               : nl - start);
+    start = (nl == std::string::npos) ? in.size() + 1 : nl + 1;
+    // Skip blank and comment lines.
+    size_t first = line.find_first_not_of(" \t\r");
+    if (first == std::string::npos || line[first] == '#') continue;
+    std::vector<unsigned char> pkt = unhex(line);
+    printf("case %d\n", ++caseno);
+    project_packet(pkt, false);
+  }
   return 0;
 }
 
@@ -410,6 +436,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(layer, "pkt_ip") == 0) {
     return project_packet(pkt, false);
+  }
+  if (strcmp(layer, "pkt_ip_lines") == 0) {
+    return project_packet_lines(in);
   }
   if (strcmp(layer, "eth") == 0) {
     return project_eth(pkt);

@@ -1,0 +1,5 @@
+pkt nhdrs=3
+hdr 0 ip6 off=0 len=40
+hdr 1 route off=40 len=24
+hdr 2 tcp off=64 len=20
+result ok

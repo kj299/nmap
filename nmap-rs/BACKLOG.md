@@ -80,10 +80,31 @@ and IPv6 tracks are approved. Port order, leaf-first:
    model. Model data extracted verbatim by `tools/extract_fpmodel.py` into a 1.7 MB
    little-endian blob (vs 2.8 MB of generated C). Gated by a bit-exact differential
    against liblinear's own `predict_values` over the real tables.
-10. `core::fp6::vectorize` — build the 695-element feature vector from IPv6 probe
+10. ~~`core::headers::icmpv6` + `core::headers::ipv6ext`~~ — **done**. The layers an
+   IPv6 response is made of, which `fp6::vectorize` has to walk before it can extract a
+   single feature: ICMPv6 (type-derived header length) and the four extension headers
+   (hop-by-hop, destination options, routing, fragment), wired into
+   `core::packet_parser`. This **closes** the M4 divergence
+   `packet-parser-ported-subset-degrades-to-raw`: the walk now follows every chain the C
+   walk can follow. Gated by the packet differential extended from 17 to 45 hand-written
+   vectors **plus 4,000 generated IPv6 chains**, all bit-exact against nmap's real
+   `PacketParser::parse_packet`, with the committed golden re-derived from the C on
+   every CI run (`tests/differential/m4/regen_pkt_golden.sh --check`) so it cannot drift
+   into agreeing with a paraphrase. Two C defects ledgered:
+   `ipv6ext-option-length-byte-must-exist` (an uninitialised read in the option walk) and
+   `ipv6ext-unknown-routing-type-is-minimal-only` (a length field read after the struct
+   holding it was cleared).
+11. `core::fp6::vectorize` — build the 695-element feature vector from IPv6 probe
    responses (`FPEngine.cc`'s per-probe feature extraction). This is the remaining pure
-   piece before the IPv6 driver.
-11. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine.
+   piece before the IPv6 driver. Notes from reading the C, so they are not re-derived:
+   17 IPv6 probes × (payload length, traffic class, hop limit) = 51, plus `vectorize_isr`
+   = 1, plus 13 TCP probes × 49 (window, 12 flag bits, 16 option kinds + 16 option
+   lengths, mss, sackok, wscale, window/mss) = 637, plus 3 ICMPv6 probes × (type, code)
+   = 6 — 695 total, every feature initialised to the `-1` "absent" sentinel that
+   `fpmodel::apply_scale` must leave alone. `tcpopt_vectorize`'s bounds check runs
+   **after** its two writes, so a 17th TCP option overwrites the first option-length
+   slot; decide deliberately whether to reproduce that.
+12. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

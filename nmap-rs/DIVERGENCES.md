@@ -1051,6 +1051,19 @@ variance, and a wrong scaling formula.
       product. Porting it directly removes the entire library from the trust boundary. The
       model *data* is copied verbatim into a little-endian `f64` blob
       (`tools/extract_fpmodel.py`), so predictions are bit-identical.
+- [x] `fp6-scale-preserves-the-absent-sentinel` (`core::fpmodel`): **faithfulness fix, and
+      a lesson about oracles.** nmap's `apply_scale` skips any negative value
+      (`if (val < 0) continue;`), because `-1` is the "attribute absent" sentinel that
+      `vectorize` initialises every feature to and leaves wherever a probe went unanswered
+      or an option was missing. Scaling it would map "no data" onto an arbitrary in-range
+      number the model reads as evidence — and since most real scans leave some probes
+      unanswered, that corrupts nearly every classification rather than an edge case.
+      The first version of this port scaled negatives, **and the differential did not
+      catch it**: the oracle's copy of `apply_scale` was hand-written without the guard
+      while its comment claimed to be verbatim, so the gate compared the port against a
+      restatement of the C rather than against the C. Both are now fixed, and the corrected
+      oracle rejects the old behaviour on the first case. The lesson generalises: a
+      function an oracle claims to copy verbatim must actually be copied, not retyped.
 - [x] `fp6-nan-score-is-no-evidence` (`core::fpmodel`): **found by fuzzing.** A NaN or
       infinite feature makes a decision value non-finite. The C feeds that into
       `1.0/(1.0+exp(-v))` and then into two places that cannot cope: `label_prob_cmp`

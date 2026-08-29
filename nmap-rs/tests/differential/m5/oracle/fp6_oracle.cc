@@ -78,12 +78,22 @@ static double predict_values(const struct model *model_, const struct feature_no
 	return model_->label[dec_max_idx];
 }
 
-/* nmap's apply_scale, copied verbatim from FPEngine.cc. */
-static void apply_scale(struct feature_node *features, int num_features,
-                        const double (*scale)[2]) {
-  int i;
+/* nmap's apply_scale, copied VERBATIM from FPEngine.cc — including the negative-value
+ * skip. `-1` is vectorize()'s "attribute absent" sentinel and every feature starts at it,
+ * so scaling a negative would turn "no data" into something that looks like data. An
+ * earlier version of this oracle omitted the guard while claiming to be verbatim, which
+ * made the differential compare the port against a restatement of the C rather than
+ * against the C. */
+static void apply_scale(struct feature_node *features, unsigned int num_features,
+  const double (*scale)[2]) {
+  unsigned int i;
+
   for (i = 0; i < num_features; i++) {
-    features[i].value = (features[i].value + scale[i][0]) * scale[i][1];
+    double val = features[i].value;
+    if (val < 0)
+      continue;
+    val = (val + scale[i][0]) * scale[i][1];
+    features[i].value = val;
   }
 }
 

@@ -1142,6 +1142,37 @@ variance, and a wrong scaling formula.
       aborting — so it is pinned by the `a_zero_length_response_degrades_to_sentinel_not_a_panic`
       unit test and by the vectorize fuzz target instead.
 
+## Milestone 5 — IPv6 OS detection: response matching
+
+- [x] `fp6-match-icmp-error-never-matches` (`core::fp6_match`, ports the IPv6 path of
+      `PacketParser::is_response`): nmap's `is_response` has extensive code to match an
+      ICMPv6 **error** message by the datagram it quotes, but that code **never succeeds**.
+      It searches for the quoted transport/ICMP header with
+      `dynamic_cast<NetworkLayerElement *>(...)`, and `TCPHeader`/`UDPHeader` derive from
+      `TransportLayerElement` while `ICMPv6Header` derives from `ICMPHeader` — none is a
+      `NetworkLayerElement`, so the cast yields `NULL` and the function returns `false`. A
+      differential against the real `is_response` confirms it: over the whole battery, nmap
+      matches **every** direct reply and **not one** ICMPv6 error quote (51 matches / 195
+      non-matches, 0 error quotes matched). The port reproduces this — a received ICMPv6
+      error is never a match — rather than "fixing" it, for two reasons. First, fidelity:
+      the IPv6 `fpmodel` was trained on fingerprints assembled from exactly the responses
+      this matcher accepts, so matching an error would attribute a `U1` (or other) response
+      nmap never would, desyncing our feature vector and classification from nmap's.
+      Second, safety: an off-path attacker can forge an ICMPv6 error far more cheaply than a
+      genuine transport reply, so declining to attribute one to a probe denies that
+      injection. This is the rare case where reproducing a C bug is *both* the faithful and
+      the safer choice. *(Realized at M5 `core::fp6_match`.)*
+- [x] `fp6-match-only-battery-sent-types` (`core::fp6_match`): `is_response`'s `sent`
+      argument is always a probe this scanner built — one of the `core::build6` battery:
+      TCP, UDP, an ICMPv6 echo, or a Neighbor Solicitation. The port handles exactly those
+      four sent upper-layer types and returns no-match for any other; a hostile host cannot
+      make us *send* a different probe, so the omitted branches are unreachable, and the
+      *received* packet is still handled in full generality (parsed totally, every field
+      bounds-checked). A narrower, safer surface than porting `is_response`'s full
+      sent-side switch (which also covers router advertisements, node-info queries, and a
+      dozen other ICMPv6 types the OS battery never emits). *(Realized at M5
+      `core::fp6_match`.)*
+
 ## Milestone 5 — IPv6 OS detection: the probe battery
 
 - [x] `build6-no-random-inside-the-builder` (`core::build6`, ports

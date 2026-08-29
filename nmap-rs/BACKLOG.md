@@ -115,11 +115,23 @@ and IPv6 tracks are approved. Port order, leaf-first:
      nmap's real builder linked to libnetutil (400 cases / 5,919 probes, re-derived from
      the C on every CI run), 9 unit tests, a fuzz target (1.3M runs), 8 mutations caught.
      Ledgered `build6-no-random-inside-the-builder`, `build6-oracle-needs-real-checksums`.
-   - **12b. `sys::fpengine` + CLI `-6 -O`** — the driver. Needs IPv6 send (`sys::rawio`)
-     and route lookup (`sys::route`), an IPv6 capture filter, the probe scheduler with the
-     six SEQ probes paced (shared flow-label timing), response attribution keyed by probe
-     id into an `Fp6Observation`, distance from the IE2/U1 hop-limit quotes, then
-     `fp6::vectorize` → `fpmodel::classify` and `-6 -O` rendering.
+   - ~~**12b-i. `core::fp6_match`**~~ — **done**. Ports the IPv6 path of
+     `PacketParser::is_response` — the pure decision that attributes a captured packet to
+     the probe it answers (address mirror, TCP/UDP port mirror, ICMPv6 echo id/seq,
+     Neighbor Advertisement solicited-flag + target). Gated by a verdict-exact differential
+     against nmap's real `is_response` (246 pairs, 51 matches, re-derived from the C on
+     every CI run), 8 unit tests, a fuzz target (2.3M runs). The differential surfaced a
+     genuine nmap bug — a `dynamic_cast<NetworkLayerElement *>` that makes an ICMPv6 error
+     **never** match any probe — which the port reproduces deliberately (faithful to the
+     trained model *and* safer against forged errors). Ledgered
+     `fp6-match-icmp-error-never-matches`, `fp6-match-only-battery-sent-types`.
+   - **12b-ii. `sys::fpengine` + CLI `-6 -O`** — the socket driver. Needs IPv6 send
+     (`sys::rawio`) and route lookup (`sys::route`), an IPv6 capture filter, the probe
+     scheduler with the six SEQ probes paced (shared flow-label timing), response
+     attribution via `fp6_match::is_response` into an `Fp6Observation`, distance from the
+     IE2/U1 hop-limit quotes, then `fp6::vectorize` → `fpmodel::classify` and `-6 -O`
+     rendering. This is the I/O-bound remainder; the pure decisions it drives
+     (`build6`, `fp6_match`, `fp6`, `fpmodel`) are all in place.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

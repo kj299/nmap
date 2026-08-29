@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod build;
+pub mod build6;
 pub mod bytes;
 pub mod checksum;
 pub mod classify;

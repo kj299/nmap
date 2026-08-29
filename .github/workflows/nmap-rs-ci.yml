@@ -134,6 +134,11 @@ jobs:
       # hand-edited golden would prove agreement with a paraphrase of the C rather
       # than with nmap itself.
       - run: bash tests/differential/m4/regen_pkt_golden.sh --check
+      # M5 IPv6 probe battery: rebuild the C FPHost6::build_probe_list() oracle,
+      # regenerate the committed corpus + golden, and require them unchanged, then run
+      # the byte-exact differential. Same anti-paraphrase guard as the other goldens.
+      - run: bash tests/differential/m5/regen_build6.sh --check
+      - run: cargo test -p nmap-core --test build6_differential
       # M5 IPv6: the classifier differential. Builds an oracle that links liblinear's own
       # predict_values against nmap's real 2.8 MB model tables, and requires bit-exact
       # agreement — the port replaces that whole library with a dot product, so "close

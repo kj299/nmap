@@ -215,3 +215,8 @@ test = false
 name = "fpmodel"
 path = "fuzz_targets/fpmodel.rs"
 test = false
+
+[[bin]]
+name = "fp6_vectorize"
+path = "fuzz_targets/fp6_vectorize.rs"
+test = false

@@ -1117,6 +1117,30 @@ variance, and a wrong scaling formula.
       a mismatch would read past them silently. Also: `FpModel`'s `Debug` is hand-written
       to print only the shape, because a derived one would dump ~210,000 floats into any
       log line that happened to include the model.
+- [x] `fp6-vectorize-preserves-the-absent-sentinel` (`core::fp6`): `vectorize` builds the
+      695-element feature vector nmap's model consumes, initialising every feature to the
+      `-1` "attribute absent" sentinel and leaving it wherever a probe went unanswered or
+      a field was missing — the value `apply_scale` skips (see `fp6-scale-preserves-the-
+      absent-sentinel`). The port matches nmap's real `vectorize()` bit-for-bit over 1,500
+      generated observations, including its deliberate quirks: `foreachOpt` treats an
+      End-of-List option as one byte and keeps walking, and `tcpopt_vectorize` writes an
+      option's opcode/length into the vector *before* the 16-option cap, so a 17th TCP
+      option overwrites the first option's length slot and the walk then stops. Those are
+      reproduced, not "fixed": every index they reach stays inside the vector (worst case
+      685 < 695, proved by construction and by fuzzing), and the model was trained against
+      vectors built exactly this way, so diverging would only make our classification
+      disagree with nmap's. This is faithful reproduction of a benign quirk, distinct from
+      the memory-unsafety quirks elsewhere that the port declines to reproduce.
+- [x] `fp6-empty-response-no-abort` (`core::fp6`): nmap's `vectorize()` calls
+      `PacketParser::split` on every stored response and `assert(pe != NULL)` — a
+      zero-length response (which `split` maps to NULL) **aborts the whole scan**. nmap
+      never stores one, so the assert is a latent abort on an invariant rather than a live
+      bug, but the port removes the abort class entirely: there is no packet to parse, no
+      header is found, and the probe's features simply stay at the `-1` sentinel. Strictly
+      safer (an unexpected empty capture degrades to "no evidence" instead of killing the
+      run) and outside the differential by nature — the C cannot be driven there without
+      aborting — so it is pinned by the `a_zero_length_response_degrades_to_sentinel_not_a_panic`
+      unit test and by the vectorize fuzz target instead.
 
 ## Milestone 4 — CLI scan-technique selection
 

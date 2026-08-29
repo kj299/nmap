@@ -2,3 +2,6 @@
 expr_oracle
 seq_oracle
 fp6_oracle
+fp6_vectorize_oracle
+.fp6vec_obj/
+pcap.h

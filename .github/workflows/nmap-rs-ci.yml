@@ -139,6 +139,11 @@ jobs:
       # the byte-exact differential. Same anti-paraphrase guard as the other goldens.
       - run: bash tests/differential/m5/regen_build6.sh --check
       - run: cargo test -p nmap-core --test build6_differential
+      # M5 IPv6 response matching: rebuild nmap's real PacketParser::is_response oracle,
+      # regenerate the committed corpus + golden, require them unchanged, then run the
+      # verdict-exact differential.
+      - run: bash tests/differential/m5/regen_fp6match.sh --check
+      - run: cargo test -p nmap-core --test fp6match_differential
       # M5 IPv6: the classifier differential. Builds an oracle that links liblinear's own
       # predict_values against nmap's real 2.8 MB model tables, and requires bit-exact
       # agreement — the port replaces that whole library with a dot product, so "close

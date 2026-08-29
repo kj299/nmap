@@ -225,3 +225,8 @@ test = false
 name = "build6"
 path = "fuzz_targets/build6.rs"
 test = false
+
+[[bin]]
+name = "fp6_match"
+path = "fuzz_targets/fp6_match.rs"
+test = false

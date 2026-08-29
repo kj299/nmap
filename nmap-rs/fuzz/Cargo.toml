@@ -220,3 +220,8 @@ test = false
 name = "fp6_vectorize"
 path = "fuzz_targets/fp6_vectorize.rs"
 test = false
+
+[[bin]]
+name = "build6"
+path = "fuzz_targets/build6.rs"
+test = false

@@ -1142,6 +1142,30 @@ variance, and a wrong scaling formula.
       aborting — so it is pinned by the `a_zero_length_response_degrades_to_sentinel_not_a_panic`
       unit test and by the vectorize fuzz target instead.
 
+## Milestone 5 — IPv6 OS detection: the probe battery
+
+- [x] `build6-no-random-inside-the-builder` (`core::build6`, ports
+      `FPHost6::build_probe_list` + `make_tcp`): nmap's builder reads randomness
+      (`get_random_u32()` per TCP ACK, `get_hoplimit()`'s random hop limit) and `NmapOps
+      o` **inside** the construction, so the packets it builds are not a function of
+      anything a test can pin. The port lifts every such value into [`Build6Params`], the
+      way `core::osprobe::build` already does for IPv4, so `build_probes` is a total,
+      deterministic function of its inputs — fuzzable, and byte-pinned by a differential.
+      Not an observable divergence (the driver feeds it the same random bases nmap would),
+      but a structural one worth recording. Gated by a **byte-exact** differential against
+      nmap's real `build_probe_list` linked to libnetutil (400 cases, 5,919 probes,
+      re-derived from the C on every CI run), 9 unit tests, a fuzz target (1.3M runs
+      clean), and eight mutations each caught.
+- [x] `build6-oracle-needs-real-checksums` (test infrastructure, not shipped code): the
+      M4 parse oracles link a `stubs.cc` that inert-stubs `ipv6_pseudoheader_cksum`,
+      `ipv4_pseudoheader_cksum` and `in_cksum` to **return 0**, which is harmless for a
+      parser but would make a *builder* oracle emit zero checksums — a golden asserting a
+      paraphrase of the C, the exact failure mode behind #70's `apply_scale` bug. The
+      build6 oracle therefore links `checksums_real.cc` (verbatim copies of nmap's own
+      `ipv6/ipv4_pseudoheader_cksum` and libdnet's `ip_cksum_add`) and a `build6_stubs.cc`
+      that is the M4 stubs minus those three functions. Recorded because it is a
+      reusable lesson for every future builder oracle, not just this one.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

@@ -5,3 +5,5 @@ fp6_oracle
 fp6_vectorize_oracle
 .fp6vec_obj/
 pcap.h
+build6_oracle
+.build6_obj/

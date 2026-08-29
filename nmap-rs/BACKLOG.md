@@ -105,11 +105,21 @@ and IPv6 tracks are approved. Port order, leaf-first:
    libnetutil parser), re-derived from the C on every CI run
    (`tests/differential/m5/regen_fp6_vectorize.sh --check`); 12 unit tests; a fuzz target
    (491k runs clean). Eight mutations of the port were each caught by the gate.
-12. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine. This is
-   the last piece of M5: send the 18-probe IPv6 battery (13 TCP + 4 ICMPv6 + 1 UDP) on the
-   M4 group engine, collect responses keyed by probe id into an `Fp6Observation`, call
-   `fp6::vectorize` → `fpmodel::classify`, and render `-6 -O`. `core::fp6` and
-   `core::fpmodel` are the whole pure half; this slice is the sockets + CLI wiring.
+12. **The IPv6 driver, in two slices** (there is no IPv6 support below this yet —
+   `sys::rawio`, `sys::route` and `core::build` are all IPv4-only):
+   - ~~**12a. `core::build6`**~~ — **done**. The 17 IPv6 probes as a pure, deterministic
+     function of [`Build6Params`] (ports `FPHost6::build_probe_list` + `make_tcp`): six
+     timed SEQ SYNs, IE1/IE2 (echo behind hop-by-hop / a mis-ordered extension chain), NS
+     (on-link only), U1, TECN, and T2–T7 — emitted only when the scan has the port state
+     each targets, in nmap's send order. Gated by a **byte-exact** differential against
+     nmap's real builder linked to libnetutil (400 cases / 5,919 probes, re-derived from
+     the C on every CI run), 9 unit tests, a fuzz target (1.3M runs), 8 mutations caught.
+     Ledgered `build6-no-random-inside-the-builder`, `build6-oracle-needs-real-checksums`.
+   - **12b. `sys::fpengine` + CLI `-6 -O`** — the driver. Needs IPv6 send (`sys::rawio`)
+     and route lookup (`sys::route`), an IPv6 capture filter, the probe scheduler with the
+     six SEQ probes paced (shared flow-label timing), response attribution keyed by probe
+     id into an `Fp6Observation`, distance from the IE2/U1 hop-limit quotes, then
+     `fp6::vectorize` → `fpmodel::classify` and `-6 -O` rendering.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

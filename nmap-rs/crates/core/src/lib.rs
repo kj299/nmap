@@ -16,6 +16,7 @@ pub mod classify;
 pub mod congestion;
 pub mod engine;
 pub mod flagscan;
+pub mod fp6;
 pub mod fpmodel;
 pub mod headers;
 pub mod icmp_quote;

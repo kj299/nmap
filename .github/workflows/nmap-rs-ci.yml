@@ -140,3 +140,9 @@ jobs:
       # enough" is not a sufficient check.
       - run: bash tests/differential/m5/oracle/build_fp6_oracle.sh
       - run: cargo test -p nmap-core --test fpmodel_differential
+      # M5 IPv6: the vectorize differential. Rebuilds nmap's real vectorize() (pasted
+      # verbatim, linked against the real libnetutil parser), regenerates the committed
+      # corpus + golden and requires them unchanged, then diffs the Rust port against it
+      # bit-for-bit — the same re-derive-from-C guard the packet golden uses.
+      - run: bash tests/differential/m5/regen_fp6_vectorize.sh --check
+      - run: cargo test -p nmap-core --test fp6_vectorize_differential

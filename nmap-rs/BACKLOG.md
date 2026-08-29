@@ -94,17 +94,22 @@ and IPv6 tracks are approved. Port order, leaf-first:
    `ipv6ext-option-length-byte-must-exist` (an uninitialised read in the option walk) and
    `ipv6ext-unknown-routing-type-is-minimal-only` (a length field read after the struct
    holding it was cleared).
-11. `core::fp6::vectorize` — build the 695-element feature vector from IPv6 probe
-   responses (`FPEngine.cc`'s per-probe feature extraction). This is the remaining pure
-   piece before the IPv6 driver. Notes from reading the C, so they are not re-derived:
-   17 IPv6 probes × (payload length, traffic class, hop limit) = 51, plus `vectorize_isr`
-   = 1, plus 13 TCP probes × 49 (window, 12 flag bits, 16 option kinds + 16 option
-   lengths, mss, sackok, wscale, window/mss) = 637, plus 3 ICMPv6 probes × (type, code)
-   = 6 — 695 total, every feature initialised to the `-1` "absent" sentinel that
-   `fpmodel::apply_scale` must leave alone. `tcpopt_vectorize`'s bounds check runs
-   **after** its two writes, so a 17th TCP option overwrites the first option-length
-   slot; decide deliberately whether to reproduce that.
-12. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine.
+11. ~~`core::fp6::vectorize`~~ — **done**. Builds the 695-element feature vector from
+   IPv6 probe responses (17 IPv6 probes × plen/tc/hlim = 51, + ISR = 1, + 13 TCP probes ×
+   49 = 637, + 3 ICMPv6 probes × type/code = 6). Every feature defaults to the `-1`
+   sentinel `apply_scale` leaves alone. The 17th-TCP-option overwrite and `foreachOpt`'s
+   walk-past-EOL are reproduced deliberately (ledgered `fp6-vectorize-preserves-the-absent-
+   sentinel`); the C's zero-length-response `assert`/abort is dropped for a safe degrade
+   (`fp6-empty-response-no-abort`). Gated by a **bit-exact differential over 1,500 generated
+   observations** against nmap's real `vectorize()` (pasted verbatim, linked to the real
+   libnetutil parser), re-derived from the C on every CI run
+   (`tests/differential/m5/regen_fp6_vectorize.sh --check`); 12 unit tests; a fuzz target
+   (491k runs clean). Eight mutations of the port were each caught by the gate.
+12. `sys::fpengine` + CLI `-6 -O` — the IPv6 probe driver on the M4 group engine. This is
+   the last piece of M5: send the 18-probe IPv6 battery (13 TCP + 4 ICMPv6 + 1 UDP) on the
+   M4 group engine, collect responses keyed by probe id into an `Fp6Observation`, call
+   `fp6::vectorize` → `fpmodel::classify`, and render `-6 -O`. `core::fp6` and
+   `core::fpmodel` are the whole pure half; this slice is the sockets + CLI wiring.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

@@ -6,9 +6,10 @@
 //!
 //! Filename convention (shared with the oracle golden-generation): a stem starting
 //! with `eth` is parsed with an Ethernet frame (`eth_included = true`); anything else
-//! starts at the network layer. The corpus is restricted to chains within the
-//! M4-ported header set so the C and Rust walks agree exactly; the ICMPv6 /
-//! IPv6-extension-header degrade-to-raw divergence is covered by unit tests.
+//! starts at the network layer. The corpus covers every chain the C walk can take,
+//! including ICMPv6 and the four IPv6 extension headers, so the C and Rust walks must
+//! agree exactly on all of them — including the malformed cases where the C stops
+//! and records the remainder as raw.
 #![cfg(not(miri))]
 
 use std::fs;
@@ -81,10 +82,56 @@ fn packet_parser_matches_c_oracle_over_the_corpus() {
         checked += 1;
     }
     assert!(
-        checked >= 17,
+        checked >= 45,
         "expected the full pkt corpus, checked {checked}"
     );
     eprintln!("packet_parser differential: {checked} vectors match the C oracle");
+}
+
+/// The randomised IPv6 chain corpus: 4000 generated packets (extension headers in
+/// arbitrary orders and lengths, every ICMPv6 type, option TLVs that do not tile their
+/// header, truncations at every boundary), projected by the C oracle in one batch.
+///
+/// This is where the walk's agreement with nmap is actually established. The
+/// hand-written corpus above states the chains a real scan meets; this one states that
+/// a hostile sender cannot find a packet the two disagree about.
+#[test]
+fn packet_parser_matches_c_oracle_over_the_random_corpus() {
+    let dir = m4_dir();
+    let vectors = fs::read_to_string(dir.join("pkt_random_vectors.txt"))
+        .expect("read pkt_random_vectors.txt");
+    let golden =
+        fs::read_to_string(dir.join("pkt_random_golden.txt")).expect("read pkt_random_golden.txt");
+
+    let mut want = String::new();
+    let mut checked = 0usize;
+    for line in vectors.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        checked = checked.saturating_add(1);
+        want.push_str(&format!("case {checked}\n"));
+        want.push_str(&project(&unhex(line), false));
+    }
+
+    assert!(
+        checked >= 4000,
+        "expected the full random corpus, got {checked}"
+    );
+    if want != golden {
+        // Report the first differing case rather than 20k lines of diff.
+        let (g, w): (Vec<&str>, Vec<&str>) = (golden.lines().collect(), want.lines().collect());
+        let at = g.iter().zip(w.iter()).position(|(a, b)| a != b);
+        let at = at.unwrap_or(g.len().min(w.len()));
+        let lo = at.saturating_sub(6);
+        panic!(
+            "random corpus diverges from the C oracle at golden line {at}\n             --- rust ---\n{}\n--- c oracle ---\n{}",
+            w.get(lo..at.saturating_add(6)).unwrap_or_default().join("\n"),
+            g.get(lo..at.saturating_add(6)).unwrap_or_default().join("\n"),
+        );
+    }
+    eprintln!("packet_parser differential: {checked} random packets match the C oracle");
 }
 
 /// The projected total consumed length must always equal the packet length (the walk

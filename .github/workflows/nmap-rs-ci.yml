@@ -128,6 +128,12 @@ jobs:
       - run: sudo apt-get install -y libpcap-dev
       - run: cargo build --release --features pcap
       - run: sudo -E env "PATH=$PATH" bash tests/differential/m5/run_os_differential.sh
+      # M4/M5 packet-walk differential: rebuild the C PacketParser oracle and
+      # regenerate the committed corpus + golden, then require them to be unchanged.
+      # The cargo test compares against the committed golden, so without this step a
+      # hand-edited golden would prove agreement with a paraphrase of the C rather
+      # than with nmap itself.
+      - run: bash tests/differential/m4/regen_pkt_golden.sh --check
       # M5 IPv6: the classifier differential. Builds an oracle that links liblinear's own
       # predict_values against nmap's real 2.8 MB model tables, and requires bit-exact
       # agreement — the port replaces that whole library with a dot product, so "close

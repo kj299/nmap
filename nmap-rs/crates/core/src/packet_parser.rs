@@ -27,7 +27,8 @@
 //! or malformed header ends the walk with the unparsed tail recorded as `Raw`, never
 //! a panic.
 
-use crate::headers::{arp, ethernet, icmpv4, ipv4, ipv6, tcp, udp};
+use crate::headers::ipv6ext::ExtKind;
+use crate::headers::{arp, ethernet, icmpv4, icmpv6, ipv4, ipv6, ipv6ext, tcp, udp};
 
 /// Maximum number of headers the walk will record before stopping, matching the C
 /// `#define MAX_HEADERS_IN_PACKET 32`. Bounds a maliciously deep encapsulation nest.
@@ -44,6 +45,7 @@ const PROTO_IPV4: u8 = 4;
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 const PROTO_IPV6: u8 = 41;
+const PROTO_ICMPV6: u8 = 58;
 // ARP heuristic constants (used when no Ethernet header framed the packet).
 const HDR_ETH10MB: u16 = 1;
 const ARP_PROTO_IPV4: u16 = 0x0800;
@@ -68,6 +70,10 @@ pub enum Header {
     Udp(udp::UdpHeader),
     /// ICMPv4 header (8/12/20 bytes, type-dependent).
     Icmpv4(icmpv4::Icmpv4Header),
+    /// ICMPv6 header (8–40 bytes, type-dependent).
+    Icmpv6(icmpv6::Icmpv6Header),
+    /// An IPv6 extension header (hop-by-hop, destination options, routing, fragment).
+    Ipv6Ext(ipv6ext::Ipv6ExtHeader),
     /// Application payload or an unparsed/unknown tail, of the given byte length.
     Raw {
         /// Number of trailing bytes this record covers.
@@ -87,6 +93,8 @@ impl Header {
             Header::Tcp(h) => h.header_len(),
             Header::Udp(h) => h.header_len(),
             Header::Icmpv4(h) => h.header_len(),
+            Header::Icmpv6(h) => h.header_len(),
+            Header::Ipv6Ext(h) => h.header_len(),
             Header::Raw { len } => *len,
         }
     }
@@ -99,7 +107,8 @@ impl Header {
     }
 
     /// Canonical short token for this layer (`eth`/`arp`/`ip4`/`ip6`/`tcp`/`udp`/
-    /// `icmp`/`raw`) — the projection alphabet shared with the C differential oracle.
+    /// `icmp`/`icmp6`/`hopopt`/`dopts`/`route`/`frag`/`raw`) — the projection
+    /// alphabet shared with the C differential oracle.
     #[must_use]
     pub fn kind_str(&self) -> &'static str {
         match self {
@@ -110,6 +119,8 @@ impl Header {
             Header::Tcp(_) => "tcp",
             Header::Udp(_) => "udp",
             Header::Icmpv4(_) => "icmp",
+            Header::Icmpv6(_) => "icmp6",
+            Header::Ipv6Ext(h) => h.kind.kind_str(),
             Header::Raw { .. } => "raw",
         }
     }
@@ -125,7 +136,27 @@ enum Next {
     Tcp,
     Udp,
     Icmpv4,
+    Icmpv6,
+    /// One of the four IPv6 extension headers, selected by the previous header's
+    /// next-header field (the C's `EXTHEADERS_LAYER` with its `expected` type).
+    Ipv6Ext(ExtKind),
     Application,
+}
+
+/// What an IPv6 `next header` value dispatches to. Shared by the IPv6 base header
+/// and every extension header, which the C keeps as two copies of the same switch.
+/// An unrecognised protocol (SCTP, ESP, AH, …) becomes application data, as in the C.
+fn next_from_protocol(proto: u8) -> Next {
+    if let Some(kind) = ExtKind::from_protocol(proto) {
+        return Next::Ipv6Ext(kind);
+    }
+    match proto {
+        PROTO_TCP => Next::Tcp,
+        PROTO_UDP => Next::Udp,
+        PROTO_ICMPV6 => Next::Icmpv6,
+        PROTO_IPV4 | PROTO_IPV6 => Next::Network,
+        _ => Next::Application,
+    }
 }
 
 /// Parse a raw packet into its owned layer stack.
@@ -208,14 +239,7 @@ pub fn parse_packet(buf: &[u8], eth_included: bool) -> Vec<Header> {
                         unknown = true;
                         break;
                     };
-                    next = match h.next_header {
-                        PROTO_TCP => Next::Tcp,
-                        PROTO_UDP => Next::Udp,
-                        PROTO_IPV4 | PROTO_IPV6 => Next::Network,
-                        // ICMPv6, IPv6 extension headers, SCTP, … have no ported
-                        // parser yet — degrade the remainder to Raw (DIVERGENCES.md).
-                        _ => Next::Application,
-                    };
+                    next = next_from_protocol(h.next_header);
                     pos = pos.saturating_add(h.header_len());
                     headers.push(Header::Ipv6(h));
                 } else {
@@ -259,6 +283,32 @@ pub fn parse_packet(buf: &[u8], eth_included: bool) -> Vec<Header> {
                 };
                 pos = pos.saturating_add(h.header_len());
                 headers.push(Header::Icmpv4(h));
+            }
+            // --- Transport layer: ICMPv6 ---------------------------------------
+            Next::Icmpv6 => {
+                let Ok(h) = icmpv6::Icmpv6Header::parse(rest) else {
+                    unknown = true;
+                    break;
+                };
+                // The four error reports embed the offending IPv6 packet; the walk
+                // continues into it. Everything else is misc payload → raw.
+                next = if h.quotes_packet() {
+                    Next::Network
+                } else {
+                    Next::Application
+                };
+                pos = pos.saturating_add(h.header_len());
+                headers.push(Header::Icmpv6(h));
+            }
+            // --- IPv6 extension headers ----------------------------------------
+            Next::Ipv6Ext(kind) => {
+                let Ok(h) = ipv6ext::Ipv6ExtHeader::parse(kind, rest) else {
+                    unknown = true;
+                    break;
+                };
+                next = next_from_protocol(h.next_header);
+                pos = pos.saturating_add(h.header_len());
+                headers.push(Header::Ipv6Ext(h));
             }
             // --- Application layer: raw, with the headerless-ARP heuristic ------
             Next::Application => {
@@ -374,16 +424,38 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_icmpv6_degrades_to_raw_not_subparsed() {
-        // next_header = 58 (ICMPv6): C would parse it; we have no ICMPv6 parser, so
-        // the remainder is Raw. Documented divergence — verify it holds.
+    fn ipv6_icmpv6_is_walked_and_a_short_one_is_not() {
+        // next_header = 58 (ICMPv6). An echo request needs 8 bytes; 4 is short, so the
+        // header is rejected and the remainder is Raw — the same verdict the C reaches.
         let mut p = vec![0x60, 0, 0, 0, 0x00, 0x04, 58, 0x40];
-        p.extend_from_slice(&[0u8; 16]);
-        p.extend_from_slice(&[0u8; 16]);
-        p.extend_from_slice(&[0x80, 0x00, 0x00, 0x00]); // would-be ICMPv6
+        p.extend_from_slice(&[0u8; 32]);
+        let base = p.clone();
+        p.extend_from_slice(&[0x80, 0x00, 0x00, 0x00]);
         let hs = parse_packet(&p, false);
         assert_eq!(kinds(&hs), ["ip6", "raw"]);
         assert_eq!(hs[1], Header::Raw { len: 4 });
+
+        // With its full 8 bytes it is parsed as ICMPv6, no longer degraded to raw.
+        let mut q = base;
+        q.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(kinds(&parse_packet(&q, false)), ["ip6", "icmp6"]);
+    }
+
+    #[test]
+    fn ipv6_extension_headers_are_walked_to_the_transport_layer() {
+        // IPv6(hop-by-hop) → hop-by-hop(fragment) → fragment(TCP) → TCP.
+        let mut p = vec![0x60, 0, 0, 0, 0x00, 0x24, 0, 0x40];
+        p.extend_from_slice(&[0u8; 32]);
+        p.extend_from_slice(&[44, 0, 0, 0, 0, 0, 0, 0]); // hop-by-hop, all Pad1
+        p.extend_from_slice(&[6, 0, 0, 0, 0, 0, 0, 0]); // fragment
+        p.extend_from_slice(&[0x00, 0x50, 0x01, 0xbb]);
+        p.extend_from_slice(&[0, 0, 0, 1]);
+        p.extend_from_slice(&[0, 0, 0, 0]);
+        p.extend_from_slice(&[0x50, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            kinds(&parse_packet(&p, false)),
+            ["ip6", "hopopt", "frag", "tcp"]
+        );
     }
 
     #[test]

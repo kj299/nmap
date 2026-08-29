@@ -263,16 +263,45 @@ lands, `[x]` = confirmed by that module's gates.
       pair, so callers read TCP flags / ICMP type / addresses without re-parsing. The
       differential compares the `(type, length, offset)` projection, which is identical.
       *(Realized at M4 `core::packet_parser`.)*
-- [x] `packet-parser-ported-subset-degrades-to-raw` (`core::packet_parser`): where the C
-      walk would descend into a header this milestone has **not** ported — ICMPv6
-      (IPv6 `next_header == 58`), the IPv6 extension-header chain (`0`/`43`/`44`/`60`),
-      SCTP, etc. — the port stops sub-parsing and records the remainder as a single
-      `Header::Raw` instead. This is strictly *safer* (it never parses un-audited
-      bytes) and conservative (no field is fabricated). The differential corpus is
-      restricted to chains within the ported set so C and Rust agree byte-for-byte; the
-      degrade behavior is pinned by `core::packet_parser` unit tests
-      (`ipv6_icmpv6_degrades_to_raw_not_subparsed`). To be tightened as those parsers
-      land (M5+). *(Introduced at M4 `core::packet_parser`.)*
+- [x] ~~`packet-parser-ported-subset-degrades-to-raw`~~ — **resolved** at M5.
+      Introduced at M4: where the C walk descended into a header the port did not yet
+      have — ICMPv6 (`next_header == 58`) and the IPv6 extension-header chain
+      (`0`/`43`/`44`/`60`) — the port stopped sub-parsing and recorded the remainder as
+      a single `Header::Raw`. `core::headers::icmpv6` and `core::headers::ipv6ext` close
+      that gap: the walk now follows every chain the C walk can follow, and the
+      differential corpus is no longer restricted to a subset. Protocols the C itself
+      has no case for (SCTP, ESP, AH, …) still become `Raw` — on **both** sides, so
+      that is agreement, not divergence. Gated by the packet differential over the
+      hand-written corpus plus 4,000 generated IPv6 chains, all bit-exact against
+      nmap's real `PacketParser::parse_packet`.
+- [x] `ipv6ext-option-length-byte-must-exist` (`core::headers::ipv6ext`):
+      `HopByHopHeader::validate()` walks the option TLVs through a raw
+      `nping_ipv6_ext_hopbyhop_opt_t *` overlay and reads `curr_opt->len` **before**
+      establishing that a length byte exists. With one option byte left (reachable
+      with five `Pad1`s in an 8-byte header) that read lands one past the copied data,
+      inside the 2050-byte packed struct — a read of **uninitialised memory** (CWE-457).
+      Every arm reachable in that state rejects the header whatever the byte holds
+      (`bytes_left < 2 + len` is unconditionally true at `bytes_left == 1`, and the
+      fixed-length arms all fail their second check), so the C's *decision* is
+      deterministic even though the read is not. The port rejects on the missing length
+      byte directly: same verdict, nothing uninitialised read. Pinned by
+      `a_single_trailing_option_byte_decides_by_type_alone` and by the differential's
+      generated corpus. *(Realized at M5 `core::headers::ipv6ext`.)*
+- [x] `ipv6ext-unknown-routing-type-is-minimal-only` (`core::headers::ipv6ext`):
+      `RoutingHeader::storeRecvData`'s unknown-type arm reads its own length field
+      *after* `reset()` has zeroed the struct that field lives in — `this->reset();
+      this->length = (this->h.len + 1) * 8;` — so the stored length is always 8, and
+      `validate()`'s `length != (h.len+1)*8` then rejects the header unless the real
+      `Hdr Ext Len` is 0. (The type-0 arm gets this right, computing the length into a
+      local before `reset()`.) The net rule is that nmap accepts an unrecognised
+      routing type only as a minimal 8-byte header. The port **reproduces that
+      decision** — it is the conservative one, since a hostile sender cannot get a
+      deeper parse out of us than out of nmap by hiding a transport header behind an
+      invented routing type — but states it as an explicit rule rather than leaving it
+      to statement order. Pinned by
+      `an_unknown_routing_type_is_accepted_only_at_the_minimum_length` and by the
+      `ip_ipv6_route_unknown_type_long` differential vector.
+      *(Realized at M5 `core::headers::ipv6ext`.)*
 - [x] `build-no-static-myttl` (`core::build`): the C's "pure" `build_ip_raw` holds a
       function-local `static int myttl` (`tcpip.cc:524`) — a reentrancy landmine. The
       port threads TTL as an explicit parameter (as it does all `NmapOps o.*` reads the
@@ -304,8 +333,9 @@ lands, `[x]` = confirmed by that module's gates.
       the C `validatepkt` validates both IPv4 and IPv6 (the latter walking the
       extension-header chain via `ipv6_get_data`). This port validates the IPv4 path
       and rejects IPv6 with `Reject::Ipv6Unsupported`, deferring IPv6
-      receive-validation to the milestone that lands the IPv6 extension-header parser
-      (M5+), consistent with `packet-parser-ported-subset-degrades-to-raw`. The
+      receive-validation to the IPv6 scan path. (The extension-header parser it was
+      waiting on has since landed as `core::headers::ipv6ext`, so this is now a scope
+      boundary rather than a missing dependency; it closes with the IPv6 driver.) The
       IPv4 accept/reject decision — including the security-critical `validateTCPhdr`
       option walk — matches nmap byte-for-byte (differential 18/18 + a 6000-packet
       randomized C-vs-Rust cross-check, 0 mismatches). *(Introduced at M4

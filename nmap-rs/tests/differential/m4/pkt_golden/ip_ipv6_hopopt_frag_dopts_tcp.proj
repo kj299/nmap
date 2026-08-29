@@ -1,0 +1,7 @@
+pkt nhdrs=5
+hdr 0 ip6 off=0 len=40
+hdr 1 hopopt off=40 len=8
+hdr 2 frag off=48 len=8
+hdr 3 dopts off=56 len=8
+hdr 4 tcp off=64 len=20
+result ok

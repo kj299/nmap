@@ -125,13 +125,24 @@ and IPv6 tracks are approved. Port order, leaf-first:
      **never** match any probe — which the port reproduces deliberately (faithful to the
      trained model *and* safer against forged errors). Ledgered
      `fp6-match-icmp-error-never-matches`, `fp6-match-only-battery-sent-types`.
-   - **12b-ii. `sys::fpengine` + CLI `-6 -O`** — the socket driver. Needs IPv6 send
-     (`sys::rawio`) and route lookup (`sys::route`), an IPv6 capture filter, the probe
-     scheduler with the six SEQ probes paced (shared flow-label timing), response
-     attribution via `fp6_match::is_response` into an `Fp6Observation`, distance from the
-     IE2/U1 hop-limit quotes, then `fp6::vectorize` → `fpmodel::classify` and `-6 -O`
-     rendering. This is the I/O-bound remainder; the pure decisions it drives
-     (`build6`, `fp6_match`, `fp6`, `fpmodel`) are all in place.
+   - ~~**12b-ii-a. `sys::fpengine` (the driver core)**~~ — **done**. The probe scheduler
+     (six SEQ probes paced at 100 ms, then the rest back to back), response attribution via
+     `fp6_match::is_response` into an `Fp6Observation`, the locality→distance resolution,
+     and `fp6::vectorize` → `fpmodel::classify`. Generic over `RawSender`/`PacketSource`
+     like the IPv4 driver, so the whole round is mock-tested (7 tests: a SYN/ACK attributed
+     to S1, an echo reply to IE1, an ICMPv6 error attributed to *nothing*, a wrong-host
+     frame ignored, the capture filter, the observation assembly). Also the pure
+     `bpf_filter` for IPv6. Ledgered `fp6-distance-hoplimit-path-is-dead` (the C's IE2/U1
+     hop-limit distance never fires because `is_response` never matches the error responses
+     it reads, so distance is localhost/direct/none only).
+   - **12b-ii-b. Privileged IPv6 wire path + CLI `-6 -O`** — the remaining integration, and
+     the only M5 piece with no CI-differential (it needs a privileged host and real IPv6).
+     Linux has **no `IPV6_HDRINCL`**, so a full-packet IPv6 send must go L2 (Ethernet) with
+     NDP next-hop resolution — a real subsystem, deliberately *not* stubbed with untested
+     socket code. Needs: IPv6 route lookup (`sys::route`), an L2 IPv6 sender with neighbor
+     resolution, and the CLI `-6 -O` branch (today the CLI reports "supports IPv4 only").
+     `sys::fpengine::scan_host` is the entry point it will call once a sender + capture
+     source are wired.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

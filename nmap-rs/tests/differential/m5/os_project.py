@@ -37,6 +37,17 @@ VOLATILE = {
 # than their fidelity. Compared when both sides have them; skipped when only one does.
 PRESENCE_OPTIONAL = {("SEQ", "TI"), ("SEQ", "CI"), ("SEQ", "II")}
 
+# `U1`'s *response* is run-dependent on loopback. The probe is a UDP datagram to a closed
+# port; the response is an ICMP port-unreachable, and whether it is elicited and captured
+# inside the scan window is a race that C nmap and nmap-rs — which run seconds apart — can
+# lose independently. The same commit has produced a run where both tools saw the response
+# and a run where only one did. So when the two sides disagree on whether `U1` got a
+# response at all (`R=Y` vs `R=N`), that is sampling luck, not a fidelity divergence, and
+# the test is skipped. When BOTH saw a response its attributes are still compared in full,
+# and a `U1` test missing entirely from one side is still caught (a broken battery, not a
+# race). Same spirit as PRESENCE_OPTIONAL.
+RESPONSE_OPTIONAL_TESTS = {"U1"}
+
 # `SEQ`'s `TS` is a *measured frequency*: the timestamp counter's rate, derived from how
 # much it advanced across six probes spread over half a second. The two tools run
 # seconds apart, so their measurement windows differ and the value can land one bucket
@@ -134,6 +145,16 @@ def self_test():
     assert compare("T1(R=Y)", "T1(R=Y)") == []
     # A whole missing test is caught.
     assert compare("T1(R=Y)\nU1(R=Y)", "T1(R=Y)") != []
+    # A U1 response seen by only one side (the loopback ICMP-unreachable race) is skipped...
+    assert compare("U1(R=Y%DF=N%IPL=164%UN=0%RIPL=G)", "U1(R=N)") == []
+    assert compare("U1(R=N)", "U1(R=Y%DF=N%IPL=164)") == []
+    # ...both no response agree...
+    assert compare("U1(R=N)", "U1(R=N)") == []
+    # ...but when BOTH responded, the content is still compared, and a real divergence caught.
+    assert compare("U1(R=Y%DF=N)", "U1(R=Y%DF=Y)") != []
+    assert compare("U1(R=Y%DF=N%IPL=164)", "U1(R=Y%DF=N%IPL=164)") == []
+    # The response-race tolerance is U1-only: a T-test response mismatch is still a divergence.
+    assert compare("T4(R=Y%DF=Y)", "T4(R=N)") != []
     print("os_project.py self-test OK")
 
 
@@ -162,6 +183,9 @@ def compare(c_text, rs_text):
             continue
         if name not in rs:
             problems.append(f"{name}: only C nmap emitted this test")
+            continue
+        # A U1 response seen by only one side is a loopback race, not a divergence.
+        if name in RESPONSE_OPTIONAL_TESTS and c[name].get("R") != rs[name].get("R"):
             continue
         for attr in sorted(set(c[name]) | set(rs[name])):
             in_c, in_rs = attr in c[name], attr in rs[name]

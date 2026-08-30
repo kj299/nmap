@@ -27,6 +27,7 @@ pub mod log;
 pub mod macvendor;
 pub mod matcher;
 pub mod model;
+pub mod ndp;
 pub mod options;
 pub mod osdb;
 pub mod osprobe;

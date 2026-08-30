@@ -156,3 +156,10 @@ jobs:
       # bit-for-bit — the same re-derive-from-C guard the packet golden uses.
       - run: bash tests/differential/m5/regen_fp6_vectorize.sh --check
       - run: cargo test -p nmap-core --test fp6_vectorize_differential
+      # M5 IPv6: the neighbor-discovery differential. Rebuilds nmap's real doND()
+      # frame construction and reply validation (pasted verbatim, packed by the real
+      # libdnet macros), regenerates the committed corpus + golden and requires them
+      # unchanged, then gates the solicitation on byte identity and the advertisement
+      # reader on verdict identity.
+      - run: bash tests/differential/m5/regen_ndp.sh --check
+      - run: cargo test -p nmap-core --test ndp_differential

@@ -135,14 +135,31 @@ and IPv6 tracks are approved. Port order, leaf-first:
      `bpf_filter` for IPv6. Ledgered `fp6-distance-hoplimit-path-is-dead` (the C's IE2/U1
      hop-limit distance never fires because `is_response` never matches the error responses
      it reads, so distance is localhost/direct/none only).
-   - **12b-ii-b. Privileged IPv6 wire path + CLI `-6 -O`** — the remaining integration, and
-     the only M5 piece with no CI-differential (it needs a privileged host and real IPv6).
+   - **12b-ii-b. Privileged IPv6 wire path + CLI `-6 -O`** — the remaining integration.
      Linux has **no `IPV6_HDRINCL`**, so a full-packet IPv6 send must go L2 (Ethernet) with
      NDP next-hop resolution — a real subsystem, deliberately *not* stubbed with untested
-     socket code. Needs: IPv6 route lookup (`sys::route`), an L2 IPv6 sender with neighbor
-     resolution, and the CLI `-6 -O` branch (today the CLI reports "supports IPv4 only").
-     `sys::fpengine::scan_host` is the entry point it will call once a sender + capture
-     source are wired.
+     socket code. Decomposed leaf-first so that everything decidable from bytes is gated in
+     CI and only the socket plumbing rests on a privileged host:
+     - ~~**12b-ii-b-1. `core::ndp` (neighbor discovery, pure)**~~ — **done**. The
+       solicited-node multicast address and MAC, the Neighbor Solicitation frame builder,
+       and the advertisement reader that decides whether a captured frame resolves the next
+       hop. Byte-exact + verdict-exact differential against nmap's real `doND` /
+       `accept_ns` / `read_ns_reply_pcap` (81 cases, re-derived from the C each CI run, six
+       mutations each caught), 11 unit tests, `ndp_advert` fuzz target (26.9M runs clean).
+       Found, proved under ASAN, and fixed **two** nmap defects reachable by any on-link
+       host: `ndp-advert-target-read-past-capture` (a 16-byte read past the captured
+       packet) and `ndp-advert-accepted-without-link-layer-address` (an uninitialised MAC
+       cached as the next hop).
+     - **12b-ii-b-2. IPv6 route lookup in `sys::route`** — `route_for6`: on-link prefix
+       match over `netif`'s IPv6 addresses, else the interface holding a default IPv6
+       gateway; yields the egress interface, source address, and next-hop address. The
+       prefix arithmetic is pure and CI-testable; only the enumeration touches the OS.
+     - **12b-ii-b-3. L2 sender + resolver + CLI `-6 -O`** — the privileged shim: an
+       Ethernet-framing `RawSender` for IPv6, the NDP send/retransmit loop driving
+       `core::ndp` (the C's 100/400/800 ms schedule), IPv6 capture, and the CLI branch that
+       today reports "supports IPv4 only". `sys::fpengine::scan_host` is the entry point.
+       **This is the only part with no CI-differential** — it needs a privileged host and
+       real IPv6, and must be validated by hand.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

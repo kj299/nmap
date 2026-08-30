@@ -230,3 +230,8 @@ test = false
 name = "fp6_match"
 path = "fuzz_targets/fp6_match.rs"
 test = false
+
+[[bin]]
+name = "ndp_advert"
+path = "fuzz_targets/ndp_advert.rs"
+test = false

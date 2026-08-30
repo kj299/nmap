@@ -16,10 +16,26 @@ A port that ships without this wastes its most valuable output.
    reading the prose. A dry-run that doesn't execute the tools against the actual code
    is theater. Run `scan_c_flaws.py`, `audit_unsafe.py`, the differential, etc. and
    eyeball the signal-to-noise.
+   **Run the kit's own self-check as the very first command**, and treat its failure as
+   a finding rather than an obstacle to route around: `make -C porting-kit check-kit`
+   returned *"No rule to make target"* at the start of the M5 retrospective — sixteen
+   documented references to a target that had never existed, past an integrity checker
+   that validated paths but not commands (LESSONS #022).
+   **Point the flaw scanner at the files where this port actually found bugs** and
+   check whether it reports them. If it does not, that gap is the headline finding, not
+   a footnote — in M5 it missed both defects in the file it was run on (LESSONS #020).
 1. **Reconstruct from artifacts** the way `RETROSPECTIVE-lsof.md` was built: lean on git
    history — especially commit *sequences* where a message says "the real fix"
    (higher signal than reverts), churn per file (time-sink proxy), the final
    `progress.json`, and the `DIVERGENCES.md` entries.
+   **Sweep the port's own notes first** (`BACKLOG.md`, `LESSONS`-ish files, TODOs in
+   the repo being ported). Lessons are often already written down *locally* and never
+   promoted — nmap's "an oracle must copy the C, not restate it" sat in the port's
+   backlog for nine PRs while the kit stayed ignorant (LESSONS #019). A lesson
+   recorded outside the kit does not compound. Promote every one you find.
+   Treat `progress.json` as **suspect until verified**: run
+   `progress.py --file <f> drift --src crates` before trusting it, because a stale
+   table misleads this review specifically (LESSONS #021).
 2. **Diff lived experience against `PLAYBOOK.md`.** Per phase: did entry/exit criteria
    match reality? Was a gate missing that would have caught a bug earlier? Did any
    harness misfire, over-report, or get skipped (a skipped control is a broken

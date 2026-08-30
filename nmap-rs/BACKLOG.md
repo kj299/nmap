@@ -150,10 +150,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
        host: `ndp-advert-target-read-past-capture` (a 16-byte read past the captured
        packet) and `ndp-advert-accepted-without-link-layer-address` (an uninitialised MAC
        cached as the next hop).
-     - **12b-ii-b-2. IPv6 route lookup in `sys::route`** — `route_for6`: on-link prefix
-       match over `netif`'s IPv6 addresses, else the interface holding a default IPv6
-       gateway; yields the egress interface, source address, and next-hop address. The
-       prefix arithmetic is pure and CI-testable; only the enumeration touches the OS.
+     - ~~**12b-ii-b-2. IPv6 route lookup in `sys::route`**~~ — **done**. `route_for6`:
+       on-link prefix match over `netif`'s IPv6 addresses, else the interface holding a
+       default IPv6 gateway; yields the egress interface, source address, next hop and
+       `directly_connected`. Source selection matches **scope** explicitly (a link-local
+       destination gets a link-local source), and a link-local target off every prefix
+       yields no route rather than falling through to a gateway. The decision is a pure
+       function of the interface table (`choose_route6`), tested against synthetic
+       topologies. Ledgered `route6-explicit-source-scope-selection`.
      - ~~**12b-ii-b-3. L2 sender + resolver + CLI `-6 -O`**~~ — **done**, with the caveat
        below. `sys::ndp` runs the C's 100/400/800 ms solicitation schedule (deadlines from
        the start of the exchange, as `doND` computes them) generically over

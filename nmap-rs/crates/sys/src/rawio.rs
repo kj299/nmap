@@ -12,6 +12,9 @@
 //!     the only raw-send path available on Windows). Its FFI is audited upstream, so
 //!     still no first-party `unsafe`.
 //!
+//! [`EthFramingSender`] adapts an L2 backend for the IPv6 probe path, which must frame
+//! its own Ethernet header because Linux has no `IPV6_HDRINCL`.
+//!
 //! A [`MockSender`] records frames for driver tests without touching the network.
 
 use std::io;
@@ -83,6 +86,47 @@ impl RawSender for RawIpv4Sender {
     }
 }
 
+/// Wraps an L2 sender so each packet handed to it goes out inside an Ethernet frame.
+///
+/// This is what the IPv6 probe path needs and the IPv4 path does not. Linux has no
+/// `IPV6_HDRINCL`: an `AF_INET6` raw socket does **not** treat a caller-supplied IPv6
+/// header the way `IP_HDRINCL` treats an IPv4 one, so a full IPv6 packet — which is what
+/// `core::build6` produces — cannot be handed to the kernel to route. It has to be
+/// framed and injected at layer 2, which is why the driver first resolves the next hop's
+/// MAC by neighbor discovery.
+///
+/// Generic over the inner sender, so the framing is exercised against a
+/// [`MockSender`] in CI and only the injection underneath it needs privilege.
+pub struct EthFramingSender<S> {
+    inner: S,
+    dst_mac: [u8; 6],
+    src_mac: [u8; 6],
+}
+
+impl<S: RawSender> EthFramingSender<S> {
+    /// Frame everything sent through `inner` from `src_mac` to `dst_mac`.
+    pub fn new(inner: S, src_mac: [u8; 6], dst_mac: [u8; 6]) -> EthFramingSender<S> {
+        EthFramingSender {
+            inner,
+            dst_mac,
+            src_mac,
+        }
+    }
+
+    /// The destination MAC every frame is addressed to — the resolved next hop.
+    #[must_use]
+    pub fn dst_mac(&self) -> [u8; 6] {
+        self.dst_mac
+    }
+}
+
+impl<S: RawSender> RawSender for EthFramingSender<S> {
+    fn send(&mut self, packet: &[u8]) -> io::Result<usize> {
+        let frame = crate::ndp::frame_ethernet(self.dst_mac, self.src_mac, packet);
+        self.inner.send(&frame)
+    }
+}
+
 /// L2 injection via libpcap/Npcap (feature `pcap`).
 #[cfg(feature = "pcap")]
 pub mod pcap_sender;
@@ -97,6 +141,26 @@ mod tests {
         assert_eq!(s.send(&[1, 2, 3]).unwrap(), 3);
         assert_eq!(s.send(&[9, 9]).unwrap(), 2);
         assert_eq!(s.sent, vec![vec![1, 2, 3], vec![9, 9]]);
+    }
+
+    #[test]
+    fn eth_framing_wraps_every_packet() {
+        const SRC: [u8; 6] = [0x00, 0x0c, 0x29, 0x1a, 0x2b, 0x3c];
+        const DST: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let mut s = EthFramingSender::new(MockSender::default(), SRC, DST);
+        assert_eq!(s.dst_mac(), DST);
+        // The reported length is the framed length, as the wire sees it.
+        assert_eq!(s.send(&[0x60, 0x00]).unwrap(), 16);
+        s.send(&[0xff]).unwrap();
+        let sent = &s.inner.sent;
+        assert_eq!(sent.len(), 2);
+        for frame in sent {
+            assert_eq!(&frame[0..6], &DST);
+            assert_eq!(&frame[6..12], &SRC);
+            assert_eq!(&frame[12..14], &[0x86, 0xdd]);
+        }
+        assert_eq!(&sent[0][14..], &[0x60, 0x00]);
+        assert_eq!(&sent[1][14..], &[0xff]);
     }
 
     #[test]

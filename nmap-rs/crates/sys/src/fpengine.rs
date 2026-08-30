@@ -264,6 +264,97 @@ where
     (observation, results)
 }
 
+/// Run IPv6 OS detection against one host, end to end — the privileged entry point.
+///
+/// Resolves the route, resolves the next hop's MAC by neighbor discovery, frames the
+/// battery at layer 2 and runs a round. **The IPv6 path has no L3 raw-socket option**:
+/// Linux offers no `IPV6_HDRINCL`, so a caller-built IPv6 packet cannot be handed to the
+/// kernel to route the way the IPv4 driver does. Everything below the seams here —
+/// `build6`, `fp6_match`, `fp6`, `fpmodel`, `core::ndp`, `route::choose_route6`,
+/// `run_round` — is differential-tested or mock-tested; this function is the wiring that
+/// cannot be, and is validated on a privileged host with real IPv6.
+///
+/// # Errors
+/// Returns `PermissionDenied` without raw-socket/capture privilege, `AddrNotAvailable`
+/// when no route exists or the next hop never answers, or another OS error if the
+/// capture cannot be opened. Returns `Unsupported` for an interface with no MAC, which
+/// cannot originate an Ethernet frame.
+#[cfg(feature = "pcap")]
+pub async fn os_scan_host6(
+    target: std::net::Ipv6Addr,
+    ports: &[nmap_core::model::Port],
+    model: &FpModel,
+) -> std::io::Result<(Fp6Observation, Fp6Results, Build6Params)> {
+    use crate::capture::pcap_source::PcapSource;
+    use crate::rawio::pcap_sender::PcapSender;
+    use crate::rawio::EthFramingSender;
+    use crate::route::route_for6;
+    use std::io::{Error, ErrorKind};
+
+    let route = route_for6(target)?
+        .ok_or_else(|| Error::new(ErrorKind::AddrNotAvailable, "no IPv6 route to target"))?;
+    let src_mac = route.src_mac.ok_or_else(|| {
+        Error::new(
+            ErrorKind::Unsupported,
+            "egress interface has no MAC; cannot frame an IPv6 probe at layer 2",
+        )
+    })?;
+
+    // Resolve the next hop before anything else: without its MAC no probe can be framed.
+    let nd_filter = crate::ndp::bpf_filter(src_mac);
+    let mut nd_sender = PcapSender::open(&route.iface)?;
+    let nd_iface = route.iface.clone();
+    let next_hop_mac = crate::ndp::next_hop_mac(
+        &mut nd_sender,
+        PcapSource::open(&nd_iface, 65535, 25, Some(&nd_filter))?,
+        src_mac,
+        route.src.octets(),
+        route.next_hop.octets(),
+        route.next_hop_mac,
+    )
+    .await?;
+
+    let selected = nmap_core::osscan::select_probe_ports(ports, crate::route::random_scan_keys().0);
+    let rand = || crate::route::random_scan_keys().0;
+    let params = Build6Params {
+        src: route.src.octets(),
+        dst: target.octets(),
+        open_tcp_port: selected.open_tcp,
+        closed_tcp_port: selected.closed_tcp,
+        // The C always sends U1 somewhere; when nothing was observed closed it falls
+        // back to the same random high port `select_probe_ports` guesses with.
+        closed_udp_port: selected
+            .closed_udp
+            .unwrap_or_else(|| nmap_core::osscan::guessed_closed_port(rand())),
+        tcp_port_base: 33000u16.wrapping_add(u16::try_from(rand() % 32261).unwrap_or(0)),
+        udp_port_base: 33000u16.wrapping_add(u16::try_from(rand() % 32261).unwrap_or(0)),
+        tcp_seq_base: rand(),
+        tcp_acks: std::array::from_fn(|_| rand()),
+        hop_limit: 64,
+        icmp_seq: 0,
+        directly_connected: route.directly_connected,
+    };
+
+    // The battery goes out framed to the resolved next hop.
+    let mut sender = EthFramingSender::new(PcapSender::open(&route.iface)?, src_mac, next_hop_mac);
+    let filter = bpf_filter(&params);
+    let iface = route.iface.clone();
+    let source = PcapSource::open(&iface, 65535, 100, Some(&filter))?;
+
+    let locality = if target.is_loopback() {
+        Locality::Localhost
+    } else if route.directly_connected {
+        Locality::DirectlyConnected
+    } else {
+        Locality::Remote
+    };
+
+    // The capture includes the Ethernet header: we opened an L2 device.
+    let (observation, results) =
+        scan_host(&mut sender, source, &params, true, locality, model).await;
+    Ok((observation, results, params))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -395,6 +395,24 @@ the driver-specific choices.
       single-subnet / default-route host; a full route table read is a later
       refinement. The capture is assumed to carry a link header (`eth_included = true`),
       correct for Linux `lo` and Ethernet — the datalinks the parser handles.
+- [x] `route6-explicit-source-scope-selection` (`sys::route::choose_route6`, the IPv6
+      counterpart of the entry above): nmap picks the source address by reading the OS
+      route table, where each matched route already carries its own device address — so
+      scope pairing falls out for free. This port selects the source itself, which means
+      it must classify scope **explicitly**: a link-local destination is answered from a
+      link-local source and a global destination from a global one, rather than from
+      whatever address happens to sit first on the egress interface (an interface
+      normally holds both). Two consequences worth recording. First, a link-local target
+      matching no configured prefix yields **no route at all** rather than falling
+      through to the default gateway — a link-local destination is unreachable through a
+      router by definition, and pairing it with a global source would emit a packet that
+      cannot be answered. Second, unique-local (`fc00::/7`) is classified `Global`,
+      because it is routed like one. The whole decision is a pure function of the
+      interface table (`choose_route6`), so it is tested against synthetic topologies
+      instead of against whatever the CI host is configured with. `Route6` additionally
+      reports the **next hop** and the source MAC, which the IPv4 `Route` does not need:
+      the IPv6 send path is layer 2, so the driver frames its own Ethernet header.
+      *(Introduced at M5 `sys::route` for item 12b-ii-b-2.)*
 - [x] `raw-scan-pcap-feature-gated-fallback` (`cli`): `-sS` needs the `pcap` capture
       backend (a build-time libpcap/Npcap dependency) and `CAP_NET_RAW`. When the build
       lacks `pcap`, or the process lacks privilege, the CLI **prints a notice and falls

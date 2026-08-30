@@ -65,9 +65,17 @@ and IPv6 tracks are approved. Port order, leaf-first:
    **Gated by the first on-wire differential in M5**
    (`tests/differential/m5/run_os_differential.sh`, in CI): C nmap and nmap-rs fingerprint
    the same loopback host and all 13 tests must agree.
-   Remaining polish (not blocking): XML/grepable `<os>` output, the `Uptime guess` and
-   `TCP Sequence Prediction` lines (the renderer supports them; the driver does not yet
-   collect `SeqReport`), and `--max-os-tries`.
+   Remaining polish: ~~the `Uptime guess` and `TCP Sequence Prediction` lines~~ and
+   ~~`--max-os-tries`~~ — **done**. The driver now collects a per-round `SeqReport`
+   (`sys::osscan::seq_report`) and the uptime inferred from the target's timestamp clock
+   (`core::osprobe::seq::estimate_uptime`, porting the `si.lastboot` derivation), so
+   `-v -O` reports uptime, sequence-prediction difficulty and IP-ID generation.
+   `--max-os-tries N` overrides the retry count. Ledgered
+   `uptime-implausible-claim-still-dates-a-boot`,
+   `uptime-ladder-differs-from-the-ts-attribute-ladder`, `uptime-boot-time-in-utc`.
+   Still outstanding: **XML/grepable `<os>` output** (the `<os>`, `<osmatch>`,
+   `<osclass>`, `<uptime>`, `<tcpsequence>` and `<ipidsequence>` elements, plus the
+   grepable `Seq Index:`/`IP ID Seq:` fields).
    **Harness note:** the differential compares the *final* round's fingerprint from each
    tool's `-d` output and strips the fields that are measurements rather than properties
    (the `SCAN` metadata line, `SEQ`'s `SP`/`GCD`/`ISR`, a numeric `SEQ.TS`, and `T`/`TG`).
@@ -181,6 +189,13 @@ and IPv6 tracks are approved. Port order, leaf-first:
 - ~~**DRY the scan matchers**~~ — **done**. The three drivers collapsed into one
   (`sys::group`), and the duplicated `ipv4_offset` plus the ICMP-quote decode now live
   once in `core::icmp_quote`.
+- **`cargo fuzz run <t> fuzz/seeds/<t>` writes into the committed seed dir.** libFuzzer
+  treats the corpus argument as read-*write*, so a local smoke run leaves hundreds of
+  machine-generated inputs in the working tree (one 60 s run on `osscan_policy` added
+  483 files / 2.1 MB against 40 curated seeds). Discard them with
+  `git clean -fd fuzz/seeds/<t>` unless a specific find is worth seeding; CI does the
+  same thing but never commits. Consider pointing runs at a scratch corpus dir with the
+  seeds as a read-only `-seed_inputs` set instead.
 - **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
   `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
   in the next scan-driver retrospective (cousin of LESSONS #15).

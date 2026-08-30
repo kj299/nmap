@@ -86,8 +86,12 @@ pub struct SeqInputs {
 /// mismatch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SeqTest {
-    /// ISN predictability index.
+    /// ISN predictability index, hex-formatted for the fingerprint attribute.
     pub sp: Option<String>,
+    /// The same index as a number. The C keeps it in `si.index` and hex-formats it for
+    /// the `SP` attribute; `-O` reports the number directly as the sequence-prediction
+    /// difficulty, so both forms are carried rather than parsed back out of the hex.
+    pub sp_index: Option<u32>,
     /// Greatest common divisor of the ISN differences.
     pub gcd: Option<String>,
     /// ISN counter rate.
@@ -277,6 +281,7 @@ fn isn_analysis(inputs: &SeqInputs, seq_diffs: &[u32], seq_rates: &[f64], out: &
     };
 
     out.sp = Some(hex(index));
+    out.sp_index = Some(index);
     out.gcd = Some(hex(seq_gcd));
     out.isr = Some(hex(rate));
 }
@@ -423,6 +428,100 @@ fn timestamp_analysis(
         }
     };
     out.ts = Some(hex(value));
+}
+
+/// How long the target has been up, inferred from its TCP timestamp clock.
+///
+/// Ports the `si.lastboot` derivation at the end of `HostOsScan::makeTSeqFP`
+/// (`osscan2.cc`). The idea: if the timestamp counter ticks at a known frequency, the
+/// *first* value observed divided by that frequency is how long the counter has been
+/// running — which is how long the host has been up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uptime {
+    /// Seconds of uptime implied by the first reply's timestamp. **Zero when the
+    /// claim was rejected as implausible** — the C clamps anything over two years to
+    /// 0 and still records a boot time, so the host reads as "just booted" rather
+    /// than as unknown. Reproduced: see `DIVERGENCES.md`.
+    pub seconds: u64,
+    /// Epoch second at which the host appears to have booted: the first `SEQ` probe's
+    /// send time minus `seconds`.
+    pub lastboot: i64,
+}
+
+/// Two years. The C rejects any longer claim as a lie.
+const MAX_PLAUSIBLE_UPTIME_SECS: u64 = 63_072_000;
+
+/// Infer the target's uptime from the `SEQ` replies' timestamps.
+///
+/// `first_probe_epoch` is the wall-clock second at which the first `SEQ` probe was
+/// *sent* (the C's `seq_send_times[0].tv_sec`); it is a parameter rather than a clock
+/// read so this stays a pure function.
+///
+/// Returns `None` exactly where the C leaves `si.lastboot` at 0 and so prints no
+/// uptime at all: fewer than two responses, or reply processing already concluded the
+/// timestamps were zero or unsupported.
+#[must_use]
+pub fn estimate_uptime(inputs: &SeqInputs, first_probe_epoch: i64) -> Option<Uptime> {
+    // `if (hss->si.ts_seqclass == TS_SEQ_UNKNOWN && hss->si.responses >= 2)`.
+    if inputs.ts_class != TsClass::Unknown {
+        return None;
+    }
+    let samples: Vec<SeqReply> = inputs.replies.iter().flatten().copied().collect();
+    if samples.len() < 2 {
+        return None;
+    }
+
+    // Average timestamp increments per second, over consecutive replies — the same
+    // quantity the `TS` attribute uses, but graded by a *different* ladder below.
+    let n = samples.len().saturating_sub(1);
+    let mut avg_hz = 0.0f64;
+    for pair in samples.windows(2) {
+        let (prev, cur) = (pair[0], pair[1]);
+        let usec = cur.sent_usec.saturating_sub(prev.sent_usec).max(1);
+        let seconds = usec as f64 / 1_000_000.0;
+        if seconds > 0.0 && n > 0 {
+            avg_hz += f64::from(mod_diff(cur.timestamp, prev.timestamp)) / seconds / n as f64;
+        }
+    }
+
+    let first_ts = u64::from(samples[0].timestamp);
+    // The C's uptime ladder. Note it is NOT the `TS` attribute ladder: the bounds are
+    // strict, and the 724..1448 bucket has no counterpart there.
+    let mut seconds = if avg_hz > 0.0 && avg_hz < 5.66 {
+        first_ts / 2
+    } else if avg_hz > 70.0 && avg_hz < 150.0 {
+        first_ts / 100
+    } else if avg_hz > 724.0 && avg_hz < 1448.0 {
+        first_ts / 1000
+    } else if avg_hz > 0.0 {
+        // `(unsigned int)(0.5 + avg_ts_hz)` — truncation, so round-half-up. Reaching
+        // here requires `avg_hz >= 5.66` (anything smaller and positive took the first
+        // branch), so the divisor is at least 6 and the C cannot divide by zero. The
+        // guard below costs nothing and makes that argument unnecessary to trust.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the C's `(unsigned int)(0.5 + avg_ts_hz)` truncates on purpose —                       that truncation IS the round-half-up, so reproducing it is the                       point rather than an accident to be guarded against"
+        )]
+        let divisor = (0.5 + avg_hz) as u64;
+        // Unreachable in practice: getting here needs `avg_hz >= 5.66`, so the divisor
+        // is at least 6. Checked anyway so the argument need not be trusted.
+        first_ts.checked_div(divisor)?
+    } else {
+        // No detectable increment: the C leaves the class unknown, so no uptime and —
+        // because `lastboot` is only assigned inside this block — no boot time either.
+        0
+    };
+
+    if seconds > MAX_PLAUSIBLE_UPTIME_SECS {
+        // "Up 2 years? Perhaps, but they're probably lying."
+        seconds = 0;
+    }
+
+    Some(Uptime {
+        seconds,
+        // `hss->si.lastboot = hss->seq_send_times[0].tv_sec - uptime;`
+        lastboot: first_probe_epoch.saturating_sub(i64::try_from(seconds).unwrap_or(i64::MAX)),
+    })
 }
 
 /// `round(log2(v))`, saturating at zero — the same undefined-conversion guard as
@@ -813,5 +912,116 @@ mod tests {
             "one step backwards across the wrap"
         );
         assert_eq!(mod_diff(5, 5), 0);
+    }
+    /// Six replies whose timestamp advances by `per_probe` each 100 ms, starting at
+    /// `first_ts` — i.e. a clock running at `per_probe * 10` Hz.
+    fn ts_series(first_ts: u32, per_probe: u32) -> SeqInputs {
+        let replies = (0..6u32)
+            .map(|i| {
+                Some(SeqReply {
+                    isn: 1000u32.saturating_add(i),
+                    ip_id: 0,
+                    timestamp: first_ts.saturating_add(per_probe.saturating_mul(i)),
+                    sent_usec: u64::from(i) * 100_000,
+                })
+            })
+            .collect();
+        SeqInputs {
+            replies,
+            ts_class: TsClass::Unknown,
+            ..SeqInputs::default()
+        }
+    }
+
+    #[test]
+    fn uptime_divides_the_first_timestamp_by_the_detected_frequency() {
+        // 10 ticks per 100 ms = 100 Hz, so the ladder's 70..150 bucket divides by 100.
+        let u = estimate_uptime(&ts_series(360_000, 10), 1_000_000_000).expect("uptime");
+        assert_eq!(u.seconds, 3600, "360000 ticks at 100 Hz is one hour");
+        assert_eq!(u.lastboot, 1_000_000_000 - 3600);
+
+        // 0.2 ticks per 100 ms would be 2 Hz; use 1 tick per 500 ms via wider spacing.
+        let mut slow = ts_series(7200, 0);
+        for (i, r) in slow.replies.iter_mut().flatten().enumerate() {
+            r.timestamp = 7200 + u32::try_from(i).unwrap();
+            r.sent_usec = u64::try_from(i).unwrap() * 500_000;
+        }
+        let u = estimate_uptime(&slow, 0).expect("uptime");
+        assert_eq!(u.seconds, 3600, "2 Hz clock divides by 2");
+
+        // 100 ticks per 100 ms = 1000 Hz, the 724..1448 bucket.
+        let u = estimate_uptime(&ts_series(3_600_000, 100), 0).expect("uptime");
+        assert_eq!(u.seconds, 3600);
+    }
+
+    // The C rejects a claim over two years as a lie, sets uptime to 0, and *still*
+    // records a boot time — so the host reads as "just booted", not as unknown.
+    // The C rejects a claim over two years, sets uptime to 0, and *still* records a
+    // boot time — so the host reads as "just booted", not as unknown.
+    //
+    // Only a slow clock can trigger it at all: the timestamp is a u32, so at 100 Hz the
+    // largest expressible uptime is u32::MAX/100 = 1.36 years and at 1000 Hz just 50
+    // days. The clamp is reachable through the 2 Hz branch (up to 68 years) and the
+    // low end of the fallback bucket, which is why this uses the 2 Hz series.
+    #[test]
+    fn an_implausible_uptime_is_clamped_but_still_dates_a_boot() {
+        let mut slow = ts_series(0, 0);
+        for (i, r) in slow.replies.iter_mut().flatten().enumerate() {
+            // 1 tick per 500 ms = 2 Hz; a first timestamp implying ~3.2 years.
+            r.timestamp = 200_000_000 + u32::try_from(i).unwrap();
+            r.sent_usec = u64::try_from(i).unwrap() * 500_000;
+        }
+        let u = estimate_uptime(&slow, 1_000_000_000).expect("uptime");
+        assert_eq!(u.seconds, 0, "over two years is rejected");
+        assert_eq!(u.lastboot, 1_000_000_000, "lastboot is still set");
+    }
+
+    #[test]
+    fn no_uptime_without_usable_timestamps() {
+        // Reply processing already concluded the timestamps were zero or absent: the C
+        // never enters the block, so lastboot stays 0 and nothing is printed.
+        for class in [TsClass::Zero, TsClass::Unsupported] {
+            let mut inputs = ts_series(360_000, 10);
+            inputs.ts_class = class;
+            assert_eq!(estimate_uptime(&inputs, 0), None, "{class:?}");
+        }
+        // Fewer than two responses.
+        let mut thin = ts_series(360_000, 10);
+        thin.replies = vec![thin.replies[0], None, None, None, None, None];
+        assert_eq!(estimate_uptime(&thin, 0), None);
+        assert_eq!(estimate_uptime(&SeqInputs::default(), 0), None);
+    }
+
+    #[test]
+    fn a_motionless_clock_dates_the_boot_to_now() {
+        // avg_hz == 0: no branch fires, uptime stays 0, and the C still assigns
+        // lastboot = send time.
+        let u = estimate_uptime(&ts_series(500, 0), 12_345).expect("uptime");
+        assert_eq!(u.seconds, 0);
+        assert_eq!(u.lastboot, 12_345);
+    }
+
+    #[test]
+    fn uptime_never_panics_on_extreme_inputs() {
+        // Saturating construction: the point is the analysis, not the fixture.
+        let replies = (0..6u32)
+            .map(|i| {
+                Some(SeqReply {
+                    isn: u32::MAX,
+                    ip_id: 0,
+                    timestamp: u32::MAX.wrapping_sub(i),
+                    // Identical send times: the elapsed-time divisor is floored at 1 us.
+                    sent_usec: 0,
+                })
+            })
+            .collect();
+        let inputs = SeqInputs {
+            replies,
+            ts_class: TsClass::Unknown,
+            ..SeqInputs::default()
+        };
+        let _ = estimate_uptime(&inputs, i64::MIN);
+        let _ = estimate_uptime(&inputs, i64::MAX);
+        let _ = estimate_uptime(&inputs, 0);
     }
 }

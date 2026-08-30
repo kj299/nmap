@@ -351,8 +351,7 @@ async fn flag_or_fallback(
 async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
     use nmap_core::osdb::model::FingerPrintDb;
     use nmap_core::osscan::{
-        attribute_distance, render, submission_reason, HostFacts, Report, SeqReport,
-        SubmissionInputs,
+        attribute_distance, render, submission_reason, HostFacts, Report, SubmissionInputs,
     };
 
     let mut out = String::new();
@@ -393,9 +392,13 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
             continue;
         }
 
-        let outcome =
-            nmap_sys::osscan::os_scan_host(v4, &host.ports, &db, nmap_sys::osscan::MAX_OS_TRIES)
-                .await;
+        let outcome = nmap_sys::osscan::os_scan_host(
+            v4,
+            &host.ports,
+            &db,
+            cfg.max_os_tries.unwrap_or(nmap_sys::osscan::MAX_OS_TRIES),
+        )
+        .await;
         let (result, selected, _params) = match outcome {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -442,13 +445,39 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
         };
         let distance = attribute_distance(facts, observation.distance);
 
-        let seq = SeqReport::default();
+        // The driver now collects these per round; the C keeps them on the target as a
+        // side effect of fingerprinting.
+        let seq = result.best_seq().cloned().unwrap_or_default();
+
+        // `Uptime guess:` — the C recomputes the elapsed time at print time rather than
+        // reusing the derived uptime, and omits the `(since ...)` clause when it cannot
+        // format the boot time. Both are reproduced here; formatting needs a clock and a
+        // calendar, which is why `core` takes them as data.
+        let uptime = result.best_uptime().and_then(|u| {
+            if u.lastboot == 0 {
+                return None;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| i64::try_from(d.as_secs()).ok())?;
+            Some(nmap_core::osscan::UptimeLine {
+                // Clock skew or a clamped boot time can put `lastboot` ahead of now; a
+                // negative age would render as a nonsense negative day count.
+                seconds: f64::from(
+                    i32::try_from(now.saturating_sub(u.lastboot).max(0)).unwrap_or(i32::MAX),
+                ),
+                since: nmap_core::osscan::format_boot_time(u.lastboot),
+            })
+        });
+
         let report = Report {
             matches,
             fingerprint: &observation.fingerprint,
             submission_reason: reason.as_deref(),
             distance,
             seq: &seq,
+            uptime,
             open_tcp_port: selected.open_tcp,
             closed_tcp_port: selected.closed_tcp,
             osscan_guess: cfg.osscan_guess,

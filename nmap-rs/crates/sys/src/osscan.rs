@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use nmap_core::ipid::get_ipid_sequence_16;
 use nmap_core::osdb::model::FingerPrintDb;
 use nmap_core::osdb::score::{match_fingerprint, MatchResults, GUESS_THRESHOLD};
 use nmap_core::osprobe::assemble::{
@@ -37,9 +38,9 @@ use nmap_core::osprobe::assemble::{
 use nmap_core::osprobe::build::{build_probe, OsProbe, ProbeParams, NUM_SEQ_SAMPLES};
 use nmap_core::osprobe::demux::{demux, tcp_timestamp, Demuxed, ProbeReply};
 use nmap_core::osprobe::icmpreply::U1Sent;
-use nmap_core::osprobe::seq::{SeqInputs, SeqReply};
+use nmap_core::osprobe::seq::{analyze_seq, estimate_uptime, SeqInputs, SeqReply, Uptime};
 use nmap_core::osprobe::tcpreply::ProbeContext;
-use nmap_core::osscan::{best_round, Round};
+use nmap_core::osscan::{best_round, Round, SeqReport};
 
 use crate::capture::{AsyncCapture, PacketSource};
 use crate::rawio::RawSender;
@@ -93,19 +94,20 @@ impl RoundCapture {
     }
 }
 
-/// Turn a round's captured replies into the structure the assembler consumes.
+/// The `SEQ` analysis inputs for one round.
+///
+/// Shared by [`to_responses`] (which feeds the fingerprint) and [`seq_report`] (which
+/// feeds the `-O` report), so the two can never disagree about what was observed.
 #[must_use]
-pub fn to_responses(capture: &RoundCapture, params: &ProbeParams, ctx: ProbeContext) -> Responses {
-    let tcp_of = |probe: OsProbe| match capture.replies.get(&probe) {
-        Some(ProbeReply::Tcp(t)) => Some(t.clone()),
-        _ => None,
-    };
-
+pub fn seq_inputs(capture: &RoundCapture, params: &ProbeParams) -> SeqInputs {
     // The SEQ samples, in probe order. A missing reply leaves a hole rather than shifting
     // the others, because the analysis reads the gaps between consecutive samples.
     let replies = (0..NUM_SEQ_SAMPLES)
         .map(|i| {
-            let t = tcp_of(OsProbe::Seq(i))?;
+            let t = match capture.replies.get(&OsProbe::Seq(i)) {
+                Some(ProbeReply::Tcp(t)) => t,
+                _ => return None,
+            };
             Some(SeqReply {
                 isn: t.seq,
                 ip_id: 0,
@@ -114,6 +116,69 @@ pub fn to_responses(capture: &RoundCapture, params: &ProbeParams, ctx: ProbeCont
             })
         })
         .collect();
+
+    SeqInputs {
+        replies,
+        tcp_ipids: capture.tcp_ipids.clone(),
+        closed_tcp_ipids: capture.closed_tcp_ipids.clone(),
+        icmp_ipids: capture.icmp_ipids.clone(),
+        ts_class: nmap_core::osprobe::seq::TsClass::Unknown,
+        is_localhost: params.src == params.dst,
+        scan_delay_ms: 0,
+    }
+}
+
+/// The sequence-prediction facts `-O` reports, plus the uptime inferred from the
+/// timestamp clock.
+///
+/// The C keeps these on the target (`currenths->seq`) as a side effect of building the
+/// fingerprint; here they are derived explicitly from the same inputs.
+///
+/// `scan_epoch` is the wall-clock second the scan started, supplied by the caller. The
+/// driver deliberately reads **no clock of its own**: `SystemTime::now()` is exactly the
+/// impurity `estimate_uptime` takes a parameter to avoid, and calling it here made every
+/// driver test unrunnable under Miri, whose isolation refuses a host clock. Passing it in
+/// keeps the round deterministic and the tests real. The C anchors on the first `SEQ`
+/// probe's send time; the difference is the few hundred milliseconds between scan start
+/// and that probe, against an uptime reported in days.
+#[must_use]
+pub fn seq_report(
+    capture: &RoundCapture,
+    params: &ProbeParams,
+    scan_epoch: Option<i64>,
+) -> (SeqReport, Option<Uptime>) {
+    let inputs = seq_inputs(capture, params);
+    let analysis = analyze_seq(&inputs);
+    let samples: Vec<&SeqReply> = inputs.replies.iter().flatten().collect();
+
+    let report = SeqReport {
+        seqs: samples.iter().map(|r| r.isn).collect(),
+        ipids: capture.tcp_ipids.clone(),
+        timestamps: samples.iter().map(|r| r.timestamp).collect(),
+        // `si.index` is the same number the `SP` attribute hex-encodes.
+        index: analysis.sp_index.unwrap_or(0),
+        ipid_class: get_ipid_sequence_16(
+            &capture
+                .tcp_ipids
+                .iter()
+                .map(|v| u32::from(*v))
+                .collect::<Vec<u32>>(),
+            inputs.is_localhost,
+        ),
+    };
+
+    // Without a wall-clock anchor there is nothing to date a boot against.
+    let uptime = scan_epoch.and_then(|epoch| estimate_uptime(&inputs, epoch));
+    (report, uptime)
+}
+
+/// Turn a round's captured replies into the structure the assembler consumes.
+#[must_use]
+pub fn to_responses(capture: &RoundCapture, params: &ProbeParams, ctx: ProbeContext) -> Responses {
+    let tcp_of = |probe: OsProbe| match capture.replies.get(&probe) {
+        Some(ProbeReply::Tcp(t)) => Some(t.clone()),
+        _ => None,
+    };
 
     let ie = match (
         capture.replies.get(&OsProbe::Ie(0)),
@@ -134,15 +199,7 @@ pub fn to_responses(capture: &RoundCapture, params: &ProbeParams, ctx: ProbeCont
     };
 
     Responses {
-        seq: SeqInputs {
-            replies,
-            tcp_ipids: capture.tcp_ipids.clone(),
-            closed_tcp_ipids: capture.closed_tcp_ipids.clone(),
-            icmp_ipids: capture.icmp_ipids.clone(),
-            ts_class: nmap_core::osprobe::seq::TsClass::Unknown,
-            is_localhost: params.src == params.dst,
-            scan_delay_ms: 0,
-        },
+        seq: seq_inputs(capture, params),
         ops: (0..NUM_SEQ_SAMPLES)
             .map(|i| tcp_of(OsProbe::Ops(i)).map(|t| t.segment))
             .collect(),
@@ -344,6 +401,11 @@ pub struct OsScanResult {
     pub rounds: Vec<Observation>,
     /// Every round's match results, aligned with `rounds`.
     pub matches: Vec<MatchResults>,
+    /// Every round's sequence-prediction facts, aligned with `rounds`.
+    pub seq: Vec<SeqReport>,
+    /// Every round's inferred uptime, aligned with `rounds`. `None` where the target's
+    /// timestamps could not date a boot.
+    pub uptime: Vec<Option<Uptime>>,
     /// The worst timing ratio seen across the rounds, feeding `submission_reason`.
     pub max_timing_ratio: f64,
     /// Probes that could not be sent in the last round attempted.
@@ -355,6 +417,16 @@ impl OsScanResult {
     #[must_use]
     pub fn observation(&self) -> Option<&Observation> {
         self.rounds.get(self.best)
+    }
+    /// The reported round's sequence-prediction facts.
+    #[must_use]
+    pub fn best_seq(&self) -> Option<&SeqReport> {
+        self.seq.get(self.best)
+    }
+    /// The reported round's inferred uptime.
+    #[must_use]
+    pub fn best_uptime(&self) -> Option<Uptime> {
+        self.uptime.get(self.best).copied().flatten()
     }
     /// The reported round's match results.
     #[must_use]
@@ -380,6 +452,7 @@ pub async fn scan_host_rounds<S, P, F>(
     eth_included: bool,
     db: &FingerPrintDb,
     max_tries: usize,
+    scan_epoch: Option<i64>,
 ) -> OsScanResult
 where
     S: RawSender,
@@ -388,6 +461,8 @@ where
 {
     let mut rounds: Vec<Observation> = Vec::new();
     let mut matches: Vec<MatchResults> = Vec::new();
+    let mut seq: Vec<SeqReport> = Vec::new();
+    let mut uptime: Vec<Option<Uptime>> = Vec::new();
     let mut policy_rounds: Vec<Round> = Vec::new();
     let mut max_timing_ratio = 0.0f64;
     let mut unsent = Vec::new();
@@ -408,6 +483,10 @@ where
         };
         let conclusive = round.is_conclusive();
 
+        let (round_seq, round_uptime) = seq_report(&capture, params, scan_epoch);
+        seq.push(round_seq);
+        uptime.push(round_uptime);
+
         rounds.push(observation);
         matches.push(result);
         policy_rounds.push(round);
@@ -423,6 +502,8 @@ where
         best,
         rounds,
         matches,
+        seq,
+        uptime,
         max_timing_ratio,
         unsent,
     }
@@ -477,6 +558,12 @@ pub async fn os_scan_host(
 
     let iface = route.iface.clone();
     let filter = bpf_filter(&params);
+    // The one clock read on this path, taken here rather than inside the round so the
+    // driver itself stays deterministic and Miri-testable.
+    let scan_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok());
     let result = scan_host_rounds(
         &mut sender,
         || PcapSource::open(&iface, 65535, 100, Some(&filter)),
@@ -484,6 +571,7 @@ pub async fn os_scan_host(
         route.eth_included,
         db,
         max_tries,
+        scan_epoch,
     )
     .await;
     Ok((result, selected, params))
@@ -695,6 +783,66 @@ mod tests {
         // evidence and must fall back to silence rather than half an answer.
         let ie = observation.fingerprint.test(TestId::Ie).expect("IE test");
         assert_eq!(ie.get("R"), Some("N"));
+    }
+
+    /// A minimal SYN/ACK carrying a TCP timestamp option — enough for the SEQ analysis,
+    /// which reads the ISN from the header and the timestamp out of the options.
+    fn seq_reply(seq: u32, tsval: u32) -> nmap_core::osprobe::tcpreply::TcpReply {
+        let mut segment = vec![0u8; 20];
+        segment[4..8].copy_from_slice(&seq.to_be_bytes());
+        // Data offset 8 words (20 header + 12 options); SYN|ACK.
+        segment[12] = 8 << 4;
+        segment[13] = 0x12;
+        segment[14..16].copy_from_slice(&1024u16.to_be_bytes());
+        // NOP, NOP, Timestamp(kind 8, len 10, tsval, tsecr).
+        segment.extend_from_slice(&[0x01, 0x01, 0x08, 0x0a]);
+        segment.extend_from_slice(&tsval.to_be_bytes());
+        segment.extend_from_slice(&0u32.to_be_bytes());
+        nmap_core::osprobe::tcpreply::TcpReply {
+            df: false,
+            ttl: 64,
+            window: 1024,
+            seq,
+            ack: 0,
+            flags: 0x12,
+            reserved: 0,
+            urgent_ptr: 0,
+            segment,
+        }
+    }
+
+    // The uptime path, end to end through the driver, with a FIXED epoch — so it proves
+    // determinism as well as correctness. Reading a clock here is what broke Miri.
+    #[test]
+    fn seq_report_is_a_deterministic_function_of_its_inputs() {
+        let params = params();
+        let mut capture = RoundCapture::default();
+        // Six SEQ replies whose timestamp advances 10 ticks per 100 ms = 100 Hz, with a
+        // first value of 360_000 ticks — one hour of uptime.
+        for i in 0..NUM_SEQ_SAMPLES {
+            let n = u32::from(i);
+            capture.seq_send_times.push(u64::from(n) * 100_000);
+            capture.replies.insert(
+                OsProbe::Seq(i),
+                ProbeReply::Tcp(seq_reply(1000 + n, 360_000 + n * 10)),
+            );
+        }
+
+        let epoch = 1_700_000_000i64;
+        let (report, uptime) = seq_report(&capture, &params, Some(epoch));
+
+        assert_eq!(report.seqs.len(), usize::from(NUM_SEQ_SAMPLES));
+        assert_eq!(report.timestamps.first().copied(), Some(360_000));
+        let u = uptime.expect("a 100 Hz clock at 360000 ticks is one hour of uptime");
+        assert_eq!(u.seconds, 3600);
+        assert_eq!(u.lastboot, epoch - 3600);
+
+        // Same inputs, same answer — no hidden clock.
+        assert_eq!(seq_report(&capture, &params, Some(epoch)).1, uptime);
+        // No anchor, no boot time: the report still stands, the uptime does not.
+        let (report2, none) = seq_report(&capture, &params, None);
+        assert_eq!(none, None);
+        assert_eq!(report2.timestamps, report.timestamps);
     }
 
     #[tokio::test]

@@ -360,6 +360,87 @@ pub struct SeqReport {
     pub ipid_class: IpidSequence,
 }
 
+/// The `Uptime guess:` line's inputs.
+///
+/// The C recomputes the elapsed time at *print* time (`difftime(now, lastboot)`)
+/// rather than reusing the uptime it derived, so `seconds` is that recomputed value.
+/// `since` is the formatted boot time; the C omits the `(since ...)` clause when
+/// `n_ctime` fails, which `None` models exactly. Formatting a wall-clock string needs
+/// a calendar and a clock, so both are supplied by the caller and this stays pure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UptimeLine {
+    /// Seconds since the host booted, as of when the report is rendered.
+    pub seconds: f64,
+    /// Human-readable boot time, when the caller could format one.
+    pub since: Option<String>,
+}
+
+/// Format an epoch second the way nmap's `Uptime guess: ... (since ...)` clause does.
+///
+/// Returns `None` outside a sane range, which the caller renders as the C's
+/// `n_ctime`-failed form (the bare `Uptime guess: N days` line) — a shape the C already
+/// produces, so nothing new is invented for the failure case.
+///
+/// **Divergence:** nmap calls `ctime`, which renders **local** time; this renders
+/// **UTC** and says so, because resolving a local timezone needs a tz database and a
+/// new dependency for one output line. The suffix makes the difference visible rather
+/// than silently mislabeling a timestamp. Ledgered `uptime-boot-time-in-utc`.
+#[must_use]
+pub fn format_boot_time(epoch: i64) -> Option<String> {
+    // 1970-01-01 .. 2999-12-31. Bounding the input up front is what makes every
+    // operation below provably non-overflowing.
+    if !(0..=32_503_680_000).contains(&epoch) {
+        return None;
+    }
+    // Days since the epoch, and the second within that day. `epoch` is non-negative
+    // here, so both are exact.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "epoch is bounded to 0..=32_503_680_000 above, so every product, sum                   and difference below stays far inside i64"
+    )]
+    let (days, secs_of_day) = (epoch / 86_400, epoch % 86_400);
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "civil-from-days over a bounded day count; all intermediates are small"
+    )]
+    let (year, month, day, hour, minute, second, weekday) = {
+        // Howard Hinnant's civil_from_days, shifted to a 1st-of-March-based year so the
+        // leap day lands at the end and the month-length table needs no special case.
+        let z = days + 719_468;
+        let era = z / 146_097;
+        let doe = z - era * 146_097; // 0..=146096
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // 0..=399
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // 0..=365
+        let mp = (5 * doy + 2) / 153; // 0..=11, March-based
+        let d = doy - (153 * mp + 2) / 5 + 1; // 1..=31
+        let m = if mp < 10 { mp + 3 } else { mp - 9 }; // 1..=12
+        let y = if m <= 2 { y + 1 } else { y };
+        // 1970-01-01 was a Thursday (index 4 with Sunday = 0).
+        let wd = (days + 4).rem_euclid(7);
+        (
+            y,
+            m,
+            d,
+            secs_of_day / 3600,
+            (secs_of_day % 3600) / 60,
+            secs_of_day % 60,
+            wd,
+        )
+    };
+
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let wd = DAYS.get(usize::try_from(weekday).ok()?)?;
+    let mo = MONTHS.get(usize::try_from(month).ok()?.checked_sub(1)?)?;
+    // `ctime`'s layout: day-of-month is space-padded to two columns.
+    Some(format!(
+        "{wd} {mo} {day:2} {hour:02}:{minute:02}:{second:02} {year} UTC"
+    ))
+}
+
 /// Everything [`render`] needs to produce the `-O` block.
 #[derive(Debug, Clone)]
 pub struct Report<'a> {
@@ -373,6 +454,8 @@ pub struct Report<'a> {
     pub distance: Distance,
     /// Sequence-prediction facts.
     pub seq: &'a SeqReport,
+    /// Uptime, when the timestamp analysis produced a boot time.
+    pub uptime: Option<UptimeLine>,
     /// Open TCP port used, if any.
     pub open_tcp_port: Option<u16>,
     /// Closed TCP port used, if any.
@@ -473,6 +556,18 @@ pub fn render(r: &Report) -> String {
                 if r.always_show_fingerprint {
                     out.push_str(&r.fingerprint.render_tests());
                 }
+            }
+        }
+    }
+
+    // The C prints uptime between the OS block and the distance line, and only under
+    // `-v` — though it emits the XML `<uptime>` element regardless of verbosity.
+    if let Some(u) = &r.uptime {
+        if r.verbose {
+            let days = u.seconds / 86_400.0;
+            match &u.since {
+                Some(t) => out.push_str(&format!("Uptime guess: {days:.3} days (since {t})\n")),
+                None => out.push_str(&format!("Uptime guess: {days:.3} days\n")),
             }
         }
     }
@@ -824,6 +919,7 @@ mod tests {
                 method: DistanceMethod::IcmpQuote,
             },
             seq,
+            uptime: None,
             open_tcp_port: Some(22),
             closed_tcp_port: Some(1),
             osscan_guess: false,
@@ -1070,5 +1166,71 @@ mod tests {
         let out = render(&r);
         assert!(!out.contains("TCP Sequence Prediction"), "{out}");
         assert!(!out.contains("IP ID Sequence Generation"), "{out}");
+    }
+    // Ground truth from `date -u -d @<epoch> '+%a %b %e %H:%M:%S %Y'`.
+    #[test]
+    fn boot_time_matches_ctime_layout() {
+        let cases = [
+            (0i64, "Thu Jan  1 00:00:00 1970 UTC"),
+            (1_000_000_000, "Sun Sep  9 01:46:40 2001 UTC"),
+            (1_756_573_200, "Sat Aug 30 17:00:00 2025 UTC"),
+            // A leap day, which the March-based civil calendar has to get right.
+            (951_782_400, "Tue Feb 29 00:00:00 2000 UTC"),
+            (32_503_679_999, "Tue Dec 31 23:59:59 2999 UTC"),
+        ];
+        for (epoch, want) in cases {
+            assert_eq!(
+                format_boot_time(epoch).as_deref(),
+                Some(want),
+                "epoch {epoch}"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_time_outside_the_supported_range_is_none() {
+        assert_eq!(format_boot_time(-1), None);
+        assert_eq!(format_boot_time(32_503_680_001), None);
+        assert_eq!(format_boot_time(i64::MIN), None);
+        assert_eq!(format_boot_time(i64::MAX), None);
+    }
+
+    #[test]
+    fn uptime_line_is_verbose_only_and_takes_both_forms() {
+        let (m, fp, seq) = (
+            MatchResults::default(),
+            FingerPrint::default(),
+            SeqReport::default(),
+        );
+        let mut r = report_for(&m, &fp, &seq, None);
+        r.uptime = Some(UptimeLine {
+            seconds: 86_400.0 * 2.5,
+            since: Some("Sat Aug 30 17:00:00 2025 UTC".to_owned()),
+        });
+
+        // The C gates the plain-text line on `o.verbose`.
+        assert!(!render(&r).contains("Uptime guess"));
+
+        r.verbose = true;
+        let out = render(&r);
+        assert!(
+            out.contains("Uptime guess: 2.500 days (since Sat Aug 30 17:00:00 2025 UTC)"),
+            "got: {out}"
+        );
+        // The C prints uptime before the distance line.
+        let (u, d) = (
+            out.find("Uptime guess").unwrap(),
+            out.find("Network Distance").unwrap(),
+        );
+        assert!(u < d, "uptime must precede Network Distance");
+
+        // `n_ctime` failing drops the parenthetical, exactly as the C does.
+        r.uptime = Some(UptimeLine {
+            seconds: 3600.0,
+            since: None,
+        });
+        let out = render(&r);
+        assert!(out.contains("Uptime guess: 0.042 days\n"), "got: {out}");
+        assert!(!out.contains("(since"));
     }
 }

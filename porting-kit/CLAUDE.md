@@ -68,6 +68,9 @@ The retrospective (which patches the kit after every port) must patch the skills
 ## Working notes
 
 - Keep `progress.json` current (`harnesses/progress/progress.py`) so any new
-  session orients in seconds.
+  session orients in seconds. This is **enforced, not trusted**:
+  `progress.py --file progress.json drift --src crates` exits 1 if a shipped
+  module is missing from the table. "Keep it current" as a habit rotted to 12
+  untracked modules across one milestone (LESSONS #021).
 - Keep `PLAYBOOK.md` under ~400 lines; push detail into linked docs.
 - When you infer project history from artifacts, mark it `[INFERRED]`.

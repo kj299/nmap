@@ -1187,6 +1187,70 @@ variance, and a wrong scaling formula.
       dozen other ICMPv6 types the OS battery never emits). *(Realized at M5
       `core::fp6_match`.)*
 
+## Milestone 5 — IPv6 OS detection: neighbor discovery (next-hop resolution)
+
+### Security fixes (C defects closed by the port)
+
+- [x] `ndp-advert-target-read-past-capture` (`core::ndp::parse_neighbor_advertisement`,
+      ports `accept_ns` + `read_ns_reply_pcap` in `libnetutil/netutil.cc`): nmap reads
+      **up to 20 bytes past the captured packet** when it validates a Neighbor
+      Advertisement. `accept_ns()` admits any capture holding
+      `offset + IP6_HDR_LEN + ICMPV6_HDR_LEN` (= offset+44) bytes; `read_ns_reply_pcap()`
+      then executes
+      `memcpy(&senderIP->sin6_addr.s6_addr, &na->icmpv6_target, 16)` reading
+      `offset+48 .. offset+64` **unconditionally** — the `head->caplen >= ... +
+      sizeof(struct icmpv6_msg_nd)` bounds test that *is* present guards only the option
+      fields, and the target `memcpy` sits outside the `if` it protects. Any capture in
+      `[offset+44, offset+64)` therefore reads whatever the pcap ring buffer holds next
+      (an adjacent packet), and those bytes become the `senderIP` that `doND()` compares
+      against the address it solicited, deciding whether to accept the reply. Reachable
+      by **any host on the local link**: an unsolicited, truncated ICMPv6 type-136 code-0
+      frame is enough, and it need not come from the target, because the address check
+      happens *after* the out-of-bounds read. Confirmed under AddressSanitizer against
+      nmap's verbatim code — `heap-buffer-overflow ... READ of size 16 ... 4 bytes after
+      a 58-byte region` (witness: `tests/differential/m5/oracle/ndp_oob_demo.cc`, built
+      by `build_ndp_oracle.sh --demo`). The port bounds every field: a frame too short to
+      hold the target is simply not an advertisement. Because the C has no defined
+      behavior in that window there is nothing for a differential to compare against, so
+      the corpus deliberately stops at its edge and the window is covered instead by
+      `ndp::tests::truncated_advertisement_is_never_read_past_the_end`, by
+      `ndp_differential::rejects_every_capture_in_the_cs_out_of_bounds_gap`, and by the
+      `ndp_advert` fuzz target (26.9M runs clean, seeded with every length across the
+      gap). *(Found and fixed at M5 `core::ndp`.)*
+- [x] `ndp-advert-accepted-without-link-layer-address` (`core::ndp::resolve_from_frame`,
+      ports `doND`): nmap accepts a Neighbor Advertisement that carries **no link-layer
+      address** and then uses an **uninitialised MAC** as the next hop. The target
+      link-layer address option is optional in an advertisement (RFC 4861 §4.4), and
+      `read_ns_reply_pcap()` reports its absence through the `has_mac` out-parameter —
+      which `doND()` passes in and **never reads** (`bool has_mac;` at
+      `netutil.cc:3549`, written at 3505/3509, never tested). On such a reply `doND()`
+      still sets `foundit = true`, leaving the caller's `u8 dstmac[6]` untouched, and
+      `getNextHopMAC()` proceeds to `mac_cache_set(dstss, dstmac)` — caching
+      uninitialised stack bytes as the link-layer destination for every subsequent frame
+      to that host. Also reachable by any on-link host, and it silently corrupts the
+      next-hop cache rather than failing. The port makes the outcome unrepresentable: the
+      MAC is an `Option<[u8; 6]>` carried by value, so "advertisement seen" and "address
+      resolved" are distinct results and only the latter can resolve a next hop. Pinned
+      by `ndp::tests::advertisement_without_a_link_layer_address_resolves_nothing` and
+      gated by the differential, which records the C's own `mac=none` verdict for exactly
+      these frames. *(Found and fixed at M5 `core::ndp`.)*
+
+### Faithfully reproduced C quirks (deliberately *not* fixed)
+
+- [x] `ndp-advert-single-fixed-option-slot` (`core::ndp`): the C inspects the option at
+      one fixed offset rather than walking the advertisement's option list, so an
+      advertisement whose *first* option is something other than a target link-layer
+      address is treated as carrying no address at all. Copied as-is: it is not a safety
+      issue (the frame is fully bounds-checked either way), it costs at most a
+      retransmit, and diverging would decide differently from nmap on a well-formed
+      packet. Recorded so the choice is visible rather than accidental.
+- [x] `ndp-solicitation-zero-flow-label` (`core::ndp::build_neighbor_solicitation`):
+      unlike the OS-detection battery, which stamps `FLOW_LABEL = 0x12345` on every
+      probe, `doND()` builds its solicitation with traffic class **and** flow label 0
+      (`ip6_pack_hdr(..., 0, 0, 32, 0x3a, 255, ...)`). Reproduced exactly — the
+      byte-identity differential catches any drift, and a mutation setting the battery's
+      flow label here is one of the six the corpus was verified to catch.
+
 ## Milestone 5 — IPv6 OS detection: the probe battery
 
 - [x] `build6-no-random-inside-the-builder` (`core::build6`, ports

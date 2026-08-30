@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# nmap's root .gitignore excludes `Makefile` repo-wide (autoconf generates its own).
+# The kit's Makefile is checked in deliberately: it is the self-check that sixteen
+# docs and all six skills tell you to run (`make -C porting-kit check-kit`).
+!Makefile

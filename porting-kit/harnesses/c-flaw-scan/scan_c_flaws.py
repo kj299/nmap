@@ -20,6 +20,35 @@ Categories flagged (CWE in parens):
   unchecked-malloc  malloc/calloc/realloc result used w/o check   (CWE-690) [weak]
   toctou            access()/stat() then open()/fopen()          (CWE-367)
 
+What this CANNOT find (know it before you trust a clean scan)
+------------------------------------------------------------
+Every category above is *API misuse*: a banned function, a non-literal format, a
+size computed by multiplication. All of it is recognisable from a single line.
+
+Two whole defect classes are structurally outside that model, and both are the
+kind a port most wants to find:
+
+  * **A guard that does not dominate the read it protects.** nmap's
+    `read_ns_reply_pcap` bounds-checks `caplen` inside an `if`, then does the
+    16-byte `memcpy` of the target address *outside* that `if` — a heap overread
+    any host on the local link can trigger. Every token on the offending line is
+    ordinary; only the relationship between two lines is wrong.
+  * **An out-parameter written but never read.** nmap's `doND` asks
+    `read_ns_reply_pcap` for `has_mac` and never tests it, so a legal reply with
+    no link-layer option leaves the caller's MAC buffer uninitialised and reports
+    success. That is a dataflow fact, invisible to any pattern.
+
+Running this scanner over the file containing both (`libnetutil/netutil.cc`)
+reports 2 format-string hits and neither defect. A memcpy-with-constant-size rule
+was measured as a candidate and rejected: 155 hits across nmap's C tree, which is
+the "noisy scanner gets ignored" failure this kit already paid for (LESSONS #2).
+
+So: a clean scan means "no *API-misuse* flaw found", never "this file is safe".
+The controls that actually caught both were (a) pasting the C verbatim into a
+differential oracle, which forces line-by-line reading, and (b) compiling that
+pasted C under AddressSanitizer and feeding it TRUNCATED inputs. Both are now
+PLAYBOOK Phase 2 steps. (LESSONS #019, #020 — nmap M5.)
+
 Usage:
   scan_c_flaws.py PATH [PATH ...] [--json] [--self-test]
 Exit: 0 always (this is an inventory, not a gate) unless --strict (then 1 if hits).

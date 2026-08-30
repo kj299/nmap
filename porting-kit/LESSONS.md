@@ -535,6 +535,104 @@ These entries are the M2 retrospective.
   discovered after the `unsafe` is written.
 - **Section amended:** PLAYBOOK · Phase 0 (Do); `ARCHITECTURE-TEMPLATE.md` (conventions).
 
+## 019. An oracle that restates the C proves only self-consistency — and a lesson written in the port's backlog never reaches the kit
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — M5 `core::fpmodel` / `core::fp6::vectorize` (IPv6 OS classifier)
+- **What happened:** The `apply_scale` oracle was **retyped** from nmap's C rather than
+  pasted, and lost the C's `if (val < 0) continue;` guard — under a comment claiming it
+  was verbatim. The differential then passed **bit-exact while both sides were wrong**,
+  and the fidelity bug shipped in #70. It surfaced only when the next module
+  (`fp6::vectorize`) made the sentinel's meaning matter, and was fixed in #71 — a
+  standalone "the real fix" commit, the highest-signal artifact in the whole milestone.
+  A gate that compares the port against a *paraphrase* of the C is not a gate.
+  **The compounding failure is worse than the bug:** the team did write the lesson
+  down — in `nmap-rs/BACKLOG.md`, the port's own file — where it sat for nine PRs and
+  never reached `porting-kit/LESSONS.md`. A lesson recorded outside the kit does not
+  compound; the next port inherits nothing. Retrospectives must sweep the port's own
+  notes for lessons already learned locally, not just reconstruct from git.
+- **Kit change:** PLAYBOOK Phase 2 gains "**an oracle COPIES the C — it never restates
+  it**": paste the function and diff it against source; where impractical (headers,
+  globals, member state), state in a comment exactly which *inputs* were substituted
+  and that no logic was. Mirrored into `porting-kit-oracle` (step 5a). The
+  retrospective skill now says to sweep the port's own backlog/notes for
+  locally-recorded lessons before reconstructing from history.
+- **Section amended:** PLAYBOOK · Phase 2 (Do, Exit criteria); `skills/porting-kit-oracle/SKILL.md` step 5a; `skills/porting-kit-retrospective/SKILL.md` step 1.
+
+## 020. The Phase-0 flaw scanner finds API misuse, not guard placement — ASan the pasted oracle over *truncated* input
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — M5 `core::ndp` (IPv6 neighbor discovery, `libnetutil/netutil.cc`)
+- **What happened:** M5 found two real, remotely-reachable defects in nmap's neighbor
+  discovery: `read_ns_reply_pcap` bounds-checks `caplen` inside an `if` and then does a
+  16-byte `memcpy` of the target address **outside** that `if` (a heap overread any
+  on-link host can trigger with a truncated ICMPv6 type-136 frame); and `doND` passes
+  `has_mac` to that function and **never reads it**, so a legal advertisement carrying
+  no link-layer option leaves the caller's MAC buffer uninitialised and still reports
+  success — `getNextHopMAC` then caches those stack bytes as a next hop.
+  `scan_c_flaws.py` run on that exact file reports **2 format-string hits and neither
+  defect**. Both are structurally outside its model: one is a relationship between two
+  lines, the other a dataflow fact. A `memcpy`-with-constant-size rule was measured as
+  a candidate and **rejected** — 155 hits across nmap's C tree, which is precisely the
+  noise that buried real findings in LESSONS #2. What actually found them was pasting
+  the C verbatim for the oracle (which forces line-by-line reading) and then compiling
+  that pasted C under AddressSanitizer with **truncated** input, which reported
+  `heap-buffer-overflow ... READ of size 16 ... 4 bytes after a 58-byte region`.
+  Critically, the *curated* corpus would not have tripped it: a corpus is built to stay
+  inside the C's defined behavior, so the truncation sweep has to be written on purpose.
+- **Kit change:** PLAYBOOK Phase 2 gains "**sanitize the pasted C, and feed it truncated
+  input**" plus "record no golden where the C is undefined — exclude the region, say so
+  in the generator, and cover it from the Rust side with a test and fuzz seeds at each
+  boundary." Mirrored into `porting-kit-oracle` (steps 5b, 5c). `scan_c_flaws.py` gains
+  a **"What this CANNOT find"** section naming both classes with this evidence, so a
+  clean scan is read as "no API-misuse flaw found", never "this file is safe".
+- **Section amended:** PLAYBOOK · Phase 2 (Do, Exit criteria); `harnesses/c-flaw-scan/scan_c_flaws.py` (docstring); `skills/porting-kit-oracle/SKILL.md` steps 5b–5c.
+
+## 021. "Keep the tracker current" was a habit, not a control — and the retrospective depends on it
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — M5 (whole milestone)
+- **What happened:** `CLAUDE.md` says "keep `progress.json` current". It rotted. M5
+  added ten modules (`fpmodel`, `fp6`, `fp6_match`, `build6`, `ndp`, `osscan`,
+  `fpengine`, `sys::ndp`, `sys::osscan`, …) and **not one** reached the table; finished
+  modules still read `differential` long after they were fuzzed and audited. Twelve of
+  51 shipped modules were untracked. This is LESSONS #003 ("a delegated control that
+  nothing enforces is not a control") turned on the kit's own bookkeeping — and it bites
+  hardest *here*, because the retrospective procedure names `progress.json` as a primary
+  artifact to reconstruct from. A stale tracker does not merely fail to help the review
+  that is supposed to catch drift; it misleads it.
+- **Kit change:** `progress.py` gains a **`drift --src DIR ...`** subcommand that parses
+  every `pub mod` from each crate's `lib.rs` and **exits 1** on any shipped module absent
+  from the table (absorbing both real-world naming conventions: sub-module-instead-of-
+  parent, and an omitted crate prefix). Wired into the CI template and named in the
+  module loop's exit criteria, so the table cannot silently rot. Its `--file`-before-
+  subcommand usage line — which contradicted its own argparse layout and cost a failed
+  invocation during this retrospective — is fixed.
+- **Section amended:** `harnesses/progress/progress.py` (new `drift` cmd + usage fix); PLAYBOOK · Phase 4 (exit criteria); `CLAUDE.md` (working notes); README harness table.
+
+## 022. Sixteen references to `make check-kit`, and no Makefile — the integrity checker validated paths but not commands
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — M5 retrospective (the kit itself)
+- **What happened:** Step 0 of the retrospective skill says to run the harnesses before
+  reading any prose. The very first command it prescribes — `make -C porting-kit
+  check-kit` — failed with *"No rule to make target"*. **There was no Makefile in the
+  kit at all**, and never had been, while `check-kit` was cited in sixteen places:
+  README, `CLAUDE.md`, `PLAYBOOK.md`, `OPERATING-GUIDE.md`, both PROMPTS, and all six
+  skills. Every harness had a working `--self-test`; nothing ran them together, so the
+  kit's advertised self-check had never once executed. `check_skills.py` — the control
+  whose entire job is catching this drift, and which CLAUDE.md claims "hard-fails on a
+  dangling reference" — passed clean, because it validated `porting-kit/<path>`
+  references and **not the command it was itself wired into**.
+- **Kit change:** Added `porting-kit/Makefile` with a real `check-kit` (every python
+  harness's `--self-test`, `bash -n` over the shell harnesses, then the skills check;
+  python3 + bash only, no toolchain, so a vendoring repo can actually run it).
+  `check_skills.py` gains check 4: **every `make <target>` a skill cites must exist in
+  the kit's Makefile** — scanning code spans only, since a first pass flagged the prose
+  "make the edits" as an invocation. Verified by removing the Makefile and watching all
+  six skills fail, then restoring it.
+- **Section amended:** new `porting-kit/Makefile`; `skills/check_skills.py` (check 4 + self-tests).
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

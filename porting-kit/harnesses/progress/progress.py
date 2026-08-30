@@ -11,14 +11,25 @@ A module's status is the highest gate it has cleared. "Done" = unsafe_audited.
   set    MODULE GATE                mark MODULE as having cleared GATE
   show   [--json]                   render the table
   ingest --unsafe-json FILE ...     auto-advance from a harness's --json output
+  drift  --src DIR ...              fail if a shipped module is absent from the table
 
-Usage: progress.py {init,set,show,ingest} [--file progress.json] ...
+`drift` exists because "keep progress.json current" was a habit and not a control,
+and habits rot silently. nmap's M5 milestone added ten modules (fpmodel, fp6,
+fp6_match, build6, ndp, osscan, fpengine, ...) and **not one** reached the table;
+meanwhile finished modules still read "differential". The retrospective procedure
+leans on this file as a primary artifact, so a stale table does not merely fail to
+help — it actively misleads the review that is supposed to catch drift. Wire
+`drift` into CI and the table cannot silently rot. (LESSONS #021 — nmap M5.)
+
+Usage: progress.py [--file progress.json] {init,set,show,ingest,drift} ...
+       (--file is a top-level flag: it precedes the subcommand)
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 
 GATES = ["not_started", "ported", "differential", "fuzzed", "sanitized", "unsafe_audited"]
@@ -126,8 +137,65 @@ def _self_test():
         check("render marks the done module", "DONE" in out)
         check("render shows partial progress", "differential" in out)
         check("render counts 1/3 fully gated", "1/3 modules fully gated" in out)
+
+        # drift: a shipped module absent from the table must fail; the two naming
+        # conventions real tables use must not produce false positives.
+        crate = os.path.join(d, "crates", "core", "src")
+        os.makedirs(crate)
+        open(os.path.join(crate, "lib.rs"), "w").write(
+            "pub mod a;\npub mod b;\npub mod c;\n")
+        cmd_init(p, ["core::a"])
+        check("untracked shipped modules fail drift",
+              cmd_drift(p, [os.path.join(d, "crates")]) == 1)
+        cmd_init(p, ["core::a", "b", "core::c::inner"])
+        check("bare-name and sub-module tracking both count as covered",
+              cmd_drift(p, [os.path.join(d, "crates")]) == 0)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
+
+
+MOD_RE = re.compile(r"^\s*pub mod (\w+)\s*;", re.M)
+
+
+def shipped_modules(srcs):
+    """Every `pub mod` declared in a lib.rs under each src dir, as crate::module."""
+    found = set()
+    for src in srcs:
+        for dirpath, _dirs, files in os.walk(src):
+            if "lib.rs" not in files:
+                continue
+            text = open(os.path.join(dirpath, "lib.rs"), encoding="utf-8", errors="replace").read()
+            # crates/<name>/src/lib.rs -> <name>
+            parts = os.path.normpath(dirpath).split(os.sep)
+            crate = parts[-2] if len(parts) >= 2 and parts[-1] == "src" else parts[-1]
+            for m in MOD_RE.findall(text):
+                found.add(f"{crate}::{m}")
+    return found
+
+
+def cmd_drift(path, srcs):
+    """Report shipped modules missing from the table. Exit 1 on any drift."""
+    data = load(path)
+    tracked = set(data.get("modules", {}))
+    # Two conventions to absorb, both seen in real tables:
+    #  * sub-modules tracked instead of the parent (core::osdb::expr for core::osdb) —
+    #    a parent covered by any child counts as tracked;
+    #  * the crate prefix omitted (`model` for `core::model`).
+    def covered(mod):
+        bare = mod.split("::", 1)[1] if "::" in mod else mod
+        for cand in (mod, bare):
+            if cand in tracked or any(t.startswith(cand + "::") for t in tracked):
+                return True
+        return False
+
+    shipped = shipped_modules(srcs)
+    missing = sorted(m for m in shipped if not covered(m))
+    for m in missing:
+        print(f"UNTRACKED: {m}")
+    print(f"\n{len(shipped)} shipped module(s), {len(missing)} untracked")
+    if missing:
+        print("Add them with: progress.py --file <f> set <module> <gate>")
+    return 1 if missing else 0
 
 
 def main(argv=None):
@@ -139,6 +207,7 @@ def main(argv=None):
     ps = sub.add_parser("set"); ps.add_argument("module"); ps.add_argument("gate")
     psh = sub.add_parser("show"); psh.add_argument("--json", action="store_true")
     pg = sub.add_parser("ingest"); pg.add_argument("--unsafe-json", nargs="+", default=[])
+    pd = sub.add_parser("drift"); pd.add_argument("--src", nargs="+", required=True)
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -151,6 +220,8 @@ def main(argv=None):
         return cmd_show(args.file, args.json)
     if args.cmd == "ingest":
         return cmd_ingest(args.file, args.unsafe_json)
+    if args.cmd == "drift":
+        return cmd_drift(args.file, args.src)
     ap.print_help()
     return 2
 

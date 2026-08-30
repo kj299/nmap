@@ -140,13 +140,40 @@ winlsof's phase order was sound; its one miss was not spiking the hang first.
   (these are Python + POSIX sh on purpose, not the target's shell), and pin the
   tool's default output to the lowest-common-denominator encoding of the target's
   default shell (winlsof: ASCII default, UTF-8 opt-in).
+- **An oracle COPIES the C — it never restates it.** Paste the reference function
+  in and diff it against the source; where that is impractical (headers, globals,
+  member state), say in a comment exactly which *inputs* were substituted and that
+  no logic was. A gate comparing a port against a paraphrase proves only
+  self-consistency: nmap's `apply_scale` oracle was retyped without the C's
+  `if (val < 0) continue;` guard, under a comment claiming it was verbatim, and the
+  differential passed **bit-exact while both sides were wrong** (LESSONS #019).
+- **Sanitize the pasted C, and feed it TRUNCATED input** (LESSONS #020). Once the
+  oracle contains real C that touches attacker-controlled buffers, build a second
+  copy with `-fsanitize=address -g -O0` and drive it with inputs cut short at every
+  length across each length-check boundary. This is the cheapest mechanical way to
+  find a bounds check that does not dominate the read it guards — the class the
+  Phase-0 flaw scanner structurally cannot see. It found a 16-byte heap overread in
+  nmap's neighbor-discovery reply path that the scanner, run on that very file,
+  did not report.
+  **Note the input matters more than the sanitizer:** a *curated* corpus of
+  well-formed cases will not trip it. The corpus is normally built to stay inside
+  the C's defined behavior, so the truncation sweep must be written separately and
+  on purpose.
+- Where the C is **undefined** for an input, the differential has nothing to
+  compare against — do not record a golden for it. Exclude that region from the
+  corpus, say so in the generator, and cover it from the Rust side instead (a test
+  asserting the port rejects every input in the gap, plus fuzz seeds at each
+  boundary). A golden captured over UB records whatever the allocator happened to
+  leave in memory.
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
   starting with the Phase-0 flaw scan's findings.
 
 **Entry criteria:** ordered module list.
 **Exit criteria:** golden corpus captured + versioned; nondeterminism map;
-normalization rules; divergence ledger seeded from the flaw scan.
+normalization rules; divergence ledger seeded from the flaw scan; every pasted-C
+oracle diffed against its source and, where it parses untrusted input, exercised
+under ASan over a truncation sweep.
 **Artifacts:** `golden/corpus/`, `normalize.py` rules, `DIVERGENCES.md`.
 **lsof failure modes this prevents:** the empty-result "bare header" and the
 bare-`n` `-F` field shipped because there was no format oracle pinning them.
@@ -348,7 +375,9 @@ Then the loop — each step is a CI-enforced gate:
    ported → differential-passing → fuzzed → sanitized → unsafe-audited).
 
 **Entry criteria:** skeleton + oracle.
-**Exit criteria (per module):** all six gates green; `progress` row fully ticked.
+**Exit criteria (per module):** all six gates green; `progress` row fully ticked —
+and `progress.py drift --src crates` clean, so a module cannot ship without
+appearing in the table at all (LESSONS #021).
 **Artifacts:** the module, its fuzz target, its golden cases, divergence entries.
 **lsof failure modes this prevents:** the 7-commit hang (spike-first + sanitizer
 reasoning), fidelity misses shipping before a test pinned them (gate 2 + golden),

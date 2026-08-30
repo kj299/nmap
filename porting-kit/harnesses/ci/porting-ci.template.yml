@@ -59,6 +59,11 @@ jobs:
         with: { python-version: "3.11" }
       # Fails the build if ANY `unsafe {}` block lacks a // SAFETY: comment.
       - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py crates/
+      # Fails the build if a shipped module never reached progress.json. Keeping
+      # the table current was a habit and rotted to 12 untracked modules in one
+      # milestone; the retrospective reads this file as a primary artifact, so a
+      # stale table misleads the very review meant to catch drift (LESSONS #021).
+      - run: python3 porting-kit/harnesses/progress/progress.py --file progress.json drift --src crates
 
   miri:
     name: miri (UB in unsafe)

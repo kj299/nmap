@@ -293,10 +293,22 @@ pub fn render_grepable(
                 .collect();
             let _ = writeln!(
                 out,
-                "Host: {} ({})\tPorts: {}",
+                "Host: {} ({})\tPorts: {}{}",
                 host.address,
                 hostname,
-                entries.join(", ")
+                entries.join(", "),
+                host.os.as_ref().map(os_grepable).unwrap_or_default()
+            );
+        } else if let Some(os) = &host.os {
+            // nmap appends the OS fields to the record it is already building, which is
+            // the `Ports:` line. With nothing shown there is no such line, so the fields
+            // get their own record rather than being dropped.
+            let _ = writeln!(
+                out,
+                "Host: {} ({}){}",
+                host.address,
+                hostname,
+                os_grepable(os)
             );
         }
     }
@@ -312,6 +324,152 @@ pub fn render_grepable(
 
 /// Escape text for inclusion in XML attribute/character data (defends against
 /// injection via hostnames / service names — the class `xml.cc` handles).
+/// The XML `<os>` block plus the elements the C emits immediately after it —
+/// `<uptime>`, `<distance>`, `<tcpsequence>`, `<ipidsequence>`, `<tcptssequence>`.
+///
+/// Ports the XML half of `printosscanoutput`. Element order, attribute order and the
+/// emit conditions are the C's: `<portused>` only for a port actually used,
+/// `<osclass>` nested inside its `<osmatch>`, `<cpe>` children only when the class has
+/// them, `lastboot` omitted when the boot time could not be formatted, and the
+/// sequence elements gated on the response count (`> 3` for TCP, `> 2` for IP ID) —
+/// which is why the plain-text lines and these elements can never disagree.
+fn os_xml(os: &crate::osscan::HostOsReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "<os>");
+
+    for (state, proto, port) in [
+        ("open", "tcp", os.open_tcp_port),
+        ("closed", "tcp", os.closed_tcp_port),
+        ("closed", "udp", os.closed_udp_port),
+    ] {
+        // The C tests `> 0`, so port 0 is "no port used" rather than a used port zero.
+        if let Some(p) = port.filter(|p| *p > 0) {
+            let _ = writeln!(
+                out,
+                "<portused state=\"{state}\" proto=\"{proto}\" portid=\"{p}\"/>"
+            );
+        }
+    }
+
+    for m in &os.matches {
+        let (name, acc, line) = (xml_escape(&m.name), m.accuracy_pct, m.line);
+        if m.classes.is_empty() {
+            let _ = writeln!(
+                out,
+                "<osmatch name=\"{name}\" accuracy=\"{acc}\" line=\"{line}\"/>"
+            );
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "<osmatch name=\"{name}\" accuracy=\"{acc}\" line=\"{line}\">"
+        );
+        for c in &m.classes {
+            let mut attrs = format!(
+                "type=\"{}\" vendor=\"{}\" osfamily=\"{}\"",
+                xml_escape(&c.device_type),
+                xml_escape(&c.vendor),
+                xml_escape(&c.family),
+            );
+            // `osgen` is optional in the database and omitted, not blank, when absent.
+            if let Some(gen) = &c.generation {
+                let _ = write!(attrs, " osgen=\"{}\"", xml_escape(gen));
+            }
+            let _ = write!(attrs, " accuracy=\"{acc}\"");
+            if c.cpe.is_empty() {
+                let _ = writeln!(out, "<osclass {attrs}/>");
+            } else {
+                let _ = writeln!(out, "<osclass {attrs}>");
+                for cpe in &c.cpe {
+                    let _ = writeln!(out, "<cpe>{}</cpe>", xml_escape(cpe));
+                }
+                let _ = writeln!(out, "</osclass>");
+            }
+        }
+        let _ = writeln!(out, "</osmatch>");
+    }
+
+    if let Some(fp) = &os.fingerprint {
+        let _ = writeln!(out, "<osfingerprint fingerprint=\"{}\"/>", xml_escape(fp));
+    }
+    let _ = writeln!(out, "</os>");
+
+    // The C emits <uptime> whenever a boot time exists — unlike the plain-text line,
+    // which it gates on -v.
+    if let Some(u) = &os.uptime {
+        match &u.lastboot {
+            Some(t) => {
+                let _ = writeln!(
+                    out,
+                    "<uptime seconds=\"{}\" lastboot=\"{}\"/>",
+                    u.seconds,
+                    xml_escape(t)
+                );
+            }
+            None => {
+                let _ = writeln!(out, "<uptime seconds=\"{}\"/>", u.seconds);
+            }
+        }
+    }
+    if let Some(d) = os.distance {
+        let _ = writeln!(out, "<distance value=\"{d}\"/>");
+    }
+
+    let (seqs, ipids, timestamps) = crate::osscan::seq_value_lists(&os.seq);
+    if os.seq.responses > 3 {
+        let _ = writeln!(
+            out,
+            "<tcpsequence index=\"{}\" difficulty=\"{}\" values=\"{}\"/>",
+            os.seq.index,
+            xml_escape(crate::osscan::difficulty_str(os.seq.index)),
+            xml_escape(&seqs)
+        );
+    }
+    if os.seq.responses > 2 {
+        let _ = writeln!(
+            out,
+            "<ipidsequence class=\"{}\" values=\"{}\"/>",
+            xml_escape(crate::osscan::ipid_class_str(os.seq.ipid_class)),
+            xml_escape(&ipids)
+        );
+        // The C emits <tcptssequence> inside the same `responses > 2` block.
+        let _ = writeln!(
+            out,
+            "<tcptssequence values=\"{}\"/>",
+            xml_escape(&timestamps)
+        );
+    }
+    out
+}
+
+/// The grepable OS fields nmap appends to a host's record: `OS:`, `Seq Index:` and
+/// `IP ID Seq:` (the C's `LOG_MACHINE` writes in `printosscanoutput`).
+///
+/// Each is tab-prefixed because it extends an existing record rather than starting one.
+/// `OS:` lists every match the C would print, `|`-separated. The two sequence fields
+/// carry the same response-count gates as the plain text and the XML.
+fn os_grepable(os: &crate::osscan::HostOsReport) -> String {
+    let mut out = String::new();
+    if !os.matches.is_empty() {
+        let names: Vec<&str> = os.matches.iter().map(|m| m.name.as_str()).collect();
+        // The field separator is `\t` and records are one per line, so a name carrying
+        // either would corrupt the record; nmap does not escape here, and a database
+        // name cannot contain them.
+        let _ = write!(out, "\tOS: {}", names.join("|"));
+    }
+    if os.seq.responses > 3 {
+        let _ = write!(out, "\tSeq Index: {}", os.seq.index);
+    }
+    if os.seq.responses > 2 {
+        let _ = write!(
+            out,
+            "\tIP ID Seq: {}",
+            crate::osscan::ipid_class_str(os.seq.ipid_class)
+        );
+    }
+    out
+}
+
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -442,6 +600,9 @@ pub fn render_xml(
             );
         }
         let _ = writeln!(out, "</ports>");
+        if let Some(os) = &host.os {
+            out.push_str(&os_xml(os));
+        }
         let _ = writeln!(out, "</host>");
     }
 
@@ -631,5 +792,178 @@ mod tests {
         let out = render_xml(&r, &meta(), None);
         assert!(out.contains("evil&quot;&gt;&lt;inject&gt;"));
         assert!(!out.contains("<inject>"));
+    }
+    // ---- OS detection: the XML <os> block and the grepable fields ----
+
+    fn os_report() -> crate::osscan::HostOsReport {
+        use crate::osdb::model::OsClass;
+        crate::osscan::HostOsReport {
+            open_tcp_port: Some(22),
+            closed_tcp_port: Some(1),
+            closed_udp_port: Some(42000),
+            matches: vec![crate::osscan::OsMatchReport {
+                name: "Linux 5.X".to_owned(),
+                accuracy_pct: 100,
+                line: 4242,
+                classes: vec![OsClass {
+                    vendor: "Linux".to_owned(),
+                    family: "Linux".to_owned(),
+                    generation: Some("5.X".to_owned()),
+                    device_type: "general purpose".to_owned(),
+                    cpe: vec!["cpe:/o:linux:linux_kernel:5".to_owned()],
+                }],
+            }],
+            fingerprint: None,
+            uptime: Some(crate::osscan::UptimeReport {
+                seconds: 216_000,
+                lastboot: Some("Sat Aug 30 17:00:00 2025 UTC".to_owned()),
+            }),
+            distance: Some(3),
+            seq: crate::osscan::SeqReport {
+                responses: 6,
+                seqs: vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                ipids: vec![1, 2, 3, 4, 5, 6],
+                timestamps: vec![10, 20, 30, 40, 50, 60],
+                index: 260,
+                ipid_class: crate::ipid::IpidSequence::Incr,
+            },
+        }
+    }
+
+    fn host_with_os(os: crate::osscan::HostOsReport) -> ScanResults {
+        let mut r = sample();
+        r.hosts[0].os = Some(os);
+        r
+    }
+
+    #[test]
+    fn xml_os_block_carries_every_element_the_c_emits() {
+        let out = render_xml(&host_with_os(os_report()), &meta(), None);
+        for want in [
+            "<os>",
+            "<portused state=\"open\" proto=\"tcp\" portid=\"22\"/>",
+            "<portused state=\"closed\" proto=\"tcp\" portid=\"1\"/>",
+            "<portused state=\"closed\" proto=\"udp\" portid=\"42000\"/>",
+            "<osmatch name=\"Linux 5.X\" accuracy=\"100\" line=\"4242\">",
+            "<osclass type=\"general purpose\" vendor=\"Linux\" osfamily=\"Linux\" osgen=\"5.X\" accuracy=\"100\">",
+            "<cpe>cpe:/o:linux:linux_kernel:5</cpe>",
+            "</osclass>",
+            "</osmatch>",
+            "</os>",
+            "<uptime seconds=\"216000\" lastboot=\"Sat Aug 30 17:00:00 2025 UTC\"/>",
+            "<distance value=\"3\"/>",
+            "<tcpsequence index=\"260\"",
+            "<ipidsequence class=",
+            "<tcptssequence values=",
+        ] {
+            assert!(out.contains(want), "missing {want}\n--- got ---\n{out}");
+        }
+        // The block sits inside <host>, after the ports.
+        let (ports, os, host_end) = (
+            out.find("</ports>").unwrap(),
+            out.find("<os>").unwrap(),
+            out.find("</host>").unwrap(),
+        );
+        assert!(ports < os && os < host_end, "os block is misplaced");
+    }
+
+    #[test]
+    fn xml_omits_what_the_c_omits() {
+        let mut os = os_report();
+        // No port used, no <portused>. The C tests `> 0`, so zero means "none".
+        os.open_tcp_port = None;
+        os.closed_tcp_port = Some(0);
+        // A class with no generation and no CPEs collapses to an empty element.
+        os.matches[0].classes[0].generation = None;
+        os.matches[0].classes[0].cpe.clear();
+        // No boot time formatted: the C drops the attribute, not the element.
+        os.uptime = Some(crate::osscan::UptimeReport {
+            seconds: 60,
+            lastboot: None,
+        });
+        os.distance = None;
+
+        let out = render_xml(&host_with_os(os), &meta(), None);
+        // Scoped to <portused>: `state="open"` also appears in the ports table.
+        assert!(
+            !out.contains("<portused state=\"open\""),
+            "no open port was used"
+        );
+        assert!(!out.contains("portid=\"0\""), "port 0 means none");
+        assert!(
+            !out.contains("osgen="),
+            "absent generation is omitted, not blank"
+        );
+        assert!(
+            out.contains("accuracy=\"100\"/>"),
+            "class collapses when it has no cpe"
+        );
+        assert!(out.contains("<uptime seconds=\"60\"/>"));
+        assert!(!out.contains("<distance"));
+    }
+
+    // The C gates <tcpsequence> on responses > 3 and <ipidsequence> on responses > 2,
+    // using the response count rather than the array lengths.
+    #[test]
+    fn xml_sequence_elements_follow_the_response_count() {
+        for (responses, tcp, ipid) in [(6, true, true), (3, false, true), (2, false, false)] {
+            let mut os = os_report();
+            os.seq.responses = responses;
+            let out = render_xml(&host_with_os(os), &meta(), None);
+            assert_eq!(out.contains("<tcpsequence"), tcp, "responses={responses}");
+            assert_eq!(out.contains("<ipidsequence"), ipid, "responses={responses}");
+        }
+    }
+
+    // The value lists are bounded by the response count, not by the vector length —
+    // the C reads only the live entries of its fixed-size arrays.
+    #[test]
+    fn xml_value_lists_are_bounded_by_the_response_count() {
+        let mut os = os_report();
+        os.seq.responses = 4;
+        let out = render_xml(&host_with_os(os), &meta(), None);
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("<tcpsequence"))
+            .expect("a tcpsequence element");
+        assert!(line.contains("values=\"AA,BB,CC,DD\""), "got: {line}");
+        assert!(
+            !line.contains("EE"),
+            "entries past `responses` must not print"
+        );
+    }
+
+    #[test]
+    fn grepable_appends_the_os_fields_to_the_ports_record() {
+        let out = render_grepable(&host_with_os(os_report()), &meta(), None);
+        let line = out
+            .lines()
+            .find(|l| l.contains("Ports:"))
+            .expect("a Ports record");
+        assert!(line.contains("\tOS: Linux 5.X"), "got: {line}");
+        assert!(line.contains("\tSeq Index: 260"), "got: {line}");
+        assert!(line.contains("\tIP ID Seq: "), "got: {line}");
+    }
+
+    #[test]
+    fn grepable_still_reports_os_when_no_ports_are_shown() {
+        let mut r = host_with_os(os_report());
+        r.hosts[0].ports.clear();
+        let out = render_grepable(&r, &meta(), None);
+        assert!(
+            out.lines().any(|l| l.contains("OS: Linux 5.X")),
+            "the OS fields must not vanish with the ports record\n{out}"
+        );
+    }
+
+    #[test]
+    fn os_names_and_classes_are_xml_escaped() {
+        let mut os = os_report();
+        os.matches[0].name = "evil\"><inject>".to_owned();
+        os.matches[0].classes[0].cpe = vec!["cpe:/o:<evil>".to_owned()];
+        let out = render_xml(&host_with_os(os), &meta(), None);
+        assert!(out.contains("evil&quot;&gt;&lt;inject&gt;"));
+        assert!(!out.contains("<inject>"));
+        assert!(out.contains("<cpe>cpe:/o:&lt;evil&gt;</cpe>"));
     }
 }

@@ -73,9 +73,13 @@ and IPv6 tracks are approved. Port order, leaf-first:
    `--max-os-tries N` overrides the retry count. Ledgered
    `uptime-implausible-claim-still-dates-a-boot`,
    `uptime-ladder-differs-from-the-ts-attribute-ladder`, `uptime-boot-time-in-utc`.
-   Still outstanding: **XML/grepable `<os>` output** (the `<os>`, `<osmatch>`,
-   `<osclass>`, `<uptime>`, `<tcpsequence>` and `<ipidsequence>` elements, plus the
-   grepable `Seq Index:`/`IP ID Seq:` fields).
+   ~~Still outstanding: **XML/grepable `<os>` output**~~ — **done**. The `<os>` block
+   (`<portused>`, `<osmatch>` with nested `<osclass>`/`<cpe>`, `<osfingerprint>`) plus
+   `<uptime>`, `<distance>`, `<tcpsequence>`, `<ipidsequence>` and `<tcptssequence>`,
+   and the grepable `OS:`/`Seq Index:`/`IP ID Seq:` fields. The report is carried on
+   `model::Host.os` as a rendered-form snapshot, so the normal, XML and grepable
+   outputs are built from the same values and cannot disagree. **`-O` is now
+   feature-complete against the C's user-visible output.**
    **Harness note:** the differential compares the *final* round's fingerprint from each
    tool's `-d` output and strips the fields that are measurements rather than properties
    (the `SCAN` metadata line, `SEQ`'s `SP`/`GCD`/`ISR`, a numeric `SEQ.TS`, and `T`/`TG`).
@@ -189,6 +193,14 @@ and IPv6 tracks are approved. Port order, leaf-first:
 - ~~**DRY the scan matchers**~~ — **done**. The three drivers collapsed into one
   (`sys::group`), and the duplicated `ipv4_offset` plus the ICMP-quote decode now live
   once in `core::icmp_quote`.
+- **Fail the fuzz *build* fast, in its own CI step.** The "fuzz crate is not in the
+  workspace lint sweep" lesson has now bitten **three times** (#69, and twice while
+  completing `-O` — both times a field added to `SeqReport`). Each time the local
+  `cargo +nightly fuzz build` sweep caught it, but in CI the compile error is buried
+  inside the ~35-minute fuzz job, so a slip surfaces late. A `for t in $(cargo +nightly
+  fuzz list); do cargo +nightly fuzz build $t; done` step at the *head* of that job (or
+  a separate fast job) would fail in ~2 minutes instead. Cheap; not done here to keep
+  this PR to its subject.
 - **`cargo fuzz run <t> fuzz/seeds/<t>` writes into the committed seed dir.** libFuzzer
   treats the corpus argument as read-*write*, so a local smoke run leaves hundreds of
   machine-generated inputs in the working tree (one 60 s run on `osscan_policy` added

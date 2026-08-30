@@ -104,11 +104,11 @@ async fn main() -> ExitCode {
     let os_block = if cfg.os_detection {
         #[cfg(feature = "pcap")]
         {
-            run_os_detection(&cfg, &results).await
+            run_os_detection(&cfg, &mut results).await
         }
         #[cfg(not(feature = "pcap"))]
         {
-            run_os_detection(&cfg, &results)
+            run_os_detection(&cfg, &mut results)
         }
     } else {
         String::new()
@@ -348,7 +348,7 @@ async fn flag_or_fallback(
 /// privilege says so plainly rather than printing nothing — silence would leave the user
 /// unable to tell an unidentifiable host from a build that cannot look.
 #[cfg(feature = "pcap")]
-async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
+async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String {
     use nmap_core::osdb::model::FingerPrintDb;
     use nmap_core::osscan::{
         attribute_distance, render, submission_reason, HostFacts, Report, SubmissionInputs,
@@ -365,7 +365,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
         return out;
     }
 
-    for host in &results.hosts {
+    for host in &mut results.hosts {
         if host.state != HostState::Up {
             continue;
         }
@@ -375,7 +375,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
                 // IPv6 OS detection is a different engine end to end: a different probe
                 // battery, a different feature vector, and a trained classifier rather
                 // than a fingerprint database.
-                out.push_str(&run_os_detection6(cfg, host, v6).await);
+                out.push_str(&run_os_detection6(cfg, &*host, v6).await);
                 continue;
             }
         };
@@ -487,7 +487,68 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
             // Asking to see it is not the same as being invited to send it in.
             always_show_fingerprint: cfg.debugging > 0 || cfg.verbose > 1,
         };
-        out.push_str(&render(&report));
+        let text = render(&report);
+
+        // The same facts, in the shape the XML and grepable renderers need. Built from
+        // the *same* values the text just used, so the three outputs cannot disagree.
+        host.os = Some(nmap_core::osscan::HostOsReport {
+            open_tcp_port: selected.open_tcp,
+            closed_tcp_port: selected.closed_tcp,
+            closed_udp_port: selected.closed_udp,
+            matches: nmap_core::osscan::listed_guesses(matches)
+                .into_iter()
+                .map(|m| {
+                    let record = db.prints.get(m.index);
+                    nmap_core::osscan::OsMatchReport {
+                        name: m.os_name.clone(),
+                        // The C's `(int)(accuracy * 100)` — a C cast, so it TRUNCATES
+                        // rather than rounds. Clamped first so a non-finite or
+                        // out-of-range accuracy cannot produce an undefined cast.
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "truncation is the C's behaviour and the value is \
+                                      clamped to 0..=100 immediately above"
+                        )]
+                        accuracy_pct: (m.accuracy * 100.0).clamp(0.0, 100.0) as u32,
+                        line: record.map_or(0, |r| r.line),
+                        classes: record.map(|r| r.classes.clone()).unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            // The C writes <osfingerprint> "any time it would be printed to any other
+            // output format", so the condition is literally "did the text include it".
+            // Asking that directly — rather than sniffing for a header string, which
+            // this renderer does not emit and which would have made this silently
+            // always-false — keeps the two in step however the text branches change.
+            fingerprint: {
+                let fp = observation.fingerprint.render_tests();
+                (!fp.is_empty() && text.contains(&fp)).then_some(fp)
+            },
+            uptime: report
+                .uptime
+                .as_ref()
+                .map(|u| nmap_core::osscan::UptimeReport {
+                    // The C emits `%.0f`, which ROUNDS — it does not truncate the
+                    // way a cast would, so `.round()` comes first. Clamped so a wild
+                    // value cannot make the conversion undefined.
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "clamped to i32 range immediately above, so the i64 \
+                                  conversion is exact"
+                    )]
+                    seconds: u
+                        .seconds
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                        as i64,
+                    lastboot: u.since.clone(),
+                }),
+            distance: distance.hops.map(i32::from),
+            seq: seq.clone(),
+        });
+
+        out.push_str(&text);
     }
     out
 }
@@ -553,7 +614,7 @@ async fn run_os_detection6(
 
 /// Without the `pcap` feature there is no capture backend, so `-O` cannot run.
 #[cfg(not(feature = "pcap"))]
-fn run_os_detection(_cfg: &RunConfig, _results: &ScanResults) -> String {
+fn run_os_detection(_cfg: &RunConfig, _results: &mut ScanResults) -> String {
     eprintln!(
         "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
     );

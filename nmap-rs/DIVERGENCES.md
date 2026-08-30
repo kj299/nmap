@@ -1142,6 +1142,20 @@ variance, and a wrong scaling formula.
       aborting — so it is pinned by the `a_zero_length_response_degrades_to_sentinel_not_a_panic`
       unit test and by the vectorize fuzz target instead.
 
+## Milestone 5 — IPv6 OS detection: the driver
+
+- [x] `fp6-distance-hoplimit-path-is-dead` (`sys::fpengine`, ports `FPHost6::finish`'s
+      distance calculation): nmap computes a hop-limit distance from the `IE2` and `U1`
+      responses via `get_encapsulated_hoplimit`, which needs an ICMPv6 **error** quoting an
+      inner IPv6 datagram. But `is_response` never attributes an ICMPv6 error to a probe
+      (the `dynamic_cast` bug ported as `fp6-match-icmp-error-never-matches`), and a normal
+      `IE2` echo reply is informational (no encapsulated packet), so that computation yields
+      `-1` on every path. The driver therefore sets the target distance from **locality
+      alone** — `0`/localhost, `1`/directly-connected, `None`/remote — which is exactly the
+      value nmap ends up with. Reproducing rather than "fixing" keeps the feature vector's
+      hop-limit rounding (`vectorize_hlim`'s `DIST_METHOD_*` tolerance) in step with the
+      trained model. *(Realized at M5 `sys::fpengine`.)*
+
 ## Milestone 5 — IPv6 OS detection: response matching
 
 - [x] `fp6-match-icmp-error-never-matches` (`core::fp6_match`, ports the IPv6 path of

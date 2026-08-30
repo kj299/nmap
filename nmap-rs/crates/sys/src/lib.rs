@@ -16,6 +16,7 @@
 
 pub mod capture;
 pub mod flagscan;
+pub mod fpengine;
 pub mod group;
 pub mod net;
 pub mod netif;

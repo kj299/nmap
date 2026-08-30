@@ -154,12 +154,19 @@ and IPv6 tracks are approved. Port order, leaf-first:
        match over `netif`'s IPv6 addresses, else the interface holding a default IPv6
        gateway; yields the egress interface, source address, and next-hop address. The
        prefix arithmetic is pure and CI-testable; only the enumeration touches the OS.
-     - **12b-ii-b-3. L2 sender + resolver + CLI `-6 -O`** — the privileged shim: an
-       Ethernet-framing `RawSender` for IPv6, the NDP send/retransmit loop driving
-       `core::ndp` (the C's 100/400/800 ms schedule), IPv6 capture, and the CLI branch that
-       today reports "supports IPv4 only". `sys::fpengine::scan_host` is the entry point.
-       **This is the only part with no CI-differential** — it needs a privileged host and
-       real IPv6, and must be validated by hand.
+     - ~~**12b-ii-b-3. L2 sender + resolver + CLI `-6 -O`**~~ — **done**, with the caveat
+       below. `sys::ndp` runs the C's 100/400/800 ms solicitation schedule (deadlines from
+       the start of the exchange, as `doND` computes them) generically over
+       `RawSender`/`PacketSource`, so the loop is mock-tested in CI; `rawio::EthFramingSender`
+       wraps any L2 backend to frame IPv6 packets, also mock-tested;
+       `fpengine::os_scan_host6` is the privileged entry point, and the CLI `-6 -O` branch
+       reports the model's ranked guesses. Ledgered `ipv6-send-is-layer-2-only` and
+       `ipv6-os-detection-is-a-classifier-not-a-database`.
+       **Still unvalidated on real hardware**: everything below the seams is tested, but
+       the wiring in `os_scan_host6` — opening the pcap handles, the live solicitation
+       exchange, and a real battery on a real IPv6 link — has no CI-differential and needs
+       a privileged host with real IPv6 to exercise. Treat it as untested-in-anger until
+       someone runs it there.
 
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).

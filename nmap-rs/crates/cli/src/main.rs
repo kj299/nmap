@@ -370,9 +370,15 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
         if host.state != HostState::Up {
             continue;
         }
-        let IpAddr::V4(v4) = host.address else {
-            eprintln!("nmap-rs: -O supports IPv4 only; skipping {}", host.address);
-            continue;
+        let v4 = match host.address {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(v6) => {
+                // IPv6 OS detection is a different engine end to end: a different probe
+                // battery, a different feature vector, and a trained classifier rather
+                // than a fingerprint database.
+                out.push_str(&run_os_detection6(cfg, host, v6).await);
+                continue;
+            }
         };
 
         let has_open = host.ports.iter().any(|p| p.state == PortState::Open);
@@ -453,6 +459,65 @@ async fn run_os_detection(cfg: &RunConfig, results: &ScanResults) -> String {
             always_show_fingerprint: cfg.debugging > 0 || cfg.verbose > 1,
         };
         out.push_str(&render(&report));
+    }
+    out
+}
+
+/// IPv6 OS detection for one host — the `-6 -O` branch.
+///
+/// Unlike IPv4 this is a classifier, not a database lookup: the battery is scored into a
+/// 695-feature vector and run through nmap's trained model, so the output is the model's
+/// ranked guesses rather than a fingerprint match.
+#[cfg(feature = "pcap")]
+async fn run_os_detection6(
+    cfg: &RunConfig,
+    host: &nmap_core::model::Host,
+    v6: std::net::Ipv6Addr,
+) -> String {
+    use nmap_core::fpmodel::FpModel;
+
+    let mut out = String::new();
+    let model = match FpModel::load() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("nmap-rs: -6 -O needs the IPv6 fingerprint model ({e:?}); skipping {v6}");
+            return out;
+        }
+    };
+
+    let outcome = nmap_sys::fpengine::os_scan_host6(v6, &host.ports, &model).await;
+    let (observation, results, _params) = match outcome {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("nmap-rs: -6 -O requires root/CAP_NET_RAW; skipping {v6}");
+            return out;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            // No route, or the next hop never answered a neighbor solicitation. Without
+            // its MAC no IPv6 probe can be framed — there is no L3 fallback on Linux.
+            eprintln!("nmap-rs: -6 -O cannot reach {v6} ({e}); skipping");
+            return out;
+        }
+        Err(e) => {
+            eprintln!("nmap-rs: -6 -O setup failed for {v6} ({e})");
+            return out;
+        }
+    };
+
+    if results.matches.is_empty() {
+        out.push_str("No OS matches for host (IPv6)\n");
+    } else {
+        out.push_str("OS guesses (IPv6):\n");
+        for m in &results.matches {
+            let pct = m.accuracy * 100.0;
+            out.push_str(&format!("  {} ({pct:.0}%)\n", m.os_name));
+        }
+    }
+    if cfg.debugging > 0 || cfg.verbose > 1 {
+        out.push_str(&format!(
+            "IPv6 observation: distance {} ({:?})\n",
+            observation.distance, observation.distance_method
+        ));
     }
     out
 }

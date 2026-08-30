@@ -1253,6 +1253,30 @@ variance, and a wrong scaling formula.
       gated by the differential, which records the C's own `mac=none` verdict for exactly
       these frames. *(Found and fixed at M5 `core::ndp`.)*
 
+### The wire path
+
+- [x] `ipv6-send-is-layer-2-only` (`sys::rawio::EthFramingSender`, `sys::fpengine::os_scan_host6`):
+      the IPv4 driver hands a fully-built packet to an `IP_HDRINCL` raw socket and lets
+      the kernel route it. **There is no IPv6 equivalent** — Linux has no
+      `IPV6_HDRINCL`, and an `AF_INET6` raw socket does not treat a caller-supplied IPv6
+      header the way `IP_HDRINCL` treats an IPv4 one. So the IPv6 battery, which
+      `core::build6` emits as complete IPv6 packets, must be framed and injected at layer
+      2, which in turn is why the driver must resolve the next hop's MAC by neighbor
+      discovery before it can send anything at all. nmap reaches the same place by the
+      same reasoning (`send_ip_packet_eth_or_sd` falls to the Ethernet path); recorded
+      because it explains why the IPv6 driver has a whole subsystem the IPv4 one does
+      not, and why `os_scan_host6` can fail with `AddrNotAvailable` where the IPv4 path
+      would simply send. The framing itself is a thin generic wrapper over any
+      [`RawSender`], so it is exercised against a mock in CI and only the injection
+      beneath it needs privilege. *(Introduced at M5 item 12b-ii-b-3.)*
+- [x] `ipv6-os-detection-is-a-classifier-not-a-database` (`cli`, `-6 -O`): the IPv4 `-O`
+      output is a fingerprint-database match, with a submission invitation, a distance
+      attribution and a `SEQ` report. IPv6 `-O` is a different engine end to end — the
+      battery is scored into a 695-feature vector and run through nmap's **trained
+      model** — so the CLI reports the model's ranked guesses with their logistic
+      accuracies instead. No fingerprint is offered for submission, because there is no
+      database to submit one to. *(Introduced at M5 item 12b-ii-b-3.)*
+
 ### Faithfully reproduced C quirks (deliberately *not* fixed)
 
 - [x] `ndp-advert-single-fixed-option-slot` (`core::ndp`): the C inspects the option at

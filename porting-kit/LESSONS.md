@@ -633,6 +633,82 @@ These entries are the M2 retrospective.
   six skills fail, then restoring it.
 - **Section amended:** new `porting-kit/Makefile`; `skills/check_skills.py` (check 4 + self-tests).
 
+## 023. The fuzz crate is outside the workspace lint sweep — compile it before fuzzing it, in its own step
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — M5, completing IPv4 `-O`
+- **What happened:** `cargo clippy --workspace --all-targets` does **not** build `fuzz/`:
+  it is a separate crate, compiled only by `cargo +nightly fuzz build`. So adding a
+  field to a type a fuzz target constructs passes fmt, all three clippy configurations,
+  both feature test suites and Miri — and then fails the fuzz job on a plain compile
+  error. It happened **three times**: once on #69 (a field on `osscan::Report`), then
+  twice in consecutive PRs while finishing `-O` (a field on `SeqReport`, each time).
+  Every occurrence was caught locally by the mandatory build sweep, so none reached a
+  reviewer — but in CI the error is buried *inside* the ~35-minute smoke job, surfacing
+  only after the first target has already fuzzed for its full 60 seconds.
+  The note lived in the port's own `BACKLOG.md` from the first occurrence and never
+  reached the kit, which is LESSONS #019's failure repeating: a lesson recorded outside
+  the kit does not compound, and the next two occurrences were the price.
+- **Kit change:** the CI template's fuzz job gains a **`fuzz targets compile` step that
+  runs `cargo +nightly fuzz build` (no target name — builds them all in one invocation,
+  sharing codegen) before any target is run**. A compile break now fails the job in
+  about a minute instead of tens of minutes, and as its own named step rather than
+  buried in a fuzzing log. The smoke run becomes a separate named step so the two
+  failure modes are told apart at a glance in the job list.
+- **Section amended:** `harnesses/ci/porting-ci.template.yml` (fuzz-smoke job).
+
+## 024. A per-target time-boxed gate is a job that grows without anyone deciding to grow it
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — CI fuzz job
+- **What happened:** The fuzz smoke runs each target for 60 seconds. That reads as a
+  fixed cost, but it is per *target*, and targets accumulate one per ported module —
+  nmap reached **38 of them**, so the job quietly grew to ~38 minutes of pure fuzzing
+  plus toolchain overhead. Nobody chose a 45-minute job; it arrived one module at a
+  time. The gate was still correct, just slow enough that a red result came back long
+  after the developer had moved on, which is how a control stops being used well.
+- **Kit change:** the CI template's fuzz job is **sharded across a matrix**
+  (`fail-fast: false`, so one shard's crash does not cancel the others and every
+  failure is visible in one run). Targets are split round-robin by line number with
+  the divisor taken from **`strategy.job-total`**, so the split follows the matrix
+  automatically: changing the shard count is a one-line edit and no target can be
+  silently dropped or run twice. Wall-clock becomes a slice plus fixed overhead
+  instead of the whole battery.
+  Two things worth knowing when tuning it: each shard still runs `cargo fuzz build`
+  for *all* targets (one invocation, shared codegen) so it stays self-contained with
+  no artifact plumbing and keeps the fail-fast compile check of #023; and past roughly
+  6–8 shards the per-job overhead (checkout, `cargo install cargo-fuzz`, build)
+  dominates, so more shards stop helping.
+- **Section amended:** `harnesses/ci/porting-ci.template.yml` (fuzz-smoke job).
+
+## 025. `push` + `pull_request` without a branch filter runs the whole pipeline twice, forever, silently
+
+- **Date:** 2026-08-30
+- **Codebase:** nmap — CI workflow (and the kit's own template, which had it worse)
+- **What happened:** The workflow triggered on `push` (branches `master` **and**
+  `claude/**`) *and* on `pull_request`. Every PR from a topic branch therefore ran the
+  entire safety pipeline **twice** — six jobs became twelve checks. It shipped that way
+  for five milestones without being noticed, because "12 checks" looked like a plausible
+  number and was mistaken (repeatedly, in this session's own reporting) for *six jobs
+  across two feature configurations* — which the workflow does not even do. The
+  duplication only became visible when sharding the fuzz job turned 12 checks into 22
+  and the runner pool started queueing. The kit's template had the same bug and worse:
+  its `push` had no branch filter at all, so it fired on every push to every branch.
+  Cost: 100% of CI, doubled, for five milestones.
+- **Kit change:** the template scopes `push` to the **default branch only**
+  (`[main, master]`), leaving `pull_request` to cover topic branches — which it does
+  better anyway, testing the merge commit rather than the branch head in isolation, and
+  re-running on force-push via the default `synchronize` activity. Also adds a
+  **`concurrency` group** that supersedes a PR's in-flight run when it is force-pushed,
+  with `cancel-in-progress` expression-gated to pull requests only so a default-branch
+  run is never cancelled (an intermediate merge commit's run is the only evidence that
+  commit was green). Trade-off recorded in the template comment: a topic branch pushed
+  with no open PR is not built until a PR exists.
+  The general lesson beyond the fix: **count your checks against your jobs.** A check
+  count that is a clean multiple of the job count is a duplicate-trigger smell, and it
+  hides in plain sight because it looks like a matrix.
+- **Section amended:** `harnesses/ci/porting-ci.template.yml` (`on:` triggers, new `concurrency`).
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

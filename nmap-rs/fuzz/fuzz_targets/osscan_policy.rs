@@ -96,6 +96,9 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let seq = SeqReport {
+        // Chosen independently of the vector lengths, so the fuzzer explores a
+        // response count both shorter and LONGER than the vectors it bounds.
+        responses: usize::from(c.u8() % 40),
         seqs: (0..usize::from(c.u8() % 40)).map(|_| c.u32()).collect(),
         ipids: (0..usize::from(c.u8() % 40)).map(|_| c.u16()).collect(),
         timestamps: (0..usize::from(c.u8() % 40)).map(|_| c.u32()).collect(),
@@ -103,11 +106,23 @@ fuzz_target!(|data: &[u8]| {
         ipid_class: ipid_class(c.u8()),
     };
 
-    // The value lists must be produced without the C's fatal(), at any length.
+    // The value lists must be produced without the C's fatal(), at any length, and
+    // each is bounded by `responses` — the C reads only the live entries of its
+    // fixed-size arrays. A `responses` larger than the vector must yield the whole
+    // vector rather than panicking or reading past it.
     let (s, i, t) = seq_value_lists(&seq);
-    assert_eq!(s.matches(',').count(), seq.seqs.len().saturating_sub(1));
-    assert_eq!(i.matches(',').count(), seq.ipids.len().saturating_sub(1));
-    assert_eq!(t.matches(',').count(), seq.timestamps.len().saturating_sub(1));
+    let listed = |rendered: &str, len: usize| {
+        let want = seq.responses.min(len);
+        assert_eq!(
+            rendered.matches(',').count(),
+            want.saturating_sub(1),
+            "expected {want} entries from responses={} over a {len}-long vector, got {rendered:?}",
+            seq.responses
+        );
+    };
+    listed(&s, seq.seqs.len());
+    listed(&i, seq.ipids.len());
+    listed(&t, seq.timestamps.len());
 
     let inputs = SubmissionInputs {
         scan_delay_ms: u64::from(c.u32()),

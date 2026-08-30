@@ -152,6 +152,9 @@ pub fn seq_report(
     let samples: Vec<&SeqReply> = inputs.replies.iter().flatten().collect();
 
     let report = SeqReport {
+        // The C's `si.responses`: how many of the six SEQ probes were answered. Both
+        // sequence gates and all three value lists are bounded by it.
+        responses: analysis.responses,
         seqs: samples.iter().map(|r| r.isn).collect(),
         ipids: capture.tcp_ipids.clone(),
         timestamps: samples.iter().map(|r| r.timestamp).collect(),

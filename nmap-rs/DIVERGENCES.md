@@ -1207,6 +1207,32 @@ variance, and a wrong scaling formula.
 
 ## Milestone 5 — completing IPv4 `-O`: uptime and sequence reporting
 
+### Structural (no observable divergence)
+
+- [x] `os-report-is-a-rendered-form-snapshot` (`core::osscan::HostOsReport`, carried on
+      `model::Host.os`): nmap keeps the OS result as live state on the `Target` and each
+      output format reaches into it, converting as it prints — `(int)(accuracy * 100)`
+      here, `%.0f` there. This port stores the values **already in the shape they are
+      emitted** (whole-percent accuracy, whole-second uptime, pre-formatted boot time),
+      so the three renderers do no arithmetic and cannot round differently from each
+      other. It also keeps `ScanResults` comparable by value (`Eq`), which the test
+      suite relies on. The conversions happen once, at the point the report is built,
+      each matching its C counterpart: accuracy **truncates** because the C casts, and
+      uptime seconds **round** because the C uses `%.0f` — a distinction easy to lose,
+      and one this port got wrong on the first attempt before clippy's truncation lint
+      forced the question. *(Introduced at M5 `-O` XML/grepable output.)*
+- [x] `seq-value-lists-bounded-by-response-count` (`core::osscan`): the C gates the
+      sequence lines and elements on `seq.responses`, and uses that same count as the
+      bound when building the `values` lists — its `seqs`/`ipids`/`timestamps` are
+      fixed-size arrays, so entries past `responses` are stale and must not print. The
+      port's vectors are exact, so the two agree in practice, but the gate and the bound
+      are taken from `responses` regardless: the IP-ID vector is filled by a different
+      collector from the ISN vector, and nothing structurally guarantees they are the
+      same length. Where the C would read past its live entries, `get(..n)` yields the
+      whole vector instead. Pinned by the `osscan_policy` fuzz target, which now chooses
+      `responses` independently of the vector lengths so it explores counts both shorter
+      and longer than what they hold.
+
 ### Faithfully reproduced C quirks (deliberately *not* fixed)
 
 - [x] `uptime-implausible-claim-still-dates-a-boot` (`core::osprobe::seq::estimate_uptime`,

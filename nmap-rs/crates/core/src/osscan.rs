@@ -348,6 +348,15 @@ fn hex_list<T: std::fmt::UpperHex>(values: &[T]) -> String {
 /// The sequence-prediction facts `-O` reports alongside the OS guess.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SeqReport {
+    /// How many of the six `SEQ` probes were answered (the C's `seq.responses`).
+    ///
+    /// The C gates the sequence lines on **this**, not on the array lengths, and uses it
+    /// as the bound when building the value lists — its arrays are fixed-size, so a
+    /// shorter run leaves stale entries past `responses` that must not be printed. Here
+    /// the vectors are exact, but taking the same bound keeps the two in step if the
+    /// IP-ID vector is ever a different length from the ISN vector (they come from
+    /// different collectors).
+    pub responses: usize,
     /// ISNs observed, in probe order.
     pub seqs: Vec<u32>,
     /// IP IDs observed.
@@ -439,6 +448,56 @@ pub fn format_boot_time(epoch: i64) -> Option<String> {
     Some(format!(
         "{wd} {mo} {day:2} {hour:02}:{minute:02}:{second:02} {year} UTC"
     ))
+}
+
+/// One `<osmatch>`: a matched record with the classifications nested under it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OsMatchReport {
+    /// The record's OS name.
+    pub name: String,
+    /// Accuracy as a whole percent. The C emits `(int)(accuracy * 100)`, truncating,
+    /// so the percentage is stored already rounded the C's way rather than as a float
+    /// — which also keeps the containing scan results comparable by value.
+    pub accuracy_pct: u32,
+    /// 1-based line the record starts on in `nmap-os-db` (the C's `match->line`).
+    pub line: usize,
+    /// `Class`/`CPE` classifications, emitted as nested `<osclass>` elements.
+    pub classes: Vec<crate::osdb::model::OsClass>,
+}
+
+/// The `<uptime>` element's data.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UptimeReport {
+    /// Seconds since boot. The C emits `%.0f`, so this is stored already rounded.
+    pub seconds: i64,
+    /// Formatted boot time; absent when it could not be formatted, in which case the C
+    /// omits the `lastboot` attribute entirely.
+    pub lastboot: Option<String>,
+}
+
+/// Everything the XML `<os>` block and the grepable OS fields need for one host.
+///
+/// Deliberately a *rendered-form* snapshot rather than a view over the scan state: the
+/// numbers are stored in the shape the C emits them (whole-percent accuracy, whole-second
+/// uptime), so the renderers do no arithmetic and the whole thing compares by value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HostOsReport {
+    /// The open TCP port the battery used, emitted as `<portused state="open">`.
+    pub open_tcp_port: Option<u16>,
+    /// The closed TCP port used.
+    pub closed_tcp_port: Option<u16>,
+    /// The closed UDP port used.
+    pub closed_udp_port: Option<u16>,
+    /// Matches to emit as `<osmatch>`, best first.
+    pub matches: Vec<OsMatchReport>,
+    /// The observed fingerprint, when it was fit to print (`<osfingerprint>`).
+    pub fingerprint: Option<String>,
+    /// Inferred uptime, when the timestamp clock dated a boot.
+    pub uptime: Option<UptimeReport>,
+    /// Hop distance, when known (`<distance value=...>`).
+    pub distance: Option<i32>,
+    /// Sequence-prediction facts behind `<tcpsequence>` / `<ipidsequence>`.
+    pub seq: SeqReport,
 }
 
 /// Everything [`render`] needs to produce the `-O` block.
@@ -577,14 +636,14 @@ pub fn render(r: &Report) -> String {
         out.push_str(&format!("Network Distance: {hops} hop{plural}\n"));
     }
 
-    if r.verbose && r.seq.seqs.len() > 3 {
+    if r.verbose && r.seq.responses > 3 {
         out.push_str(&format!(
             "TCP Sequence Prediction: Difficulty={} ({})\n",
             r.seq.index,
             difficulty_str(r.seq.index)
         ));
     }
-    if r.verbose && r.seq.ipids.len() > 2 {
+    if r.verbose && r.seq.responses > 2 {
         out.push_str(&format!(
             "IP ID Sequence Generation: {}\n",
             ipid_class_str(r.seq.ipid_class)
@@ -612,10 +671,13 @@ pub fn listed_guesses(matches: &MatchResults) -> Vec<&crate::osdb::score::OsMatc
 /// The comma-separated hex lists `-O` reports for the sequence samples.
 #[must_use]
 pub fn seq_value_lists(seq: &SeqReport) -> (String, String, String) {
+    // `.get(..n)` rather than indexing: a vector shorter than `responses` yields the
+    // whole vector instead of panicking, where the C would read past its live entries.
+    let take = |v: &[u32]| hex_list(v.get(..seq.responses).unwrap_or(v));
     (
-        hex_list(&seq.seqs),
-        hex_list(&seq.ipids),
-        hex_list(&seq.timestamps),
+        take(&seq.seqs),
+        hex_list(seq.ipids.get(..seq.responses).unwrap_or(&seq.ipids)),
+        take(&seq.timestamps),
     )
 }
 
@@ -1135,9 +1197,12 @@ mod tests {
         let m = results(ScanOutcome::Success, 1, vec![os_match("X", 1.0)]);
         let fp = FingerPrint::default();
         let seq = SeqReport {
+            // Four SEQ probes answered: enough for the TCP line (> 3) and the IP-ID
+            // line (> 2). The C gates on this count, not on the vector lengths.
+            responses: 4,
             seqs: vec![1, 2, 3, 4],
-            ipids: vec![1, 2, 3],
-            timestamps: vec![9, 8, 7],
+            ipids: vec![1, 2, 3, 4],
+            timestamps: vec![9, 8, 7, 6],
             index: 7,
             ipid_class: IpidSequence::Incr,
         };

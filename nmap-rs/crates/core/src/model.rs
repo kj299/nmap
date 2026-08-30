@@ -206,6 +206,10 @@ pub struct Host {
     pub state: HostState,
     /// Ports in the order discovered; render sorts as needed.
     pub ports: Vec<Port>,
+    /// OS-detection result, when `-O` ran and produced one. Lives on the host because
+    /// that is what it describes, and because the XML and grepable renderers need it
+    /// per host without a second lookup.
+    pub os: Option<crate::osscan::HostOsReport>,
 }
 
 impl Host {
@@ -215,6 +219,7 @@ impl Host {
             hostname: None,
             state,
             ports: Vec::new(),
+            os: None,
         }
     }
 

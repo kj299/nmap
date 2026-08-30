@@ -25,6 +25,24 @@ semantic-comparison stage, not build time — "it builds" tells you almost nothi
 5. **Validate every vector against the C first** — a wrong vector that "passes"
    teaches nothing. **Hold back a hidden acceptance set** (an LLM in the loop will
    overfit to visible vectors).
+5a. **An oracle copies the C; it never restates it.** Paste the reference function and
+   diff it against the source. Where that is impractical (headers, globals, member
+   state), state in a comment exactly which *inputs* were substituted and that no
+   logic was. A gate that compares the port against a paraphrase proves only
+   self-consistency — nmap's `apply_scale` oracle was retyped without the C's
+   `if (val < 0) continue;`, under a comment claiming verbatim, and the differential
+   passed bit-exact **while both sides were wrong** (LESSONS #019).
+5b. **Sanitize the pasted C over truncated input** (LESSONS #020). Where the oracle
+   contains real C that parses attacker-controlled bytes, build a second copy with
+   `-fsanitize=address -g -O0` and drive it with inputs cut short at every length
+   across each length-check boundary. A *curated* corpus will not trip it — the
+   corpus is built to stay inside defined behavior — so write the truncation sweep
+   separately. This is the cheapest mechanical check for a bounds test that does not
+   dominate the read it guards, the class `scan_c_flaws.py` structurally cannot see.
+5c. **Record no golden where the C is undefined.** Exclude that region from the
+   corpus, say so in the generator, and cover it from the Rust side (a test asserting
+   the port rejects every input in the gap, plus fuzz seeds at each boundary). A
+   golden captured over UB records whatever was left in memory, not behavior.
 6. **Seed `DIVERGENCES.md`** (copy `porting-kit/skeleton/DIVERGENCES.md`) from the
    Phase-0 flaw scan — the intentional-divergence ledger the differential reads.
 7. **Wire the differential** (used per module in `porting-kit-module`):

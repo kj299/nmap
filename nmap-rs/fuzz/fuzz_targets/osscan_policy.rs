@@ -163,6 +163,20 @@ fuzz_target!(|data: &[u8]| {
         submission_reason: reason.as_deref(),
         distance,
         seq: &seq,
+        // Exercise both uptime shapes and the absent case: the render must not panic
+        // or produce a NaN/inf day count for any of them.
+        uptime: if c.bool() {
+            Some(nmap_core::osscan::UptimeLine {
+                seconds: f64::from(c.u32()),
+                since: if c.bool() {
+                    nmap_core::osscan::format_boot_time(i64::from(c.u32()))
+                } else {
+                    None
+                },
+            })
+        } else {
+            None
+        },
         open_tcp_port: if c.bool() { Some(c.u16()) } else { None },
         closed_tcp_port: if c.bool() { Some(c.u16()) } else { None },
         osscan_guess: c.bool(),
@@ -173,6 +187,15 @@ fuzz_target!(|data: &[u8]| {
 
     let out = render(&report);
     assert_eq!(render(&report), out, "rendering is not deterministic");
+    // Scoped to the uptime line: this target deliberately feeds degenerate *accuracies*
+    // (NaN/inf) to prove the policy does not panic on them, so a non-finite percentage
+    // elsewhere is the point rather than a defect.
+    for line in out.lines().filter(|l| l.starts_with("Uptime guess")) {
+        assert!(
+            !line.contains("NaN") && !line.contains("inf"),
+            "a non-finite day count reached the uptime line: {line}"
+        );
+    }
 
     // The invariant that protects the shared fingerprint database: a fingerprint judged
     // unfit must never be printed *for submission*. Showing it under -d is a different

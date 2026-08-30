@@ -1205,6 +1205,43 @@ variance, and a wrong scaling formula.
       dozen other ICMPv6 types the OS battery never emits). *(Realized at M5
       `core::fp6_match`.)*
 
+## Milestone 5 — completing IPv4 `-O`: uptime and sequence reporting
+
+### Faithfully reproduced C quirks (deliberately *not* fixed)
+
+- [x] `uptime-implausible-claim-still-dates-a-boot` (`core::osprobe::seq::estimate_uptime`,
+      ports the `si.lastboot` derivation at the end of `makeTSeqFP`): a target claiming
+      more than **two years** of uptime is disbelieved — the C sets `uptime = 0` — but it
+      then assigns `si.lastboot = seq_send_times[0].tv_sec - 0`, i.e. *now*. Since
+      `printosscanoutput` prints the line whenever `lastboot` is non-zero, a host that
+      claimed seven years is reported as `Uptime guess: 0.000 days` rather than as
+      unknown. Reproduced: the rejection is a deliberate anti-lying measure and the
+      resulting line is what nmap prints, so suppressing it would diverge from the C on
+      an output an operator may be diffing. Worth knowing the clamp is **only reachable
+      for slow clocks**: the timestamp is a `u32`, so at 100 Hz the largest expressible
+      uptime is `u32::MAX/100` ≈ 1.36 years and at 1000 Hz ≈ 50 days — neither can trip a
+      two-year threshold. It fires through the 2 Hz branch (up to ~68 years) and the low
+      end of the fallback bucket. *(Realized at M5 `-O` completion.)*
+- [x] `uptime-ladder-differs-from-the-ts-attribute-ladder` (`core::osprobe::seq`): the C
+      grades `avg_ts_hz` **twice, differently**. The uptime derivation uses strict bounds
+      and a `724..1448` bucket (divide by 1000); the `TS` fingerprint attribute uses
+      `<=` bounds, a `150..350` bucket, and a base-2 logarithm fallback, with no 1000 Hz
+      case at all. They are not a refactoring accident to be unified — the first picks a
+      divisor, the second picks a fingerprint value — so both ladders are ported
+      separately and verbatim.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `uptime-boot-time-in-utc` (`core::osscan::format_boot_time`): nmap renders the boot
+      time with `ctime`, which is **local** time. This port renders **UTC** and labels it
+      `UTC` in the output. Resolving a local timezone correctly needs a tz database and a
+      new dependency for a single output line, and a mislabeled local timestamp is worse
+      than a labeled UTC one. Where the C's `n_ctime` fails it drops the `(since ...)`
+      clause entirely; this port does the same for any epoch outside 1970–2999, so the
+      failure path is a shape the C already produces. The formatter is pure and pinned by
+      unit tests against `date -u` for the epoch, a leap day, and both range ends.
+      *(Introduced at M5 `-O` completion.)*
+
 ## Milestone 5 — IPv6 OS detection: neighbor discovery (next-hop resolution)
 
 ### Security fixes (C defects closed by the port)

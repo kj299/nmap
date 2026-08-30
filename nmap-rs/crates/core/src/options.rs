@@ -72,6 +72,9 @@ pub struct RunConfig {
     /// `--osscan-limit`: only fingerprint hosts with at least one open and one closed
     /// TCP port, where the result stands a chance of being meaningful.
     pub osscan_limit: bool,
+    /// `--max-os-tries N`: how many OS-detection rounds to attempt per host before
+    /// giving up. `None` leaves the driver's default (nmap's `MAX_OS_TRIES`).
+    pub max_os_tries: Option<usize>,
     /// `--version-intensity <0..=9>` (default 7). `--version-light` = 2,
     /// `--version-all` = 9. Only meaningful when [`RunConfig::service_version`].
     pub version_intensity: u8,
@@ -106,6 +109,7 @@ impl Default for RunConfig {
             os_detection: false,
             osscan_guess: false,
             osscan_limit: false,
+            max_os_tries: None,
             // nmap's default `--version-intensity` (`o.version_intensity = 7`).
             version_intensity: crate::servicescan::DEFAULT_INTENSITY,
             out_normal: None,
@@ -255,6 +259,17 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             // nmap accepts both spellings for the same behaviour.
             "--osscan-guess" | "--fuzzy" => cfg.osscan_guess = true,
             "--osscan-limit" => cfg.osscan_limit = true,
+            _ if s.starts_with("--max-os-tries") => {
+                let (v, adv) = opt_value(args, i, "--max-os-tries");
+                // Long-option attached form is `--max-os-tries=N`; drop the `=`.
+                let v = v.strip_prefix('=').map(str::to_string).unwrap_or(v);
+                // nmap rejects a non-positive count rather than scanning zero times.
+                match v.trim().parse::<usize>() {
+                    Ok(n) if n > 0 => cfg.max_os_tries = Some(n),
+                    _ => cfg.unrecognized.push(format!("--max-os-tries {v}")),
+                }
+                consumed_extra = adv;
+            }
             // `-A` turns on the aggressive set; OS detection is the part we implement.
             "-A" => {
                 cfg.os_detection = true;
@@ -395,6 +410,36 @@ mod tests {
         assert!(cfg(&["-O", "--osscan-guess", "10.0.0.1"]).osscan_guess);
         assert!(cfg(&["-O", "--fuzzy", "10.0.0.1"]).osscan_guess);
         assert!(cfg(&["-O", "--osscan-limit", "10.0.0.1"]).osscan_limit);
+    }
+
+    #[test]
+    fn max_os_tries_takes_a_positive_count_in_either_form() {
+        assert_eq!(
+            cfg(&["-O", "--max-os-tries", "3", "10.0.0.1"]).max_os_tries,
+            Some(3)
+        );
+        assert_eq!(
+            cfg(&["-O", "--max-os-tries=7", "10.0.0.1"]).max_os_tries,
+            Some(7)
+        );
+        // Unset leaves the driver's default rather than forcing a value.
+        assert_eq!(cfg(&["-O", "10.0.0.1"]).max_os_tries, None);
+    }
+
+    #[test]
+    fn max_os_tries_rejects_a_count_that_would_scan_nothing() {
+        // Zero, negative and non-numeric are recorded as unrecognized rather than
+        // silently becoming a default — a scan that never runs is not what was asked.
+        for bad in ["0", "-1", "abc", ""] {
+            let c = cfg(&["-O", "--max-os-tries", bad, "10.0.0.1"]);
+            assert_eq!(c.max_os_tries, None, "{bad}");
+            assert!(
+                c.unrecognized
+                    .iter()
+                    .any(|u| u.starts_with("--max-os-tries")),
+                "{bad} should be reported"
+            );
+        }
         // `-A` implies OS detection and version detection together.
         let a = cfg(&["-A", "10.0.0.1"]);
         assert!(a.os_detection && a.service_version);

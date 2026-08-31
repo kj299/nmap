@@ -1,0 +1,10 @@
+schema = 1
+serial = 1
+file = db
+version = 1
+sha256 = 3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c
+size = 1
+file = db
+version = 2
+sha256 = 0011223344556677889900aabbccddeeff00112233445566778899aabbccddee
+size = 2

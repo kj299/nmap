@@ -1,0 +1,15 @@
+# nmap-rs signature bundle
+schema = 1
+serial = 41
+released = 2026-08-31
+source = https://example.invalid/nmap-rs/signatures
+
+file = nmap-os-db
+version = 41
+sha256 = 3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c
+size = 5368132
+
+file = nmap-service-probes
+version = 39
+sha256 = 0011223344556677889900aabbccddeeff00112233445566778899aabbccddee
+size = 2579553

@@ -184,6 +184,43 @@ and IPv6 tracks are approved. Port order, leaf-first:
        a privileged host with real IPv6 to exercise. Treat it as untested-in-anger until
        someone runs it there.
 
+## Workstream S — signature-database maintenance  ⟵ **IN PROGRESS**
+
+Phase 0 done (`docs/S-ANALYSIS.md`): the C has no update mechanism, no version
+metadata to read, and resolves DB paths through `$NMAPDIR` with no way to verify
+what it loaded. Build order S1-S5, security core first, only the networked slice
+last.
+
+1. ~~**S1. `core::sigstore::manifest`**~~ - **done**. The manifest format (schema,
+   bundle serial, per-file version/sha256/size), the downgrade comparison, and the
+   file-name allowlist that kills path traversal *at parse time* so every consumer
+   inherits the guarantee. Fail-closed where its sibling DB parsers are lenient,
+   because a signed document with a defect is never a line to skip. 33 unit tests,
+   11 mutations each caught, `sigstore_manifest` fuzz target with 20 committed
+   seeds. Fuzzing found a real gap in the first draft: `nmap-os-..` passed the
+   leading-dot rule, and Win32 silently strips trailing dots, so `db`/`db.`/`db..`
+   would collide *after* the duplicate-name check passed. Ledgered under
+   `sigstore-manifest-*`.
+2. **S2. `core::sigstore::verify`** - signature over the manifest, then per-file
+   hash. Pure over `&[u8]` with an injected key. **Blocked on the signing-scheme
+   decision** (minisign-style Ed25519 recommended vs cosign/sigstore).
+3. **S3. `core::fingerprint_store`** - opt-in capture of the unmatched OS/service
+   fingerprints the port already computes, plus `--export-fingerprints`.
+   Independent of S1/S2; can lead if the collection half is wanted first.
+4. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
+   dir, archive unpack with the traversal/bomb/size limits.
+5. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,
+   `--import-signatures <file>`. **Blocked on the bundle-source decision.**
+
+**Kit gap found in S1, for the Workstream S retrospective.** The six-gate ladder
+(`ported -> differential -> fuzzed -> sanitized -> unsafe_audited`) is linear and
+assumes a C counterpart exists. An *additive* module can never clear
+`differential`, so `progress.py` cannot represent "done" for it without either
+overclaiming (marking a gate that was never run) or understating it forever. S1 is
+recorded as `fuzzed` and is in fact also sanitized and unsafe-audited. The kit
+needs either an explicit `n/a` for a gate or an `additive` track; decide it in the
+retrospective rather than quietly picking a convention per module.
+
 ## Smaller follow-ups (opportunistic)
 - **Pin `rust-toolchain.toml`** — done (M4 retrospective, LESSONS #16).
 - **Full routing-table LPM** in `sys::route` (today: on-link match → default gateway).

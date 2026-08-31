@@ -16,37 +16,40 @@ record; edit it as milestones complete.
 | 1 | **MVP: unprivileged TCP connect scan → output** | full cycle | ✅ **DONE** — all 9 modules; `-sT` end-to-end; fuzz + differential gates closed; retrospective merged (PRs #2–#11) |
 | 2 | Full async engine (`nsock`→tokio) + full `ultra_scan` | full cycle | ✅ **DONE** — congestion (AIMD) + host & group schedulers + rate limiting, pure core driven by a tokio host-group driver; 8/8 differential incl. multi-host + `--min`/`--max-rate`; TSan dropped as unsound over tokio (structural race-freedom instead); retrospective merged (PRs #12–#17, this PR) |
 | 3 | Service / version detection (`-sV`) | full cycle | ✅ **DONE** — all 6 modules merged. **`core::probedb`** (exact C counts, 12,171 rules) → **`core::pcre_translate`** (77.50%→93.57%) → **`core::matcher`** (hybrid, all 12,171 rules, ReDoS-immune) → **`core::versioninfo`** (`$1`/`$P`/`$SUBST`/`$I`, no fixed buffers) → **`core::servicescan`**+**`sys::servicescan`** (pure `nextProbe` scheduler + tokio driver) → **`cli`** (`-sV`/`--version-intensity`, VERSION column in normal/XML/grep). `-sV` runs end-to-end; **9/9 differential MATCH vs C nmap 7.94 incl. `sv-ssh-banner`**. 0 unsafe workspace-wide, miri clean. Retrospective merged (kit lessons #12–#15). |
-| 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | 🔶 **CURRENT** — fresh kit cycle; start at Phase 0 (spike Npcap `-msvc` linkage + pcap-fd-in-async before scheduling) |
-| 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ⬜ |
-| S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | ⬜ |
+| 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ✅ **DONE** — Phase 0 pre-mortem + spike S1 (pcap-in-async) before any Rust; then `core::bytes` → `checksum` → the six `headers::*` → `packet_parser` → `build` → `recv_validate` → `classify` → `ipid`, and `sys::{netif,capture,rawio}`. All raw scans ship on **one** engine: `sys::group` scans a host group over a single demultiplexed capture, with `SynKind` (`-sS`), `UdpKind` (`-sU`) and `FlagKind` (`-sA/-sW/-sM/-sF/-sN/-sX`); `core::payload` derives UDP payloads from `nmap-service-probes`; `core::icmp_quote` gives all three the *filtered*-with-reason path. Retrospective merged (PRs #29–#57). |
+| 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ✅ **DONE** — both tracks. **IPv4:** `osdb::{expr,model,parse,score}` over the real 5.1 MB `nmap-os-db` (6,108 fingerprints), `macvendor` (52,085 prefixes), the full `osprobe` battery + 13 tests, `assemble`, `osscan` policy, `demux` + `sys::osscan`; `-O` is **feature-complete against the C's user-visible output** — normal, XML (`<os>`/`<uptime>`/`<tcpsequence>`…) and grepable, plus uptime, sequence-prediction difficulty and `--max-os-tries`. **IPv6:** `fpmodel` (liblinear **removed** — the one entry point reduces to a dot product), ICMPv6 + the four extension headers, `fp6::vectorize`, `build6`, `fp6_match`, `sys::fpengine`, `core::ndp` + `sys::ndp` + `route_for6` + `EthFramingSender` (Linux has no `IPV6_HDRINCL`, so the send path is L2), and CLI `-6 -O`. **Five genuine nmap defects found**, two of them NDP memory-safety bugs reachable by any on-link host, proved under ASAN. Retrospective merged; kit lessons #19–#25 (PRs #58–#83). ⚠️ **`os_scan_host6`'s live wiring is unvalidated on hardware** — see BACKLOG 12b-ii-b-3. |
+| S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | 🔶 **CURRENT** — the DB **parsers** landed with M3/M5; what remains is the missing maintenance loop: signed versioned bundles, the update channel, and the opt-in unmatched-fingerprint store. Phase 0 in this PR. |
 | 6 | NSE — Lua engine + bridges + scripts | full cycle | ⬜ |
 | 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | ⬜ |
 
-> **We are here:** Milestones 0–3 are complete and merged. `nmap-rs -sV` runs the
-> full service/version pipeline — `nmap-service-probes` parse → PCRE→Rust syntax
-> translation → a hybrid `regex::bytes`(linear)/`fancy-regex`(bounded-backtrack)
-> matcher over all 12,171 rules → `$1`/`$P`/`$SUBST`/`$I` version substitution into
-> growing `Vec<u8>` (no fixed buffers) → a pure `nextProbe` scheduler driven by a
-> thin tokio connect driver → the `-sV` CLI with a VERSION column across
-> normal/XML/grep. The whole workspace still holds **0 `unsafe`**, miri is clean,
-> and the differential matches C nmap 7.94 on all 9 cases (incl. `sv-ssh-banner`).
-> M3's retrospective added four kit lessons — **#12 binary input stays bytes** (a
-> `char`-at-a-time C parser ported through `&str` re-adds a mid-codepoint panic;
-> found by fuzz), **#13 a signature-DB differential compares findings not lookups**
-> (project the service *name*, not DB-version-dependent product/version), **#14 a
-> catch-all `break` in a scheduler loop is a liveness bug** (retry, never break with
-> work outstanding), and **#15 a 60s fuzz smoke is a floor not a proof** (seed what
-> it finds late) — plus a positive validation that the regex spike changed the plan
-> by compiling the corpus instead of trusting a grep estimate.
-> **Next: Milestone 4 (raw-packet infrastructure + all raw scans)** — the scariest,
-> highest-privilege, most Windows-specific phase. Start a fresh kit cycle at Phase 0
-> (`kickoff` inventory + `cflaw-scan` over `tcpip.cc`/`libnetutil`/`scan_engine_raw`
-> + the `libdnet .*-win32` layer + threat model), run the **spike-and-gate ritual**
-> on each hard piece (Npcap SDK linkage on `-msvc`, pcap-fd-in-async, packet
-> inject/capture on loopback) **before** committing, then **stop for approval on
-> port order before any Rust**. **Never skip the retrospective.** Each milestone is
-> its own kit cycle: `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop →
-> audit → retrospective-that-patches-the-kit`.
+> **We are here:** Milestones 0-5 are complete and merged. `nmap-rs` runs `-sT`,
+> `-sS`, `-sU`, the six TCP flag scans, `-sV` and `-O` (IPv4 **and** IPv6), with
+> normal, XML and grepable output. The workspace holds **51 shipped modules**;
+> `core` is `#![forbid(unsafe_code)]` and `sys` is the only crate with `unsafe`, all
+> of it documented and gated by the unsafe-audit harness; miri is clean; CI is green
+> in ~11 minutes across 11 jobs.
+>
+> M4 built the raw layer (send/capture, the header set, the packet walk) and
+> collapsed every raw scan onto **one** group engine. M5 built OS detection on top of
+> it and found **five genuine nmap defects** along the way - two of them NDP
+> memory-safety bugs reachable by any on-link host, proved under ASAN, fixed in the
+> port and ledgered. Its retrospective added kit lessons #19-#25, including three CI
+> fixes (fail the fuzz *build* fast; a per-target time-boxed gate grows without
+> anyone deciding to; `push` + `pull_request` without a branch filter runs everything
+> twice, forever, silently).
+>
+> **Next: Workstream S (signature DB maintenance).** The DB *parsers* already landed
+> with M3 and M5; what is missing is the loop around them, and it is missing in the C
+> too - nmap has no in-tool way to update `nmap-os-db`, `nmap-service-probes` or
+> `nmap-mac-prefixes`, and no way to collect the unmatched fingerprints it computes
+> and prints. This is therefore an **additive** workstream: most of it has no C to
+> differential against, so it is gated by golden + negative tests and every piece is
+> ledgered in `DIVERGENCES.md` as intentional new behavior. Because it introduces the
+> port's **first network-fetch and first signature-verification code**, its threat
+> model is the deliverable that matters most - see `THREAT-MODEL.md` (Workstream S).
+> **Never skip the retrospective.** Each milestone is its own kit cycle:
+> `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop → audit →
+> retrospective-that-patches-the-kit`.
 
 **Sequencing rationale (why this order, and where raw lands).** Order follows the
 kit's "roots-before-dependents, cheapest-and-safest-first, spike-the-scary-module-
@@ -333,6 +336,12 @@ maintenance loop as a first-class, security-reviewed feature of the Rust port.
 **update channel + collection/submission pipeline** is its own deliverable,
 implemented **alongside M5** and hardened at **M7** (it's a signing/supply-chain
 concern). Track as workstream **S** in the status table.
+**Phase 0 is done** — see [`docs/S-ANALYSIS.md`](docs/S-ANALYSIS.md) for the verified
+inventory (the C has no update path, no version metadata to read, and resolves DB
+paths through `$NMAPDIR` with no way to verify what it loaded), the flaw triage, the
+threat model for the port's first network fetch + signature verification, and the
+proposed five-slice build order **S1-S5 awaiting approval**.
+
 **Gates:** same six, plus the per-release supply-chain + signing controls. **Oracle:**
 the loaders differential-match C nmap's DB parsing (same matches on the same DB);
 the update/submission paths are new behavior → golden + negative tests, ledgered in
@@ -405,13 +414,21 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    `-oX` vs C nmap on Windows. M4+ requires Npcap installed + Administrator.
 
 ## Next concrete steps
-1. ✅ **M0 (done):** kit vendored → `porting-kit/`, skills symlinked, `make check-kit`
-   green; `skeleton/` → `nmap-rs/`; path-scoped CI wired; Windows-msvc preflight.
-   Committed (`278f403`, `6108be3`), PR #1 open with Rust jobs green.
-2. 🔶 **M1 Phase 0 (next):** invoke `porting-kit-kickoff` — inventory + `cflaw-scan`
-   (tune for signal-to-noise first) + `THREAT-MODEL.md`; in parallel invoke
-   `porting-kit-oracle` to lock C nmap + build the connect-scan differential matrix
-   against local-listener fixtures. Present the Phase-0 report + confirmed leaf-first
-   port order, then **stop for approval before any Rust** (kit requirement).
-3. On approval, begin the M1 six-gate loop at `core::model`; **update the STATUS
-   TRACKER** above as each module/milestone advances (the "don't lose the phase" rule).
+1. ✅ **M0-M5 (done):** see the STATUS TRACKER. `-sT`, `-sS`, `-sU`, the six flag
+   scans, `-sV` and `-O` (IPv4 + IPv6) all ship; five retrospectives merged; kit
+   lessons #1-#25.
+2. 🔶 **Workstream S Phase 0 (this PR):** inventory of what the C does and does
+   not do for signature-DB maintenance, the threat model for the port's first
+   network-fetch + signature-verification code, and a leaf-first build order.
+   **Stop for approval on the build order before any Rust** (kit requirement).
+3. On approval, run the S six-gate loop leaf-first, starting at `core::sigstore`
+   (manifest + version metadata, pure). **Update the STATUS TRACKER above** as each
+   module advances - the "don't lose the phase" rule, which this document violated
+   for five milestones before anyone noticed.
+4. After S: **M6 (NSE)**, then **M7 (cutover + `ncat`/`nping`)**.
+
+> **Note on step 3.** This section, and the STATUS TRACKER above it, sat at "M1 Phase
+> 0 (next)" while M1 through M5 were designed, built, gated and merged. The
+> `progress.py drift` gate covers `progress.json` against the shipped crates and
+> caught nothing here, because PLAN.md is not one of its inputs. A tracker nothing
+> enforces is a tracker that rots (LESSONS #003, #021).

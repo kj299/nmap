@@ -7,12 +7,28 @@
 # changes (see the paths added to build.yml).
 name: nmap-rs-ci
 
+# `push` is scoped to master ONLY. Including 'claude/**' here ran the entire
+# pipeline TWICE for every PR — once for the branch push, once for the pull_request
+# — which is why this workflow reported 22 checks instead of 11. A PR's own
+# `pull_request` run already covers the branch (and covers it better: it tests the
+# merge commit, not the branch head in isolation), and re-runs on every force-push
+# via the default `synchronize` activity. The push trigger's remaining job is master
+# after a merge. Trade-off, deliberately accepted: a `claude/**` branch pushed with
+# NO open pull request is not built until a PR is opened for it.
 on:
   push:
-    branches: [master, 'claude/**']
+    branches: [master]
     paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
   pull_request:
     paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
+
+# Supersede a PR's in-flight run when it is force-pushed: with a ~40-minute fuzz
+# matrix, a stale run is pure waste and its result is about code that no longer
+# exists. Never cancel on master — an intermediate merge commit's result is the only
+# evidence that commit was ever green, so those runs are allowed to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -85,9 +101,18 @@ jobs:
 
   # --- Gates below activate as their inputs land (kept wired, self-skip until then) ---
 
+  # Sharded across a matrix: the smoke is 60s PER TARGET, so a single job grew to
+  # ~38 minutes of pure fuzzing as targets accumulated. Each shard fuzzes a slice, so
+  # wall-clock is the slice plus fixed overhead rather than the whole battery.
+  # `fail-fast: false` because a crash in one shard must not cancel the others — the
+  # point of this gate is to see every failure, not the first.
   fuzz-smoke:
-    name: fuzz (60s smoke per untrusted-input parser)
+    name: fuzz shard ${{ matrix.shard }} (60s smoke per untrusted-input parser)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -95,13 +120,39 @@ jobs:
       - run: |
           if [ ! -d fuzz ]; then echo "no fuzz/ dir yet — skipping"; exit 0; fi
           cargo install cargo-fuzz --locked
-          # Fuzz each target from its hand-authored seed corpus. Any panic/crash
-          # on arbitrary input is a release blocker (Phase 4, gate 3).
-          # Invoke with +nightly explicitly: cargo-fuzz needs -Zsanitizer, and the
-          # repo's rust-toolchain.toml (a *directory* override, pinning stable) would
-          # otherwise outrank the job's nightly default and fail the inner build
-          # (LESSONS #16 — the pin interacts with nightly-only gates).
-          for t in $(cargo +nightly fuzz list); do
+      # Compile every target BEFORE fuzzing any of them. `cargo clippy --workspace
+      # --all-targets` does not build fuzz/ — it is a separate crate — so adding a
+      # field to a type a fuzz target constructs passes every local and CI check
+      # except this job. Without this step that compile error surfaces only after the
+      # first target has already fuzzed for 60s, well into the run; with it the shard
+      # fails in about a minute. Cost three red runs before it was added (LESSONS #023).
+      # Every shard builds everything: `fuzz build` with no target name is one
+      # invocation sharing codegen, and it keeps each shard self-contained (no
+      # artifact plumbing) while still failing fast.
+      - name: fuzz targets compile
+        run: |
+          if [ ! -d fuzz ]; then echo "no fuzz/ dir yet — skipping"; exit 0; fi
+          cargo +nightly fuzz build
+      # Fuzz this shard's slice from each target's hand-authored seed corpus. Any
+      # panic/crash on arbitrary input is a release blocker (Phase 4, gate 3).
+      # Invoke with +nightly explicitly: cargo-fuzz needs -Zsanitizer, and the
+      # repo's rust-toolchain.toml (a *directory* override, pinning stable) would
+      # otherwise outrank the job's nightly default and fail the inner build
+      # (LESSONS #16 — the pin interacts with nightly-only gates).
+      #
+      # Round-robin by line number, with the shard count taken from
+      # `strategy.job-total` so the split follows the matrix automatically — adding a
+      # shard needs no second edit here, and no target can be dropped or run twice.
+      - name: fuzz smoke run
+        run: |
+          if [ ! -d fuzz ]; then echo "no fuzz/ dir yet — skipping"; exit 0; fi
+          targets=$(cargo +nightly fuzz list \
+            | awk -v s=${{ matrix.shard }} -v n=${{ strategy.job-total }} 'NR % n == s % n')
+          if [ -z "$targets" ]; then
+            echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }}: no targets"; exit 0
+          fi
+          echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }} runs:"; echo "$targets"
+          for t in $targets; do
             cargo +nightly fuzz run "$t" fuzz/seeds/"$t" -- -max_total_time=60 -print_final_stats=1
           done
 

@@ -14,11 +14,30 @@ name: porting-ci
 # CI and leaving PRs misleadingly "unstable" while unrelated jobs drain. Scope this
 # Rust workflow to the Rust paths, and scope the C workflow to the C paths, so each
 # change triggers only the pipeline that can be affected by it. Tune the globs.
+#
+# LESSONS #025 — scope `push` to the DEFAULT BRANCH only. An unfiltered `push`
+# alongside `pull_request` runs this entire pipeline TWICE for every pull request:
+# once for the branch push, once for the PR. nmap shipped that way for five
+# milestones and only noticed when a sharded fuzz matrix turned 12 duplicate checks
+# into 22. A PR's own `pull_request` run already covers the branch — and covers it
+# better, testing the merge commit rather than the branch head in isolation — and
+# re-runs on every force-push via the default `synchronize` activity. Trade-off,
+# deliberately accepted: a topic branch pushed with NO open pull request is not
+# built until a PR is opened for it.
 on:
   push:
+    branches: [main, master]
     paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
   pull_request:
     paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/porting-ci.yml']
+
+# Supersede a PR's in-flight run when it is force-pushed: a safety pipeline with a
+# fuzz matrix runs for tens of minutes, and a stale run is pure waste whose result
+# describes code that no longer exists. Never cancel on the default branch — an
+# intermediate merge commit's run is the only evidence that commit was green.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -83,20 +102,47 @@ jobs:
       - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh asan .
       - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh ubsan .
 
+  # Sharded across a matrix: the smoke is 60s PER TARGET, so a single job grows
+  # linearly as targets accumulate (nmap reached ~38 minutes of pure fuzzing).
+  # Each shard fuzzes a slice, so wall-clock is the slice plus fixed overhead.
+  # `fail-fast: false` because a crash in one shard must not cancel the others —
+  # the point of this gate is to see every failure, not only the first.
   fuzz-smoke:
-    name: fuzz (60s smoke per target)
+    name: fuzz shard ${{ matrix.shard }} (60s smoke per target)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz
+      # Compile every target BEFORE fuzzing any of them (LESSONS #023). The fuzz
+      # crate is NOT part of `cargo clippy --workspace --all-targets` — it is a
+      # separate crate — so adding a field to a type a fuzz target constructs passes
+      # every other local and CI check. Without this step that compile error surfaces
+      # only after the first target has fuzzed its full 60s, tens of minutes in; with
+      # it the job fails in about a minute. No target name = build them all at once.
+      - name: fuzz targets compile
+        run: cargo +nightly fuzz build
       # Short smoke in CI; schedule a nightly deep run separately.
       # Use +nightly explicitly: cargo-fuzz needs -Zsanitizer, and a pinned
       # rust-toolchain.toml (shipped from skeleton/, a *directory* override) would
       # otherwise outrank the job's nightly default and fail the inner build
       # (LESSONS #16 — the stable pin interacts with nightly-only gates).
-      - run: |
-          for t in $(cargo +nightly fuzz list 2>/dev/null); do
+      # Round-robin by line number, with the shard count taken from
+      # `strategy.job-total` so the split follows the matrix automatically — adding a
+      # shard needs no second edit, and no target can be dropped or run twice.
+      - name: fuzz smoke run
+        run: |
+          targets=$(cargo +nightly fuzz list 2>/dev/null \
+            | awk -v s=${{ matrix.shard }} -v n=${{ strategy.job-total }} 'NR % n == s % n')
+          if [ -z "$targets" ]; then
+            echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }}: no targets"; exit 0
+          fi
+          echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }} runs:"; echo "$targets"
+          for t in $targets; do
             cargo +nightly fuzz run "$t" -- -max_total_time=60
           done
 

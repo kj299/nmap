@@ -193,14 +193,35 @@ and IPv6 tracks are approved. Port order, leaf-first:
 - ~~**DRY the scan matchers**~~ — **done**. The three drivers collapsed into one
   (`sys::group`), and the duplicated `ipv4_offset` plus the ICMP-quote decode now live
   once in `core::icmp_quote`.
-- **Fail the fuzz *build* fast, in its own CI step.** The "fuzz crate is not in the
-  workspace lint sweep" lesson has now bitten **three times** (#69, and twice while
-  completing `-O` — both times a field added to `SeqReport`). Each time the local
-  `cargo +nightly fuzz build` sweep caught it, but in CI the compile error is buried
-  inside the ~35-minute fuzz job, so a slip surfaces late. A `for t in $(cargo +nightly
-  fuzz list); do cargo +nightly fuzz build $t; done` step at the *head* of that job (or
-  a separate fast job) would fail in ~2 minutes instead. Cheap; not done here to keep
-  this PR to its subject.
+- ~~**Shard the fuzz smoke across a matrix.**~~ — **done**. The 60s smoke is *per
+  target* and targets accumulate one per ported module, so the job had grown to ~38
+  minutes of pure fuzzing (38 targets). Now six shards, split round-robin with the
+  divisor taken from `strategy.job-total` so it follows the matrix automatically, and
+  `fail-fast: false` so one shard's crash does not hide the others. Promoted to the kit
+  as LESSONS #024.
+- ~~**CI runs the whole suite twice per PR.**~~ — **done**. The workflow triggered on
+  `push` (branches included `claude/**`) *and* on `pull_request`, so every PR ran the
+  whole pipeline twice — that is why there were 12 checks rather than 6, which was
+  repeatedly mis-read as six jobs across two feature configurations. `push` is now
+  scoped to `master` only, and a `concurrency` group supersedes a PR's in-flight run on
+  force-push (never on master, where an intermediate merge commit's run is the only
+  evidence it was green). Accepted trade-off: a `claude/**` branch pushed with no open
+  PR is not built until a PR is opened. Promoted to the kit as LESSONS #025 — its
+  template had the same bug with no branch filter at all.
+- **CI never runs `--features pcap` or `--all-features`** — only the default config, so
+  the local three-config clippy/test sweep is stricter than the gate. An import used
+  only under `#[cfg(feature = "pcap")]`, or a lint that only fires with the feature on,
+  would pass CI and fail a contributor's local check. Closing this means a small feature
+  matrix on the build-test job (and, for the `pcap` config, libpcap installed on the
+  runner).
+- ~~**Fail the fuzz *build* fast, in its own CI step.**~~ — **done**. The "fuzz crate is
+  not in the workspace lint sweep" lesson had bitten **three times** (#69, and twice
+  while completing `-O` — both a field added to `SeqReport`). The fuzz job now runs a
+  `fuzz targets compile` step (`cargo +nightly fuzz build`, no target name, so all of
+  them build in one invocation) before any target is fuzzed, so a compile break fails
+  in about a minute rather than tens. Promoted to the kit as LESSONS #023 and added to
+  `harnesses/ci/porting-ci.template.yml`, since the note living only here is what let
+  it recur twice more.
 - **`cargo fuzz run <t> fuzz/seeds/<t>` writes into the committed seed dir.** libFuzzer
   treats the corpus argument as read-*write*, so a local smoke run leaves hundreds of
   machine-generated inputs in the working tree (one 60 s run on `osscan_policy` added

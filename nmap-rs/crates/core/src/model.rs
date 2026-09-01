@@ -152,6 +152,11 @@ pub struct ServiceInfo {
     pub devicetype: Option<String>,
     /// `-sV` hostname reported by the service.
     pub hostname: Option<String>,
+    /// The escaped transcript of what this service said, when `-sV` got data but
+    /// nothing matched it and the observation is worth submitting. `None` on a hard
+    /// match, below the `--version-intensity` floor, or when no probe got data.
+    /// Produced by [`crate::servicefp`].
+    pub fingerprint: Option<String>,
     /// `-sV` CPE identifiers (`cpe:/a:…`).
     pub cpe: Vec<String>,
     /// How the service was identified: `"table"` (nmap-services) or `"probed"`

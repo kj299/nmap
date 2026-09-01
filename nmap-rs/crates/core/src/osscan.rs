@@ -394,15 +394,24 @@ pub struct UptimeLine {
 /// **UTC** and says so, because resolving a local timezone needs a tz database and a
 /// new dependency for one output line. The suffix makes the difference visible rather
 /// than silently mislabeling a timestamp. Ledgered `uptime-boot-time-in-utc`.
+/// Split a Unix timestamp into UTC civil fields: `(year, month, day, hour, minute,
+/// second, weekday)` with month 1-12, day 1-31 and weekday 0 = Sunday.
+///
+/// Howard Hinnant's `civil_from_days`, shifted to a 1st-of-March-based year so the
+/// leap day lands at the end of the year and the month-length table needs no special
+/// case. Returns `None` outside 1970-01-01 .. 2999-12-31; bounding the input up front
+/// is what makes every operation below provably non-overflowing.
+///
+/// **UTC, not local time.** The C's callers use `localtime()`; reproducing that needs
+/// a timezone database, which is a dependency this crate does not carry for a handful
+/// of output fields. The same choice was made for `-O`'s boot time and is ledgered
+/// there as `uptime-boot-time-in-utc`; this keeps one convention across the port
+/// rather than two.
 #[must_use]
-pub fn format_boot_time(epoch: i64) -> Option<String> {
-    // 1970-01-01 .. 2999-12-31. Bounding the input up front is what makes every
-    // operation below provably non-overflowing.
+pub fn civil_from_epoch(epoch: i64) -> Option<(i64, i64, i64, i64, i64, i64, i64)> {
     if !(0..=32_503_680_000).contains(&epoch) {
         return None;
     }
-    // Days since the epoch, and the second within that day. `epoch` is non-negative
-    // here, so both are exact.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "epoch is bounded to 0..=32_503_680_000 above, so every product, sum                   and difference below stays far inside i64"
@@ -412,9 +421,7 @@ pub fn format_boot_time(epoch: i64) -> Option<String> {
         clippy::arithmetic_side_effects,
         reason = "civil-from-days over a bounded day count; all intermediates are small"
     )]
-    let (year, month, day, hour, minute, second, weekday) = {
-        // Howard Hinnant's civil_from_days, shifted to a 1st-of-March-based year so the
-        // leap day lands at the end and the month-length table needs no special case.
+    let out = {
         let z = days + 719_468;
         let era = z / 146_097;
         let doe = z - era * 146_097; // 0..=146096
@@ -437,6 +444,12 @@ pub fn format_boot_time(epoch: i64) -> Option<String> {
             wd,
         )
     };
+    Some(out)
+}
+
+#[must_use]
+pub fn format_boot_time(epoch: i64) -> Option<String> {
+    let (year, month, day, hour, minute, second, weekday) = civil_from_epoch(epoch)?;
 
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [

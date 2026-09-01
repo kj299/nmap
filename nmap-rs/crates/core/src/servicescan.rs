@@ -246,6 +246,11 @@ pub struct VersionResult {
     pub devicetype: Option<Vec<u8>>,
     /// CPE identifiers (`cpe:/a:…`), verbatim.
     pub cpe: Vec<Vec<u8>>,
+    /// The escaped transcript of what this service said, when nothing matched it
+    /// and the observation is worth submitting
+    /// ([`servicefp::should_print_fingerprint`](crate::servicefp::should_print_fingerprint)).
+    /// `None` on a hard match, below the intensity floor, or when no probe got data.
+    pub fingerprint: Option<String>,
 }
 
 impl VersionResult {
@@ -268,6 +273,8 @@ impl VersionResult {
             ostype: vi.ostype,
             devicetype: vi.devicetype,
             cpe,
+            // A hard match is never offered for submission.
+            fingerprint: None,
         }
     }
 

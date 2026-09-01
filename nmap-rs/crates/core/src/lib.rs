@@ -40,6 +40,7 @@ pub mod pcre_translate;
 pub mod ports;
 pub mod probedb;
 pub mod recv_validate;
+pub mod servicefp;
 pub mod servicescan;
 pub mod sigstore;
 pub mod synscan;

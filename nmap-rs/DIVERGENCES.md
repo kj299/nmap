@@ -1509,6 +1509,75 @@ one yet. `service_scan.cc`'s `addServiceChar`/`addServiceString`/
 in `docs/S-ANALYSIS.md`. That is slice S3b, and unlike the rest of this workstream it
 has a real C oracle.
 
+## Workstream S — the service-fingerprint builder (`core::servicefp`)
+
+Unlike the rest of Workstream S this is a **port**, not an addition: it fills the
+M3 gap where `service_scan.cc`'s `addServiceChar` / `addServiceString` /
+`addToServiceFingerprint` / `getServiceFingerprint` (`:1663-1795`) were never
+translated. It is therefore the one slice here with a real C oracle, and it is
+gated by a **byte-exact** differential over 861 cases
+(`tests/differential/s/`, re-derived from the C on every CI run).
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `servicefp-no-abort-on-buffer-exhaustion`: the C's `addServiceChar` calls
+      `fatal()` when fewer than six bytes remain in its buffer
+      (`service_scan.cc:1666`) — a process abort whose trigger is how much data a
+      scanned host sent back, reached through a `safe_realloc` sizing computation
+      (`spaceneeded = respused * 5 + strlen(probeName) + 128`) that has to be right
+      for the abort not to fire. The port appends to a `String`, so there is no
+      buffer to exhaust and no abort to reach; growth is bounded by the response and
+      total ceilings instead.
+- [x] `servicefp-empty-response-is-refused-not-asserted`: the C does
+      `assert(resplen)` and `assert(probeName)`, aborting on an empty response.
+      `add_response` returns `false`.
+- [x] `servicefp-no-in-loop-assert`: the C asserts
+      `servicefpalloc - servicefplen > 8` on **every byte** of the response, and
+      `> 1` before writing its terminator. Both are aborts in a debug build driven
+      by attacker-controlled length; neither has a counterpart here.
+- [x] `servicefp-takes-no-clock-and-no-globals`: the C's header reads
+      `NMAP_VERSION`, `NMAP_PLATFORM`, `o.version_intensity` and
+      `localtime(time(NULL))`. All of it arrives in `FingerprintHeader` instead. That
+      keeps `core` pure — and it is what makes the differential **byte-exact** rather
+      than "equal after stripping the fields that move", which is what the M5 OS
+      differential has to do because the C reads its clock inside the code under
+      test.
+
+### Faithfully reproduced C behaviour (deliberately *not* "improved")
+
+- [x] `servicefp-wrap-counts-its-own-continuations`: the wrap is
+      `servicefplen % (wrapat+1) == wrapat` over the **cumulative buffer length,
+      including the four bytes of each `"\nSF:"` already inserted** — not the column
+      of the current line. Visible line lengths are therefore not constant, and a
+      continuation can land in the middle of a record: nmap's own output for a
+      2000-byte response reads `%r(NULL\nSF:,7D0,"`. Reimplementing this as "wrap at
+      column 74" produces different bytes, so the C's arithmetic is kept verbatim.
+- [x] `servicefp-reports-total-length-when-truncated`: `%r(probe,LEN,"...")` carries
+      the response's **total** length while escaping at most 900 bytes (1300 with
+      `-d`), as the C's own comment says it should.
+- [x] `servicefp-nul-lookahead-stops-at-the-truncation-window`: `\0` is spelled
+      `\x00` when the next byte is an ASCII digit, because PCRE would otherwise read
+      the pair as a different escape — but the C tests `srcidx + 1 >= respused`, so a
+      digit **beyond the truncation cut** does not count. Reproduced exactly; a
+      corpus case pins it.
+- [x] `servicefp-escape-ladder-order`: `strchr("\\?\"[]().*+$^|")` is tested
+      **before** `ispunct`, so a regex metacharacter is backslashed and every other
+      punctuation byte is emitted literally. Swapping the two produces different
+      output for `.`, `*`, `+`, `$`, `^`, `|`, `?`, `(`, `)`, `[`, `]`, `"` and `\`.
+- [x] `servicefp-total-cap-is-strictly-greater`: the C's `if (servicefplen > 2200)
+      return;` uses `>`, so a fingerprint sitting at exactly 2200 still accepts one
+      more response. The first version of the corpus never landed on the exact value
+      and a `>` → `>=` mutation survived the differential; a sweep of response sizes
+      now guarantees some case hits it.
+- [x] `servicefp-ascii-classification`: the C's `isalnum`/`ispunct` are
+      locale-dependent in principle, but nmap never leaves the `"C"` locale —
+      `main.cc:120` calls `setlocale(LC_CTYPE, NULL)`, which **queries** without
+      setting, and nothing else calls `setlocale`. The port uses ASCII predicates,
+      which is faithful rather than a divergence.
+- [x] `servicefp-terminator-is-never-wrapped`: `getServiceFingerprint` writes its
+      `;` directly rather than through `addServiceChar`, so it never triggers a
+      continuation even when it lands exactly on the wrap boundary.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

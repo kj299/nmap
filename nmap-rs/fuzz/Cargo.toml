@@ -245,3 +245,8 @@ test = false
 name = "fingerprint_store"
 path = "fuzz_targets/fingerprint_store.rs"
 test = false
+
+[[bin]]
+name = "servicefp"
+path = "fuzz_targets/servicefp.rs"
+test = false

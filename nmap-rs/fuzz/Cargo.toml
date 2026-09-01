@@ -235,3 +235,8 @@ test = false
 name = "ndp_advert"
 path = "fuzz_targets/ndp_advert.rs"
 test = false
+
+[[bin]]
+name = "sigstore_manifest"
+path = "fuzz_targets/sigstore_manifest.rs"
+test = false

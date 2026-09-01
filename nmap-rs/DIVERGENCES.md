@@ -1380,6 +1380,84 @@ variance, and a wrong scaling formula.
       that is the M4 stubs minus those three functions. Recorded because it is a
       reusable lesson for every future builder oracle, not just this one.
 
+## Workstream S — the signature-bundle manifest (`core::sigstore::manifest`)
+
+**This whole module is an intentional addition with no C counterpart.** nmap has no
+in-tool way to update `nmap-os-db`, `nmap-service-probes` or `nmap-mac-prefixes`,
+no version metadata to report (all three files carry an unexpanded SVN `$Id$` where
+a version should be), and no way to collect the unmatched fingerprints it computes
+and prints. There is therefore nothing to differential against: the gate here is
+golden plus negative tests plus fuzz, and each decision below is recorded because
+an addition that is never written down is indistinguishable from drift.
+
+Background and the threat model are in `docs/S-ANALYSIS.md`.
+
+- [x] `sigstore-manifest-is-fail-closed`: the sibling database parsers
+      (`core::macvendor`, `core::osdb::parse`, `core::probedb`) follow nmap and
+      collect warnings, skip the bad line and continue — right for a 116,000-line
+      database where one malformed fingerprint should not cost the other 6,107. The
+      manifest is the opposite kind of document: signed, small, and the thing that
+      decides whether other bytes are trustworthy. It is parsed fail-closed, with
+      one error type and no partial results. Divergence in *posture*, not in any C
+      behaviour.
+- [x] `sigstore-manifest-rejects-unknown-keys`: an unrecognised key is an error,
+      not something to ignore. In a signed document an unknown field may be the
+      signer expressing intent an older build would silently discard — the shape of
+      a downgrade-by-omission attack. Forward compatibility is handled honestly by
+      the `schema` number instead: a manifest declaring a schema this build does not
+      implement is rejected with a message telling the operator to update, rather
+      than leaving them to guess why a field had no effect.
+- [x] `sigstore-manifest-rejects-duplicate-keys`: a repeated key is refused rather
+      than resolved last-wins. Last-wins lets whoever controls the tail of a
+      document choose the value, which in a signed file is exactly the wrong
+      default.
+- [x] `sigstore-manifest-orders-by-serial-not-date`: the downgrade decision is made
+      on a monotonic `u64` bundle serial and nothing else. Dates invite timezone and
+      format questions and semver invites precedence rules; both invite a parser.
+      `released` is carried as display-only text and is never consulted for
+      ordering, and the per-file `version` is informational — one rule, one
+      comparison, no ambiguity about which field wins. A correctly signed bundle
+      with an older serial reads as `VersionVerdict::Older`, because signature
+      validity and freshness are separate questions.
+- [x] `sigstore-manifest-name-allowlist-kills-traversal-at-parse-time`: file names
+      are validated in the parser, not in the installer, so the guarantee holds for
+      every consumer including ones not yet written, instead of resting on each of
+      them remembering to check. The allowlist is `[A-Za-z0-9._-]`, which excludes
+      both separators; a leading dot is rejected, which rules out `.`, `..`, `./x`
+      and `.hidden`; and `..` is rejected anywhere so that the guarantee is legible
+      at a glance rather than reconstructed from the interaction of two rules.
+- [x] `sigstore-manifest-rejects-trailing-dot-for-win32`: a name ending in `.` is
+      rejected. **Found by fuzzing**, which produced `nmap-os-..` — not a traversal
+      as a single path component, and so not caught by the leading-dot rule. The
+      Win32 path layer silently strips trailing dots, so `db`, `db.` and `db..` all
+      name the same file on Windows. The manifest's duplicate-name check compares
+      the declared strings, so without this rule a bundle could pass that check and
+      still have its second record quietly overwrite the first on our
+      `x86_64-pc-windows-msvc` target. (Trailing spaces are stripped by Win32 too;
+      the byte allowlist already excludes them.)
+- [x] `sigstore-manifest-rejects-windows-device-names`: `CON`, `PRN`, `AUX`, `NUL`,
+      `COM1`-`COM9` and `LPT1`-`LPT9` are refused, with or without an extension and
+      in any case. Opening one is not a filesystem operation: a write to `NUL` is
+      silently discarded and a write to `COM1` can block on a serial port. A name in
+      a bundle should never be able to reach a device.
+- [x] `sigstore-manifest-bounds-everything-before-allocating`: total input, line
+      length, name length, file count and per-file declared size all have ceilings
+      enforced before any allocation proportional to input. The size ceiling exists
+      so the installer can refuse a decompression bomb *before* writing a byte,
+      rather than discovering it by filling the disk.
+- [x] `sigstore-manifest-parses-bytes-not-str`: input is taken as `&[u8]`. A parser
+      that walks a `&str` by character re-introduces the mid-codepoint panic class
+      fuzzing found in `core::probedb` (kit LESSONS #12); bytes are validated as
+      printable ASCII before any of them become a `String`.
+- [x] `sigstore-manifest-escapes-control-bytes-in-errors`: error messages carry
+      attacker-influenced names, and an error message reaches a terminal. Non-
+      printable bytes are escaped as `\xNN` rather than emitted, so a hostile name
+      cannot inject ANSI sequences into an operator's console.
+
+**Not asserted by this module:** holding a `Manifest` is *not* evidence that
+anything was verified. Signature verification runs over the raw bytes before this
+parser and is S2's job; this type only asserts structural validity.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

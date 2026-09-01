@@ -40,6 +40,7 @@ pub mod ports;
 pub mod probedb;
 pub mod recv_validate;
 pub mod servicescan;
+pub mod sigstore;
 pub mod synscan;
 pub mod targets;
 pub mod timing;

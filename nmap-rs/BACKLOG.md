@@ -211,18 +211,29 @@ last.
    attacker-controlled text so a fingerprint cannot forge its own record boundary,
    and the module reads no clock. 20 unit tests, 12 mutations each caught, fuzz
    target with 13 committed seeds. Ledgered under `fpstore-*`.
-4. **S3b. `core::servicefp`** - **new slice, found while starting S3.** The Phase 0
-   doc assumed the port already computed both fingerprints; it computes the OS one
-   but `service_scan.cc`'s `addServiceChar`/`addServiceString`/
-   `addToServiceFingerprint` (`:1663-1720`) were never ported in M3, and `crates/`
-   has no service-fingerprint builder at all. This is a real C port (74-column wrap
-   with `\nSF:` continuations, `\xHH` escaping, 900/1300-byte per-response
-   truncation, 2200/10000-byte total cap, `%r(probe,len,"...")` records under an
-   `SF-PortNNNN-TCP` header) and **the one slice in this workstream with a real C
-   oracle**. Note the C `fatal()`s when it runs out of fingerprint space
-   (`service_scan.cc:1666`); the port returns a bounded string instead. Worth doing
-   for its own sake -- it closes an M3 gap -- but not on the critical path for the
-   update channel.
+4. ~~**S3b. `core::servicefp`**~~ - **done**. Ports `service_scan.cc`'s
+   `addServiceChar`/`addServiceString`/`addToServiceFingerprint`/
+   `getServiceFingerprint` (`:1663-1795`), the M3 gap that left the port unable to
+   produce a service fingerprint at all. **The one slice in this workstream with a
+   real C oracle**, gated by a byte-exact differential over 861 cases whose corpus
+   AND golden are both re-derived from the C on every CI run. Header inputs
+   (version, platform, intensity, localtime) are parameters rather than globals,
+   which is what makes the comparison byte-exact instead of "equal after stripping
+   the fields that move". 14 unit tests, 18 mutations caught, 798,428 fuzz runs
+   clean with 12 committed seeds. Ledgered under `servicefp-*`.
+
+   Two things worth carrying forward: the C `fatal()`s and asserts three separate
+   ways on lengths a scanned host controls, none of which the port reproduces; and
+   the first corpus missed the `>` vs `>=` total-cap boundary entirely, so a
+   mutation survived a differential that was otherwise catching everything. **A
+   differential is only as good as whether its corpus reaches the boundary** - the
+   fix was to sweep response sizes rather than to compute where the boundary falls,
+   since computing it would have meant deriving the corpus from the port under test.
+
+   **Still outstanding for S3b:** nothing wires this into `-sV` yet. `sys::servicescan`
+   does not call it and `core::fingerprint_store` is never fed a `Service` record, so
+   the builder is complete and gated but not yet reachable from a scan. That
+   integration is small and belongs with whichever slice adds the CLI surface.
 5. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
    dir, archive unpack with the traversal/bomb/size limits.
 6. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,

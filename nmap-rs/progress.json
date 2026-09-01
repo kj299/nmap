@@ -42,6 +42,7 @@
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
     "core::recv_validate": "unsafe_audited",
+    "core::servicefp": "differential",
     "core::servicescan": "unsafe_audited",
     "core::sigstore": "fuzzed",
     "core::synscan": "unsafe_audited",

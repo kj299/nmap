@@ -214,3 +214,12 @@ jobs:
       # reader on verdict identity.
       - run: bash tests/differential/m5/regen_ndp.sh --check
       - run: cargo test -p nmap-core --test ndp_differential
+
+      # Workstream S3b — the service-fingerprint builder. This is the only slice of
+      # the signature-maintenance workstream with a C counterpart, so it is the only
+      # one that can be differentialled at all; the rest are additive and gated by
+      # golden + negative tests. The oracle pastes service_scan.cc's four builder
+      # functions verbatim, and --check re-derives BOTH the corpus and the golden
+      # from the C so neither can drift into agreeing with the port.
+      - run: bash tests/differential/s/regen_servicefp.sh --check
+      - run: cargo test -p nmap-core --test servicefp_differential

@@ -47,6 +47,24 @@ nmap computes the unmatched fingerprint and then prints a URL:
 (`https://nmap.org/submit/`) for OS. `:2506–2510` repeats the ask at scan end.
 The data exists in-process; nothing captures it.
 
+> **Correction (found while starting S3).** The paragraph above was originally
+> written to say the *port* already computes both the OS and the service
+> fingerprint, so collection would be pure capture. That is true for OS —
+> `core::osscan::submission_reason` (porting `OmitSubmissionFP`) and
+> `FingerPrint::render_tests` (porting `fp2ascii`) both landed in M5. It is
+> **false for service**: `service_scan.cc`'s `addServiceChar` /
+> `addServiceString` / `addToServiceFingerprint` (`:1663–1720`) were never
+> ported in M3, and a search of `crates/` finds no service-fingerprint builder
+> at all. The service half of collection therefore needs a *port*, not a
+> capture — and unlike the rest of this workstream it has a real C oracle,
+> because the C emits a specific format (74-column wrap with `\nSF:`
+> continuations, `\xHH` escaping, a 900/1300-byte per-response truncation and a
+> 2200/10000-byte total cap, `%r(probe,len,"...")` records under an
+> `SF-PortNNNN-TCP` header). That is a different kind of work from the additive
+> store, so the slice is split: **S3a** captures what exists, **S3b** ports the
+> builder. Splitting it also keeps a differential-gated port out of a PR whose
+> other half can only be golden-gated.
+
 **4. Database path resolution is a trust boundary the C handles by warning.**
 `nmap_fetchfile_sub` (`nmap.cc:2677`) searches, in order: `--datadir` → **the
 `$NMAPDIR` environment variable** → the user's home directory (`~/.nmap`, or
@@ -167,7 +185,8 @@ decidable from bytes is gated in CI before any network code exists.
 |---|---|---|---|---|
 | S1 | `core::sigstore::manifest` | `core` | The manifest format: schema version, per-file content version + SHA-256 + source, and the **downgrade comparison**. Pure, no I/O. | Golden + negative tests; fuzz the manifest parser (untrusted input); property-test the version ordering |
 | S2 | `core::sigstore::verify` | `core` | Signature verification over the manifest, then per-file hash. Pure over `&[u8]` with an injected key — no filesystem, no clock. | Known-answer tests against fixed vectors; negative tests (wrong key, truncated sig, hash mismatch, swapped files); fuzz |
-| S3 | `core::fingerprint_store` | `core` | The opt-in store: capture the unmatched OS/service fingerprints the port already computes, plus `--export-fingerprints`. Pure model + serializer. | Round-trip golden; fuzz; an explicit test that consent-off stores nothing |
+| S3a | `core::fingerprint_store` | `core` | The opt-in store for the **OS** fingerprints the port already computes, plus `--export-fingerprints`. Pure model + serializer. | Round-trip golden; fuzz; an explicit test that consent-off stores nothing |
+| S3b | `core::servicefp` | `core` | **Port** of `service_scan.cc`'s service-fingerprint builder (wrap, escape, truncate, cap), which M3 left out. Feeds the same store. | C-oracle differential — the one slice in this workstream that has one |
 | S4 | `sys::sigstore` | `sys` | Atomic install (temp + fsync + rename), per-user data dir resolution, and the archive unpack with the traversal/bomb/size limits from the threat model. | Negative tests per attack in the table; no network yet |
 | S5 | `sys::update` + CLI | `sys`/`cli` | `--update-signatures`, `--check-signatures`, `--import-signatures <file>`, and the version surfaced in `--version`/verbose. HTTPS fetch behind the same verify path. | Mock-transport tests for the fetch loop; end-to-end against a locally served fixture bundle |
 
@@ -198,3 +217,7 @@ exists from M3/M5 and must stay green as version metadata is threaded through.
    default the operator can override.
 3. **S3 ordering.** Collection is independent of the update path. If the
    fingerprint store is the more useful half to you, S3 can lead.
+4. **S3b scope.** Porting the service-fingerprint builder is a real C port with a
+   real oracle, discovered only when S3 started (see the correction above). It is
+   worth doing for its own sake — it closes an M3 gap, not just an S one — but it
+   is not on the critical path for the update channel.

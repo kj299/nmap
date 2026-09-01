@@ -1458,6 +1458,57 @@ Background and the threat model are in `docs/S-ANALYSIS.md`.
 anything was verified. Signature verification runs over the raw bytes before this
 parser and is S2's job; this type only asserts structural validity.
 
+## Workstream S — the unmatched-fingerprint store (`core::fingerprint_store`)
+
+**Another intentional addition with no C counterpart.** nmap computes an unmatched
+OS fingerprint, prints it, tells the operator to paste it into a web form
+(`output.cc:1901/1925/1938`), and throws it away. This is the missing half.
+
+- [x] `fpstore-consent-is-structural`: there is no constructor that leaves consent
+      unspecified — `FingerprintStore::{enabled,disabled}` — and `record` is the only
+      way in. A disabled store accepts calls and keeps nothing, returning
+      `RecordOutcome::NoConsent`. A caller therefore cannot *forget* to check
+      consent, rather than being trusted to remember. The CLI default is disabled.
+- [x] `fpstore-record-outcome-is-explicit`: `record` returns what actually happened
+      (`Stored`/`NoConsent`/`Duplicate`/`Full`/`Rejected`) instead of a bool or
+      nothing. Silently dropping an operator's data is the failure this module
+      exists to fix, so "stored" and "dropped" are never indistinguishable.
+- [x] `fpstore-submission-export-omits-host-identity`: `ExportScope::Submission`
+      omits both the target and the timestamp; `ExportScope::Local` keeps them for
+      the operator's own file. A fingerprint improves a shared database on its own —
+      who was scanned, and when, is the operator's business. There is deliberately
+      **no `Default`** for the scope: whether host identity leaves the machine is
+      not a decision to make by omission.
+- [x] `fpstore-export-escapes-attacker-controlled-text`: the fingerprint is built
+      from bytes a scanned host chose and the target can come from DNS. The export is
+      line-oriented, so newlines are escaped (a raw one would let a fingerprint forge
+      its own `end`/`begin` lines and desynchronise any reader), control bytes are
+      escaped (an export is read in a terminal), and backslash is escaped so the
+      mapping stays reversible. Nothing here interpolates a fingerprint into a path,
+      command, or URL.
+- [x] `fpstore-label-truncation-is-on-a-char-boundary`: an over-long target is
+      truncated by characters, not bytes. Slicing a `&str` mid-codepoint panics —
+      the same class kit LESSONS #12 records from `core::probedb`.
+- [x] `fpstore-takes-no-clock`: `recorded_at` is passed in by the caller and never
+      read here. A `core` module that reads the time is one Miri cannot run and a
+      test cannot pin; `SystemTime::now()` in the SEQ send loop is what turned #81's
+      Miri job red, and the fix there was the same — take the anchor as a parameter.
+- [x] `fpstore-bounds-entries-and-sizes`: entry count, fingerprint length and label
+      length are all capped. A scan of a large network produces one fingerprint per
+      host, so an unbounded store is a memory-exhaustion path driven by how many
+      hosts the operator scanned.
+- [x] `fpstore-deduplicates-on-host-and-kind`: `-O` retries its battery over several
+      rounds, so the same fingerprint arrives repeatedly; it is kept once, with the
+      **first** sighting's timestamp. The same fingerprint from a *different* host is
+      a separate record, because two hosts sharing a fingerprint is exactly the
+      signal a database submission wants.
+
+**Not covered here:** the `Service` kind exists in the format but nothing produces
+one yet. `service_scan.cc`'s `addServiceChar`/`addServiceString`/
+`addToServiceFingerprint` (`:1663-1720`) were never ported in M3 — see the correction
+in `docs/S-ANALYSIS.md`. That is slice S3b, and unlike the rest of this workstream it
+has a real C oracle.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

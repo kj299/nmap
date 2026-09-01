@@ -1578,6 +1578,37 @@ gated by a **byte-exact** differential over 861 cases
       `;` directly rather than through `addServiceChar`, so it never triggers a
       continuation even when it lands exactly on the wrap boundary.
 
+## Workstream S — making the service fingerprint reachable (`-sV` wiring)
+
+S3b built the builder; this connects it, so an unmatched service now produces
+something the operator can act on instead of nothing. Ports
+`shouldWePrintFingerprint` (`service_scan.cc:2708`), the three
+`addToServiceFingerprint` call sites (`:2583/2595/2605`) and the
+"N services unrecognized" block (`output.cc:830-843`).
+
+- [x] `servicefp-print-policy`: `should_print_fingerprint` is a hard match check
+      plus an intensity floor of 7, exactly as the C has it. A **soft** match still
+      prints — the service name is known but the version is not, which is precisely
+      the case a submission improves.
+- [x] `servicefp-single-accumulation-point`: the C guards each of its three
+      `addToServiceFingerprint` calls with `if (readstrlen > 0)` because the callee
+      does `assert(resplen)` and an empty response would abort the process. The port
+      has no such guard: `add_response` refuses an empty response
+      (`servicefp-empty-response-is-refused-not-asserted`), so a caller-side check
+      would be a control that cannot fire. Mutation-testing it confirmed as much —
+      removing it changed no observable behaviour — and a control nothing can
+      distinguish is worse than none, because it reads as protection.
+      The C's three sites collapse to one here anyway: `grab_banner` has already
+      folded the read-nomatch, timeout and EOF paths into one result.
+- [x] `servicefp-header-inputs-come-from-the-boundary`: `NMAP_VERSION`,
+      `NMAP_PLATFORM` and `localtime()` are supplied by the CLI rather than read in
+      `core`. That purity is what lets S3b's differential be byte-exact.
+- [x] `servicefp-header-date-is-utc`: the date in the header is UTC, not local time,
+      matching `-O`'s boot-time line (`uptime-boot-time-in-utc`). Reproducing
+      `localtime()` needs a timezone database, which this crate does not carry for
+      two integers; one convention across the port beats two.
+      `osscan::civil_from_epoch` is now shared by both rather than duplicated.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

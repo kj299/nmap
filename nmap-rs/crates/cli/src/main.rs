@@ -653,8 +653,28 @@ async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
         return; // nothing open to probe
     }
 
+    // The C's fingerprint header carries NMAP_VERSION, NMAP_PLATFORM and the local
+    // month/day from `localtime()`. `core::servicefp` reads none of that itself --
+    // that purity is what lets its differential be byte-exact -- so the boundary
+    // supplies it here. UTC rather than local time, matching `-O`'s boot-time line
+    // (ledgered `uptime-boot-time-in-utc`): one convention across the port, and no
+    // timezone-database dependency for two integers.
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (month, day) = nmap_core::osscan::civil_from_epoch(i64::try_from(now_secs).unwrap_or(0))
+        .map_or((0, 0), |(_, m, d, ..)| {
+            (i32::try_from(m).unwrap_or(0), i32::try_from(d).unwrap_or(0))
+        });
+
     let sv_cfg = ServiceScanConfig {
         intensity: cfg.version_intensity,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        header_month: month,
+        header_day: day,
+        header_time: i32::try_from(now_secs & 0x7fff_ffff).unwrap_or(0),
         ..ServiceScanConfig::default()
     };
     let host_versions = service_scan(&open, db, compiled, &sv_cfg).await;
@@ -689,6 +709,9 @@ fn merge_version(existing: &ServiceInfo, r: &VersionResult) -> ServiceInfo {
     svc.devicetype = esc(&r.devicetype);
     svc.hostname = esc(&r.hostname);
     svc.cpe = r.cpe.iter().map(|c| printable_escape(c)).collect();
+    // Carried through verbatim: the builder already escaped it, and re-escaping
+    // would double every backslash the transcript legitimately contains.
+    svc.fingerprint = r.fingerprint.clone();
     match r.resolution {
         nmap_core::Resolution::HardMatched => {
             svc.method = Some("probed".into());

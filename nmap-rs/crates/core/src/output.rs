@@ -127,6 +127,9 @@ pub fn render_normal(
         render_host_normal(&mut out, host, services, meta.service_version);
     }
 
+    let fps = collect_service_fingerprints(results);
+    out.push_str(&service_fingerprint_block(&fps));
+
     let n = results.hosts.len();
     let _ = writeln!(
         out,
@@ -137,6 +140,55 @@ pub fn render_normal(
         if up == 1 { "" } else { "s" },
         meta.elapsed_secs
     );
+    out
+}
+
+/// Every unmatched-but-submittable service fingerprint in the scan, in host then
+/// port order.
+#[must_use]
+pub fn collect_service_fingerprints(results: &ScanResults) -> Vec<String> {
+    let mut out = Vec::new();
+    for host in &results.hosts {
+        for port in &host.ports {
+            if let Some(fp) = port.service.fingerprint.as_ref() {
+                out.push(fp.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The "N services unrecognized despite returning data" block.
+///
+/// Ports `output.cc:830-843`. Empty when there is nothing to submit, so callers can
+/// append it unconditionally.
+///
+/// The separator between fingerprints appears **only when there is more than one**,
+/// which is the C's behaviour and matters: it tells the operator that each block is
+/// a separate submission rather than one long record.
+#[must_use]
+pub fn service_fingerprint_block(fingerprints: &[String]) -> String {
+    if fingerprints.is_empty() {
+        return String::new();
+    }
+    let n = fingerprints.len();
+    let plural = if n > 1 { "s" } else { "" };
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{n} service{plural} unrecognized despite returning data. \
+If you know the service/version, please submit the following fingerprint{plural} at \
+https://nmap.org/cgi-bin/submit.cgi?new-service :"
+    );
+    for fp in fingerprints {
+        if n > 1 {
+            let _ = writeln!(
+                out,
+                "==============NEXT SERVICE FINGERPRINT (SUBMIT INDIVIDUALLY)=============="
+            );
+        }
+        let _ = writeln!(out, "{fp}");
+    }
     out
 }
 
@@ -965,5 +1017,51 @@ mod tests {
         assert!(out.contains("evil&quot;&gt;&lt;inject&gt;"));
         assert!(!out.contains("<inject>"));
         assert!(out.contains("<cpe>cpe:/o:&lt;evil&gt;</cpe>"));
+    }
+
+    #[test]
+    fn no_unmatched_fingerprints_renders_nothing_at_all() {
+        // Not a header with an empty list: the block is appended unconditionally by
+        // render_normal, so an empty one has to be genuinely empty.
+        assert_eq!(service_fingerprint_block(&[]), "");
+    }
+
+    #[test]
+    fn one_fingerprint_gets_no_separator() {
+        // The C emits the separator only when there is more than one, and that is
+        // load-bearing: it tells the operator each block is its own submission.
+        let out = service_fingerprint_block(&["SF-Port22-TCP:V=7.94...;".to_owned()]);
+        assert!(out.starts_with("1 service unrecognized despite returning data."));
+        assert!(!out.contains("NEXT SERVICE FINGERPRINT"));
+        assert!(out.contains("SF-Port22-TCP:V=7.94...;"));
+        assert!(out.contains("submit.cgi?new-service"));
+    }
+
+    #[test]
+    fn several_fingerprints_are_pluralised_and_separated() {
+        let fps = vec!["FP-A;".to_owned(), "FP-B;".to_owned(), "FP-C;".to_owned()];
+        let out = service_fingerprint_block(&fps);
+        assert!(out.starts_with("3 services unrecognized despite returning data."));
+        assert!(out.contains("fingerprints at"), "plural not applied: {out}");
+        assert_eq!(out.matches("NEXT SERVICE FINGERPRINT").count(), 3);
+        for fp in &fps {
+            assert!(out.contains(fp.as_str()));
+        }
+    }
+
+    #[test]
+    fn collection_walks_hosts_and_ports_in_order_and_skips_matched_services() {
+        use crate::model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults};
+        let mut host = Host::new("10.0.0.1".parse().expect("addr"), HostState::Up);
+        for (n, fp) in [(22u16, Some("FP-22;")), (80, None), (443, Some("FP-443;"))] {
+            let mut p = Port::new(n, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+            p.service.fingerprint = fp.map(str::to_owned);
+            host.ports.push(p);
+        }
+        let results = ScanResults { hosts: vec![host] };
+        assert_eq!(
+            collect_service_fingerprints(&results),
+            vec!["FP-22;".to_owned(), "FP-443;".to_owned()]
+        );
     }
 }

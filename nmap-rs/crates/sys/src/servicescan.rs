@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use nmap_core::matcher::CompiledDb;
 use nmap_core::probedb::ProbeDb;
+use nmap_core::servicefp::{
+    should_print_fingerprint, FingerprintHeader, Proto, ServiceFingerprint,
+};
 use nmap_core::servicescan::{MatchKind, ProbeRef, Resolution, Scheduler, VersionResult};
 use tokio::task::JoinSet;
 
@@ -31,6 +34,18 @@ pub struct ServiceScanConfig {
     pub max_banner_bytes: usize,
     /// Max concurrent (host, port) probes in flight.
     pub max_parallelism: usize,
+    /// Version string for the fingerprint header (`NMAP_VERSION` in the C).
+    pub version: String,
+    /// Platform string for the fingerprint header (`NMAP_PLATFORM` in the C).
+    pub platform: String,
+    /// Local month (1-12) for the fingerprint header. Supplied by the caller
+    /// because `core::servicefp` reads no clock; the C calls `localtime()` inside
+    /// the builder, which is what stops its output being reproducible.
+    pub header_month: i32,
+    /// Local day of month for the fingerprint header.
+    pub header_day: i32,
+    /// `time(NULL)` for the fingerprint header, rendered `%X`.
+    pub header_time: i32,
 }
 
 impl Default for ServiceScanConfig {
@@ -40,6 +55,13 @@ impl Default for ServiceScanConfig {
             connect_timeout: Duration::from_secs(5),
             max_banner_bytes: 64 * 1024,
             max_parallelism: 16,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            platform: std::env::consts::ARCH.to_owned(),
+            // Zeroes, not "now": a default must not silently make the output
+            // irreproducible. The CLI fills these in from the real clock.
+            header_month: 0,
+            header_day: 0,
+            header_time: 0,
         }
     }
 }
@@ -143,8 +165,28 @@ async fn scan_one_port(
     let mut hard: Option<VersionResult> = None;
     let mut first_probe = true;
 
+    // Accumulates the transcript of every probe that got data but matched nothing.
+    // The C does this at three sites (`service_scan.cc:2583/2595/2605`) -- the
+    // read-nomatch, timeout and EOF paths -- all of which reduce here to "this
+    // probe produced bytes and did not match", because `grab_banner` has already
+    // collapsed the three ways a read can end.
+    let mut fp = ServiceFingerprint::new(
+        FingerprintHeader {
+            port: addr.port(),
+            proto: Proto::Tcp,
+            version: config.version.clone(),
+            platform: config.platform.clone(),
+            intensity: i32::from(config.intensity),
+            ssl_tunnel: false,
+            month: config.header_month,
+            day: config.header_day,
+            time: config.header_time,
+        },
+        false,
+    );
+
     while let Some(probe_ref) = sched.next_probe(db) {
-        let (send, wait_ms, tcpwrapped_ms, compiled_probe) = match probe_ref {
+        let (send, wait_ms, tcpwrapped_ms, compiled_probe, probe_name) = match probe_ref {
             ProbeRef::Null => {
                 let np = db.null_probe.as_ref();
                 (
@@ -152,6 +194,7 @@ async fn scan_one_port(
                     np.map_or(5000, |p| p.totalwaitms),
                     np.map_or(2000, |p| p.tcpwrappedms),
                     compiled.null_probe.as_ref(),
+                    np.map_or("NULL", |p| p.name.as_str()),
                 )
             }
             ProbeRef::Indexed(i) => match db.probes.get(i) {
@@ -160,6 +203,7 @@ async fn scan_one_port(
                     p.totalwaitms,
                     p.tcpwrappedms,
                     compiled.probes.get(i),
+                    p.name.as_str(),
                 ),
                 None => break,
             },
@@ -199,7 +243,17 @@ async fn scan_one_port(
                 hard = Some(VersionResult::hard(outcome.rule, &outcome.captures));
                 MatchKind::Hard
             }
-            None => MatchKind::NoMatch,
+            None => {
+                // The C guards this call with `if (readstrlen > 0)` because its
+                // `addToServiceFingerprint` does `assert(resplen)` -- passing an
+                // empty response aborts the process. `add_response` refuses one
+                // instead (ledgered `servicefp-empty-response-is-refused-not-
+                // asserted`), so repeating the guard here would be a control that
+                // cannot fire: mutation-testing it changed no observable behaviour.
+                // One enforcement point, in the callee, where S3b's tests pin it.
+                fp.add_response(probe_name, &banner.data);
+                MatchKind::NoMatch
+            }
         };
         sched.record(kind);
         if sched.is_finished() {
@@ -207,11 +261,18 @@ async fn scan_one_port(
         }
     }
 
-    match sched.resolution() {
+    let resolution = sched.resolution();
+    let mut result = match resolution {
         Resolution::HardMatched => hard.unwrap_or_default(),
         Resolution::SoftMatched => VersionResult::soft(sched.soft_service().unwrap_or_default()),
         Resolution::NoMatch => VersionResult::default(),
+    };
+    // `shouldWePrintFingerprint` gates on the hard match and the intensity floor;
+    // `getServiceFingerprint` returns NULL when no probe ever produced data.
+    if should_print_fingerprint(resolution == Resolution::HardMatched, config.intensity) {
+        result.fingerprint = fp.finish();
     }
+    result
 }
 
 #[cfg(test)]
@@ -295,5 +356,100 @@ mod tests {
         let pv = &out[0].ports[0];
         // Either NoMatch or tcpwrapped depending on timing, but never a hard match.
         assert_ne!(pv.result.resolution, Resolution::HardMatched);
+    }
+
+    /// A config with a fixed, reproducible fingerprint header.
+    fn fp_config(intensity: u8) -> ServiceScanConfig {
+        ServiceScanConfig {
+            intensity,
+            version: "7.94".to_owned(),
+            platform: "x86_64-pc-linux-gnu".to_owned(),
+            header_month: 8,
+            header_day: 31,
+            header_time: 0x66D3_A1B2,
+            ..ServiceScanConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    async fn an_unmatched_service_that_returned_data_yields_a_fingerprint() {
+        // The whole point of the wiring: bytes came back, nothing matched, so the
+        // operator gets something they can submit instead of nothing at all.
+        let port = banner_server(b"WEIRD-PROTO/1.0 hello\r\n").await;
+        let (db, compiled) = ssh_db();
+        let out = scan_one_port(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            &db,
+            &compiled,
+            &fp_config(7),
+        )
+        .await;
+
+        assert_eq!(out.resolution, Resolution::NoMatch);
+        let fp = out
+            .fingerprint
+            .expect("an unmatched banner must produce one");
+        assert!(fp.starts_with("SF-Port"), "{fp}");
+        assert!(
+            fp.contains(&format!("{port}-TCP")),
+            "wrong port in header: {fp}"
+        );
+        assert!(fp.ends_with(';'), "not terminated: {fp}");
+        // The banner is there, escaped: `/` is punctuation and passes through, `\r\n`
+        // become escapes.
+        assert!(fp.contains("WEIRD"), "{fp}");
+        assert!(fp.contains("\\r\\n"), "line ending not escaped: {fp}");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    async fn a_hard_match_produces_no_fingerprint() {
+        // nmap already knows what this is.
+        let port = banner_server(b"SSH-2.0-OpenSSH_8.9p1\r\n").await;
+        let (db, compiled) = ssh_db();
+        let out = scan_one_port(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            &db,
+            &compiled,
+            &fp_config(7),
+        )
+        .await;
+        assert_eq!(out.resolution, Resolution::HardMatched);
+        assert_eq!(out.fingerprint, None, "hard match must not be offered");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    async fn below_the_intensity_floor_no_fingerprint_is_produced() {
+        // Too few probes for the transcript to describe the service fairly.
+        let port = banner_server(b"WEIRD-PROTO/1.0 hello\r\n").await;
+        let (db, compiled) = ssh_db();
+        let out = scan_one_port(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            &db,
+            &compiled,
+            &fp_config(6),
+        )
+        .await;
+        assert_eq!(out.resolution, Resolution::NoMatch);
+        assert_eq!(out.fingerprint, None, "intensity floor not applied");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    async fn a_silent_port_yields_no_fingerprint() {
+        // `getServiceFingerprint` returns NULL when nothing was ever added --
+        // silence says nothing about the service, so there is nothing to submit.
+        let port = banner_server(b"").await;
+        let (db, compiled) = ssh_db();
+        let out = scan_one_port(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            &db,
+            &compiled,
+            &fp_config(9),
+        )
+        .await;
+        assert_eq!(out.fingerprint, None, "silence produced a fingerprint");
     }
 }

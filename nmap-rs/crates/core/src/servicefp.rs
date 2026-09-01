@@ -318,6 +318,32 @@ impl ServiceFingerprint {
     }
 }
 
+/// Whether an unmatched service's fingerprint is worth showing the operator.
+///
+/// Ports `shouldWePrintFingerprint` (`service_scan.cc:2708`). Two conditions, both
+/// about whether the observation is worth anything rather than whether the host is
+/// interesting:
+///
+/// * a **hard match** means nmap already knows what this is, so there is nothing to
+///   submit;
+/// * below the default `--version-intensity` of 7, too few probes were sent for the
+///   transcript to be a fair description of the service, and submitting it would
+///   pollute the database with under-probed samples.
+///
+/// A **soft** match still prints: the service name is known but the version is not,
+/// which is exactly the case a submission improves.
+#[must_use]
+pub fn should_print_fingerprint(hard_matched: bool, intensity: u8) -> bool {
+    if hard_matched {
+        return false;
+    }
+    intensity >= MIN_SUBMITTABLE_INTENSITY
+}
+
+/// Below this `--version-intensity`, a fingerprint is not offered for submission
+/// (`if (o.version_intensity < 7) return 0;`).
+pub const MIN_SUBMITTABLE_INTENSITY: u8 = 7;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +509,42 @@ mod tests {
         assert!(unwrapped(&normal).contains("%r(A,4B0,"));
         assert!(unwrapped(&debug).contains("%r(A,4B0,"));
         assert!(debug.len() > normal.len(), "debug did not escape more");
+    }
+
+    #[test]
+    fn a_hard_match_is_never_offered_for_submission() {
+        // nmap already knows what this is; there is nothing to submit.
+        for intensity in 0..=9 {
+            assert!(
+                !should_print_fingerprint(true, intensity),
+                "intensity {intensity}"
+            );
+        }
+    }
+
+    #[test]
+    fn below_the_default_intensity_nothing_is_offered() {
+        // Too few probes were sent for the transcript to describe the service
+        // fairly, so submitting it would pollute the database.
+        for intensity in 0..MIN_SUBMITTABLE_INTENSITY {
+            assert!(
+                !should_print_fingerprint(false, intensity),
+                "intensity {intensity}"
+            );
+        }
+        for intensity in MIN_SUBMITTABLE_INTENSITY..=9 {
+            assert!(
+                should_print_fingerprint(false, intensity),
+                "intensity {intensity}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_soft_match_still_prints() {
+        // The service name is known but the version is not -- precisely the case a
+        // submission improves. Only a HARD match suppresses it.
+        assert!(should_print_fingerprint(false, MIN_SUBMITTABLE_INTENSITY));
     }
 
     #[test]

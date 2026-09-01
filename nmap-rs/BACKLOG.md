@@ -230,14 +230,41 @@ last.
    fix was to sweep response sizes rather than to compute where the boundary falls,
    since computing it would have meant deriving the corpus from the port under test.
 
-   **Still outstanding for S3b:** nothing wires this into `-sV` yet. `sys::servicescan`
-   does not call it and `core::fingerprint_store` is never fed a `Service` record, so
-   the builder is complete and gated but not yet reachable from a scan. That
-   integration is small and belongs with whichever slice adds the CLI surface.
+   ~~**Still outstanding for S3b:** nothing wires this into `-sV`.~~ - **done**
+   (S3c). `sys::servicescan` accumulates every probe response that returned data and
+   matched nothing, `should_print_fingerprint` (porting `shouldWePrintFingerprint`)
+   gates it on the hard match and the intensity floor, and `core::output` renders the
+   "N services unrecognized despite returning data" block from `output.cc:830-843`.
+   The header's version/platform/date come from the CLI so `core` stays clock-free.
+   `osscan::civil_from_epoch` was extracted from `format_boot_time` rather than
+   duplicated. Ledgered under `servicefp-print-policy`,
+   `servicefp-single-accumulation-point`, `servicefp-header-*`.
+
+   **Still outstanding:** `core::fingerprint_store` is not fed a `Service` record,
+   because nothing yet exposes the opt-in or `--export-fingerprints` on the command
+   line. Storing into an always-disabled store would be dead code, so that waits for
+   the slice that adds the CLI surface — naturally S5, which also adds
+   `--update-signatures` and friends.
 5. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
    dir, archive unpack with the traversal/bomb/size limits.
 6. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,
    `--import-signatures <file>`. **Blocked on the bundle-source decision.**
+
+**Run Miri the way CI runs it: `cargo +nightly miri test` over the WHOLE
+workspace.** Twice now a local sweep has run Miri only on selected `-p nmap-core`
+modules and reported "Miri clean", and twice CI has disagreed. #81: `SystemTime::now()`
+in the SEQ send loop hit Miri isolation in `nmap-sys`, which the core-only run never
+touched. #88 (S3c): four new `#[tokio::test]` driver tests bound real loopback
+sockets, and `socket` is not available under Miri isolation -- `crates/sys/src/
+servicescan.rs` already carried
+`#[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]` on its two
+pre-existing socket tests, and the new ones simply lacked it. Both failures were a
+one-line fix; both cost a red CI cycle purely because the local command was narrower
+than the gate. Same shape as the fuzz-build blind spot (LESSONS #023) and the
+"lint both feature configurations" note: **the local convenience invocation is not
+the CI invocation**, and the gap is invisible until the gate disagrees. Per-module
+Miri is fine while iterating; the pre-push sweep must be the workspace-wide command.
+Promote to the kit at the Workstream S retrospective.
 
 **Miri is now the CI critical path and grows with every pure-`core` module.**
 Measured on three consecutive PRs: #84 (docs only) 11m36s, #85 (S1, 33 tests)

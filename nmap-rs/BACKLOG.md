@@ -204,13 +204,40 @@ last.
 2. **S2. `core::sigstore::verify`** - signature over the manifest, then per-file
    hash. Pure over `&[u8]` with an injected key. **Blocked on the signing-scheme
    decision** (minisign-style Ed25519 recommended vs cosign/sigstore).
-3. **S3. `core::fingerprint_store`** - opt-in capture of the unmatched OS/service
-   fingerprints the port already computes, plus `--export-fingerprints`.
-   Independent of S1/S2; can lead if the collection half is wanted first.
-4. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
+3. ~~**S3a. `core::fingerprint_store`**~~ - **done**. The opt-in, consent-gated
+   store for unmatched OS fingerprints, with a `Local`/`Submission` export split so
+   host identity leaving the machine is a decision rather than a default. Consent is
+   structural (no constructor leaves it unspecified), the export escapes
+   attacker-controlled text so a fingerprint cannot forge its own record boundary,
+   and the module reads no clock. 20 unit tests, 12 mutations each caught, fuzz
+   target with 13 committed seeds. Ledgered under `fpstore-*`.
+4. **S3b. `core::servicefp`** - **new slice, found while starting S3.** The Phase 0
+   doc assumed the port already computed both fingerprints; it computes the OS one
+   but `service_scan.cc`'s `addServiceChar`/`addServiceString`/
+   `addToServiceFingerprint` (`:1663-1720`) were never ported in M3, and `crates/`
+   has no service-fingerprint builder at all. This is a real C port (74-column wrap
+   with `\nSF:` continuations, `\xHH` escaping, 900/1300-byte per-response
+   truncation, 2200/10000-byte total cap, `%r(probe,len,"...")` records under an
+   `SF-PortNNNN-TCP` header) and **the one slice in this workstream with a real C
+   oracle**. Note the C `fatal()`s when it runs out of fingerprint space
+   (`service_scan.cc:1666`); the port returns a bounded string instead. Worth doing
+   for its own sake -- it closes an M3 gap -- but not on the critical path for the
+   update channel.
+5. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
    dir, archive unpack with the traversal/bomb/size limits.
-5. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,
+6. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,
    `--import-signatures <file>`. **Blocked on the bundle-source decision.**
+
+**Miri is now the CI critical path and grows with every pure-`core` module.**
+Measured on three consecutive PRs: #84 (docs only) 11m36s, #85 (S1, 33 tests)
+12m26s, #86 (S3a, 20 tests) 12m57s. Both code PRs were measured *after* catching a
+pathological case in their own tests (S1's exhaustive byte sweeps at 858s, S3a's
+O(n^2) cap fill at 320s), so ~80s of growth across two slices is the *healthy*
+rate, not the worst case. The direction is one-way, and #83's sharding bought ~28
+minutes, so at roughly a minute per slice that win erodes over ~25 more modules.
+Nothing to act on yet; options when it matters are sharding Miri the way fuzz was
+sharded, or running it only over crates the diff touches. Decide it in the
+Workstream S retrospective rather than when the job hits 20 minutes.
 
 **Kit gap found in S1, for the Workstream S retrospective.** The six-gate ladder
 (`ported -> differential -> fuzzed -> sanitized -> unsafe_audited`) is linear and

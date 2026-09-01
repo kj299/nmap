@@ -9,6 +9,7 @@
     "core::checksum": "unsafe_audited",
     "core::classify": "unsafe_audited",
     "core::cli": "unsafe_audited",
+    "core::fingerprint_store": "fuzzed",
     "core::flagscan": "unsafe_audited",
     "core::fp6": "unsafe_audited",
     "core::fp6_match": "unsafe_audited",

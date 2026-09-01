@@ -16,6 +16,7 @@ pub mod checksum;
 pub mod classify;
 pub mod congestion;
 pub mod engine;
+pub mod fingerprint_store;
 pub mod flagscan;
 pub mod fp6;
 pub mod fp6_match;

@@ -240,3 +240,8 @@ test = false
 name = "sigstore_manifest"
 path = "fuzz_targets/sigstore_manifest.rs"
 test = false
+
+[[bin]]
+name = "fingerprint_store"
+path = "fuzz_targets/fingerprint_store.rs"
+test = false

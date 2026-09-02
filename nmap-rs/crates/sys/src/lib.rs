@@ -26,6 +26,7 @@ pub mod rawio;
 pub mod route;
 pub mod scan;
 pub mod servicescan;
+pub mod sigstore;
 pub mod synscan;
 pub mod udpscan;
 

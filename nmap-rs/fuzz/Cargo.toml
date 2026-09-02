@@ -250,3 +250,8 @@ test = false
 name = "servicefp"
 path = "fuzz_targets/servicefp.rs"
 test = false
+
+[[bin]]
+name = "sha256"
+path = "fuzz_targets/sha256.rs"
+test = false

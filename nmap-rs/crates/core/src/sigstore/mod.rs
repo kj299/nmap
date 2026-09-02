@@ -18,6 +18,8 @@
 //! the file format to verify against. Verifying content against a pinned key is
 //! what makes the search order stop being security-relevant.
 
+pub mod digest;
 pub mod manifest;
 
+pub use digest::{to_hex, Sha256, DIGEST_LEN};
 pub use manifest::{FileEntry, Manifest, ManifestError, VersionVerdict, SCHEMA_VERSION};

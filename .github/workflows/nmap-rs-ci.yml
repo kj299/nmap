@@ -223,3 +223,11 @@ jobs:
       # from the C so neither can drift into agreeing with the port.
       - run: bash tests/differential/s/regen_servicefp.sh --check
       - run: cargo test -p nmap-core --test servicefp_differential
+
+      # Workstream S4 — SHA-256. `core::sigstore::digest` is a hand-rolled hash
+      # carried in-tree rather than taken as a dependency, so the gate that matters
+      # is agreement with an INDEPENDENT implementation: the golden is produced by
+      # the system sha256sum (coreutils) and re-derived here on every run. Comparing
+      # against a second hand-rolled hash would prove only that the two agree.
+      - run: bash tests/differential/s/regen_sha256.sh --check
+      - run: cargo test -p nmap-core --test sha256_differential

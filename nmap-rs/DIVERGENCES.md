@@ -1609,6 +1609,64 @@ something the operator can act on instead of nothing. Ports
       two integers; one convention across the port beats two.
       `osscan::civil_from_epoch` is now shared by both rather than duplicated.
 
+## Workstream S — installing a verified database (`core::sigstore::digest`, `sys::sigstore`)
+
+Additive; no C counterpart. nmap has no update path, so it never writes a detection
+database and has nothing here to diverge from.
+
+### The digest
+
+- [x] `sigstore-sha256-in-tree`: SHA-256 is implemented in `core` rather than taken
+      as a dependency. `core` carries two crates, both for the regex engine, and the
+      code deciding whether downloaded bytes may be installed is the last place to
+      grow that surface. The hash is an integrity check, not a MAC, so there is no
+      secret-dependent timing to get wrong. Gated by the four NIST vectors **plus a
+      669-case differential against the system `sha256sum`**, re-derived on every CI
+      run — an independent oracle, not a self-consistency check. 15 mutations of the
+      implementation were each caught by it. Swapping in RustCrypto's `sha2` is a
+      one-line change behind the same interface if a reviewer prefers a vetted crate;
+      the differential keeps guarding either way.
+- [x] `sigstore-sha256-buffering-bug-found-by-its-own-tests`: the first draft reset
+      the buffer length to zero whenever an `update` call was consumed entirely by
+      topping up a partial block, which made `finish`'s padding loop spin forever.
+      Found by the streaming tests before the differential ever ran. Recorded because
+      it is the concrete argument for why a hand-rolled hash needs this much gating:
+      the algorithm was right and the plumbing was not.
+
+### The install
+
+- [x] `sigstore-install-verifies-and-there-is-no-way-around-it`: `Installer::install`
+      takes the manifest entry and the bytes and checks size and SHA-256 itself.
+      There is no "install these, I already checked" entry point, because that is an
+      invitation to a caller who did not. Holding a `Manifest` is not evidence of
+      verification (S1 says so); neither is holding a `Vec<u8>`.
+- [x] `sigstore-install-is-atomic`: the write goes to a temporary **in the
+      destination directory**, is fsynced, then renamed over the target. A failed or
+      interrupted install leaves the previous database intact and complete. The
+      temporary is a sibling rather than a system temp file because `rename` is only
+      atomic within one filesystem, and `/tmp` is very often a different one — a
+      cross-device rename degrades to copy-then-delete, which is exactly the
+      non-atomic behaviour being avoided.
+- [x] `sigstore-install-never-touches-a-system-directory`: updates land in the
+      per-user data directory (`~/.nmap`, `%APPDATA%\nmap`) — the same one nmap's
+      `nmap_fetchfile_userdir` reads. The C's search path also covers `$NMAPDIR`, the
+      executable's directory and `NMAPDATADIR`; resolving those here would let an
+      update overwrite a distribution's files, so it does not.
+- [x] `sigstore-no-archive-layer`: there is deliberately no archive unpacking. The
+      manifest carries each file's name, size and digest, so a bundle can be a set of
+      files rather than an archive — which removes the decompression-bomb class **by
+      construction** instead of defending against it, and avoids an archive-format
+      dependency. Whether bytes arrive as one archive or several downloads is the
+      fetcher's business (S5); this module's contract is unchanged either way.
+
+**Known coverage gap, stated rather than papered over:** the `fsync` before the
+rename is **not covered by any test**. Durability across power loss cannot be
+observed from inside the process — a mutation deleting that call passes every test in
+the module. It is kept because it does real work; it is recorded here because an
+untested control should be known to be untested. This is the opposite case from
+`servicefp-single-accumulation-point`, where a guard that could *never* fire was
+removed: that one was theatre, this one is unobservable.
+
 ## Milestone 4 — CLI scan-technique selection
 
 - [x] `cli-scan-reason-from-port-not-hardcoded` (`core::output`): the "Not shown"

@@ -245,10 +245,47 @@ last.
    line. Storing into an always-disabled store would be dead code, so that waits for
    the slice that adds the CLI surface — naturally S5, which also adds
    `--update-signatures` and friends.
-5. **S4. `sys::sigstore`** - atomic install (temp + fsync + rename), per-user data
-   dir, archive unpack with the traversal/bomb/size limits.
+5. ~~**S4. `sys::sigstore` + `core::sigstore::digest`**~~ - **done**. SHA-256 in
+   `core` (gated by the NIST vectors plus a **669-case differential against the
+   system `sha256sum`**, 15 mutations each caught, fuzz target with 10 seeds), and an
+   installer in `sys` that verifies size and digest itself -- there is no way to
+   install unverified bytes through it -- then writes atomically via a temporary
+   **in the destination directory**, fsync, rename. Never touches a system directory.
+   12 tests, 8 of 9 mutations caught. Ledgered under `sigstore-*`.
+
+   **Scope call, deliberate:** no archive unpacking. The manifest carries each file's
+   name, size and digest, so a bundle can be a set of files rather than an archive --
+   which removes the decompression-bomb class *by construction* rather than defending
+   against it, and avoids an archive-format dependency. Whether bytes arrive as one
+   archive or several downloads is S5's business; the installer's contract is
+   unchanged either way. **If you want an archive format, that is a decision to make
+   alongside the bundle source.**
+
+   **Known coverage gap:** the `fsync` before the rename is not covered by any test --
+   durability across power loss cannot be observed in-process, and a mutation deleting
+   it passes everything. Kept because it does real work; recorded because an untested
+   control should be known to be untested.
+
+   Two of my own tests were wrong before they were right, both worth remembering:
+   the tamper tests used replacement content of a *different length*, so they tripped
+   the size check and never exercised the digest path they were named for; and the
+   SHA-256 buffering bug (a buffer-length reset that made `finish` spin forever) was
+   caught by the streaming tests before the differential ever ran.
+
 6. **S5. `sys::update` + CLI** - `--update-signatures`, `--check-signatures`,
    `--import-signatures <file>`. **Blocked on the bundle-source decision.**
+
+**Every exhaustive test in a pure-`core` module needs a `cfg(miri)` bound, and
+this is now a pattern rather than four coincidences.** S1's byte sweeps (858s ->
+47.7s), S3a's O(n^2) cap fill (320s -> 8.55s), S4's 1 MB SHA-256 vector (minutes,
+now `ignore`d under Miri) and S4's 201-split streaming sweep (sigstore under Miri
+166s -> 56s). The shape is identical each time: a test that is milliseconds natively
+and minutes under Miri, in a crate that is `#![forbid(unsafe_code)]` so Miri has no
+UB to find that the other tests do not already cover. The exhaustive question is
+answered natively at stride 1, by the fuzz target, or by a differential; Miri only
+needs a sample. Write the stride when the test is written, not after CI slows down.
+**Promote this to the kit at the Workstream S retrospective** -- it belongs next to
+LESSONS #023/#024 as a standing rule, not as four separate war stories.
 
 **Run Miri the way CI runs it: `cargo +nightly miri test` over the WHOLE
 workspace.** Twice now a local sweep has run Miri only on selected `-p nmap-core`

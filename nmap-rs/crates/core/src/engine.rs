@@ -464,7 +464,7 @@ mod tests {
             guard += 1;
             assert!(guard < 1_000_000, "did not converge");
             if let Some(p) = s.next_probe() {
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     s.on_timeout(p);
                 } else {
                     s.on_reply(p, 3_000);

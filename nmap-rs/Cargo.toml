@@ -11,7 +11,22 @@ members = ["crates/core", "crates/sys", "crates/cli"]
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.74"
+# MEASURED, not aspirational: the workspace builds on 1.88 and fails on 1.87.
+# Enforced by the `msrv` CI job, which reads THIS line and builds with it — so the
+# gate can never quietly disagree with the declaration.
+#
+# What sets it is the dependency tree, not this port's own code (which needs 1.81
+# for lint `reason = "..."`). Two constraints, neither of them visible in any
+# crate's `rust-version` field, which is why this has to be verified by building:
+#   * `mac-addr 0.3.0` (via `netdev`) is edition 2024 -> Cargo 1.85+. A too-old
+#     Cargo cannot even PARSE its manifest, so this fails at download time.
+#   * `netdev 0.45.0` uses let-chains -> rustc 1.88+.
+#
+# This sat at "1.74" through five milestones while the tree had long since needed
+# more, because nothing built at it (CI pins 1.97.0 via rust-toolchain.toml).
+# A declaration nothing enforces is a declaration that rots — LESSONS #003/#021,
+# and the same failure this file's own PLAN.md tracker had.
+rust-version = "1.88"
 
 [profile.release]
 # Overflow checks ON even in release: silent wraparound is exactly the class of

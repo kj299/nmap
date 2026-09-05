@@ -405,16 +405,51 @@ retrospective rather than quietly picking a convention per module.
   the fuzz and differential jobs in ways nobody has validated. Recorded in
   DIVERGENCES.md as `sigstore-miri-tests-the-serial-backend`. (Found while measuring
   the S2 Miri budget.)
-- **The declared MSRV is already false, and nothing checks it.** `Cargo.toml` says
-  `rust-version = "1.74"`, but `cargo +1.74 check -p nmap-core` fails on
-  `crates/core/src/osscan.rs` — lint `reason = "..."` was stabilised in 1.81 — and this
-  predates S2. CI pins 1.97.0 and never builds on the declared MSRV, so the claim is
-  unenforced metadata. Two honest fixes: raise `rust-version` to what the tree actually
-  needs, or add an MSRV job and hold the line. Until one is chosen, S2 pins
-  `ed25519-dalek =2.1.1` (the last release supporting 1.74) so it does not make the
-  claim *more* false — at the cost of no security-patch headroom, since 2.2.x needs
-  1.81 and 3.x needs 1.85. Decide before an advisory forces the choice under time
-  pressure. (Found while adding the S2 dependency.)
+- **RESOLVED (MSRV): the declaration is now measured and enforced.** `rust-version`
+  sat at `1.74` through five milestones while the tree had long since needed more,
+  because nothing ever built at it — every job pins 1.97.0 via `rust-toolchain.toml`.
+  Bisected: the workspace builds on **1.88** and fails on 1.87. What sets it is the
+  dependency tree, not this port's code (which needs 1.81 for lint `reason`), and
+  neither constraint appears in any crate's `rust-version` field, so it could only
+  be found by building: `mac-addr 0.3.0` (via `netdev`) is edition 2024, which a
+  pre-1.85 Cargo cannot even parse, and `netdev 0.45.0` uses let-chains (1.88).
+  A new `msrv` CI job now builds at the declared version and **reads that version
+  from `Cargo.toml`** rather than hardcoding it, so the gate cannot drift from the
+  claim the way the claim drifted from the tree.
+- **Raising the declared MSRV UNLOCKS clippy lints, so it is never a metadata-only
+  change.** Clippy suppresses any suggestion whose replacement API postdates the
+  declared `rust-version`. Correcting 1.74 -> 1.88 therefore turned on
+  `manual_is_multiple_of` (1.87) and `manual_repeat_n` (1.82) and produced 10 new
+  findings across `build`, `build6`, `engine`, `fp6`, `osprobe::demux` and five
+  differential tests — which CI would have failed under `-D warnings`. All ten were
+  mechanical and behaviour-preserving (`x % n == 0` -> `x.is_multiple_of(n)` with a
+  non-zero literal divisor is exact, and it removes a `%` operator, which suits the
+  `arithmetic_side_effects` posture; `repeat().take()` -> `repeat_n` is identical).
+  Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Worth a
+  LESSONS entry: an MSRV bump must be validated with the full clippy sweep, not just
+  a build.
+- **979 fuzzer-generated files are committed as "seeds" across 7 targets, from
+  before this slice.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory
+  as a *corpus* and writes discovered units into it, so a local smoke run silently
+  adds libFuzzer-named (40-hex) blobs that then get committed. Repo-wide it is now
+  979 generated against 367 hand-authored: `fp6_vectorize` 293, `fp6_match` 189,
+  `parse_packet` 186, `osprobe_icmpreply` 97, `osprobe_assemble` 95, `ndp_advert` 93,
+  `parse_tcp` 26. Traced to the feature PRs that introduced each target (e.g. #73).
+  Not fixed here because 979 deletions do not belong in an MSRV change. Two things
+  are wanted: prune them, and add a CI check so it cannot recur —
+  `ls fuzz/seeds/<t> | grep -cE '^[0-9a-f]{40}$'` must be 0. Green CI has never
+  objected to any of this, which is the point.
+- **DECIDE: relax the `ed25519-dalek` pin now that MSRV no longer forces it.** The
+  `=2.1.1` pin was chosen solely because 2.2.0 needs rustc 1.81 and 3.0.0 needs
+  1.85, both above the then-declared 1.74. With MSRV corrected to 1.88 that reason
+  is gone, and the pin's cost is now unmitigated: `=` leaves no room for a patch
+  release, so a RUSTSEC advisory against 2.1.1 must be answered by editing the
+  manifest under time pressure, and `yanked = "deny"` means a yank of 2.1.1 breaks
+  the build outright. `Cargo.lock` is what makes builds reproducible, so relaxing to
+  a caret would restore headroom without changing the version actually built until
+  someone runs `cargo update`. Left pinned for now because it changes which code
+  verifies signatures — a decision to take deliberately, with the S2 differential
+  and Miri re-run, not as a side effect of an MSRV correction.
 - **`verify_strict` is not a style preference, and the measurement says so.** For a
   small-order public key, OpenSSL, python-cryptography, RFC 8032's own reference
   implementation and `ed25519-dalek`'s non-strict `verify` all accept forged

@@ -58,6 +58,38 @@ jobs:
           -D clippy::undocumented_unsafe_blocks
       - run: cargo test --all
 
+  # Builds the workspace at the DECLARED MSRV, so `rust-version` is a promise the
+  # repo keeps rather than a number nobody checks. It sat at "1.74" through five
+  # milestones while the tree had long since needed 1.88 — nothing ever built at it,
+  # because every other job pins 1.97.0 via rust-toolchain.toml.
+  #
+  # The toolchain is READ FROM the declaration instead of hardcoded here. A second
+  # hardcoded version would be a second thing to forget, and the failure mode is
+  # silent: the gate would keep passing against a number the manifest no longer
+  # claims. Bumping `rust-version` is therefore the whole change — this job follows.
+  #
+  # `cargo +<msrv>` is explicit for the same reason the nightly gates use
+  # `cargo +nightly`: rust-toolchain.toml is a DIRECTORY override that otherwise
+  # outranks whatever the action installed, and the job would silently test 1.97
+  # (LESSONS #16).
+  msrv:
+    name: MSRV (workspace builds at the declared rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: declared
+        run: |
+          v=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$v" ]; then echo "no rust-version in nmap-rs/Cargo.toml" >&2; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $v"
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "${{ steps.declared.outputs.version }}" }
+      # --all-targets so tests and fuzz-adjacent targets are covered too, and
+      # --all-features so the off-by-default `pcap` path cannot quietly need newer.
+      - run: cargo +${{ steps.declared.outputs.version }} check --workspace --all-targets
+      - run: cargo +${{ steps.declared.outputs.version }} check --workspace --all-targets --all-features
+
   unsafe-audit:
     name: unsafe-audit (hard fail on undocumented unsafe)
     runs-on: ubuntu-latest

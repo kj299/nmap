@@ -126,7 +126,7 @@ impl Ipv4Spec {
 
     fn validate_options(&self) -> Result<(), BuildError> {
         let n = self.options.len();
-        if n % 4 != 0 {
+        if !n.is_multiple_of(4) {
             return Err(BuildError::IpOptionsNotAligned(n));
         }
         if n > 40 {
@@ -202,7 +202,7 @@ pub fn build_tcp_raw(
     data: &[u8],
 ) -> Result<Vec<u8>, BuildError> {
     let optn = tcpopt.len();
-    if optn % 4 != 0 {
+    if !optn.is_multiple_of(4) {
         return Err(BuildError::TcpOptionsNotAligned(optn));
     }
     if optn > 40 {

@@ -420,7 +420,7 @@ fn routing_header(next_header: u8) -> [u8; 8] {
 fn build_ie1(params: &Build6Params) -> Vec<u8> {
     let hbh = ext_options(NH_ICMPV6);
     let mut icmp = icmp_echo(9, params.icmp_seq).to_vec();
-    icmp.extend(std::iter::repeat(0u8).take(IE1_PAYLOAD_LEN));
+    icmp.extend(std::iter::repeat_n(0u8, IE1_PAYLOAD_LEN));
     let sum = ipv6_pseudoheader_cksum(params.src, params.dst, NH_ICMPV6, &icmp);
     write_checksum(&mut icmp, 2, sum);
 
@@ -503,7 +503,7 @@ fn build_u1(params: &Build6Params) -> Vec<u8> {
     udp.extend_from_slice(&params.closed_udp_port.to_be_bytes());
     udp.extend_from_slice(&u16::try_from(total).unwrap_or(u16::MAX).to_be_bytes());
     udp.extend_from_slice(&[0, 0]); // checksum placeholder
-    udp.extend(std::iter::repeat(UDP_PAYLOAD_BYTE).take(UDP_PAYLOAD_LEN));
+    udp.extend(std::iter::repeat_n(UDP_PAYLOAD_BYTE, UDP_PAYLOAD_LEN));
 
     let sum = ipv6_pseudoheader_cksum(params.src, params.dst, NH_UDP, &udp);
     write_checksum(&mut udp, 6, sum);

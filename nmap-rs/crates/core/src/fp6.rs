@@ -562,7 +562,7 @@ mod tests {
     /// A TCP segment with the given window, flags byte, reserved nibble, seq and options.
     fn tcp(window: u16, flags: u8, reserved: u8, seq: u32, options: &[u8]) -> Vec<u8> {
         let mut opts = options.to_vec();
-        while opts.len() % 4 != 0 {
+        while !opts.len().is_multiple_of(4) {
             opts.push(1); // NOP pad
         }
         let offset = u8::try_from(5 + opts.len() / 4).unwrap();

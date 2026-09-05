@@ -231,3 +231,13 @@ jobs:
       # against a second hand-rolled hash would prove only that the two agree.
       - run: bash tests/differential/s/regen_sha256.sh --check
       - run: cargo test -p nmap-core --test sha256_differential
+
+      # Workstream S2 — Ed25519 / minisign verification. `core::sigstore::verify`
+      # CONSUMES signatures, so the gate is that it accepts what an independent
+      # signer produces and refuses that signer's near-misses: every signature in
+      # the corpus is made by the OpenSSL CLI, and the generator refuses to emit
+      # anything unless OpenSSL first reproduces the RFC 8032 vectors byte for byte.
+      # --check re-derives the corpus, the golden AND the Rust fixtures the Miri-
+      # visible unit tests `include!`, so those cannot drift from the corpus either.
+      - run: bash tests/differential/s/regen_minisign.sh --check
+      - run: cargo test -p nmap-core --test minisign_differential

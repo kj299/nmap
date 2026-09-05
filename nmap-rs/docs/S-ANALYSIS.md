@@ -197,6 +197,26 @@ adjacent surface (filesystem, atomicity) appears, and S5 — the only slice with
 network access — is deliberately last and thinnest, because by then it is a
 transport feeding an already-verified pipeline.
 
+**S2, as built (resolved).** The signing scheme question below was answered
+*minisign-style Ed25519*, implemented with the vetted `ed25519-dalek` crate rather
+than hand-rolled — the opposite of the call made for SHA-256 one slice earlier, and
+argued in `DIVERGENCES.md` under `sigstore-ed25519-dependency`. Two scope
+corrections to the row above:
+
+- **Verification only.** The row says "signature verification over the manifest,
+  *then per-file hash*". The per-file hash half already shipped in S4:
+  `sys::sigstore::Installer::install` checks declared size, then SHA-256, before it
+  writes a byte. S2 is therefore purely the signature layer, and the two meet at
+  `VerifiedManifest`, which is the only thing the install path accepts.
+- **There *is* an oracle after all.** The note below says S1–S5 have nothing to
+  differential against. That is true of the C nmap tree, but not of the primitive:
+  S2 verifies signatures produced by the OpenSSL CLI, over a 39-case corpus
+  re-derived on every CI run, with the generator refusing to emit anything unless
+  OpenSSL first reproduces the RFC 8032 §7.1 vectors byte for byte. The container
+  was additionally cross-checked against the real `minisign` 0.11 binary, which
+  accepts our fixtures (with `-l`, since we sign in pure mode). So this slice is
+  gated by an independent implementation, not only by golden and negative tests.
+
 **Oracle note, stated plainly.** There is no C to differential against for S1–S5;
 the C has none of this. Per the kit that means golden + negative tests carry the
 weight here, and **every slice is ledgered in `DIVERGENCES.md` as intentional
@@ -206,7 +226,7 @@ exists from M3/M5 and must stay green as version metadata is threaded through.
 
 ## Open questions for the approval gate
 
-1. **Signing scheme.** minisign (small, Ed25519, one dependency, no X.509) vs
+1. ✅ **Signing scheme — DECIDED and shipped in S2.** minisign (small, Ed25519, one dependency, no X.509) vs
    cosign/sigstore (transparency log, heavier, more infrastructure). Recommend
    **minisign-style Ed25519** for S2 — it keeps `core` pure and the verify path
    auditable in a page of code — with the format versioned so a transparency log

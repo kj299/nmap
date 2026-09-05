@@ -417,15 +417,30 @@ the update/submission paths are new behavior → golden + negative tests, ledger
 1. ✅ **M0-M5 (done):** see the STATUS TRACKER. `-sT`, `-sS`, `-sU`, the six flag
    scans, `-sV` and `-O` (IPv4 + IPv6) all ship; five retrospectives merged; kit
    lessons #1-#25.
-2. 🔶 **Workstream S Phase 0 (this PR):** inventory of what the C does and does
-   not do for signature-DB maintenance, the threat model for the port's first
-   network-fetch + signature-verification code, and a leaf-first build order.
-   **Stop for approval on the build order before any Rust** (kit requirement).
-3. On approval, run the S six-gate loop leaf-first, starting at `core::sigstore`
-   (manifest + version metadata, pure). **Update the STATUS TRACKER above** as each
-   module advances - the "don't lose the phase" rule, which this document violated
-   for five milestones before anyone noticed.
-4. After S: **M6 (NSE)**, then **M7 (cutover + `ncat`/`nping`)**.
+2. ✅ **Workstream S Phase 0 (done):** inventory of what the C does and does not
+   do for signature-DB maintenance, the threat model for the port's first
+   network-fetch + signature-verification code, and a leaf-first build order. See
+   [`docs/S-ANALYSIS.md`](docs/S-ANALYSIS.md).
+3. ✅ **Workstream S, every unblocked slice (done):** `core::sigstore::manifest`
+   (S1, fail-closed manifest parser), `core::sigstore::verify` (S2, minisign-style
+   Ed25519 over a pinned key ring), `core::fingerprint_store` (S3a, consent-gated
+   collection), `core::servicefp` + its wiring (S3b/S3c, the service-fingerprint
+   builder — the one slice with a C counterpart, so the only one with a true
+   differential), `core::sigstore::digest` + `sys::sigstore` (S4, SHA-256 and the
+   atomic installer).
+4. 🔶 **Workstream S5 (`sys::update`) is BLOCKED on three decisions**, all of them
+   policy rather than engineering, and none of them ours to make:
+   - **Bundle source.** There is no upstream nmap signature-bundle endpoint,
+     because the mechanism does not exist in the C. Either a configurable source
+     with no default (safest, least useful) or a documented default the operator
+     can override.
+   - **Are bundles archives?** S4 deliberately assumes not, which removes the
+     decompression-bomb class by construction. Reversing that is a security
+     decision, not a packaging one.
+   - **The CLI surface** for `--export-fingerprints` and the collection opt-in —
+     which is why `core::fingerprint_store` is still never handed a `Service`
+     record.
+5. After S: **M6 (NSE)**, then **M7 (cutover + `ncat`/`nping`)**.
 
 > **Note on step 3.** This section, and the STATUS TRACKER above it, sat at "M1 Phase
 > 0 (next)" while M1 through M5 were designed, built, gated and merged. The

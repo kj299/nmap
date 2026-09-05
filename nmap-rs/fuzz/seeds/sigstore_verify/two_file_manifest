@@ -1,0 +1,18 @@
+C# nmap-rs signature bundle
+schema = 1
+serial = 41
+released = 2026-08-31
+
+file = nmap-os-db
+version = 41
+sha256 = 55c7e7c4be00fca95f3aaab1b599343740058ab90980a476c2b9a8a0e26fd046
+size = 5368132
+
+file = nmap-service-probes
+version = 41
+sha256 = 11c4a847b3b962007a8599b3c6b141c3c8db0e3732dacdccba62fe40c97c24e8
+size = 2400000
+untrusted comment: signature from the nmap-rs test key
+RWQRIjNEVWZ3iILF9ogk9OfJJ+BJWsJ5pIGgl5i0yZXTYLbsrbspvdkp2MMXCv2uhqFwfVxgjCs49VKxKXIvlpGMXP+J5xosvgI=
+trusted comment: nmap-rs-sig:1	serial:41
+88FQuEZYvsVNYs7w8tgobUcgztJ+zPa6oPahelmD2C2BYV9h6PGrTk89fcAh0JNyqa3noFkRdMAumwsmk3qJBg==

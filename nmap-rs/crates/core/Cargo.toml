@@ -19,5 +19,22 @@ rust-version.workspace = true
 regex = "1"
 fancy-regex = "0.13"
 
+# `core::sigstore::verify` — Ed25519 verification of the signature-bundle manifest.
+# Verify-only: no signing, no key generation, no RNG, no PKCS#8/PEM parsing, no
+# serde. `default-features = false` turns off `std`, `zeroize` (there is no secret
+# key here to scrub) and `fast` (30 KiB of precomputed basepoint tables, measured
+# worth 5% on an operation that runs once per invocation). The verify path needs
+# no features at all.
+#
+# `legacy_compatibility` must NEVER be enabled: it degrades the RFC 8032
+# `0 <= s < L` check to a top-three-bits test and reintroduces signature
+# malleability. See DIVERGENCES.md `sigstore-verify-strict`.
+#
+# The `=` pin is load-bearing, not stylistic: ed25519-dalek 2.2.0 requires rustc
+# 1.81 and 3.0.0 requires 1.85, both above this workspace's 1.74 MSRV, and
+# `resolver = "2"` is not MSRV-aware — a caret requirement silently resolves to
+# 2.2.0 and breaks the MSRV build.
+ed25519-dalek = { version = "=2.1.1", default-features = false }
+
 [lints]
 workspace = true

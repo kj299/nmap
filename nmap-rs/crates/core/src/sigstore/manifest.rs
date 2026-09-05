@@ -313,7 +313,7 @@ fn name_byte_ok(b: u8) -> bool {
 
 /// Render a byte string for an error message without letting control characters
 /// reach a terminal.
-fn escape(bytes: &[u8]) -> String {
+pub(super) fn escape(bytes: &[u8]) -> String {
     let mut out = String::new();
     for &b in bytes {
         if (0x20..0x7f).contains(&b) {
@@ -354,7 +354,7 @@ fn lower_hex_value(b: u8) -> Option<u8> {
 
 /// Parse a `u64` from ASCII digits, rejecting anything else (no sign, no
 /// whitespace, no underscores, no leading `+`).
-fn parse_u64(value: &[u8]) -> Option<u64> {
+pub(super) fn parse_u64(value: &[u8]) -> Option<u64> {
     if value.is_empty() || value.len() > 20 {
         return None;
     }

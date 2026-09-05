@@ -1722,3 +1722,157 @@ removed: that one was theatre, this one is unobservable.
 - [x] `version`: `nmap-rs --version` carries Rust build metadata and notes it is the
       port; the differential compares the semantic projection, which excludes the
       version banner entirely. (Confirmed at M1 CLI.)
+
+
+- [x] `sigstore-verify-strict` (`core::sigstore::verify`, Workstream S2): signature
+      verification calls `ed25519-dalek`'s **`verify_strict`**, never the permissive
+      `Verifier::verify`, and refuses a public key that is small-order or
+      non-canonical *before* it is ever used. Measured on this machine against four
+      implementations: for a small-order public key (the all-zero encoding, which
+      decompresses to a genuine order-4 point, and the order-8 points), OpenSSL,
+      python-cryptography, RFC 8032's own reference implementation and dalek's
+      non-strict `verify` **all accept forged signatures**; only `verify_strict`
+      rejects. The same 4-to-1 split appears for `R` = identity, which is not a
+      forgery but a *signature-uniqueness* break — the key holder can mint a second,
+      different, equally valid signature over the same manifest — so no caller here
+      may assume `(key, manifest)` yields unique signature bytes. The corpus carries
+      that case (`small_order_r`) precisely because it is the one where a signature
+      OpenSSL accepts is deliberately refused. A narrowing of compatibility, taken
+      knowingly: for a single pinned publisher key the strict and permissive paths
+      agree on every honestly produced signature, so the whole malleability class is
+      removed for free. `ed25519-dalek`'s `legacy_compatibility` feature must never
+      be enabled — it degrades the RFC 8032 `0 <= s < L` check to a top-three-bits
+      test — and `crates/core/Cargo.toml` says so at the dependency line.
+
+      The explicit `y < p` canonicality check on the injected key is **not**
+      redundant with the small-order check, and the reason is recorded here because
+      it is what a future maintainer will read before deleting it as duplicated
+      work: `y = 2^255 - 1` aliases to `y = 18`, which is a **full-order** point.
+      `VerifyingKey::from_bytes` accepts it, `is_weak()` returns false, and
+      `verify_strict` will happily use it — the small-order check does not cover it.
+      Nor does the obvious alternative: `VerifyingKey` stores the original bytes and
+      returns them verbatim, so a `to_bytes() == input` round-trip detects no
+      non-canonical encoding at all. The corpus carries
+      `non_canonical_key_y_eq_p_plus_18` exactly so that removing the check fails a
+      test rather than quietly widening what counts as a trusted key.
+      *(Introduced at S2.)*
+
+- [x] `sigstore-pure-ed25519-only` (`core::sigstore::verify`, Workstream S2): only
+      minisign's **pure** mode (`Ed`) is accepted; the prehashed mode (`ED`,
+      BLAKE2b-512 over the message) is refused with a typed error that names what
+      was refused. The signed object is a manifest capped at 64 KiB and already in
+      memory, so prehashing solves nothing here, while accepting it would pull
+      BLAKE2b-512 into a `#![forbid(unsafe_code)]` crate that has three dependencies
+      — `ed25519-dalek` brings `sha2`, but not `blake2`. Note also that minisign's
+      prehash is *not* RFC 8032 Ed25519ph (which is SHA-512 with a dom2 prefix) but
+      a project-local construction, so accepting it would mean adopting that
+      construction rather than a standard. **Interoperability, measured rather than
+      assumed:** the released `minisign` binaries verify our pure-mode fixtures with
+      no special flag — 0.11 prints "Signature and comment signature verified" for a
+      plain `minisign -V -p key.pub -m manifest.txt`. (The `allow_legacy` gate that
+      would require `-l` exists only on minisign's master branch, not in a release;
+      an earlier draft of this entry claimed the flag was needed, which was reading
+      master and describing a release.) The converse does **not** hold: stock
+      minisign accepts several things this parser refuses — trailing bytes after
+      line 4, non-canonical base64, a rewritten untrusted comment — so "minisign
+      says OK" is neither necessary nor sufficient evidence about an nmap-rs bundle,
+      and the release runbook should say so. *(Introduced at S2.)*
+
+- [x] `sigstore-canonical-container` (`core::sigstore::verify`, Workstream S2): the
+      `.minisig` container is parsed far more strictly than stock minisign parses
+      it, so a signature has exactly one byte representation — the same argument
+      `manifest.rs` already makes for lowercase-only hex. Four narrowings, each
+      measured against the C in `jedisct1/minisign`:
+      **(a) Canonical base64 only.** `b64_to_bin` never masks the unused trailing
+      bits of the final character, so stock minisign accepts 4 distinct spellings of
+      any signature line and 16 of any global-signature line. Here padding is
+      mandatory, the length is compared to a compile-time constant, the alphabet is
+      standard-only (URL-safe `-`/`_` refused), whitespace is never skipped, and
+      trailing bits must be zero.
+      **(b) Exactly four lines.** Stock minisign performs four `fgets` calls and
+      ignores everything after them, so bytes appended to a `.minisig` are accepted
+      and invisible — two different files verify identically. Here trailing content
+      is refused, so a mirror or CDN cannot append undetected.
+      **(c) The trusted comment and global signature are REQUIRED, not optional.**
+      OpenBSD `signify` has only two lines and no global signature; an
+      implementation that treats lines 3 and 4 as optional silently degrades to
+      those semantics, which would make the envelope binding skippable by anyone who
+      can shorten a file.
+      **(d) Printable ASCII plus tab on every line.** Stock minisign's
+      `is_printable()` admits full UTF-8; homoglyph and bidi text displayed beside
+      the word "verified" is a spoofing surface, and ASCII-only removes every
+      encoding question downstream. *(Introduced at S2.)*
+
+- [x] `sigstore-key-id-is-not-authentication` (`core::sigstore::verify`, Workstream
+      S2): the 8-byte key id **orders** verification attempts and nothing more. No
+      signature covers it — measured: Ed25519 over `alg || keyid || sig || tc` does
+      not reproduce the global signature, so the id is outside both signed byte
+      strings and an attacker rewrites it for free. Stock minisign's `verify()`
+      calls `exit(1)` on a key-id mismatch *before* attempting any verification,
+      which with a multi-key ring would hand an attacker a choice of which pinned
+      key you are allowed to try — a downgrade lever during a rotation window. Here
+      every key in the ring is tried regardless, the only failure is "no pinned key
+      verified both signatures", and `VerifiedManifest::signing_key_id()` reports
+      the id of the **trusted** key that succeeded, never the one the file claimed.
+      *(Introduced at S2.)*
+
+- [x] `sigstore-untrusted-comment-is-dropped` (`core::sigstore::verify`, Workstream
+      S2): line 1 of a `.minisig` is signed by nothing, in any mode, ever. Its
+      prefix is checked and its content is then discarded — never stored on the
+      returned type, never rendered into an error, never logged. Stock minisign
+      prints it, and is looser still: `pubkey_load_file` does not even require the
+      prefix on a public-key file. An attacker-chosen string arriving at an
+      operator's terminal next to the word "verified" is a phishing primitive; the
+      only comment a human is ever shown here is the signed one. A unit test asserts
+      a hostile line 1 reaches neither the success value nor the error text.
+      *(Introduced at S2.)*
+
+- [x] `sigstore-verified-manifest-newtype` (`core::sigstore::verify`, Workstream
+      S2): `verify_manifest` is the only constructor of `VerifiedManifest`, and the
+      update path accepts nothing else. `manifest.rs`'s own documentation already
+      warned that "holding a `Manifest` is never evidence that anything was
+      verified"; this turns that comment into a type the compiler checks. Parsing
+      happens strictly *after* both signatures pass, so a malformed manifest is
+      never parsed on an attacker's say-so — "verify before parse, never parse to
+      decide whether to verify". The envelope's `serial` is cross-checked against
+      the manifest's; that check is **redundant against an attacker** — the manifest
+      is inside the signed bytes, so a forged serial fails the signature first — and
+      the claim made for it is deliberately no larger than what it does catch:
+      publisher tooling that signs an envelope disagreeing with its manifest, which
+      it fails closed on. *(Introduced at S2.)*
+
+- [x] `sigstore-ed25519-dependency` (`core::sigstore::verify`, Workstream S2):
+      Ed25519 is taken as a **vetted dependency** (`ed25519-dalek =2.1.1`), not
+      hand-rolled, which is the opposite of the call made one slice earlier for
+      SHA-256 in `core::sigstore::digest`. The two are not the same kind of
+      primitive: a hash is a fixed, exhaustively testable function with one right
+      answer, while Ed25519 verification has genuinely contested semantics across
+      implementations (see `sigstore-verify-strict`) and its failure modes —
+      non-canonical encodings, cofactor handling, torsion components — are precisely
+      the ones a differential built from valid signatures never exercises. The
+      dependency cost is stated rather than hidden: `core` goes from two direct
+      dependencies to three, and ~127 `unsafe` constructs enter its transitive tree
+      (`generic-array` 58, `sha2` 29, `curve25519-dalek` 25, `cpufeatures` 9,
+      `block-buffer` 4, `subtle` 2), even though `ed25519-dalek` itself contains
+      zero and declares `forbid(unsafe_code)`. `nmap-core`'s own
+      `#![forbid(unsafe_code)]` is unaffected and still enforced. All licences clear
+      `deny.toml`'s allow-list unchanged, and `cargo deny check` passes with no
+      policy edit. The version is pinned exactly because 2.2.0 requires rustc 1.81
+      and 3.0.0 requires 1.85, both above the declared MSRV, and `resolver = "2"` is
+      not MSRV-aware. *(Introduced at S2.)*
+
+- [x] `sigstore-miri-tests-the-serial-backend` (`core::sigstore::verify`, Workstream
+      S2) — **a known gap, recorded rather than papered over.** Under Miri,
+      `is_x86_feature_detected!` reports no CPU features, so `curve25519-dalek`'s
+      runtime dispatch falls through to its pure-Rust serial backend. The
+      workspace-wide Miri job therefore gives **zero UB coverage of the AVX2/AVX512
+      vector code** — about 23 of `curve25519-dalek`'s `unsafe` constructs — that
+      actually executes in production on any modern x86_64 host. Miri reports green
+      on code that does not ship. Measured alternative: building with
+      `--cfg curve25519_dalek_backend="serial"` makes tested and shipped code
+      identical and removes those `unsafe` blocks from the binary, at 61.2 vs
+      56.2 µs per verification (9%, on an operation that runs once per invocation).
+      That is not adopted here because its interaction with the fuzz and
+      differential jobs is unvalidated, and changing a workspace-wide build flag is
+      not this slice's business; it is the recommended follow-up, tracked in
+      `BACKLOG.md`. *(Introduced at S2.)*

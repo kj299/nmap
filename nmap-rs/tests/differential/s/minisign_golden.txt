@@ -1,0 +1,45 @@
+# name	oracle	expected
+# `oracle` is the OpenSSL CLI's independent verdict on the raw Ed25519
+# signature. A row with OPENSSL_OK / REJECT is a deliberate divergence:
+# the signature is genuine and this port refuses it anyway, on purpose.
+basic	OPENSSL_OK	ACCEPT
+no_trailing_newline	OPENSSL_OK	ACCEPT
+empty_untrusted_comment	OPENSSL_OK	ACCEPT
+long_untrusted_comment	OPENSSL_OK	ACCEPT
+two_file_manifest	OPENSSL_OK	ACCEPT
+key_id_mismatch	OPENSSL_OK	ACCEPT
+crlf_line_endings	OPENSSL_NA	ACCEPT
+tampered_manifest	OPENSSL_FAIL	REJECT
+tampered_signature	OPENSSL_FAIL	REJECT
+tampered_global_signature	OPENSSL_OK	REJECT
+rewritten_trusted_comment	OPENSSL_OK	REJECT
+transplanted_envelope	OPENSSL_OK	REJECT
+wrong_key	OPENSSL_FAIL	REJECT
+s_plus_group_order	OPENSSL_FAIL	REJECT
+s_high_bits_set	OPENSSL_FAIL	REJECT
+small_order_r	OPENSSL_OK	REJECT
+small_order_key	OPENSSL_FAIL	REJECT
+non_canonical_key_y_eq_p	OPENSSL_FAIL	REJECT
+non_canonical_key_y_eq_p_plus_18	OPENSSL_FAIL	REJECT
+undecompressable_key	OPENSSL_FAIL	REJECT
+prehashed_mode	OPENSSL_OK	REJECT
+non_canonical_b64_signature	OPENSSL_OK	REJECT
+non_canonical_b64_global	OPENSSL_OK	REJECT
+appended_junk	OPENSSL_OK	REJECT
+missing_global_signature	OPENSSL_OK	REJECT
+stray_carriage_return	OPENSSL_OK	REJECT
+unknown_envelope_field	OPENSSL_OK	REJECT
+envelope_too_new	OPENSSL_OK	REJECT
+serial_mismatch	OPENSSL_OK	REJECT
+envelope_version_not_first	OPENSSL_OK	REJECT
+duplicate_envelope_field	OPENSSL_OK	REJECT
+envelope_missing_serial	OPENSSL_OK	REJECT
+url_safe_b64	OPENSSL_NA	REJECT
+unpadded_b64	OPENSSL_NA	REJECT
+short_signature_line	OPENSSL_NA	REJECT
+bad_untrusted_prefix	OPENSSL_OK	REJECT
+bad_trusted_prefix	OPENSSL_OK	REJECT
+non_ascii_trusted_comment	OPENSSL_OK	REJECT
+oversized_trusted_comment	OPENSSL_OK	REJECT
+empty_input	OPENSSL_NA	REJECT
+giant_input	OPENSSL_NA	REJECT

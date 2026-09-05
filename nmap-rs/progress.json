@@ -44,7 +44,7 @@
     "core::recv_validate": "unsafe_audited",
     "core::servicefp": "differential",
     "core::servicescan": "unsafe_audited",
-    "core::sigstore": "differential",
+    "core::sigstore": "fuzzed",
     "core::synscan": "unsafe_audited",
     "core::trace": "differential",
     "core::udpscan": "unsafe_audited",

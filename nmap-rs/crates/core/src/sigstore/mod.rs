@@ -20,6 +20,11 @@
 
 pub mod digest;
 pub mod manifest;
+pub mod verify;
 
 pub use digest::{to_hex, Sha256, DIGEST_LEN};
 pub use manifest::{FileEntry, Manifest, ManifestError, VersionVerdict, SCHEMA_VERSION};
+pub use verify::{
+    verify_manifest, KeyRing, SignedEnvelope, TrustedKey, VerifiedManifest, VerifyError,
+    ENVELOPE_VERSION,
+};

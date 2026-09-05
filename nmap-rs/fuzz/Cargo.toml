@@ -16,6 +16,10 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+# Only the signer-in-the-loop target (`sigstore_envelope`) uses this, to mint
+# genuine signatures over fuzzer-chosen bytes. `nmap-core` itself never signs;
+# this dependency lives here and does not reach the shipped crate.
+ed25519-dalek = { version = "=2.1.1", default-features = false }
 libfuzzer-sys = "0.4"
 
 [dependencies.nmap-core]
@@ -239,6 +243,16 @@ test = false
 [[bin]]
 name = "sigstore_manifest"
 path = "fuzz_targets/sigstore_manifest.rs"
+test = false
+
+[[bin]]
+name = "sigstore_verify"
+path = "fuzz_targets/sigstore_verify.rs"
+test = false
+
+[[bin]]
+name = "sigstore_envelope"
+path = "fuzz_targets/sigstore_envelope.rs"
 test = false
 
 [[bin]]

@@ -393,3 +393,43 @@ retrospective rather than quietly picking a convention per module.
   local `--all-features`-only check passes code CI rejects. (Cost a red run on #55.)
   Same shape as the fuzz `+nightly` note in LESSONS #16: the local convenience
   invocation is not the CI invocation. For the next retrospective.
+
+- **Build `curve25519-dalek` with its serial backend, or accept that Miri tests code
+  that does not ship.** Under Miri `is_x86_feature_detected!` returns false for
+  avx2/avx512, so the runtime dispatch falls to the pure-Rust serial backend: the
+  workspace-wide Miri job gives **zero** UB coverage of the ~23 `unsafe` constructs in
+  the AVX2/AVX512 paths that actually execute in production. `--cfg
+  curve25519_dalek_backend="serial"` makes tested and shipped code identical and drops
+  those blocks from the binary, measured at 61.2 vs 56.2 µs per verification (9%, once
+  per invocation). Not taken in S2 because a workspace-wide build flag interacts with
+  the fuzz and differential jobs in ways nobody has validated. Recorded in
+  DIVERGENCES.md as `sigstore-miri-tests-the-serial-backend`. (Found while measuring
+  the S2 Miri budget.)
+- **The declared MSRV is already false, and nothing checks it.** `Cargo.toml` says
+  `rust-version = "1.74"`, but `cargo +1.74 check -p nmap-core` fails on
+  `crates/core/src/osscan.rs` — lint `reason = "..."` was stabilised in 1.81 — and this
+  predates S2. CI pins 1.97.0 and never builds on the declared MSRV, so the claim is
+  unenforced metadata. Two honest fixes: raise `rust-version` to what the tree actually
+  needs, or add an MSRV job and hold the line. Until one is chosen, S2 pins
+  `ed25519-dalek =2.1.1` (the last release supporting 1.74) so it does not make the
+  claim *more* false — at the cost of no security-patch headroom, since 2.2.x needs
+  1.81 and 3.x needs 1.85. Decide before an advisory forces the choice under time
+  pressure. (Found while adding the S2 dependency.)
+- **`verify_strict` is not a style preference, and the measurement says so.** For a
+  small-order public key, OpenSSL, python-cryptography, RFC 8032's own reference
+  implementation and `ed25519-dalek`'s non-strict `verify` all accept forged
+  signatures; only `verify_strict` rejects. Any future Ed25519 call site in this tree
+  must use it. Worth a LESSONS entry at the Workstream S retrospective, alongside the
+  observation that RFC 8032's reference `verify()` constructs a bad-length exception
+  and never raises it — so it accepts a 65-byte signature and is not usable as a
+  differential oracle for length handling.
+- **Publisher-side foot-gun for the S5 release runbook: never pipe untrusted text into
+  `minisign -S -t`.** A newline in the trusted comment makes minisign write a malformed
+  five-line `.minisig` with an attacker-chosen line spliced in — and the *release*
+  binaries are built `NDEBUG`, so the assertion that would have caught it is compiled
+  out and the tool exits 0. Both 0.11 and 0.12 then fail to parse their own output.
+  S2's parser rejects it on the line count, but any nmap-rs signing tooling must reject
+  newlines itself rather than rely on the signer to. Also note `minisign -S -t ""` does
+  not produce an empty trusted comment — it substitutes `timestamp:<unix>\tfile:<name>`
+  — so the empty-comment case is only reachable from a non-stock signer, which is why
+  it is an explicit negative test rather than assumed unreachable.

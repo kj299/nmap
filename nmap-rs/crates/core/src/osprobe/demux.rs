@@ -467,7 +467,7 @@ mod tests {
             0x00, // EOL
         ];
         seg.extend_from_slice(&opts);
-        while seg.len() % 4 != 0 {
+        while !seg.len().is_multiple_of(4) {
             seg.push(0);
         }
         let off = u8::try_from(seg.len() / 4).unwrap_or(5);

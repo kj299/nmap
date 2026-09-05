@@ -30,10 +30,21 @@ fancy-regex = "0.13"
 # `0 <= s < L` check to a top-three-bits test and reintroduces signature
 # malleability. See DIVERGENCES.md `sigstore-verify-strict`.
 #
-# The `=` pin is load-bearing, not stylistic: ed25519-dalek 2.2.0 requires rustc
-# 1.81 and 3.0.0 requires 1.85, both above this workspace's 1.74 MSRV, and
-# `resolver = "2"` is not MSRV-aware — a caret requirement silently resolves to
-# 2.2.0 and breaks the MSRV build.
+# The `=` pin's ORIGINAL reason has lapsed, and is recorded here rather than
+# quietly restated: it was chosen when the workspace declared MSRV 1.74, because
+# ed25519-dalek 2.2.0 needs rustc 1.81 and 3.0.0 needs 1.85, and `resolver = "2"`
+# is not MSRV-aware, so a caret requirement resolved to 2.2.0 and broke the build.
+# The declared MSRV is now 1.88 (measured), so neither release is out of reach and
+# that argument no longer holds.
+#
+# The pin is left in place because relaxing it changes which code verifies
+# signatures, and that is a deliberate decision rather than a side effect of an
+# MSRV correction. Note the cost while it stands: `=` leaves no room for a patch
+# release, so a RUSTSEC advisory against 2.1.1 would have to be answered by editing
+# this line under time pressure. Cargo.lock is what makes builds reproducible, so
+# relaxing this to `"2.1.1"` (caret) would restore that headroom without changing
+# the version actually built until someone runs `cargo update`. Tracked in
+# BACKLOG.md.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 
 [lints]

@@ -173,7 +173,7 @@ fn faithful_u1(quoted_ttl: u8) -> UdpErrorReply {
 fn segment(options: &[u8]) -> Vec<u8> {
     let mut seg = vec![0u8; 20];
     seg.extend_from_slice(options);
-    while seg.len() % 4 != 0 {
+    while !seg.len().is_multiple_of(4) {
         seg.push(0x01); // NOP-pad to a 4-byte boundary
     }
     let offset = u8::try_from(seg.len() / 4).unwrap_or(5);

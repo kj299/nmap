@@ -31,7 +31,7 @@ fn s_dir() -> PathBuf {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    assert!(s.len() % 2 == 0, "odd-length hex: {s}");
+    assert!(s.len().is_multiple_of(2), "odd-length hex: {s}");
     s.as_bytes()
         .chunks(2)
         .map(|pair| {

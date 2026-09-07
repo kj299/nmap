@@ -1,0 +1,21 @@
+# name	oracle	expected
+# `oracle` is the verdict of nmap's OWN Lua 5.4 and OWN LPeg, built from
+# liblua/ + lpeg.c, running the selection grammar sliced verbatim out of
+# nse_main.lua and nselib/lpeg-utility.lua.
+# A row whose two columns disagree is a deliberate divergence, ledgered in
+# DIVERGENCES.md and pinned by name in the differential test.
+norm_plain	RULE:false:safe	RULE:false:safe
+norm_forced	RULE:true:safe	RULE:true:safe
+norm_forced_spaced	RULE:true:safe	RULE:true:safe
+norm_leading_ws	RULE:false:safe	RULE:false:safe
+norm_trailing_ws	RULE:false:safe	RULE:false:safe
+norm_both_ws	RULE:false:safe	RULE:false:safe
+norm_inner_ws	RULE:false:a and b	RULE:false:a and b
+norm_ws_forced	RULE:true:safe	RULE:true:safe
+norm_empty	SKIP:	SKIP:
+norm_only_ws	SKIP:    	SKIP:    
+norm_only_plus	SKIP:+	SKIP:+
+norm_double_plus	RULE:true:+safe	RULE:true:+safe
+norm_plus_inside	RULE:false:a+b	RULE:false:a+b
+norm_tab	RULE:false:safe	RULE:false:safe
+norm_newline	RULE:false:safe	RULE:false:safe

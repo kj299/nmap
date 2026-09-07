@@ -279,3 +279,8 @@ test = false
 name = "nse_metadata"
 path = "fuzz_targets/nse_metadata.rs"
 test = false
+
+[[bin]]
+name = "nse_selection"
+path = "fuzz_targets/nse_selection.rs"
+test = false

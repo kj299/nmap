@@ -368,9 +368,13 @@ retrospective rather than quietly picking a convention per module.
   `git clean -fd fuzz/seeds/<t>` unless a specific find is worth seeding; CI does the
   same thing but never commits. Consider pointing runs at a scratch corpus dir with the
   seeds as a read-only `-seed_inputs` set instead.
-- **New-fuzz-target checklist**: every new `fuzz_targets/<t>.rs` needs a committed
-  `fuzz/seeds/<t>/` dir, or CI's `cargo fuzz run <t> fuzz/seeds/<t>` errors. Capture
-  in the next scan-driver retrospective (cousin of LESSONS #15).
+- **RESOLVED (new-fuzz-target checklist): now enforced, not remembered.** Every
+  `fuzz_targets/<t>.rs` needs a committed non-empty `fuzz/seeds/<t>/`, or CI's
+  `cargo fuzz run <t> fuzz/seeds/<t>` errors — minutes into a fuzz shard rather
+  than at the point of the mistake. `fuzz/check-seeds.sh` reads the `[[bin]]`
+  entries out of `fuzz/Cargo.toml` and asserts each has a non-empty seed dir; it
+  needs no toolchain, so it runs first in the fast build job. A checklist item
+  nobody can forget beats a checklist item.
 - **An oracle must copy the C, not restate it.** The fp6 differential passed bit-exact
   while both sides were wrong: the oracle's `apply_scale` had been retyped without nmap's
   `if (val < 0) continue;` guard, under a comment claiming it was verbatim. A gate that
@@ -428,17 +432,20 @@ retrospective rather than quietly picking a convention per module.
   Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Worth a
   LESSONS entry: an MSRV bump must be validated with the full clippy sweep, not just
   a build.
-- **979 fuzzer-generated files are committed as "seeds" across 7 targets, from
-  before this slice.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory
-  as a *corpus* and writes discovered units into it, so a local smoke run silently
-  adds libFuzzer-named (40-hex) blobs that then get committed. Repo-wide it is now
-  979 generated against 367 hand-authored: `fp6_vectorize` 293, `fp6_match` 189,
-  `parse_packet` 186, `osprobe_icmpreply` 97, `osprobe_assemble` 95, `ndp_advert` 93,
-  `parse_tcp` 26. Traced to the feature PRs that introduced each target (e.g. #73).
-  Not fixed here because 979 deletions do not belong in an MSRV change. Two things
-  are wanted: prune them, and add a CI check so it cannot recur —
-  `ls fuzz/seeds/<t> | grep -cE '^[0-9a-f]{40}$'` must be 0. Green CI has never
-  objected to any of this, which is the point.
+- **RESOLVED (seed pollution): 979 fuzzer-generated files pruned, recurrence
+  gated.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory as a
+  *corpus* and writes discovered inputs into it, so local smoke runs silently
+  dropped SHA1-named blobs into the tree that were then committed by the feature
+  PRs introducing each target (e.g. #73). Repo-wide it had reached 979 generated
+  against 367 curated, 5.6 MB of seeds. Pruned to 387 curated files, 1.8 MB.
+  `fuzz/check-seeds.sh` now fails on any 40-hex-named file under `fuzz/seeds/`,
+  and each of its three failure modes was verified to actually fire before the
+  check was wired in. The fix for the mechanism itself is in the script's header:
+  pass a scratch corpus dir FIRST and the seed dir second.
+  Note `ndp_advert` had **93 generated seeds and zero curated ones**, so pruning it
+  alone would have emptied the directory; it now carries 20 hand-written seeds
+  covering the truncated-advertisement read that the target exists to guard, and
+  they reach cov 67 / ft 72 against the 93 blobs' 69 / 74.
 - **DECIDE: relax the `ed25519-dalek` pin now that MSRV no longer forces it.** The
   `=2.1.1` pin was chosen solely because 2.2.0 needs rustc 1.81 and 3.0.0 needs
   1.85, both above the then-declared 1.74. With MSRV corrected to 1.88 that reason

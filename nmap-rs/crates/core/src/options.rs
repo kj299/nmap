@@ -122,6 +122,29 @@ impl Default for RunConfig {
     }
 }
 
+/// Options accepted as no-ops because this port's *unconditional* behaviour
+/// already satisfies them.
+///
+/// This is deliberately not a list of "flags it seems safe to ignore". The CLI
+/// otherwise refuses anything it does not implement, because ignoring an option
+/// that constrains a scan makes the scan broader than the operator asked for
+/// (see `cli-fails-closed-on-unsupported-options` in `DIVERGENCES.md`). The
+/// only sound exception is an option that asks for behaviour the port already
+/// has with no way to turn it off — accepting one of those changes nothing, and
+/// refusing it would reject a command whose intent is already honoured.
+///
+/// Each entry carries the reason it qualifies, and the reason has to be a
+/// property of the code, checkable today — not an intention. An option whose
+/// *opposite* would change behaviour does NOT belong here: `-n` qualifies
+/// because no reverse lookup exists to suppress, while `-R` (always resolve)
+/// does not, because this port cannot do what it asks.
+const ALREADY_SATISFIED: &[(&str, &str)] = &[(
+    "-n",
+    "never do reverse DNS: this port performs no reverse lookup anywhere. \
+     `Host::hostname` is only ever set from the user's own target expression \
+     (see the CLI's target resolution), so there is nothing for -n to disable.",
+)];
+
 /// Parse a `--min-rate`/`--max-rate` value: a positive, finite probes-per-second
 /// number. Anything else (empty, non-numeric, `<= 0`, NaN) is rejected as `None`
 /// rather than silently treated as a rate.
@@ -245,6 +268,8 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             }
             "-6" => cfg.ipv6 = true,
             "-Pn" => cfg.assume_up = true,
+            // Accepted as a no-op: see ALREADY_SATISFIED.
+            _ if ALREADY_SATISFIED.iter().any(|(opt, _)| *opt == s) => {}
             "-sT" => cfg.scan = ScanKind::Connect,
             "-sS" => cfg.scan = ScanKind::Syn,
             "-sU" => cfg.scan = ScanKind::Udp,
@@ -531,6 +556,56 @@ mod tests {
         let c = cfg(&["-Z", "--frobnicate", "10.0.0.1"]);
         assert_eq!(c.unrecognized, vec!["-Z", "--frobnicate"]);
         assert_eq!(c.targets, vec!["10.0.0.1"]);
+    }
+
+    /// `-n` is accepted rather than refused, because the port already never
+    /// does a reverse lookup. Every case in the M1 differential matrix passes
+    /// `-n`, so refusing it took the whole differential red.
+    #[test]
+    fn an_option_the_port_already_satisfies_is_accepted() {
+        let c = cfg(&["-n", "-sT", "127.0.0.1"]);
+        assert!(
+            c.unrecognized.is_empty(),
+            "-n should not be refused: {:?}",
+            c.unrecognized
+        );
+        assert_eq!(c.targets, vec!["127.0.0.1"]);
+    }
+
+    /// The carve-out is narrow on purpose. An option whose *opposite* is what
+    /// the port does — `-R`, always resolve — asks for behaviour this port
+    /// cannot provide, so it must still be refused rather than quietly accepted.
+    #[test]
+    fn the_no_op_carve_out_does_not_leak_to_its_opposite() {
+        assert_eq!(cfg(&["-R", "127.0.0.1"]).unrecognized, vec!["-R"]);
+        // And it does not accidentally swallow the constraint options that
+        // motivated failing closed in the first place.
+        for flag in [
+            "--exclude",
+            "--scan-delay",
+            "-T2",
+            "--max-retries",
+            "--top-ports",
+        ] {
+            assert_eq!(
+                cfg(&[flag, "127.0.0.1"]).unrecognized,
+                vec![flag.to_string()],
+                "{flag} must still be refused"
+            );
+        }
+    }
+
+    /// Every entry in the table has to carry a stated reason; an entry added
+    /// without one is the failure mode this guards against.
+    #[test]
+    fn every_accepted_no_op_states_why_it_qualifies() {
+        for (opt, why) in ALREADY_SATISFIED {
+            assert!(opt.starts_with('-'), "{opt} is not an option");
+            assert!(
+                why.len() > 40,
+                "{opt} needs a real justification, got {why:?}"
+            );
+        }
     }
 
     #[test]

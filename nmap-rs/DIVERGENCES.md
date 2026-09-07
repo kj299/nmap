@@ -1959,4 +1959,15 @@ removed: that one was theatre, this one is unobservable.
       The residual divergence is only in the *message and exit code*: C exits
       `-1` (255) and this port exits 1, and the wording differs. Neither is
       load-bearing — no scanning happens in either case.
+      One carve-out, narrow by construction: an option is accepted as a no-op
+      only when this port's *unconditional* behaviour already satisfies it, so
+      accepting it changes nothing. `-n` (never do reverse DNS) is the only
+      current entry — no reverse lookup exists anywhere in the port to
+      suppress. The table (`options::ALREADY_SATISFIED`) requires a stated,
+      code-checkable reason per entry, and an option whose *opposite* would
+      change behaviour is excluded: `-R` (always resolve) is still refused,
+      because this port cannot do what it asks. Tests pin all three properties.
+      This mattered immediately: every case in the M1 differential matrix
+      passes `-n`, so the first version of this change took the whole
+      differential red — 9 of 9 cases — before the carve-out existed.
       *(Introduced at M7.0.)*

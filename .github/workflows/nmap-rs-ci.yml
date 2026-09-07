@@ -194,7 +194,16 @@ jobs:
           fi
           echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }} runs:"; echo "$targets"
           for t in $targets; do
-            cargo +nightly fuzz run "$t" fuzz/seeds/"$t" -- -max_total_time=60 -print_final_stats=1
+            # Write newly discovered inputs to a scratch corpus, NOT to the
+            # hand-authored seeds. libFuzzer treats the FIRST corpus directory
+            # as writable output and any further ones as read-only input, so
+            # passing only `fuzz/seeds/$t` (as this did) grows that directory by
+            # thousands of files during a run. In CI that is merely untidy; run
+            # locally it silently turns a curated 23-file corpus into a 5,723-file
+            # one that then lands in a commit. `fuzz/corpus/` is gitignored.
+            mkdir -p fuzz/corpus/"$t"
+            cargo +nightly fuzz run "$t" fuzz/corpus/"$t" fuzz/seeds/"$t" \
+              -- -max_total_time=60 -print_final_stats=1
           done
 
   differential:
@@ -299,3 +308,18 @@ jobs:
       - run: bash tests/differential/m6/regen_m6.sh --check
       - run: cargo test -p nmap-core --test nse_differential
       - run: cargo test -p nmap-core --test nse_corpus
+
+      # M6.2 — the `--script` selection grammar. The oracle here is nmap's own
+      # LPeg as well as its own Lua: `build_lua_oracle.sh` compiles `liblua/`
+      # AND `lpeg.c` out of this repository, because the grammar's observable
+      # behaviour (ordered choice that commits, possessive repetition, capture
+      # functions that run only over the surviving parse tree, and a backtrack
+      # stack that gives out at fifteen nested parentheses) belongs to that
+      # engine rather than to PEGs in general.
+      #
+      # Two gates again, and the second is the broader one: `selection_corpus`
+      # evaluates 45 realistic rules against all 611 shipped scripts — 27,495
+      # verdicts — and compares counts and a digest of the selected set.
+      - run: bash tests/differential/m6/regen_m62.sh --check
+      - run: cargo test -p nmap-core --test selection_differential
+      - run: cargo test -p nmap-core --test selection_corpus

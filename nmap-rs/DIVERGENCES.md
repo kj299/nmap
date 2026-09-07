@@ -1934,3 +1934,44 @@ removed: that one was theatre, this one is unobservable.
       this parser reproduces the index nmap itself generated — by executing them
       — byte for byte, all 52,755 of them.
       *(Introduced at M6.1.)*
+
+- [x] `nse-selection-depth-ceiling` (`core::nse::selection`, M6.2) — **the C
+      refuses deeply nested `--script` expressions; this port evaluates them.**
+      nmap parses selection rules with LPeg, which keeps pending ordered choices
+      on a fixed 100-slot backtrack stack (`lpeg.c:52`, `MAXBACK`). When that
+      stack runs out the match raises a Lua error — `too many pending
+      calls/choices` — which propagates out of `script_database.Entry`,
+      out of `get_chosen_scripts`, and aborts NSE. Because the stack is shared
+      across constructs rather than counted per rule, the ceiling is different
+      for each of them, measured against nmap's own LPeg: **15** nested
+      parentheses, **19** chained `and`s, **31** chained `or`s. Those three
+      numbers are an artifact of how many slots each construct happens to cost,
+      not a property of the grammar, so reproducing them would mean emulating
+      LPeg's stack accounting. This port applies one uniform bound instead
+      ([`MAX_NESTING`], 256 recursion levels — roughly 127 nested parentheses),
+      and every rule the C accepts is accepted here with the same verdict. The
+      differential pins that direction explicitly: seven corpus cases
+      (`nesting_15`, `nesting_16`, `nesting_40`, `and_chain_19`, `and_chain_25`,
+      `or_chain_31`, `or_chain_40`) record the C erroring where this port
+      answers, and `no_unledgered_divergence_exists` fails if an eighth appears.
+      Note what the bound is *for*. The grammar's three alternatives all begin by
+      parsing the same `value`, so a literal transcription re-parses it up to
+      four times per level and costs `4^depth`; the C is shielded from that only
+      by the low ceiling described above. This port folds the three rules into a
+      single pass and memoises failed positions, which makes parsing linear, so
+      the bound here guards the stack rather than the clock.
+      *(Introduced at M6.2.)*
+
+- [x] `nse-selection-rule-length` (`core::nse::selection`, M6.2) — **a rule
+      longer than 64 KiB is refused rather than parsed.** The C imposes no
+      length limit of its own: a rule reaches `get_chosen_scripts` from `argv`
+      via `NmapOps::chooseScripts` (`NmapOps.cc:628`) and is bounded only by the
+      operating system's argument size, typically ~2 MiB on Linux. This is the
+      one place where the port is *stricter* than the C, so it is worth being
+      precise about the cost: the longest rule in any nmap documentation,
+      tutorial or shipped example is well under 100 bytes, the longest plausible
+      hand-written rule is a few hundred, and [`MAX_RULE_LEN`] is 64 KiB —
+      roughly a thousand times the largest realistic input. A refusal is
+      reported as `SelectionError::TooLong` rather than silently selecting
+      nothing, so the case is distinguishable by the caller.
+      *(Introduced at M6.2.)*

@@ -1934,3 +1934,29 @@ removed: that one was theatre, this one is unobservable.
       this parser reproduces the index nmap itself generated — by executing them
       — byte for byte, all 52,755 of them.
       *(Introduced at M6.1.)*
+
+- [x] `cli-fails-closed-on-unsupported-options` (`cli`, M7.0) — **an option this
+      port does not implement stops the scan instead of being ignored.** This
+      entry records a divergence being *removed*, and is kept because the old
+      behaviour shipped.
+      C nmap refuses an unrecognised option outright: it reaches `case '?'` in
+      the `getopt_long_only` loop (`nmap.cc:653`), prints `See the output of
+      nmap -h`, and calls `exit(-1)` without scanning. Until M7.0 this port
+      warned and scanned anyway, which was an unledgered divergence in the
+      dangerous direction — and worse than "the option had no effect", for two
+      compounding reasons. Most of the 86 options not yet implemented
+      *constrain* a scan (`--exclude`, `--excludefile`, `--scan-delay`, `-T`,
+      `--max-retries`, `--max-parallelism`, `--host-timeout`, `--top-ports`), so
+      ignoring one scans more hosts, or faster, than the operator asked. And an
+      unimplemented option that takes a value left that value in `argv`, where
+      the positional handler read it as a **target**. The two combined meant
+      `nmap-rs --exclude 127.0.0.2 … 127.0.0.1` scanned *two* hosts where the
+      same command without `--exclude` scanned one: naming a host in order to
+      protect it was the thing that got it scanned.
+      The port now names the offending options, refuses to scan and exits
+      non-zero, matching the C. `crates/cli/tests/fail_closed.rs` pins it, and
+      its three behavioural tests fail against the previous code.
+      The residual divergence is only in the *message and exit code*: C exits
+      `-1` (255) and this port exits 1, and the wording differs. Neither is
+      load-bearing — no scanning happens in either case.
+      *(Introduced at M7.0.)*

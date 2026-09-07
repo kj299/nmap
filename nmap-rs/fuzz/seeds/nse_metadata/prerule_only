@@ -1,0 +1,4 @@
+categories = {"safe"}
+dependencies = {}
+prerule = function() end
+action = function() end

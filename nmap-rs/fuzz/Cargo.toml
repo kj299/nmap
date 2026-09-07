@@ -269,3 +269,13 @@ test = false
 name = "sha256"
 path = "fuzz_targets/sha256.rs"
 test = false
+
+[[bin]]
+name = "nse_scriptdb"
+path = "fuzz_targets/nse_scriptdb.rs"
+test = false
+
+[[bin]]
+name = "nse_metadata"
+path = "fuzz_targets/nse_metadata.rs"
+test = false

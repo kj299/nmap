@@ -1,0 +1,7 @@
+categories = {"safe"}
+dependencies = {}
+prerule = function() end
+hostrule = function() end
+portrule = function() end
+postrule = function() end
+action = function() end

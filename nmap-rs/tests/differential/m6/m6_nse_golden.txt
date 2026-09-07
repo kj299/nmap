@@ -1,0 +1,36 @@
+# name	oracle	expected
+# `oracle` is the verdict of nmap's OWN Lua 5.4, built from liblua/ and
+# running loading logic sliced verbatim out of nse_main.lua.
+# A row whose two columns disagree is a deliberate divergence, ledgered in
+# DIVERGENCES.md: the C accepts it and this port refuses it, on purpose.
+minimal	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=;author=;license=
+defaults	LUA_OK:cats=;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=;deps=;rules=portrule;desc=;author=;license=
+full_metadata	LUA_OK:cats=safe,discovery;deps=dep1,dep2;rules=hostrule;desc=a description;author=an author;license=a license	ACCEPT:cats=safe,discovery;deps=dep1,dep2;rules=hostrule;desc=a description;author=an author;license=a license
+long_string_description	LUA_OK:cats=safe;deps=;rules=portrule;desc=line one%0Aline two%0A;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=line one%0Aline two%0A;author=;license=
+missing_action	LUA_ERR:MISSING_FIELD	REJECT
+action_not_function	LUA_ERR:BAD_TYPE	REJECT
+categories_not_table	LUA_ERR:BAD_TYPE	REJECT
+dependencies_not_table	LUA_ERR:BAD_TYPE	REJECT
+no_rule	LUA_ERR:MISSING_RULE	REJECT
+prerule_only	LUA_OK:cats=safe;deps=;rules=prerule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=prerule;desc=;author=;license=
+postrule_only	LUA_OK:cats=safe;deps=;rules=postrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=postrule;desc=;author=;license=
+hostrule_only	LUA_OK:cats=safe;deps=;rules=hostrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=hostrule;desc=;author=;license=
+all_four_rules	LUA_OK:cats=safe;deps=;rules=prerule,hostrule,portrule,postrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=prerule,hostrule,portrule,postrule;desc=;author=;license=
+rule_not_function	LUA_ERR:BAD_RULE_TYPE	REJECT
+rule_nil	LUA_OK:cats=safe;deps=;rules=hostrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=hostrule;desc=;author=;license=
+category_not_string	LUA_ERR:BAD_CATEGORY	REJECT
+dependency_not_string	LUA_ERR:BAD_DEPENDENCY	REJECT
+duplicate_categories	LUA_OK:cats=safe,discovery;deps=;rules=portrule;desc=;author=x;license=	ACCEPT:cats=safe,discovery;deps=;rules=portrule;desc=;author=x;license=
+duplicate_differing	LUA_OK:cats=intrusive;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=intrusive;deps=;rules=portrule;desc=;author=;license=
+local_categories	LUA_OK:cats=;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=;deps=;rules=portrule;desc=;author=;license=
+categories_after_action	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=;author=;license=
+empty_categories	LUA_OK:cats=;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=;deps=;rules=portrule;desc=;author=;license=
+crlf	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=;author=;license=
+comment_only	LUA_ERR:MISSING_FIELD	REJECT
+empty_file	LUA_ERR:MISSING_FIELD	REJECT
+syntax_error	LUA_ERR:RUNTIME	REJECT
+unicode_metadata	LUA_OK:cats=safe;deps=;rules=portrule;desc=caf%C3%A9;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=caf%C3%A9;author=;license=
+computed_categories	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	REJECT
+categories_from_call	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	REJECT
+categories_via_table_insert	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	REJECT
+side_effect_on_load	LUA_OK:cats=safe;deps=;rules=portrule;desc=;author=;license=	ACCEPT:cats=safe;deps=;rules=portrule;desc=;author=;license=

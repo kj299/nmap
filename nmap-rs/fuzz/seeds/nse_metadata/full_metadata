@@ -1,0 +1,7 @@
+description = "a description"
+author = "an author"
+license = "a license"
+categories = {"safe", "discovery"}
+dependencies = {"dep1", "dep2"}
+hostrule = function() end
+action = function() end

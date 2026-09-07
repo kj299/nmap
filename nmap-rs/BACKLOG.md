@@ -446,6 +446,49 @@ retrospective rather than quietly picking a convention per module.
   alone would have emptied the directory; it now carries 20 hand-written seeds
   covering the truncated-advertisement read that the target exists to guard, and
   they reach cov 67 / ft 72 against the 93 blobs' 69 / 74.
+- **RESOLVED: the `ed25519-dalek` pin is relaxed to the 2.x line.** `=2.1.1` was
+  chosen only because 2.2.0 needs rustc 1.81 and 3.0.0 needs 1.85, both above the
+  then-declared MSRV of 1.74. With the MSRV corrected to a measured 1.88 that
+  reason lapsed, and an exact pin on a signature-verification crate became a
+  liability: no room for a patch release, and `yanked = "deny"` would have broken
+  the build outright on a yank. Now `"2.1.1"` (caret), with `Cargo.lock` moved to
+  2.2.0 so the maintained release is what actually ships; reproducibility comes
+  from the committed lockfile, and the caret deliberately excludes 3.0.0 because a
+  major bump changes the verification API and should not happen inside a routine
+  `cargo update`.
+  Verified rather than assumed, since this changes the code that checks signatures:
+  the 2.1.1 -> 2.2.0 diff of `verify_strict` is a refactor of how `expected_R` is
+  computed and nothing else, `check_scalar` differs only by a comment, the
+  `is_small_order()` rejection of both R and the public key is still present, and
+  `legacy_compatibility` remains outside `default`. The 41-case OpenSSL differential
+  passes unchanged, `small_order_r` included — the case only `verify_strict`
+  refuses. No new transitive dependencies; `cargo deny` clean on all four gates.
+- **Raising the declared MSRV UNLOCKS clippy lints, so it is never a metadata-only
+  change.** Clippy suppresses any suggestion whose replacement API postdates the
+  declared `rust-version`. Correcting 1.74 -> 1.88 therefore turned on
+  `manual_is_multiple_of` (1.87) and `manual_repeat_n` (1.82) and produced 10 new
+  findings across `build`, `build6`, `engine`, `fp6`, `osprobe::demux` and five
+  differential tests — which CI would have failed under `-D warnings`. All ten were
+  mechanical and behaviour-preserving (`x % n == 0` -> `x.is_multiple_of(n)` with a
+  non-zero literal divisor is exact, and it removes a `%` operator, which suits the
+  `arithmetic_side_effects` posture; `repeat().take()` -> `repeat_n` is identical).
+  Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Worth a
+  LESSONS entry: an MSRV bump must be validated with the full clippy sweep, not just
+  a build.
+- **RESOLVED (seed pollution): 979 fuzzer-generated files pruned, recurrence
+  gated.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory as a
+  *corpus* and writes discovered inputs into it, so local smoke runs silently
+  dropped SHA1-named blobs into the tree that were then committed by the feature
+  PRs introducing each target (e.g. #73). Repo-wide it had reached 979 generated
+  against 367 curated, 5.6 MB of seeds. Pruned to 387 curated files, 1.8 MB.
+  `fuzz/check-seeds.sh` now fails on any 40-hex-named file under `fuzz/seeds/`,
+  and each of its three failure modes was verified to actually fire before the
+  check was wired in. The fix for the mechanism itself is in the script's header:
+  pass a scratch corpus dir FIRST and the seed dir second.
+  Note `ndp_advert` had **93 generated seeds and zero curated ones**, so pruning it
+  alone would have emptied the directory; it now carries 20 hand-written seeds
+  covering the truncated-advertisement read that the target exists to guard, and
+  they reach cov 67 / ft 72 against the 93 blobs' 69 / 74.
 - **DECIDE: relax the `ed25519-dalek` pin now that MSRV no longer forces it.** The
   `=2.1.1` pin was chosen solely because 2.2.0 needs rustc 1.81 and 3.0.0 needs
   1.85, both above the then-declared 1.74. With MSRV corrected to 1.88 that reason

@@ -17,7 +17,7 @@ its bulk is not C:
 | part | files | lines | ported? |
 |---|---|---|---|
 | C++ binding glue (`nse_*.cc`, `nse_*.h`) | 27 | **8,303** | **yes — this is M6** |
-| bundled Lua 5.4 interpreter (`liblua/`) | — | 30,120 | no — use a maintained binding |
+| bundled Lua 5.4 interpreter (`liblua/`) | — | 30,120 | no — replaced, see *Decision 1* |
 | `nselib/` script libraries (Lua) | 133 | 95,049 | no — must *run* unmodified |
 | `scripts/` (Lua) | 611 | 116,260 | no — must *run* unmodified |
 
@@ -96,8 +96,9 @@ design**, so the threat model is the deliverable that matters most.
 
 Leaf-first, and ordered by the dependency weight measured above:
 
-1. **M6.0 — the Lua runtime decision.** Bind a maintained Lua 5.4 rather than
-   porting `liblua`'s 30k lines. Needs a decision (below) before anything else.
+1. **M6.0 — the Lua runtime.** Decided (Decision 1 below): extend `piccolo`, a
+   pure-Rust stackless Lua VM, with the stdlib surface the corpus actually
+   uses. This is the long pole and is sized separately below.
 2. **M6.1 — `core::nse::script`**: the `.nse` file format, the mandatory fields,
    categories, and `script.db`. Pure parsing over `&[u8]`, no Lua. Fuzzable on
    day one, and it is the input that decides what executes.
@@ -116,16 +117,189 @@ Gates: 6.1 and 6.2 are pure parsers and get the full ladder (differential agains
 the C's own selection, fuzz, mutation). 6.3-6.7 are gated by running the real
 `scripts/` corpus, which is the strongest oracle available in this project.
 
-## Open questions — need answers before M6.1
+## Decision 1 — the Lua runtime: extend `piccolo`, ship no C
 
-1. **Which Lua?** `mlua` (vendored Lua 5.4, builds from source, needs a C
-   compiler — present) is the obvious choice, but it puts a C interpreter back
-   into a port whose premise is memory safety. The alternatives are a pure-Rust
-   Lua (none is remotely complete enough for 611 real scripts) or accepting the C.
-   This is the same class of trade as `ed25519-dalek` in S2, and larger.
-2. **Do we sandbox?** The C exposes `io` and `os` to every script. Shipping the
-   same thing is faithful; restricting it by default is safer and would be the
-   port's most user-visible divergence yet. It also risks breaking scripts in the
-   shipped corpus — which is measurable before deciding, and should be measured.
-3. **Scope of the corpus.** Do all 611 scripts have to run, or is a defined subset
-   the M6 exit criterion with the rest deferred to M7?
+The project's premise is the removal of C, so binding a C interpreter is not a
+trade to weigh — it is disqualifying. `mlua`, `rlua` and `hlua` all vendor and
+compile PUC-Lua, and are out on that ground alone.
+
+That leaves the pure-Rust field, which was surveyed rather than assumed:
+
+| crate | verdict |
+|---|---|
+| **`piccolo`** (kyren, MIT/CC0) | stackless Lua VM, real GC, coroutines, compiler — **the only viable base** |
+| `hematita` | abandoned at 0.1.0 |
+| `full_moon` | parser only, no VM |
+| `luar` | toy |
+
+`piccolo`'s dependency tree is `ahash`, `allocator-api2`, `anyhow`,
+`gc-arena`, `hashbrown`, `rand`, `thiserror` — measured: **no `build.rs`
+anywhere in the tree and no `cc`/`bindgen` dependency**. It compiles no C.
+
+### What `piccolo` gives us for free
+
+The expensive parts of a Lua implementation are already done: 18,621 lines
+across 44 files implementing a stackless VM, a compiler, metatables,
+coroutines, and a tracing GC (`gc-arena`, a further 7,908 lines).
+
+**Stacklessness is not incidental here — it is the reason this is the right
+base.** NSE's entire concurrency model is coroutines that suspend for I/O
+(`lua_yieldk`, `nse_main.cc:703`). PUC-Lua cannot yield across a C call
+boundary without the `k`-continuation dance that `nse_nsock.cc` exists to
+perform. A stackless VM suspends anywhere, so the callback plumbing that makes
+up much of the 8,303 lines of C++ glue has no analogue to port — it simply
+stops being necessary.
+
+The safety arithmetic is also favourable, and is the argument for the whole
+milestone:
+
+| | lines | unsafe |
+|---|---|---|
+| `liblua/` (C, today) | 30,120 | all of it, by construction |
+| `piccolo` | 18,621 | 31 sites across 7 files |
+| `gc-arena` | 7,908 | 234 sites |
+
+265 auditable `unsafe` sites concentrated in a GC, versus 30,120 lines where
+every pointer is unchecked. That is the trade this milestone is for.
+
+### What is missing, measured against the corpus
+
+`piccolo`'s own `COMPATIBILITY.md` was parsed rather than read impressionistically:
+79 unimplemented entries, 61 implemented, 6 will-not-implement, 3 differing.
+All of `table` is implemented; `math` is complete; `string.byte/char/len/lower/
+reverse/sub/upper`, `pcall`, `tonumber`, `rawlen`, `_VERSION`, `next`, `pairs`,
+`setmetatable` and `coroutine.create/resume/running/status/yield` are done.
+
+The gap that matters, weighted by what the 744 shipped Lua files actually call:
+
+| missing surface | call sites | files |
+|---|---|---|
+| Lua patterns — `find` / `match` / `gmatch` / `gsub` | **1,890** | 421 |
+| `string.pack` / `unpack` / `packsize` | **1,747** | 169 |
+| `string.format` | **1,568** | 397 |
+| `string.rep` | 174 | 60 |
+| `_G`, `coroutine.wrap`, `loadfile`, `load`, `xpcall`, `rawequal` | 64 | ~30 |
+| `require` / `package` | — | 742 |
+
+**609 of 744 files (81.9%) use at least one missing stdlib function**, and 742
+use `require`. But the shape of that number is the point: it is dominated by
+**three** subsystems — the Lua pattern matcher, `string.format`, and
+`string.pack`/`unpack` — which between them account for 5,205 of the 5,379
+measured call sites. Each is a self-contained mini-language over `&[u8]` with a
+precise specification in the Lua 5.4 manual, no I/O, and total behaviour on
+malformed input. In other words: exactly the kind of thing this project's
+existing gate ladder (differential → fuzz → mutation → Miri) is built to prove
+correct, and exactly the kind of thing C gets wrong.
+
+`require` is not really a gap. NSE does not use stock `package` loading — it
+installs its own searcher in `nse_main.cc`, which is ours to write anyway.
+
+### The honest cost, and the risks
+
+This is a subproject, not a slice — comparable in size to M3 and M4 combined.
+Two risks are worth stating plainly rather than discovering later:
+
+1. **`piccolo` is dormant.** Last release 0.3.3 (2024-06-16); last commit
+   `ce709eb`, 2025-07-10. Master carries unreleased work (the whole of `table`,
+   `string.byte/char`) that 0.3.3 lacks, so we would be building on a git rev,
+   not a published crate. `gc-arena`, by contrast, is actively maintained (last
+   commit 2026-08-17). Plan on a **fork**, not on upstream contributions
+   landing.
+2. **Master pins `gc-arena` by git rev**, which the supply-chain CI job will
+   not accept as-is. Vendoring or a published-version pin is a prerequisite.
+
+The correctness strategy is the one this project already runs: **PUC-Lua as a
+differential oracle, never as a shipped dependency** — the same relation the
+port has to C nmap today, where the C is the reference and never the product.
+The Lua 5.4 official test suite plus the 744-file corpus is a strong oracle,
+and the oracle harness (`tests/differential/`) already exists.
+
+## Decision 2 — the sandbox: it costs nothing, because we are writing the stdlib
+
+The C exposes the complete standard library to every script
+(`luaL_openlibs(L)`, `nse_main.cc:593`; `io`/`os` at `liblua/linit.c:47-48`),
+so `--script /path/to/untrusted.nse` is arbitrary code execution — usually as
+root. Decision 1 changes the economics of fixing that completely: because the
+stdlib is ours to write, **restricting it is not a restriction bolted onto an
+interpreter, it is declining to write four functions.**
+
+Measured across all 744 files (aliased forms included — `base32.lua` and
+`base64.lua` both do `local remove = require "os".remove`, which a naive grep
+for `os.remove` misses):
+
+| primitive | operational uses |
+|---|---|
+| `os.execute` | **0** |
+| `io.popen` | **0** — the 2 sites are inside `if not unittest.testing()` self-test blocks (`base32.lua:239`, `base64.lua:197`) |
+| `os.remove`, `os.tmpname` | **0** — same two self-test blocks |
+| `os.exit` | **0** — the single occurrence is commented out (`msrpctypes.lua:1830`) |
+
+128 files (17%) touch `os.*` or `io.*` at all. What they genuinely need:
+
+| | files | uses |
+|---|---|---|
+| `io.open` | 61 | 73 — 32 write/append, 34 read, 7 unspecified (read) |
+| `io.lines` | 11 | 13 |
+| `io.write` | 5 | 20 |
+| `os.time` | 53 | 109 |
+| `os.date` | 8 | 16 |
+| `os.difftime` | 4 | 6 |
+| `os.getenv` | 1 | 3 — all `HOME`, for `.ssh/config` and `known_hosts` (`ssh1.lua:244,248,255`) |
+
+**The plan.** Ship no process-execution surface at all — no `os.execute`, no
+`io.popen`, no `os.remove`/`os.rename`/`os.tmpname`. Measured cost: **zero
+shipped scripts**, and the two self-test blocks that would notice are exactly
+the place where a divergence is acceptable and visible.
+
+In their place:
+
+- **Capability-scoped filesystem** rather than raw `io.open`: reads from the
+  data directories and from paths passed explicitly via `--script-args`; writes
+  only beneath an operator-designated output directory. That covers all 73
+  `io.open` sites, including the ~28 scripts that legitimately write loot.
+- **A clock** — `os.time`/`os.date`/`os.difftime`, unrestricted. Harmless.
+- **No `os.getenv`.** Resolve `HOME`, `.ssh/config` and `known_hosts` in Rust
+  and hand the paths in. Three call sites, one library.
+
+Every item above is a divergence and goes in `DIVERGENCES.md` with this
+measurement as its justification. The result is a port that is safer than the C
+by construction, at a measured cost of nothing.
+
+## Decision 3 — scope: the engine is the port; the scripts are data
+
+**"All 611 scripts run" is the wrong exit criterion**, and gating M6 on it is
+the single biggest schedule risk in the milestone. A script that does not yet
+run is a coverage number, not a safety regression, and 611 programs is a bar
+that never quite closes.
+
+The proposed exit criterion instead, in increasing order of strength:
+
+1. **All 133 `nselib` libraries load, and the tests NSE already ships pass.**
+   NSE carries its own test framework — `nselib/unittest.lua` driven by
+   `scripts/unittest.nse` — and **26 of the 133 libraries define a
+   `test_suite`**. That is a ready-made conformance oracle sitting in the tree,
+   and it exercises the stdlib far harder than the scripts do.
+2. **The 125 `default`-category scripts run.** That is precisely what a bare
+   `nmap -sC` executes, so it is the user-visible baseline.
+3. The remaining 486 become a **tracked coverage number that must not
+   regress**, not a merge gate.
+
+For reference, the category distribution over all 611 scripts: `safe` 350,
+`discovery` 312, `intrusive` 213, `default` 125, `vuln` 105, `brute` 73,
+`version` 48, `broadcast` 47, `exploit` 45, `auth` 38, `external` 33, `dos` 11,
+`malware` 10, `fuzzer` 3, `info` 1.
+
+## Sequencing recommendation
+
+Given the size of Decision 1, **M6 should run after M7**, not before it.
+Cutover plus `ncat`/`nping` yields a complete, C-free, shippable nmap sooner,
+and the Lua runtime work then proceeds without the rest of the port parked
+behind an interpreter project. Sequencing M6 first couples every remaining
+milestone to the hardest one.
+
+## Still open
+
+Nothing blocks M6.1 and M6.2 (the `.nse` parser and the `--script` selection
+grammar) — both are pure, fuzzable, and independent of the runtime decision.
+The runtime work (M6.0) needs port-order approval before any Rust is written,
+per the kit.

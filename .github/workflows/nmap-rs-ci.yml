@@ -43,6 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Seed hygiene runs FIRST: it needs no toolchain, takes a second, and catches
+      # two things nothing else did. `cargo fuzz run <t> fuzz/seeds/<t>` treats the
+      # seed directory as a corpus and writes discovered inputs into it, so local
+      # runs silently commit SHA1-named blobs — 979 accumulated across seven targets
+      # before this check existed. It also catches a target with no seed directory,
+      # which otherwise fails a fuzz shard minutes into the run rather than here.
+      # Deliberately in this job and not the sharded fuzz one: fast feedback, and
+      # it would otherwise run six redundant times.
+      - run: fuzz/check-seeds.sh
       # Pinned via nmap-rs/rust-toolchain.toml so local `cargo fmt`/`cargo clippy`
       # match CI exactly — no more floating-@stable rustfmt/clippy skew (LESSONS #16).
       - uses: dtolnay/rust-toolchain@master

@@ -1,2 +1,10 @@
 lua
 __pycache__/
+
+# Generated oracle drivers. These are pasted together from verbatim slices of
+# nse_main.lua at generation time; keeping them out of the tree stops a stale
+# copy from being read as if it were the reference. `regen_m62.sh` rewrites
+# them, and they are left on disk after a run because reading the assembled
+# grammar is the quickest way to check what the oracle actually ran.
+m62_driver.lua
+m62_sweep.lua

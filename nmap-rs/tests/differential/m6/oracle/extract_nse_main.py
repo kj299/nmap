@@ -11,14 +11,15 @@ oracle is worse than none.
 import hashlib
 
 NSE_MAIN = "nse_main.lua"
+LPEG_UTILITY = "nselib/lpeg-utility.lua"
 
 
 class ExtractError(RuntimeError):
     pass
 
 
-def _lines(root):
-    with open(f"{root}/{NSE_MAIN}", encoding="utf-8") as fh:
+def _lines(root, source=NSE_MAIN):
+    with open(f"{root}/{source}", encoding="utf-8") as fh:
         return fh.read().split("\n")
 
 
@@ -68,15 +69,60 @@ BLOCKS = {
         "    local categories = rawget(script_entry, \"categories\");",
         lambda l: "script database appears corrupt" in l,
     ),
+    # ---- M6.2: the `--script` selection grammar ------------------------------
+    # `K` builds the caseless keyword pattern, including the follow-set that
+    # keeps "not" from splitting "nota".
+    "keyword": (
+        "local memo_K = {}",
+        lambda l: l == "end",
+    ),
+    # The rule normaliser: the "+" forced prefix and the whitespace strip.
+    "rule_normalise": (
+        "  for i, rule in ipairs(rules) do",
+        lambda l: l == "  end",
+    ),
+    # The grammar itself — ordered choice, right-recursive operators.
+    "grammar": (
+        "  local pre_T = locale {",
+        lambda l: l == "  }",
+    ),
+    # Glob compilation: which characters are escaped, and that only `*` is not.
+    "globs": (
+        "  local globs = {}",
+        lambda l: l == "    })",
+    ),
+    # Per-entry wiring: basename extraction, the `selected_by_name` side
+    # effect, the pseudo-category "all", and the path character class.
+    "entry_match": (
+        "    local escaped_basename = match(filename, \"([^/\\\\]-)%.nse$\") or match(filename, \"([^/\\\\]-)$\");",
+        lambda l: l == "    local T = P(pre_T)",
+    ),
+}
+
+#: blocks that live in `nselib/lpeg-utility.lua` rather than `nse_main.lua`
+LPEG_UTILITY_BLOCKS = {
+    # `caseless` is what makes every keyword case-insensitive while leaving
+    # path globs case-SENSITIVE — an asymmetry the port has to reproduce.
+    "caselessp": (
+        "local caselessP = lpeg.Cf((lpeg.P(1) / function (a) return lpeg.S(lower(a)..upper(a)) end)^1, function (a, b) return a * b end)",
+        lambda l: True,
+    ),
+    "caseless": (
+        "function caseless (literal)",
+        lambda l: l == "end",
+    ),
 }
 
 
 def extract(root):
     """Return {name: (text, first_line, last_line)} plus a digest of the whole."""
-    lines = _lines(root)
     out = {}
+    lines = _lines(root)
     for name, (start, end_pred) in BLOCKS.items():
         out[name] = _slice(lines, start, end_pred, name)
+    util = _lines(root, LPEG_UTILITY)
+    for name, (start, end_pred) in LPEG_UTILITY_BLOCKS.items():
+        out[name] = _slice(util, start, end_pred, name)
     return out
 
 

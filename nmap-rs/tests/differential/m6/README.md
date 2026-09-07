@@ -62,3 +62,97 @@ Feeding a real `.nse` to oracle 1 fails: 610 of 611 shipped scripts
 harness — it is the measurement that motivates the port. The C's metadata
 extraction is coupled to the whole runtime *because it works by execution*;
 this port's is a function of the bytes, and reads all 611 outside any process.
+
+---
+
+# M6.2 differential — the `--script` selection grammar
+
+Gate 2 for `core::nse::selection`. Regenerate with `regen_m62.sh`; CI runs
+`regen_m62.sh --check`, which re-derives all six generated files and fails on
+any difference.
+
+## Why the oracle needs LPeg, not just Lua
+
+M6.1 needed nmap's Lua. M6.2 needs nmap's **LPeg** as well, so
+`build_lua_oracle.sh` now compiles `lpeg.c` (through `nse_lpeg.cc`, the same
+wrapper nmap itself builds it with) into the oracle interpreter.
+
+That is not fastidiousness. Everything surprising about this grammar is a
+property of that engine:
+
+- **Ordered choice commits.** PEG backtracking is local: once an alternative
+  succeeds, a later failure in the enclosing sequence does not reconsider it.
+  With `x` as one of the script's categories, `x,y` therefore fails to parse —
+  `category` consumes `x` and the leftover `,y` is fatal — while the same rule
+  against a script *without* that category parses as the single glob `x,y`.
+- **Repetition is possessive.** `path` is `R(...)^1` and never gives characters
+  back to help a later part of the pattern.
+- **Capture functions run after the match, over the surviving tree only.**
+  `match_script` sets `selected_by_name` as a side effect, so a glob that is
+  evaluated but contributes nothing still sets it — `safe and not http-*`
+  reports "selected by name" while returning false.
+
+A hand-written oracle would encode what a PEG *ought* to do and bless the same
+wrong answers as the port. Compiling the real engine costs about twenty lines of
+build script.
+
+## The two oracles
+
+**1. Edge cases** — 98 `(rule, filename, categories)` triples plus 15
+rule-normalisation cases, chosen to sit on the corners: keyword follow-sets,
+glob metacharacters, the path class's byte-range edges, grouping, and the
+nesting ceilings.
+
+**2. The shipped index** — `m62_sweep_golden.txt` runs 45 realistic rules
+against all 611 entries of `scripts/script.db`: **27,495 verdicts**, none chosen
+to be interesting. Per rule it records how many scripts matched, how many were
+selected by name, and a SHA-256 over the matching filenames in index order. The
+digest is what makes it exact rather than statistical — two different selections
+of the same size cannot agree.
+
+## Three things the corpus establishes
+
+**Grouping is right-greedy, not conventional.** `a and b or c` means
+`a and (b or c)`. On the shipped index, `safe and not intrusive or vuln` selects
+**350** scripts while `(safe and not intrusive) or vuln` selects **421** — so the
+trap is worth 71 scripts on real data. The port reproduces it rather than
+"fixing" it, because fixing it would silently change which scripts run.
+
+**Keywords fold case; globs do not.** `--script SAFE` selects the same 352
+scripts as `safe`. `--script Http-*` selects **none**, where `http-*` selects
+134.
+
+**`*` is the only wildcard.** `?`, `.`, `[`, `]`, `+`, `-`, `^`, `$` and `%` are
+all escaped into literals before matching, so `http-titl?` does not match
+`http-title`.
+
+## Divergences
+
+One, ledgered as `nse-selection-depth-ceiling` and pinned by name in
+`selection_differential.rs`: the C refuses deeply nested rules because LPeg's
+100-slot backtrack stack runs out — at 15 nested parentheses, 19 chained `and`s
+or 31 chained `or`s, three different numbers from one shared budget — and this
+port evaluates them instead. Plus `nse-selection-rule-length`, the one place the
+port is stricter: rules over 64 KiB are refused.
+
+## Running the fuzzer without trashing the seeds
+
+libFuzzer treats the **first** corpus directory on the command line as writable
+output and any further ones as read-only input. So this grows the curated seed
+corpus by thousands of files:
+
+```sh
+cargo +nightly fuzz run nse_selection fuzz/seeds/nse_selection   # DON'T
+```
+
+Pass a scratch corpus first instead — `fuzz/corpus/` is gitignored:
+
+```sh
+mkdir -p fuzz/corpus/nse_selection
+cargo +nightly fuzz run nse_selection fuzz/corpus/nse_selection fuzz/seeds/nse_selection \
+  -- -max_total_time=300 -print_final_stats=1
+```
+
+CI does the same. The seeds directory is meant to stay small and hand-read:
+20 shapes chosen by hand, plus three inputs the fuzzer found that are kept
+because they are regression tests for specific performance bugs.

@@ -1876,3 +1876,61 @@ removed: that one was theatre, this one is unobservable.
       differential jobs is unvalidated, and changing a workspace-wide build flag is
       not this slice's business; it is the recommended follow-up, tracked in
       `BACKLOG.md`. *(Introduced at S2.)*
+
+- [x] `nse-scriptdb-not-evaluated` (`core::nse::script`, M6.1) — **the script index
+      is parsed as data; nmap runs it as a program.** `nse_main.lua:1310` reads
+      `script.db` with `loadfile(path, "t", script_database)` and calls the
+      resulting chunk. The environment it hands over is narrow — `Entry` and
+      `chunk`, so no `io`, no `os`, no `load` — which makes this much less
+      dangerous than it first looks, but the file is still *code*: loops,
+      conditionals, rebinding and non-termination are all inside the grammar the
+      C accepts, and a `while true do end` in an index that nmap re-reads on
+      every run is a denial of service with no diagnostic. This port accepts the
+      generated grammar only: a sequence of
+      `Entry { filename = <string>, categories = { <string>… } }`, over the
+      literal subset of Lua — every string form and escape the language has,
+      table constructors, `ipairs` semantics including `{[2] = …}` — and nothing
+      that computes. Measured cost against the differential corpus: four of 58
+      cases, all of them arbitrary control flow
+      (`loop_generates_entries`, `conditional_entry`, `entry_rebound`) or a
+      statement that is not a record at all (`not_entry_call`, which the C
+      silently loads as *zero* scripts — a quiet way to run nothing). Cost
+      against the shipped index: none. `tests/nse_corpus.rs` parses the committed
+      `scripts/script.db` and round-trips all 611 records byte for byte.
+      *(Introduced at M6.1.)*
+
+- [x] `nse-metadata-not-executed` (`core::nse::script`, M6.1) — **reading a
+      script's metadata no longer runs the script.** This is the largest
+      security divergence in the port so far, and it removes a code-execution
+      path rather than papering over one. `Script.new` (`nse_main.lua:601-628`)
+      wraps a `.nse` file in `return function (_ENV) return function (...)`,
+      loads it, and resumes a coroutine over the whole top level with
+      `setmetatable(env, {__index = _G})` — the complete Lua standard library,
+      `io` and `os` included (`luaL_openlibs` at `nse_main.cc:593`,
+      `liblua/linit.c:47-48`). Extracting `categories` therefore *executes the
+      script*. `--script-updatedb` does it to every `.nse` in the scripts
+      directory, and nmap runs that update by itself whenever `script.db` is
+      missing (`nse_main.lua:1305-1307`). A file dropped into the scripts
+      directory is executed, on a program usually run as root, with no script
+      having been selected and no rule having fired. CWE-94.
+      This port reads the metadata instead. It recognises top-level assignments
+      to the ten names `Script.new` looks at, in every form the corpus uses:
+      `name = <literal>`, the `function name() … end` sugar (32 scripts), Lua
+      multiple assignment (`action, portrule, hostrule = …`, 8 scripts), and
+      assignment inside a conditional (`scripts/banner.nse` picks its `portrule`
+      that way). A `local` declaration is honoured as shadowing, so it never
+      reaches the environment.
+      **What it costs, measured.** A value the C would compute is reported as
+      `Field::Indeterminate` rather than guessed: three of 31 differential cases
+      (`computed_categories`, `categories_from_call`,
+      `categories_via_table_insert`). Across the 611 shipped scripts the cost is
+      zero for the fields that decide whether a script runs — all 611 declare
+      `categories` literally — and one script for a field that does not:
+      `scripts/clock-skew.nse` builds its `description` by concatenating its own
+      `dependencies`, so both are indeterminate for it and neither is needed for
+      selection. That exception is pinned by a test, so a second one is a
+      decision rather than a drift. The proof that the reading is faithful is
+      `tests/nse_corpus.rs`: re-deriving `script.db` from all 611 scripts with
+      this parser reproduces the index nmap itself generated — by executing them
+      — byte for byte, all 52,755 of them.
+      *(Introduced at M6.1.)*

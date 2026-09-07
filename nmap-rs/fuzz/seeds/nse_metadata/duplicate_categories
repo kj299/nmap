@@ -1,0 +1,6 @@
+categories = {"safe", "discovery"}
+author = "x"
+categories = {"safe", "discovery"}
+dependencies = {}
+portrule = function() end
+action = function() end

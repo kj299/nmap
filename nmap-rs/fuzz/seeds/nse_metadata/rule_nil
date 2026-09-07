@@ -1,0 +1,5 @@
+categories = {"safe"}
+dependencies = {}
+portrule = nil
+hostrule = function() end
+action = function() end

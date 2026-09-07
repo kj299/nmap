@@ -1,0 +1,4 @@
+categories = {"safe"}
+dependencies = {}
+hostrule = function() end
+action = function() end

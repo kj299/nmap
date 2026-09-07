@@ -1,0 +1,5 @@
+local t = os.time()
+categories = {"safe"}
+dependencies = {}
+portrule = function() end
+action = function() end

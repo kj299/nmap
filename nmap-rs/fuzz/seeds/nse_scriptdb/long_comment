@@ -1,0 +1,4 @@
+--[==[
+not code
+]==]
+Entry { filename = "a.nse", categories = { "safe", } }

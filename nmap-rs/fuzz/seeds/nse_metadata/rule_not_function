@@ -1,0 +1,4 @@
+categories = {"safe"}
+dependencies = {}
+portrule = "nope"
+action = function() end

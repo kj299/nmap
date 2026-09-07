@@ -1,0 +1,3 @@
+if 1 < 2 then
+Entry { filename = "a.nse", categories = { "safe", } }
+end

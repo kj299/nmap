@@ -1,0 +1,1 @@
+Entry { filename = "a\nb.nse", categories = { "safe", } }

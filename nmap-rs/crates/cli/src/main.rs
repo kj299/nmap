@@ -43,8 +43,36 @@ async fn main() -> ExitCode {
         print_usage();
         return ExitCode::SUCCESS;
     }
-    for flag in &cfg.unrecognized {
-        eprintln!("nmap-rs: warning: ignoring unrecognized option '{flag}' (not yet implemented)");
+    // Refuse to scan on an option we do not implement.
+    //
+    // This used to warn and carry on, which is the wrong posture for a scanner
+    // and diverged from the C. Two things went wrong at once:
+    //
+    //  * Most of the unimplemented options CONSTRAIN the scan — `--exclude`,
+    //    `--scan-delay`, `-T`, `--max-retries`, `--top-ports`. Ignoring a
+    //    constraint means scanning more hosts, or faster, than the operator
+    //    asked for. "Warn and continue" turns every one of those into a
+    //    silent widening.
+    //  * An unimplemented option that takes a VALUE left its value in argv,
+    //    where the positional handler collected it as a target. So
+    //    `--exclude 10.0.0.5` did not merely fail to exclude 10.0.0.5 — it
+    //    added it to the scan. Naming a host to protect it was the thing that
+    //    got it scanned.
+    //
+    // C nmap does not do this: an unrecognised option reaches `case '?'` in
+    // `nmap.cc:653`'s getopt loop, which calls `error()` and `exit(-1)` without
+    // scanning anything. Failing closed here restores that behaviour and is
+    // the safe direction besides.
+    if !cfg.unrecognized.is_empty() {
+        for flag in &cfg.unrecognized {
+            eprintln!("nmap-rs: unrecognized or unsupported option '{flag}'");
+        }
+        eprintln!(
+            "nmap-rs: refusing to scan — an unimplemented option may widen the scan \
+             beyond what you asked for, and its argument would be read as a target."
+        );
+        eprintln!("See the output of nmap-rs -h for a summary of supported options.");
+        return ExitCode::FAILURE;
     }
     if cfg.targets.is_empty() {
         eprintln!("nmap-rs: no targets specified");

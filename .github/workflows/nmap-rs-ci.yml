@@ -52,6 +52,15 @@ jobs:
       # Deliberately in this job and not the sharded fuzz one: fast feedback, and
       # it would otherwise run six redundant times.
       - run: fuzz/check-seeds.sh
+      # --all-features (below) turns on `pcap`, which LINKS against libpcap. The
+      # `msrv` job has run --all-features for milestones without this and stayed
+      # green, which is a trap worth naming: `cargo check` never links, so a missing
+      # -lpcap is invisible to it. `cargo test` does link, and the first run of this
+      # job with --all-features failed with `rust-lld: error: unable to find library
+      # -lpcap` on three targets. A feature flag that is safe in one cargo verb is not
+      # automatically safe in another.
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+        working-directory: .
       # Pinned via nmap-rs/rust-toolchain.toml so local `cargo fmt`/`cargo clippy`
       # match CI exactly — no more floating-@stable rustfmt/clippy skew (LESSONS #16).
       - uses: dtolnay/rust-toolchain@master

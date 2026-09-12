@@ -54,6 +54,14 @@ jobs:
       # never ran. `@master` reads the repo's `rust-toolchain.toml` (ship it from
       # skeleton/) so `cargo fmt`/`cargo clippy` here use the EXACT version you ran
       # locally. Nightly gates below stay `@nightly` (they override the pin).
+      # --all-features (below) turns on EVERY off-by-default feature, including any
+      # that link against a system library. Install those here. The trap worth naming:
+      # `cargo check --all-features` never links, so a missing system library is
+      # invisible to a check-only job and stays green indefinitely — nmap's MSRV job
+      # ran --all-features for milestones before `cargo test --all-features` failed on
+      # the very first run with `unable to find library -lpcap`. A feature flag that is
+      # safe under one cargo verb is not automatically safe under another.
+      #   e.g. - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: "1.97.0", components: clippy, rustfmt }
       - run: cargo fmt --all -- --check

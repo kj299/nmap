@@ -1,15 +1,124 @@
 {
+  "coverage": {
+    "core::fingerprint_store": [
+      "fingerprint_store"
+    ],
+    "core::headers::icmpv6": [
+      "parse_packet"
+    ],
+    "core::headers::ipv6ext": [
+      "parse_packet"
+    ],
+    "core::macvendor": [
+      "macvendor_parse"
+    ],
+    "core::osdb::expr": [
+      "osdb_expr"
+    ],
+    "core::osdb::model": [
+      "osdb_parse",
+      "osdb_score"
+    ],
+    "core::osdb::parse": [
+      "osdb_parse"
+    ],
+    "core::osdb::score": [
+      "osdb_score"
+    ],
+    "core::osprobe::analyze": [
+      "osprobe_tcpopt"
+    ],
+    "core::osprobe::assemble": [
+      "osprobe_assemble"
+    ],
+    "core::osprobe::build": [
+      "osprobe_build"
+    ],
+    "core::osprobe::demux": [
+      "osprobe_demux"
+    ],
+    "core::osprobe::icmpreply": [
+      "osprobe_icmpreply"
+    ],
+    "core::osprobe::seq": [
+      "osprobe_seq"
+    ],
+    "core::osprobe::tcpreply": [
+      "osprobe_tcpreply"
+    ],
+    "core::servicefp": [
+      "servicefp"
+    ],
+    "core::sigstore": [
+      "sigstore_envelope",
+      "sigstore_manifest",
+      "sigstore_verify"
+    ],
+    "core::sigstore::digest": [
+      "sha256"
+    ],
+    "core::sigstore::manifest": [
+      "sigstore_manifest"
+    ],
+    "core::sigstore::verify": [
+      "sigstore_verify"
+    ]
+  },
+  "exemptions": {
+    "cli": {
+      "fuzzed": "The CLI shell wires argv into the engine and renders results. Every parser it calls (parse_target, parse_port_spec, options) carries its own fuzz target; it has no parse entry point of its own."
+    },
+    "congestion": {
+      "fuzzed": "AIMD congestion-window arithmetic over our own scheduler state. Replies are classified and validated by core before any number reaches here, so no attacker-controlled bytes are parsed."
+    },
+    "connect_scan": {
+      "fuzzed": "Async TCP connect driver. What it observes are connect(2) results - success, refused, timeout - not attacker-supplied buffers."
+    },
+    "core::log": {
+      "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
+    },
+    "core::trace": {
+      "fuzzed": "A single enabled() predicate over a verbosity flag. Takes no input of any kind."
+    },
+    "engine": {
+      "fuzzed": "Scan scheduling and task orchestration over owned state. Every byte is parsed by a core parser before a result reaches the engine."
+    },
+    "model": {
+      "fuzzed": "The result data model (Host, Port, PortState). Constructed by us from already-parsed values; it has no parse entry point."
+    },
+    "net": {
+      "fuzzed": "Thin tokio socket wrappers. Anything received is handed to a core parser, each of which is separately fuzzed."
+    },
+    "sys::fpengine": {
+      "fuzzed": "I/O driver for the IPv6 fingerprint battery. Every byte-level decision delegates to core::fp6_match::is_response (fuzz target fp6_match); its only local slicing is network_layer(), a total frame.get(14..).unwrap_or(&[])."
+    },
+    "sys::ndp": {
+      "fuzzed": "Neighbour-discovery I/O driver. Frame parsing is core::ndp::resolve_from_frame, covered by fuzz target ndp_advert; this module only drives the capture and the timeout."
+    },
+    "sys::osscan": {
+      "fuzzed": "OS-detection round driver. Frame parsing is core::osprobe::demux::demux, covered by fuzz target osprobe_demux (added in M7.1); this module does the bookkeeping around it."
+    },
+    "sys::scan": {
+      "fuzzed": "Connect-scan driver over tokio sockets. No wire bytes are parsed here; port state comes from the syscall result."
+    },
+    "sys::sigstore": {
+      "fuzzed": "Installs already-verified bytes to disk. The manifest parsing, and the single-path-component invariant install() relies on, are fuzzed in core by sigstore_manifest."
+    },
+    "timing": {
+      "fuzzed": "RTT and timeout arithmetic over our own measurements. No untrusted-input parse path."
+    }
+  },
   "modules": {
-    "cli": "differential",
-    "congestion": "differential",
-    "connect_scan": "differential",
+    "cli": "unsafe_audited",
+    "congestion": "unsafe_audited",
+    "connect_scan": "unsafe_audited",
     "core::build": "unsafe_audited",
     "core::build6": "unsafe_audited",
     "core::bytes": "unsafe_audited",
     "core::checksum": "unsafe_audited",
     "core::classify": "unsafe_audited",
     "core::cli": "unsafe_audited",
-    "core::fingerprint_store": "fuzzed",
+    "core::fingerprint_store": "unsafe_audited",
     "core::flagscan": "unsafe_audited",
     "core::fp6": "unsafe_audited",
     "core::fp6_match": "unsafe_audited",
@@ -17,61 +126,68 @@
     "core::headers::arp": "unsafe_audited",
     "core::headers::ethernet": "unsafe_audited",
     "core::headers::icmpv4": "unsafe_audited",
+    "core::headers::icmpv6": "unsafe_audited",
     "core::headers::ipv4": "unsafe_audited",
     "core::headers::ipv6": "unsafe_audited",
+    "core::headers::ipv6ext": "unsafe_audited",
     "core::headers::tcp": "unsafe_audited",
     "core::headers::udp": "unsafe_audited",
     "core::icmp_quote": "unsafe_audited",
     "core::ipid": "unsafe_audited",
-    "core::log": "differential",
-    "core::macvendor": "differential",
+    "core::log": "unsafe_audited",
+    "core::macvendor": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::ndp": "unsafe_audited",
     "core::nse::script": "unsafe_audited",
     "core::nse::selection": "unsafe_audited",
-    "core::osdb::expr": "differential",
-    "core::osdb::model": "differential",
-    "core::osdb::parse": "differential",
-    "core::osdb::score": "differential",
-    "core::osprobe::analyze": "differential",
-    "core::osprobe::build": "differential",
-    "core::osprobe::icmpreply": "fuzzed",
-    "core::osprobe::seq": "differential",
-    "core::osprobe::tcpreply": "fuzzed",
+    "core::osdb::expr": "unsafe_audited",
+    "core::osdb::model": "unsafe_audited",
+    "core::osdb::parse": "unsafe_audited",
+    "core::osdb::score": "unsafe_audited",
+    "core::osprobe::analyze": "unsafe_audited",
+    "core::osprobe::assemble": "unsafe_audited",
+    "core::osprobe::build": "unsafe_audited",
+    "core::osprobe::demux": "unsafe_audited",
+    "core::osprobe::icmpreply": "unsafe_audited",
+    "core::osprobe::seq": "unsafe_audited",
+    "core::osprobe::tcpreply": "unsafe_audited",
     "core::osscan": "unsafe_audited",
     "core::packet_parser": "unsafe_audited",
     "core::payload": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
     "core::recv_validate": "unsafe_audited",
-    "core::servicefp": "differential",
+    "core::servicefp": "unsafe_audited",
     "core::servicescan": "unsafe_audited",
-    "core::sigstore": "fuzzed",
+    "core::sigstore": "unsafe_audited",
+    "core::sigstore::digest": "unsafe_audited",
+    "core::sigstore::manifest": "unsafe_audited",
+    "core::sigstore::verify": "unsafe_audited",
     "core::synscan": "unsafe_audited",
-    "core::trace": "differential",
+    "core::trace": "unsafe_audited",
     "core::udpscan": "unsafe_audited",
     "core::versioninfo": "unsafe_audited",
-    "engine": "differential",
-    "model": "differential",
-    "net": "differential",
+    "engine": "unsafe_audited",
+    "model": "unsafe_audited",
+    "net": "unsafe_audited",
     "options": "differential",
     "output": "differential",
     "ports": "unsafe_audited",
     "sys::capture": "unsafe_audited",
     "sys::flagscan": "unsafe_audited",
-    "sys::fpengine": "differential",
+    "sys::fpengine": "unsafe_audited",
     "sys::group": "unsafe_audited",
-    "sys::ndp": "differential",
+    "sys::ndp": "unsafe_audited",
     "sys::netif": "unsafe_audited",
-    "sys::osscan": "differential",
+    "sys::osscan": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
     "sys::route": "unsafe_audited",
-    "sys::scan": "differential",
+    "sys::scan": "unsafe_audited",
     "sys::servicescan": "unsafe_audited",
-    "sys::sigstore": "fuzzed",
+    "sys::sigstore": "unsafe_audited",
     "sys::synscan": "unsafe_audited",
     "sys::udpscan": "unsafe_audited",
     "targets": "unsafe_audited",
-    "timing": "differential"
+    "timing": "unsafe_audited"
   }
 }

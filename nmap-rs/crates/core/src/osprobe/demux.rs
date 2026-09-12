@@ -22,7 +22,7 @@
 use super::build::{source_port, OsProbe, ProbeParams};
 use super::icmpreply::{EchoReply, UdpErrorReply};
 use super::tcpreply::TcpReply;
-use crate::icmp_quote::ipv4_offset;
+use crate::packet_parser::{parse_packet, Header};
 
 /// ICMP type for an echo reply.
 const ICMP_ECHO_REPLY: u8 = 0;
@@ -115,7 +115,7 @@ pub fn tcp_timestamp(segment: &[u8]) -> Option<u32> {
 /// or ICMP identifier does not correspond to any probe in the battery.
 #[must_use]
 pub fn demux(frame: &[u8], eth_included: bool, params: &ProbeParams) -> Option<Demuxed> {
-    let off = ipv4_offset(frame, eth_included)?;
+    let off = outer_ipv4_offset(frame, eth_included)?;
     let ip = frame.get(off..)?;
 
     // The reply must come from the host we probed; otherwise it belongs to someone else's
@@ -144,6 +144,46 @@ pub fn demux(frame: &[u8], eth_included: bool, params: &ProbeParams) -> Option<D
         // ours to interpret.
         _ => None,
     }
+}
+
+/// Offset of the **outermost** IPv4 header, or `None` when the frame's network layer is
+/// not IPv4. Only link-layer headers are skipped on the way to it.
+///
+/// Deliberately NOT `icmp_quote::ipv4_offset`, which returns the first IPv4 header found
+/// anywhere in the chain. That is right for its own job — the quoted datagram inside an
+/// ICMP error genuinely *is* nested — and wrong here, where the frame is a reply arriving
+/// on the wire.
+///
+/// Using the chain-walking version let `demux` attribute a reply from an IPv4 header
+/// **inside an IPv6 tunnel** (an IPv6 packet with next-header 4). The host filter below
+/// then checked that inner header's source, which is entirely attacker-authored, and
+/// never looked at the outer one. Spoofing a bare IPv4 source is blocked wherever ingress
+/// filtering (BCP 38) is deployed; encapsulating a forged IPv4 header inside a
+/// legitimately-sourced IPv6 packet is not, so the filter could be bypassed exactly where
+/// it was supposed to hold. A reply attributed to the wrong host has no error path — it
+/// silently becomes part of that host's fingerprint.
+///
+/// C nmap does not do this: `HostOsScan::processResp` (`osscan2.cc:1888`) does
+/// `memcpy(&ip, pkt, sizeof(ip))` straight off the pointer `readipv4_pcap` returns, which
+/// strips the datalink header and nothing else. The outermost header is the IPv4 header
+/// or the packet is not a reply.
+///
+/// Found by the `osprobe_demux` fuzz target added in M7.1 — by the attribution invariant
+/// it asserts, not by a panic. See `DIVERGENCES.md`.
+fn outer_ipv4_offset(frame: &[u8], eth_included: bool) -> Option<usize> {
+    let mut off = 0usize;
+    for h in parse_packet(frame, eth_included) {
+        match h {
+            Header::Ipv4(_) => return Some(off),
+            // Link layer only: keep walking down to the network layer.
+            Header::Ethernet(_) => {}
+            // Anything else means the outermost network header is not IPv4, so this is
+            // not a reply to one of our IPv4 probes.
+            _ => return None,
+        }
+        off = off.checked_add(h.len())?;
+    }
+    None
 }
 
 /// A TCP reply, identified by the destination port it came back to.
@@ -339,6 +379,60 @@ mod tests {
         let mut frame = ipv4(&p, PROTO_TCP, 61, 7, true, &tcp(sport, 1, 1, 0x12, 1));
         // Same port, different source address: it belongs to someone else's conversation.
         frame[12..16].copy_from_slice(&[10, 0, 0, 99]);
+        assert!(demux(&frame, false, &p).is_none());
+    }
+
+    /// A forged IPv4 reply wrapped in an IPv6 packet is NOT attributed, even though the
+    /// inner header names the probed host.
+    ///
+    /// Regression for the bug the `osprobe_demux` fuzz target found in M7.1. `demux` used
+    /// `icmp_quote::ipv4_offset`, which returns the first IPv4 header found *anywhere* in
+    /// the chain — correct for a quoted datagram nested inside an ICMP error, wrong for a
+    /// frame arriving on the wire. An IPv6 packet with next-header 4 carries an IPv4
+    /// header at offset 40, and the host filter then validated that inner, entirely
+    /// attacker-authored source while never looking at the outer one.
+    ///
+    /// Why it mattered: spoofing a bare IPv4 source is blocked wherever ingress filtering
+    /// (BCP 38) is deployed, but encapsulating a forged IPv4 header inside a
+    /// legitimately-sourced IPv6 packet is not — so the filter failed exactly where it was
+    /// meant to hold, and a wrongly attributed reply has no error path. It just becomes
+    /// part of the wrong host's fingerprint.
+    #[test]
+    fn an_ipv4_reply_tunnelled_inside_ipv6_is_not_attributed() {
+        let p = params();
+        let sport = source_port(OsProbe::Seq(0), &p).expect("port");
+        // A frame that WOULD be attributed on its own: right source, right port.
+        let inner = ipv4(&p, PROTO_TCP, 61, 7, true, &tcp(sport, 1, 1, 0x12, 1));
+        assert!(
+            demux(&inner, false, &p).is_some(),
+            "the inner packet must be attributable on its own, or this test proves nothing"
+        );
+
+        // Now wrap it in an IPv6 header whose next-header is 4 (IPv4 encapsulation).
+        let mut tunnelled = vec![0u8; 40];
+        tunnelled[0] = 0x60; // version 6
+        let plen = u16::try_from(inner.len()).expect("fits");
+        tunnelled[4..6].copy_from_slice(&plen.to_be_bytes());
+        tunnelled[6] = 4; // next header: IPv4
+        tunnelled[7] = 64; // hop limit
+        tunnelled.extend_from_slice(&inner);
+
+        assert!(
+            demux(&tunnelled, false, &p).is_none(),
+            "an IPv4 reply inside an IPv6 tunnel must not be attributed: the outer source \
+             is unchecked, so the host filter would be bypassed"
+        );
+    }
+
+    /// The outermost network header must be IPv4 — an IPv6 frame is not a reply to an
+    /// IPv4 probe battery, whatever it contains.
+    #[test]
+    fn a_plain_ipv6_frame_is_rejected() {
+        let p = params();
+        let mut frame = vec![0u8; 40];
+        frame[0] = 0x60;
+        frame[6] = PROTO_TCP;
+        frame.extend_from_slice(&tcp(1, 1, 1, 0x12, 1));
         assert!(demux(&frame, false, &p).is_none());
     }
 

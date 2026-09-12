@@ -17,8 +17,8 @@ everything below follows from taking that question literally.
 |---|---|
 | C nmap (`*.cc` + `*.h`) | 55,402 lines |
 | `nmap-rs` core / sys / cli | 32,797 / 6,392 / 958 lines |
-| modules tracked | 73 |
-| modules through all six gates | 44 |
+| modules tracked | 81 (73 at the start of M7; `drift` could not see 25 sub-modules — see §3d) |
+| modules through every gate that applies | 79 of 81 (44 at the start of M7) |
 | fuzz targets | 48 (47 at the start of M7; `osprobe_demux` added in M7.1) |
 | `unsafe` blocks | 11, all documented, **all in `sys`** |
 | supply chain | `cargo audit` + `cargo deny` clean (advisories, bans, licenses, sources) |
@@ -74,6 +74,18 @@ The general rule this establishes, and which the rest of M7 should follow:
 
 The tracker shows 29 of 73 modules short of the final gate. That number is
 misleading in both directions, so it is worth splitting three ways.
+
+> **M7.2 correction.** The three-way split below was derived by reading names, and
+> two of its three numbers were wrong. The tracker showed 73 modules; the port ships
+> **81**, because `drift` only ever read `lib.rs` and 25 sub-modules (`headers::*`,
+> `osdb::*`, `osprobe::*`, `nse::*`, `sigstore::*`) were outside its walk — it
+> reported "56 shipped, 0 untracked" and was wrong twice over. This workflow had also
+> never wired the drift step at all. "19 covered but unrecorded" was really **14**:
+> six modules were credited to a fuzz target that merely shared their name
+> (`sys::ndp` to `ndp_advert`, which fuzzes `core::ndp` — the `sys` module parses
+> nothing), and one, `core::osdb::parse`, was missed in the other direction because an
+> inherent impl need not live in the module its type is declared in. The counts below
+> are left as written; §3d records what the table says now.
 
 ### 3a. Met in fact, unrecorded — 19 modules
 
@@ -185,6 +197,29 @@ This was the top technical item for M7, and M7.1 closes it.
 
 ---
 
+### 3d. What the tracker says after M7.2
+
+**79 of 81** modules are complete on every gate that applies. The two that are not are
+the deliverable of this section, not an oversight:
+
+| module | why it is still short |
+|---|---|
+| `output` | renders attacker-controlled hostnames, service banners and TLS subjects into XML and grepable formats. C nmap has had escaping bugs here. **It needs a fuzz target** (§4, M7.4) and is deliberately left un-exempt so the table keeps saying so. |
+| `options` | argv is operator-supplied rather than attacker-supplied, which is the usual argument for exempting it — but M7.3 adds `-iL` and `--excludefile`, which read *files*. Exempting it now would be exempting it a milestone before the premise stops holding. |
+
+`output` is also the answer to why there is **no blanket `n/a` state** (Q2). It sits on
+the same "not really a parser" list as the schedulers and renderers, looks exactly as
+exemptable as they do, and is the one entry on that list that genuinely needs fuzzing.
+An escape hatch wide enough to silence a module is wide enough to silence that one. So
+exemptions are **per gate** and carry a **reason**, in the same shape as the divergence
+ledger: 14 modules are exempt from `fuzzed` only, each with a written argument, each
+still required to clear `differential`, `sanitized` and `unsafe_audited`. `show`
+renders an exempt gate as `[-]`, never `[x]`.
+
+The other half of the fix is that coverage is now **recorded rather than inferred** —
+20 module→target mappings, checked in CI against the `[[bin]]` entries in
+`fuzz/Cargo.toml`. That is what stops "19" and "14" from being arguable again.
+
 ## 4. Cutover criteria, walked
 
 From `PLAN.md` §"Milestone 7" and the kit's Phase 5.
@@ -231,13 +266,15 @@ Leaf-first and risk-first, same discipline as M6:
    crate at cutover.
 3. **M7.2 — reconcile `progress.json`** (§3a/3b), including a decision on an
    `n/a` gate state. Cheap, and cutover needs the tracker to be trustworthy.
-4. **M7.3 — CLI parity triage.** Not all 86 missing options are equal. Sort
-   them into: *must implement before cutover* (the constraint options —
-   `--exclude`, `-T`, `--scan-delay`, `--max-*`, `-iL`, `--top-ports`),
-   *should implement* (output formats `-oA`/`-oS`/`-oM`, `--open`, `--reason`),
-   and *may stay unimplemented and refused* (`--thc`, `--nogcc`,
-   `--deprecated-xml-osclass`). With §2 in place, an unimplemented option is
-   now honest rather than dangerous, so this can be staged.
+4. **M7.3 — CLI parity triage.** ✅ Done — `docs/M7.3-CLI-PARITY.md`. All 102
+   unimplemented options sorted into 24 MUST / 21 SHOULD / 51 REFUSE, with the
+   MUST tier derived from a proposed **capability profile** rather than from a
+   flag count (which is also the proposed answer to §6 Q1). Six options left the
+   refusal set in the process at zero risk: `-r`, `--release-memory` and
+   `--log-errors` join the `ALREADY_SATISFIED` carve-out (the last two are
+   no-ops in C nmap *itself*), and `--oN`/`--oX`/`--oG` turned out to be a real
+   parity bug — the long spellings of three implemented output formats were
+   refused because the matcher tested only the short one.
 5. **M7.4 — output-injection review** of the XML/grepable writers, with fuzzing
    (§4).
 6. **M7.5 — release engineering.** SBOM, `cargo auditable`, reproducible build,
@@ -252,15 +289,33 @@ Leaf-first and risk-first, same discipline as M6:
 Per the kit, these need answering before M7 porting work proceeds beyond
 M7.0/M7.1.
 
-1. **What does "cutover" mean for this project?** `PLAN.md` says "keep C nmap as
-   oracle through one overlap release, then archive". But `nmap-rs` implements
-   14/100 long options. Cutover cannot mean "replaces nmap for everyone" yet.
-   Is the target (a) a *drop-in* replacement for the flags it supports, refusing
-   the rest — which is roughly where §2 leaves it today; or (b) full CLI parity
-   first? These are very different amounts of work, and everything in §5 after
-   M7.2 depends on the answer.
-2. **Does the `n/a` gate state get added to the kit?** It affects the kit
-   itself, not just this port, so it is a kit-level decision.
+1. ~~**What does "cutover" mean for this project?**~~ **M7.3 proposes an answer,
+   and it is neither (a) nor (b) — both measure cutover in flags, and flags are
+   the wrong unit.** (b) full parity is a second project: a third of the 86
+   missing options are blocked behind subsystems this port has deliberately not
+   built. (a) "drop-in for the flags it supports" is true of any program if you
+   pick the flags afterwards; operators type the invocation their runbook already
+   contains, and `-iL targets.txt --exclude 10.0.0.5 -T4` is an ordinary one that
+   (a) refuses three times over.
+   The proposal is a **capability profile** — a written statement of the scanning
+   `nmap-rs` is a genuine drop-in for, everything outside it refused — from which
+   a finite, testable 24-option MUST tier falls out. Full triage of all 102
+   unimplemented options, the profile, and a five-step order in
+   **`docs/M7.3-CLI-PARITY.md`**. It still needs an owner's yes, and it surfaces
+   one question a triage cannot settle alone: whether the evasion suite (decoys,
+   source and MAC spoofing, fragmentation) is "not yet" or "not ever" — see §5
+   of that document.
+2. ~~**Does the `n/a` gate state get added to the kit?**~~ **Answered by M7.2: no —
+   a per-gate exemption with a written reason instead.** A module is not
+   inapplicable; a specific *gate* is inapplicable to it, and a module-level flag
+   throws away which gates still apply (a scheduler exempt from fuzzing must still be
+   differential-clean and unsafe-audited). The decisive argument against the blanket
+   state is `output`: it sits on §3b's "not really a parser" list, looks exactly as
+   exemptable as the schedulers beside it, and is the one entry on that list that
+   genuinely needs a fuzz target. One escape hatch wide enough for the schedulers is
+   wide enough for it. Exemptions therefore name a gate, carry a reason CI checks, and
+   render as `[-]` rather than `[x]`. Coverage is recorded rather than inferred for
+   the same reason — see §3d.
 3. ~~**Is `sys` fuzzing in scope for M7, or its own milestone?**~~ **Answered by
    M7.1, and the question was based on a wrong premise.** It assumed fuzzing `sys`
    meant building a synthetic packet-injection harness around raw sockets and

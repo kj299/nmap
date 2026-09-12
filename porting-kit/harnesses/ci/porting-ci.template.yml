@@ -103,6 +103,13 @@ jobs:
       # milestone; the retrospective reads this file as a primary artifact, so a
       # stale table misleads the very review meant to catch drift (LESSONS #021).
       - run: python3 porting-kit/harnesses/progress/progress.py --file progress.json drift --src crates
+      # Fails on a gate exemption with no recorded reason, and on a coverage claim
+      # naming a fuzz target that does not exist. A gate a module is exempt from is
+      # an argument, not a status — if it cannot be written down it has not been
+      # made — and module-to-target coverage inferred from import paths is wrong in
+      # both directions (LESSONS #027). Drop --fuzz-manifest if you have no fuzz
+      # crate yet; the exemption checks still run.
+      - run: python3 porting-kit/harnesses/progress/progress.py --file progress.json audit --fuzz-manifest fuzz/Cargo.toml
 
   miri:
     name: miri (UB in unsafe)

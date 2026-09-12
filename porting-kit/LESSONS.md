@@ -759,6 +759,67 @@ These entries are the M2 retrospective.
 - **Section amended:** `harnesses/ci/porting-ci.template.yml` (lint/test feature flags,
   new ASan job, UBSan note), `SECURITY-CHECKLIST.md` (Phase-4 gate-verification step).
 
+## 027. A progress gate that reports GREEN while seeing two-thirds of the tree
+
+- **Date:** 2026-09-12
+- **Codebase:** nmap — M7.2, reconciling the tracker before cutover
+- **What happened:** LESSONS #021 added `progress.py drift` because "keep the table
+  current" was a habit and habits rot. The control was right; three things made it
+  worthless anyway, and each of them failed *green*.
+  1. **The port never wired it.** The kit template carries the drift step; nmap's
+     workflow was written separately and simply did not have it. Five milestones, no
+     check. A control that exists in the template and not in the workflow is not a
+     control.
+  2. **The harness only read `lib.rs`.** Sub-modules declared in a `mod.rs` were
+     outside the walk entirely — in nmap that was **25 modules** (`headers::*`,
+     `osdb::*`, `osprobe::*`, `nse::*`, `sigstore::*`), which is where a maturing port
+     puts most of its code. It reported "56 shipped modules, 0 untracked" and both
+     numbers were wrong. One genuinely missing module, `core::osprobe::demux`, was
+     also the only byte parser in the port with no fuzz target (#026 / M7.1) — the two
+     blind spots had quietly overlapped on the same code.
+  3. **Coverage was inferred, never recorded.** The M7 analysis stated "19 modules are
+     covered but unrecorded" in a milestone document used for a go/no-go decision. The
+     real number was **14**. Six were credited because a fuzz target shared a *name*
+     with the module — `sys::ndp` counted against `ndp_advert`, which fuzzes
+     `core::ndp`; the sys module is an I/O driver that parses nothing. One was missed
+     the other way: `core::osdb::parse` *is* covered, by a target importing
+     `osdb::model::FingerPrintDb`, because an inherent impl need not live in the module
+     its type is declared in. **No heuristic over import paths gets both directions
+     right.** Write the mapping down.
+- **Kit change:**
+  - `shipped_modules()` walks `mod.rs` as well as `lib.rs` and builds the full
+    `crate::a::b` path. nmap went from 56 modules seen to 81.
+  - New `exempt MODULE GATE --reason ...`, `cover MODULE --targets ...`, and an
+    `audit` subcommand that hard-fails on an exemption without a real reason, an
+    exemption naming an unknown module or gate, a coverage claim naming a
+    non-existent fuzz target, and the contradiction of a module being exempt from
+    `fuzzed` while also claiming fuzz coverage. Wired into the template next to
+    `drift`.
+  - **No blanket `n/a` module state, deliberately.** A module is not inapplicable; a
+    specific *gate* is inapplicable to it, and collapsing that loses which gates still
+    apply — a scheduler exempt from fuzzing must still be differential-clean and
+    unsafe-audited. And one escape hatch broad enough to silence a module is broad
+    enough to silence the module you should have looked harder at: nmap's `output`
+    renders attacker-controlled hostnames and service banners into XML, sits on the
+    same "not really a parser" list as the schedulers, and is the one entry on it that
+    genuinely needs a fuzz target. It is left un-exempt and visibly short of the gate,
+    which is the tracker doing its job.
+  - `show` renders an exempt gate as `[-]`, never `[x]`, and counts it separately. An
+    exemption is a recorded argument, not evidence of a pass, and must not read like
+    one at a glance.
+- **The second lesson, which cost a real bug in this very change:** while adding the
+  `[-]` marker the `[x]` branch was dropped, so the table rendered **every gate of
+  every module as unticked** — and the whole self-test suite stayed green, because
+  every render assertion in it checked for `DONE`, a count, or the new `[-]`, and not
+  one asserted the marker that had been there since the beginning. **A test suite
+  tends to assert the feature being added and to leave the thing it replaced
+  unasserted.** When you change how something is rendered or computed, add an
+  assertion for the *old* behaviour you intend to keep, not only the new one. Three
+  such assertions are now in the self-test.
+- **Section amended:** `harnesses/progress/progress.py` (mod.rs walk, exempt/cover/
+  audit, `[-]` rendering, self-test), `harnesses/ci/porting-ci.template.yml` (audit
+  step).
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

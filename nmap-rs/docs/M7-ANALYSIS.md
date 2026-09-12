@@ -17,8 +17,8 @@ everything below follows from taking that question literally.
 |---|---|
 | C nmap (`*.cc` + `*.h`) | 55,402 lines |
 | `nmap-rs` core / sys / cli | 32,797 / 6,392 / 958 lines |
-| modules tracked | 73 |
-| modules through all six gates | 44 |
+| modules tracked | 81 (73 at the start of M7; `drift` could not see 25 sub-modules — see §3d) |
+| modules through every gate that applies | 79 of 81 (44 at the start of M7) |
 | fuzz targets | 48 (47 at the start of M7; `osprobe_demux` added in M7.1) |
 | `unsafe` blocks | 11, all documented, **all in `sys`** |
 | supply chain | `cargo audit` + `cargo deny` clean (advisories, bans, licenses, sources) |
@@ -74,6 +74,18 @@ The general rule this establishes, and which the rest of M7 should follow:
 
 The tracker shows 29 of 73 modules short of the final gate. That number is
 misleading in both directions, so it is worth splitting three ways.
+
+> **M7.2 correction.** The three-way split below was derived by reading names, and
+> two of its three numbers were wrong. The tracker showed 73 modules; the port ships
+> **81**, because `drift` only ever read `lib.rs` and 25 sub-modules (`headers::*`,
+> `osdb::*`, `osprobe::*`, `nse::*`, `sigstore::*`) were outside its walk — it
+> reported "56 shipped, 0 untracked" and was wrong twice over. This workflow had also
+> never wired the drift step at all. "19 covered but unrecorded" was really **14**:
+> six modules were credited to a fuzz target that merely shared their name
+> (`sys::ndp` to `ndp_advert`, which fuzzes `core::ndp` — the `sys` module parses
+> nothing), and one, `core::osdb::parse`, was missed in the other direction because an
+> inherent impl need not live in the module its type is declared in. The counts below
+> are left as written; §3d records what the table says now.
 
 ### 3a. Met in fact, unrecorded — 19 modules
 
@@ -185,6 +197,29 @@ This was the top technical item for M7, and M7.1 closes it.
 
 ---
 
+### 3d. What the tracker says after M7.2
+
+**79 of 81** modules are complete on every gate that applies. The two that are not are
+the deliverable of this section, not an oversight:
+
+| module | why it is still short |
+|---|---|
+| `output` | renders attacker-controlled hostnames, service banners and TLS subjects into XML and grepable formats. C nmap has had escaping bugs here. **It needs a fuzz target** (§4, M7.4) and is deliberately left un-exempt so the table keeps saying so. |
+| `options` | argv is operator-supplied rather than attacker-supplied, which is the usual argument for exempting it — but M7.3 adds `-iL` and `--excludefile`, which read *files*. Exempting it now would be exempting it a milestone before the premise stops holding. |
+
+`output` is also the answer to why there is **no blanket `n/a` state** (Q2). It sits on
+the same "not really a parser" list as the schedulers and renderers, looks exactly as
+exemptable as they do, and is the one entry on that list that genuinely needs fuzzing.
+An escape hatch wide enough to silence a module is wide enough to silence that one. So
+exemptions are **per gate** and carry a **reason**, in the same shape as the divergence
+ledger: 14 modules are exempt from `fuzzed` only, each with a written argument, each
+still required to clear `differential`, `sanitized` and `unsafe_audited`. `show`
+renders an exempt gate as `[-]`, never `[x]`.
+
+The other half of the fix is that coverage is now **recorded rather than inferred** —
+20 module→target mappings, checked in CI against the `[[bin]]` entries in
+`fuzz/Cargo.toml`. That is what stops "19" and "14" from being arguable again.
+
 ## 4. Cutover criteria, walked
 
 From `PLAN.md` §"Milestone 7" and the kit's Phase 5.
@@ -259,8 +294,17 @@ M7.0/M7.1.
    the rest — which is roughly where §2 leaves it today; or (b) full CLI parity
    first? These are very different amounts of work, and everything in §5 after
    M7.2 depends on the answer.
-2. **Does the `n/a` gate state get added to the kit?** It affects the kit
-   itself, not just this port, so it is a kit-level decision.
+2. ~~**Does the `n/a` gate state get added to the kit?**~~ **Answered by M7.2: no —
+   a per-gate exemption with a written reason instead.** A module is not
+   inapplicable; a specific *gate* is inapplicable to it, and a module-level flag
+   throws away which gates still apply (a scheduler exempt from fuzzing must still be
+   differential-clean and unsafe-audited). The decisive argument against the blanket
+   state is `output`: it sits on §3b's "not really a parser" list, looks exactly as
+   exemptable as the schedulers beside it, and is the one entry on that list that
+   genuinely needs a fuzz target. One escape hatch wide enough for the schedulers is
+   wide enough for it. Exemptions therefore name a gate, carry a reason CI checks, and
+   render as `[-]` rather than `[x]`. Coverage is recorded rather than inferred for
+   the same reason — see §3d.
 3. ~~**Is `sys` fuzzing in scope for M7, or its own milestone?**~~ **Answered by
    M7.1, and the question was based on a wrong premise.** It assumed fuzzing `sys`
    meant building a synthetic packet-injection harness around raw sockets and

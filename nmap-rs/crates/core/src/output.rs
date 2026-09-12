@@ -829,6 +829,38 @@ mod tests {
         assert!(out.trim_end().ends_with("</nmaprun>"));
     }
 
+    /// The XML carries NO stylesheet reference, and `options::ALREADY_SATISFIED`
+    /// depends on that.
+    ///
+    /// C nmap emits an `<?xml-stylesheet?>` processing instruction by default and
+    /// `--no-stylesheet` suppresses it. This port never emits one, which is why
+    /// `--no-stylesheet` is accepted as a no-op (M7.3) — the option asks for what
+    /// already happens. That carve-out's rule is that every reason must be a
+    /// property of the code checkable today, so this is the check: start emitting
+    /// a stylesheet and the carve-out's justification is false, and this test says
+    /// so rather than leaving the CLI silently accepting an option it no longer
+    /// satisfies.
+    #[test]
+    fn xml_emits_no_stylesheet_reference() {
+        let out = render_xml(&sample(), &meta(), Some(&services()));
+        assert!(
+            !out.contains("xml-stylesheet"),
+            "XML gained a stylesheet PI; options::ALREADY_SATISFIED's --no-stylesheet \
+             entry is now false and must be removed:\n{out}"
+        );
+        // The declaration is followed directly by <nmaprun>, with no PI between.
+        let after_decl = out
+            .split_once("?>\n")
+            .expect("an XML declaration")
+            .1
+            .trim_start();
+        assert!(
+            after_decl.starts_with("<nmaprun"),
+            "expected <nmaprun> straight after the declaration, got: {}",
+            &after_decl[..after_decl.len().min(80)]
+        );
+    }
+
     #[test]
     fn xml_escaping_defends_against_injection() {
         let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);

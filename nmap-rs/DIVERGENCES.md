@@ -2010,4 +2010,35 @@ removed: that one was theatre, this one is unobservable.
       This mattered immediately: every case in the M1 differential matrix
       passes `-n`, so the first version of this change took the whole
       differential red — 9 of 9 cases — before the carve-out existed.
-      *(Introduced at M7.0.)*
+      **M7.3 added three more entries**, each found by reading the C for the
+      parity triage (`docs/M7.3-CLI-PARITY.md`). `-r` (scan ports sequentially,
+      do not randomise) qualifies because this port never randomises — ports
+      leave `parse_port_spec` ascending and are sorted by `(protocol, number)`
+      before reporting, which `sys::scan`'s own test asserts. `--release-memory`
+      and `--log-errors` qualify for a stronger reason still: **they are no-ops
+      in C nmap too**, handled at `nmap.cc:730` with `/* No-op. We always
+      release memory now. */` and at `nmap.cc:879` with a comment saying the
+      option is "left in so as to not break anybody's scanning scripts".
+      Accepting those two is exact parity rather than a concession — refusing
+      them would have this port reject a command the reference accepts and
+      ignores. The opposite-is-still-refused rule extends with them:
+      `--randomize-hosts` and its `--rH` alias remain refused beside `-r`, as
+      `-R` does beside `-n`.
+      *(Introduced at M7.0; extended at M7.3.)*
+
+- [x] `cli-long-spelling-of-output-flags` (`core::options`, M7.3) — **`--oN`,
+      `--oX` and `--oG` were refused while `-oN`, `-oX` and `-oG` worked.**
+      Another divergence being *removed*, recorded because the broken behaviour
+      shipped. C nmap parses its command line with `getopt_long_only`
+      (`nmap.cc:653`), which matches a long option after a **single** dash, and
+      carries `oN`/`oX`/`oG` in the long-option table — so `-oN f` and `--oN f`
+      are the same command there. This port matched on `s.starts_with("-oN")`,
+      and `"--oN"` does not start with `"-oN"`, so three fully implemented
+      output formats were unreachable by their documented long spelling.
+      Before M7.0 this misparsed silently (the filename fell through to the
+      positional handler and became a **target**); after M7.0 it became a
+      refusal, which is how it was noticed at all — by running the binary
+      rather than reading it, the same way the `--exclude` bug above was found.
+      Both spellings now reach the same field, attached or separate, pinned by
+      `options::tests::output_flags_accept_both_the_short_and_long_spelling`.
+      *(Introduced at M7.3.)*

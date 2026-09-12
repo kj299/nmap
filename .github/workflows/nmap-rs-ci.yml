@@ -60,12 +60,24 @@ jobs:
       # -D warnings escalates the workspace safety lints (arithmetic_side_effects,
       # cast_possible_truncation, undocumented_unsafe_blocks, missing_safety_doc)
       # to hard errors. Explicit -D flags are belt-and-suspenders (LESSONS #3).
+      #
+      # --all-features is NOT decoration here, it is what makes the two unsafe lints
+      # mean anything. Every `unsafe` block in this project — all 11 of them — lives in
+      # crates/sys/src/netif/ffi.rs, behind `#[cfg(all(feature = "raw-ffi", unix))]`,
+      # and `raw-ffi` is off by default. Without the flag clippy never compiles that
+      # file, so `-D clippy::undocumented_unsafe_blocks` was a hard error that could
+      # not fire on the only code it was aimed at. Measured, not assumed: `cargo clippy
+      # -p nmap-sys --all-targets` mentions ffi.rs exactly 0 times.
       - run: >
-          cargo clippy --all-targets --
+          cargo clippy --all-targets --all-features --
           -D warnings
           -D clippy::missing_safety_doc
           -D clippy::undocumented_unsafe_blocks
-      - run: cargo test --all
+      # Same reason, and the effect is countable: `cargo test -p nmap-sys --lib` runs
+      # 93 tests, `--features raw-ffi` runs 94. That 94th —
+      # netif::tests::ffi_backend_agrees_with_netdev_on_names_and_v4 — is the ONLY test
+      # in the project that executes any `unsafe`, and until M7.1 no CI job ran it.
+      - run: cargo test --all --all-features
 
   # Builds the workspace at the DECLARED MSRV, so `rust-version` is a promise the
   # repo keeps rather than a number nobody checks. It sat at "1.74" through five
@@ -130,6 +142,67 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
       - run: cargo +nightly miri test
+
+  # ASan over the one crate that holds `unsafe`. This job exists because the gate it
+  # replaces was vacuous, and the way it was vacuous is worth writing down.
+  #
+  # All 11 `unsafe` blocks in this project are in crates/sys/src/netif/ffi.rs — a
+  # getifaddrs(3) linked-list walk — behind `#[cfg(all(feature = "raw-ffi", unix))]`,
+  # and `raw-ffi` is NOT a default feature. Follow that through every job that claimed
+  # to cover it and none of them did:
+  #
+  #   * `cargo test --all`      — compiled the file out. 93 tests ran; the FFI test is
+  #                               the 94th and never ran.
+  #   * `cargo clippy`          — mentioned ffi.rs 0 times, so the `-D
+  #                               clippy::undocumented_unsafe_blocks` escalation above
+  #                               was a hard error aimed at code it never saw.
+  #   * `miri`                  — runs 0 netif tests even WITH the feature on, because
+  #                               the module is `#[cfg(all(test, not(miri)))]`. That cfg
+  #                               is correct: Miri cannot call a foreign function, so it
+  #                               can never execute this code. It is also why Miri can
+  #                               never be the gate here.
+  #   * `msrv`                  — `cargo check --all-features` type-checks it. Nothing
+  #                               is codegen'd and nothing runs.
+  #   * `unsafe-audit`          — greps source text, so it did see it. Text only.
+  #
+  # So the project's entire residual unsafe surface was type-checked and grepped, and
+  # never once executed under any dynamic check. The two edits above fix the test and
+  # clippy jobs; this job adds the dynamic one.
+  #
+  # NOTE, so nobody adds a UBSan job expecting it to work: rustc has NO
+  # UndefinedBehaviorSanitizer. `-Zsanitizer` accepts address, leak, memory, thread,
+  # cfi and friends — `undefined` is rejected outright. UBSan is a C/C++ pairing and
+  # naming it alongside ASan (as M7-ANALYSIS §3c originally did) promises a gate that
+  # cannot be built. MSan would need every dependency including std rebuilt
+  # instrumented; TSan is already ruled out above.
+  #
+  # What this does NOT catch: the kernel supplies the ifaddrs list, so ASan checks how
+  # we walk a well-formed one, not what a malicious one would do. There is no way to
+  # feed getifaddrs a hostile list from userspace, so that stays unprovable rather than
+  # proven — recorded here instead of left to look covered.
+  sanitizers:
+    name: ASan (the unsafe layer, actually executed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      # --all-features is the whole point: without it this job would compile the same
+      # 93 tests every other job already runs and report green having sanitized no
+      # `unsafe` at all.
+      #
+      # --target is REQUIRED, not stylistic. Without an explicit target, cargo builds
+      # build scripts and proc macros with the same RUSTFLAGS and links them against a
+      # sanitizer runtime they have no business carrying; with it, instrumentation
+      # applies to the target artifacts only.
+      #
+      # LeakSanitizer is left ON (it ships inside ASan on linux-gnu and is enabled by
+      # default). It was measured clean over the full suite with the pcap feature on, so
+      # there is no `detect_leaks=0` here — a suppression nobody needs is a suppression
+      # that later hides a real leak.
+      - run: cargo +nightly test -p nmap-sys --all-features --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
 
   # NOTE: no ThreadSanitizer gate. The host-group driver's race-freedom is
   # *structural* — all scheduler state is mutated by the single driver task and

@@ -329,7 +329,7 @@ Then the loop — each step is a CI-enforced gate:
    sitting on the untrusted boundary a longer budget than the 60s CI smoke at least
    once per milestone. The seed corpus is the port's accumulating regression memory.
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
-   logic and, for the `sys` layer, ASan/UBSan (and TSan if threaded). winlsof's
+   logic and, for the `sys` layer, ASan (and TSan if threaded). winlsof's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.
    **Miri cannot execute real I/O** (sockets, files, real syscalls) — a tokio
    `TcpStream::connect` test aborts under Miri. So structure the `sys` layer to
@@ -413,7 +413,7 @@ kept both trees side by side — preserve that discipline.
 |---|---|---|
 | No `unsafe` in pure logic | `#![forbid(unsafe_code)]` on `core` | compile |
 | Every `unsafe` justified | `unsafe-audit/audit_unsafe.py` | **hard-fail CI** |
-| No UB at the FFI boundary | `sanitizers/run_sanitizers.sh` (Miri, ASan/UBSan/TSan) | CI |
+| No UB at the FFI boundary | `sanitizers/run_sanitizers.sh` (Miri, ASan/LSan/TSan) | CI |
 | No panics on untrusted input | `fuzz/` (`cargo-fuzz`) | CI smoke + nightly deep |
 | No vulnerable/untrusted deps | `supply-chain/run_supply_chain.sh` (`cargo audit`,`cargo deny`) | CI |
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |

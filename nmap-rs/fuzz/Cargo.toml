@@ -284,3 +284,8 @@ test = false
 name = "nse_selection"
 path = "fuzz_targets/nse_selection.rs"
 test = false
+
+[[bin]]
+name = "osprobe_demux"
+path = "fuzz_targets/osprobe_demux.rs"
+test = false

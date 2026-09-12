@@ -21,8 +21,19 @@ to safety and security" — this is that list.
 - [ ] **No panic on untrusted input.** A `cargo-fuzz` target exists for every
       parse/decode entry point and runs clean (60s smoke min; nightly deep).
       No `unwrap()`/`expect()`/`[i]` indexing on attacker-controlled data.
-- [ ] **No UB.** Miri passes on the pure logic; ASan/UBSan pass over the FFI
+- [ ] **No UB.** Miri passes on the pure logic; ASan passes over the FFI
       layer; TSan if the module shares state across threads (winlsof's hang class).
+      Miri does **not** subsume ASan here — it cannot execute a foreign function, so
+      at the FFI boundary itself ASan is the only dynamic check there is.
+- [ ] **Each gate proved to execute the code it names.** A gate is worth what it
+      *runs*, not what it is called. For every gate above, name the line it
+      executes and prove it — cheapest proof is a count (`N` tests before, `N+1`
+      after enabling the feature), or make the code fail on purpose and watch the
+      gate go red. **Anything behind a `#[cfg(feature = ...)]` is compiled out of
+      every default-feature job**, which is how nmap's entire `unsafe` surface ended
+      up type-checked and grepped but never executed, under a clippy rule escalated
+      to a hard error specifically to police it (LESSONS #026). Run the lint, test
+      and sanitizer gates with `--all-features`.
 - [ ] **Integer safety.** `overflow-checks = true`; size math uses
       `checked_*`/`saturating_*`; no `as` truncation on lengths/offsets from
       input. (Closes the C `malloc(a*b)` overflow class.)

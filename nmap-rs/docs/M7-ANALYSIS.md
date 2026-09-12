@@ -19,7 +19,7 @@ everything below follows from taking that question literally.
 | `nmap-rs` core / sys / cli | 32,797 / 6,392 / 958 lines |
 | modules tracked | 73 |
 | modules through all six gates | 44 |
-| fuzz targets | 47 |
+| fuzz targets | 48 (47 at the start of M7; `osprobe_demux` added in M7.1) |
 | `unsafe` blocks | 11, all documented, **all in `sys`** |
 | supply chain | `cargo audit` + `cargo deny` clean (advisories, bans, licenses, sources) |
 
@@ -109,27 +109,79 @@ that one probably *should* be fuzzed for injection, see §4).
 
 ### 3c. A real gap: the unsafe layer is the least-tested code
 
-This is the one that should worry us.
+This is the one that should worry us — though **not for the reason stated here
+originally**. M7.1 measured it and the first version of this section was wrong
+twice. Both corrections are kept visible rather than quietly edited out, because
+how the measurement went wrong is the more useful finding.
+
+**What this section said first:**
+
+> | | `core` | `sys` |
+> |---|---|---|
+> | fuzz targets exercising it | **47** | **0** |
+> | ASan / UBSan | via cargo-fuzz | **none** |
+> | Miri | yes | yes, but cannot execute FFI |
+>
+> All 47 fuzz targets import `nmap_core`; not one imports `nmap_sys`.
+
+**Correction 1 — "`sys` has 0 fuzz targets" counts the wrong thing.** It is true
+and it is close to meaningless. `sys` barely parses: it delegates to `core` and
+keeps the I/O. `match_reply` is a five-line wrapper over `core::synscan::
+match_syn_response`; `record` wraps `core::osprobe::demux::demux`; the NDP driver
+wraps `core::ndp::resolve_from_frame`. That split is the unsafe-quarantine design
+working exactly as intended, and a fuzz target per `sys` wrapper would measure the
+wrapper, not the parser.
+
+Cross-referencing every `core` function that takes raw bytes against what the 47
+targets actually import gives the honest list. Almost everything is covered,
+including transitively: `headers::icmpv6` and `headers::ipv6ext` via `parse_packet`,
+`icmp_quote` via `match_syn`/`match_udp`/`match_flag`, and `sigstore::install`'s
+path-traversal contract via `sigstore_manifest` — which already asserts the
+single-component invariant `install` relies on, joined-path escape check included.
+
+One genuine gap survived: **`core::osprobe::demux::{demux, tcp_timestamp}`**, called
+from exactly one place — `sys/osscan.rs:39` — and fuzzed by nothing. It looks like an
+internal helper of the `sys` driver and is in fact a frame parser whose own module
+doc says its input is "entirely attacker-chosen". M7.1 adds `osprobe_demux`; it
+survives 10,025,242 executions clean.
+
+**Correction 2 — the unsafe was not under-tested, it was untested, and the reason
+is a feature flag.** All 11 `unsafe` blocks are in `crates/sys/src/netif/ffi.rs`
+behind `#[cfg(all(feature = "raw-ffi", unix))]`, and `raw-ffi` is off by default.
+Follow that through every job that appeared to cover it:
+
+| job | what it did with the 11 `unsafe` blocks |
+|---|---|
+| `cargo test --all` | compiled them out — 93 tests ran, the FFI test is the 94th |
+| `cargo clippy --all-targets` | mentioned `ffi.rs` **0 times**, so `-D clippy::undocumented_unsafe_blocks` was a hard error aimed at code it never compiled |
+| `miri` | runs **0** of those tests even with the feature on: the module is `#[cfg(all(test, not(miri)))]`, correctly, since Miri cannot call a foreign function |
+| `msrv` | `cargo check --all-features` type-checked them; nothing ran |
+| `unsafe-audit` | greps source text — the only gate that saw the file at all |
+
+So the entire residual unsafe surface was type-checked once and grepped once, and
+had never been executed under any dynamic check. Nothing turned out to be broken —
+ASan over it passes 94/94 with leak detection on — but that is luck confirmed after
+the fact, not a property anything was testing.
+
+**And there is no UBSan.** rustc's `-Zsanitizer` accepts `address`, `leak`,
+`memory`, `thread`, `cfi` and friends; `undefined` is rejected outright. The row
+above promised a gate that cannot be built. Worse, the kit shipped a
+`run_sanitizers.sh ubsan` mode that invoked exactly that flag — dead on any Rust
+project, and unnoticed because no port had ever wired the kit's sanitizers job.
+
+**Corrected picture:**
 
 | | `core` | `sys` |
 |---|---|---|
 | lines | 32,797 | 6,392 |
-| `unsafe` blocks | **0** | **11** |
-| fuzz targets exercising it | **47** | **0** |
-| ASan / UBSan | via cargo-fuzz | **none** |
-| Miri | yes | yes, but cannot execute FFI |
+| `unsafe` blocks | **0** | **11**, all in one file, behind a non-default feature |
+| byte-consuming parsers without a fuzz target | **1** (`osprobe::demux`, now closed) | 0 — it delegates to `core` |
+| tests executing any `unsafe` | n/a | **1**, which no CI job ran |
+| ASan | via cargo-fuzz | **now gated in CI, `--all-features`** |
+| UBSan | does not exist for Rust | does not exist for Rust |
+| Miri | yes | yes on the safe Rust; can never execute the FFI |
 
-All 47 fuzz targets import `nmap_core`; **not one imports `nmap_sys`**. CI has
-no ASan or UBSan job at all. TSan's absence *is* considered and documented
-(LESSONS #10 — unsound over a tokio runtime), but ASan/UBSan's absence is not
-recorded anywhere.
-
-So the crate holding 100% of the `unsafe`, the raw sockets, the FFI and the
-packet-capture bindings has the weakest dynamic coverage in the project, and
-its only sanitizer is the one that cannot run its FFI paths. That inverts what
-the kit's threat model assumes.
-
-This is the top technical item for M7.
+This was the top technical item for M7, and M7.1 closes it.
 
 ---
 
@@ -141,7 +193,7 @@ From `PLAN.md` §"Milestone 7" and the kit's Phase 5.
 |---|---|
 | all target modules through six gates | ⚠️ 44/73 recorded; see §3 for the honest split |
 | differential green modulo ledgered divergences | ✅ every milestone's differential runs in CI |
-| fuzz seeded + clean | ✅ for `core` (47 targets); ❌ nothing for `sys` |
+| fuzz seeded + clean | ✅ 48 targets; the one uncovered byte parser (`osprobe::demux`) closed in M7.1 — see §3c for why "nothing for `sys`" was the wrong measurement |
 | supply-chain clean | ✅ audit + deny clean |
 | least-privilege verified | ❌ not yet assessed — see below |
 | ASCII-default output | ❓ unverified |
@@ -209,9 +261,15 @@ M7.0/M7.1.
    M7.2 depends on the answer.
 2. **Does the `n/a` gate state get added to the kit?** It affects the kit
    itself, not just this port, so it is a kit-level decision.
-3. **Is `sys` fuzzing in scope for M7, or its own milestone?** Fuzzing raw-socket
-   and capture code needs harness work (synthetic packet injection) that is
-   closer to a milestone than a task.
+3. ~~**Is `sys` fuzzing in scope for M7, or its own milestone?**~~ **Answered by
+   M7.1, and the question was based on a wrong premise.** It assumed fuzzing `sys`
+   meant building a synthetic packet-injection harness around raw sockets and
+   capture — a milestone's worth of work. It does not, because `sys` does not parse:
+   every byte-level decision it appears to make is delegated to a pure function in
+   `core` that a plain `fuzz_target!` can call directly. One target (`osprobe_demux`)
+   closed the only real gap, in an afternoon rather than a milestone. What `sys`
+   actually needed was not fuzzing at all but a **sanitizer that compiles its
+   feature-gated `unsafe`** — see §3c.
 4. **Still unanswered from M6**: the M6.0 port order, and whether M6 resumes
    after M7. M6.1 and M6.2 are merged and were deliberately chosen to be
    independent of the Lua-runtime decision; **M6.3 is not**, so M6 is blocked at

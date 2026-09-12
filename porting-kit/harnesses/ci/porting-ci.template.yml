@@ -62,12 +62,24 @@ jobs:
       # belt-and-suspenders so this gate holds even if a repo copies this CI
       # without the [workspace.lints] table — every `unsafe fn` needs `# Safety`,
       # every `unsafe {}` a doc (cross-checks the audit harness). (LESSONS #3)
+      #
+      # --all-features is what makes the two unsafe lints mean anything. The unsafe
+      # an FFI port cares about is routinely behind a non-default feature — this
+      # kit's own Option-C escape hatch recommends exactly that — and clippy does
+      # not compile a cfg'd-out module, so without the flag these -D escalations
+      # are hard errors pointed at code the linter never sees. In nmap this was not
+      # hypothetical: `cargo clippy --all-targets` mentioned the file holding all 11
+      # `unsafe` blocks exactly 0 times (LESSONS #026).
       - run: >
-          cargo clippy --all-targets --
+          cargo clippy --all-targets --all-features --
           -D warnings
           -D clippy::missing_safety_doc
           -D clippy::undocumented_unsafe_blocks
-      - run: cargo test --all
+      # Same reason, and the effect is countable. Count what EXECUTED, not what the
+      # job was named: nmap's `cargo test -p <sys-crate> --lib` ran 93 tests and
+      # `--all-features` ran 94 — and that 94th was the only test in the project
+      # that executed any `unsafe`.
+      - run: cargo test --all --all-features
 
   unsafe-audit:
     name: unsafe-audit (hard fail on undocumented unsafe)
@@ -93,14 +105,27 @@ jobs:
         with: { components: miri }
       - run: cargo +nightly miri test
 
+  # ASan over the crate that holds the `unsafe`. Miri is the gate above this one and
+  # does NOT subsume it: Miri cannot execute a foreign function, so at the FFI
+  # boundary itself — the whole reason the quarantine crate exists — ASan is the only
+  # dynamic check available.
+  #
+  # There is deliberately no ubsan step. rustc has no UndefinedBehaviorSanitizer;
+  # `-Zsanitizer` rejects `undefined` outright. This template used to run one, and
+  # the harness used to accept the mode, and neither had ever been executed by a real
+  # port — which is exactly how a gate that cannot pass survives in a kit (LESSONS
+  # #026). The harness now refuses the mode with an explanation instead.
   sanitizers:
-    name: sanitizers (asan + ubsan)
+    name: sanitizers (ASan over the unsafe layer)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with: { components: rust-src }
+      # Install whatever system libraries the off-by-default features need to link —
+      # --all-features turns them all on, which is the point (see the harness header).
+      # e.g. `sudo apt-get update && sudo apt-get install -y libpcap-dev`
       - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh asan .
-      - run: bash porting-kit/harnesses/sanitizers/run_sanitizers.sh ubsan .
 
   # Sharded across a matrix: the smoke is 60s PER TARGET, so a single job grows
   # linearly as targets accumulate (nmap reached ~38 minutes of pure fuzzing).

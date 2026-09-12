@@ -35,7 +35,7 @@ compiles and matches the oracle is at step 2 of 6, not done.
 |---|---|
 | unsafe contained | `#![forbid(unsafe_code)]` on `core` |
 | unsafe documented | `harnesses/unsafe-audit/audit_unsafe.py crates/` — **hard fail** |
-| no UB | `harnesses/sanitizers/run_sanitizers.sh` (miri/asan/ubsan/tsan) |
+| no UB | `harnesses/sanitizers/run_sanitizers.sh` (miri/asan/lsan/tsan) |
 | no panic on input | `harnesses/fuzz/` (cargo-fuzz) |
 | clean deps | `harnesses/supply-chain/run_supply_chain.sh` |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |

@@ -244,7 +244,7 @@ the core; wire the rest as CI gates the kit ships:
   compiler-side cross-check — and make sure they are actually *enabled* (both are
   allow-by-default; a "delegated to clippy" control that clippy never runs is not a
   control).
-- **Miri + ASan/UBSan/TSan** over the unsafe/FFI layer — the UB the compiler can't
+- **Miri + ASan/TSan** over the unsafe/FFI layer — the UB the compiler can't
   see. TSan specifically for threaded code (shared-resource races are the class the
   liveness/hang bugs hide behind).
 - **Fuzz every parse/input entry point** (cargo-fuzz): any panic/crash on arbitrary

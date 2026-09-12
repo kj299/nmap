@@ -16,7 +16,8 @@ oracle is at gate 2 of 6, not done.
    gate catches.) Plus `cargo clippy --all-targets -- -D warnings -D
    clippy::missing_safety_doc -D clippy::undocumented_unsafe_blocks`.
 2. **No UB:** `bash porting-kit/harnesses/sanitizers/run_sanitizers.sh all .`
-   (Miri + ASan/UBSan; TSan for threaded code — the class that hides the hang bugs.)
+   (Miri + ASan; TSan for threaded code — the class that hides the hang bugs.
+   Rust has no UBSan: `-Zsanitizer` rejects `undefined`. See LESSONS #026.)
 3. **No panic on input:** `cargo fuzz list` then a 60s smoke per target. Any crash blocks.
 4. **Clean supply chain:** `bash porting-kit/harnesses/supply-chain/run_supply_chain.sh .`
    (`cargo audit` + `cargo deny`: no advisories, licenses allow-listed, crates.io-only.)

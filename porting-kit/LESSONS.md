@@ -709,6 +709,56 @@ These entries are the M2 retrospective.
   hides in plain sight because it looks like a matrix.
 - **Section amended:** `harnesses/ci/porting-ci.template.yml` (`on:` triggers, new `concurrency`).
 
+## 026. A cfg-gated module is invisible to every default-feature gate — including the gates aimed at it
+
+- **Date:** 2026-09-12
+- **Codebase:** nmap — M7.1, closing the `sys` coverage gap
+- **What happened:** The kit's whole unsafe strategy is *quarantine*: push every
+  `unsafe` into one crate, wrap it in audited safe functions, and point the safety
+  gates at it. nmap did that well — all 11 `unsafe` blocks in a 39,000-line port live
+  in one file, `crates/sys/src/netif/ffi.rs`, a `getifaddrs(3)` linked-list walk. It
+  was also, correctly by the kit's own Option-C advice, put behind a non-default
+  feature (`raw-ffi`) so the default build carries a safe `netdev` backend instead.
+  Those two good decisions combined into a blind spot nobody chose. A cfg-gated module
+  is not compiled unless something asks for the feature, and **not one gate asked**:
+  - `cargo test --all` ran 93 tests. With `--features raw-ffi` it runs 94. The 94th is
+    the only test in the project that executes any `unsafe`, and no CI job ran it.
+  - `cargo clippy --all-targets` mentioned `ffi.rs` **0 times** — so the workflow's
+    `-D clippy::undocumented_unsafe_blocks`, escalated to a hard error specifically to
+    police this code, was pointed at a file clippy never compiled.
+  - `miri` runs **0** of those tests even with the feature enabled, because the module
+    is `#[cfg(all(test, not(miri)))]`. That cfg is *right* — Miri cannot call a foreign
+    function — but it means Miri can never be the gate for the one thing it was
+    credited with covering.
+  - `msrv`'s `cargo check --all-features` type-checked it. Nothing was codegen'd, and
+    nothing ran.
+  - `unsafe-audit` greps source text, so it alone saw the file. Text only.
+
+  So the port's entire residual unsafe surface was type-checked once and grepped once,
+  and had never been executed under any dynamic check. Nothing was broken — ASan over
+  it passes clean, 94/94, leak detection included — but that was luck confirmed after
+  the fact, not a property anything had been testing. The milestone analysis that
+  opened M7 recorded the symptom as "`sys` has 0 fuzz targets" and credited Miri with
+  partial coverage; both were wrong in the same direction, and the reason is that
+  **coverage was counted by reading the job list rather than by running the jobs and
+  counting what executed.**
+- **Kit change:** two edits, one narrow and one general.
+  1. The CI template's lint and test steps take **`--all-features`**, and the template
+     comment says why in the form "this flag is what makes the unsafe lints mean
+     anything". A safety lint that cannot compile its target is worse than no lint,
+     because it reports green.
+  2. The Phase-4 gate checklist gains a step: **for each declared gate, name the
+     specific line of code it executes, and prove it by making that code fail.** A
+     gate's worth is what it runs, not what its name claims. The cheap version of this
+     proof is a count — 93 vs 94 tests — and it takes one command.
+  Also recorded in the template: **rustc has no UndefinedBehaviorSanitizer.**
+  `-Zsanitizer` accepts `address`, `leak`, `memory`, `thread`, `cfi` and friends;
+  `undefined` is rejected outright. "ASan/UBSan" is a C/C++ pairing, and carrying it
+  into a Rust kit document promises a gate that cannot be built — this port's own M7
+  analysis had it in a table before anyone tried to run it.
+- **Section amended:** `harnesses/ci/porting-ci.template.yml` (lint/test feature flags,
+  new ASan job, UBSan note), `SECURITY-CHECKLIST.md` (Phase-4 gate-verification step).
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

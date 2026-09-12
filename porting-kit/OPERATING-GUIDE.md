@@ -62,7 +62,7 @@ The kit is designed so an agent reads *verdicts, not corpora*. Lean into that:
 - **Path-scope every workflow** (LESSONS #5) so a change runs only the pipeline it
   can affect. The single biggest CI-waste fix.
 - **Tier the slow gates:** fuzz = 60s smoke per target in CI, deep run nightly;
-  Miri/ASan/UBSan on the `sys`/changed crates per-PR, full sweep nightly. Don't pay
+  Miri/ASan on the `sys`/changed crates per-PR, full sweep nightly. Don't pay
   the whole safety matrix on every push.
 - **Leaf-first order is an efficiency lever, not just correctness** — it localizes
   every failure to one definition, so you debug one thing, not a 10k-line blast

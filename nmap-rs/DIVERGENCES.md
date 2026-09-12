@@ -2033,6 +2033,46 @@ removed: that one was theatre, this one is unobservable.
       beside `-n`.
       *(Introduced at M7.0; extended at M7.3.)*
 
+- [x] `osprobe-demux-accepted-tunnelled-replies` (`core::osprobe::demux`, M7.3) —
+      **an OS-probe reply forged inside an IPv6 tunnel was attributed to the
+      probed host.** A divergence being *removed*; recorded because the broken
+      behaviour shipped from M5 until M7.3.
+      `demux` located the reply's IPv4 header with `icmp_quote::ipv4_offset`,
+      which returns the first IPv4 header found **anywhere** in the header
+      chain. That is correct for its own caller — the quoted datagram inside an
+      ICMP error genuinely is nested — and wrong for a frame arriving on the
+      wire. An IPv6 packet whose next-header is 4 carries an IPv4 header at
+      offset 40, so `ipv4_offset` returned 40 and the host filter
+      (`src != params.dst -> None`) then validated that **inner** header, which
+      is entirely attacker-authored. The outer source was never examined.
+      Why it mattered rather than merely differing: spoofing a bare IPv4 source
+      is blocked wherever ingress filtering (BCP 38) is deployed, while sending
+      a legitimately-sourced IPv6 packet that encapsulates a forged IPv4 header
+      is not. The filter could therefore be bypassed in exactly the deployments
+      where it was supposed to hold, and a misattributed reply has no error
+      path — it silently becomes part of the wrong host's fingerprint, which is
+      a confidently wrong OS answer rather than a missing one.
+      C nmap does not do this. `HostOsScan::processResp` (`osscan2.cc:1888`)
+      does `memcpy(&ip, pkt, sizeof(ip))` directly on the pointer
+      `readipv4_pcap` returns, which strips the datalink header and nothing
+      else; the outermost header is the IPv4 header or the packet is not a
+      reply. So this was an unledgered divergence in the dangerous direction.
+      `demux` now uses its own `outer_ipv4_offset`, which skips link-layer
+      headers only and refuses anything whose outermost network header is not
+      IPv4. `icmp_quote::ipv4_offset` is unchanged — it is right for its job.
+      **Found by fuzzing, and specifically by an invariant rather than a
+      panic**: the `osprobe_demux` target added in M7.1 asserts that a matched
+      frame's source is the probed host, checked against a second, independent
+      address reader. A totality-only target would have run past this
+      indefinitely. CI hit it after 618,868 executions on a shard; the local
+      10-million-execution run in M7.1 had not.
+      Pinned by `an_ipv4_reply_tunnelled_inside_ipv6_is_not_attributed`, which
+      first asserts the inner packet *would* be attributed on its own so the
+      test cannot pass vacuously, and which fails against the previous code.
+      The crash input is kept as the fuzz seed
+      `ipv4_reply_tunnelled_in_ipv6`.
+      *(Introduced at M7.3.)*
+
 - [x] `cli-long-spelling-of-output-flags` (`core::options`, M7.3) — **`--oN`,
       `--oX` and `--oG` were refused while `-oN`, `-oX` and `-oG` worked.**
       Another divergence being *removed*, recorded because the broken behaviour

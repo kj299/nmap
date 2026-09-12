@@ -166,6 +166,15 @@ const ALREADY_SATISFIED: &[(&str, &str)] = &[
          Accepting it is parity with the reference, not a concession.",
     ),
     (
+        "--no-stylesheet",
+        "do not reference an XSL stylesheet from the XML output: this port never \
+         emits one. `output::xml` writes the XML declaration and goes straight to \
+         `<nmaprun>` (see `output.rs`), with no `<?xml-stylesheet?>` processing \
+         instruction anywhere — so there is nothing to suppress. Its opposites, \
+         `--stylesheet` and `--webxml`, stay refused: this port cannot emit the \
+         reference they ask for.",
+    ),
+    (
         "--log-errors",
         "log errors to the normal output file: deprecated and always-on in C nmap, \
          whose handler says it is `left in so as to not break anybody's scanning \
@@ -619,9 +628,16 @@ mod tests {
         // because there the port cannot do what is asked.
         //   -n  (no reverse DNS)        <-> -R                (always resolve)
         //   -r  (sequential ports)      <-> --randomize-hosts (and its --rH alias)
+        //   --no-stylesheet             <-> --stylesheet, --webxml
         // `--release-memory` and `--log-errors` have no opposite in C nmap's
         // grammar, so there is nothing to pair them with here.
-        for opposite in ["-R", "--randomize-hosts", "--rH"] {
+        for opposite in [
+            "-R",
+            "--randomize-hosts",
+            "--rH",
+            "--stylesheet",
+            "--webxml",
+        ] {
             assert_eq!(
                 cfg(&[opposite, "127.0.0.1"]).unrecognized,
                 vec![opposite.to_string()],
@@ -652,7 +668,13 @@ mod tests {
     /// the opposite of what this is for.
     #[test]
     fn each_already_satisfied_option_is_accepted_and_scans() {
-        for flag in ["-n", "-r", "--release-memory", "--log-errors"] {
+        for flag in [
+            "-n",
+            "-r",
+            "--release-memory",
+            "--log-errors",
+            "--no-stylesheet",
+        ] {
             let c = cfg(&[flag, "127.0.0.1"]);
             assert!(
                 c.unrecognized.is_empty(),

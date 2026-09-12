@@ -2021,9 +2021,16 @@ removed: that one was theatre, this one is unobservable.
       option is "left in so as to not break anybody's scanning scripts".
       Accepting those two is exact parity rather than a concession — refusing
       them would have this port reject a command the reference accepts and
-      ignores. The opposite-is-still-refused rule extends with them:
-      `--randomize-hosts` and its `--rH` alias remain refused beside `-r`, as
-      `-R` does beside `-n`.
+      ignores. A fourth, `--no-stylesheet`, joined them: C nmap emits an
+      `<?xml-stylesheet?>` processing instruction by default and this option
+      suppresses it, while `output::render_xml` goes straight from the XML
+      declaration to `<nmaprun>` and emits none — so there is nothing to
+      suppress. `output::tests::xml_emits_no_stylesheet_reference` pins that,
+      so the day the XML gains a stylesheet the carve-out fails loudly instead
+      of quietly becoming false. The opposite-is-still-refused rule extends with
+      all of them: `--randomize-hosts` and its `--rH` alias remain refused beside
+      `-r`, and `--stylesheet`/`--webxml` beside `--no-stylesheet`, as `-R` does
+      beside `-n`.
       *(Introduced at M7.0; extended at M7.3.)*
 
 - [x] `cli-long-spelling-of-output-flags` (`core::options`, M7.3) — **`--oN`,

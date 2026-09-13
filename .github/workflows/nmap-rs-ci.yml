@@ -131,6 +131,29 @@ jobs:
       # root against the workspace crates.
       - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py nmap-rs/crates/
         working-directory: .
+      # Fails if a shipped module never reached progress.json. The kit template has
+      # carried this step since LESSONS #021 ("keep the table current" was a habit,
+      # and habits rot silently — one milestone added ten modules and none reached
+      # the table). This workflow never adopted it, so for five milestones nothing
+      # checked, and `core::osprobe::demux` sat untracked while being the one byte
+      # parser in the port with no fuzz target (M7.1).
+      #
+      # The harness itself was also under-counting: it only read `lib.rs`, so all 25
+      # sub-modules declared in a `mod.rs` — every headers::*, osdb::*, osprobe::*,
+      # nse::*, sigstore::* — were outside its walk. It reported "56 shipped, 0
+      # untracked" and was wrong twice over. Fixed in M7.2; it now sees 81.
+      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json drift --src nmap-rs/crates
+        working-directory: .
+      # Fails on a gate exemption without a real recorded reason, and on a coverage
+      # claim naming a fuzz target that does not exist. Module-to-target coverage had
+      # only ever been *inferred*, and inference is wrong in both directions: the M7
+      # analysis put "19 modules covered but unrecorded" in a milestone document when
+      # the true number was 14. Six were credited to a target that merely shared a
+      # name; one real one was missed because an inherent impl need not live in the
+      # module its type is declared in. So the mapping is written down, and this step
+      # is what keeps it true.
+      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json audit --fuzz-manifest nmap-rs/fuzz/Cargo.toml
+        working-directory: .
 
   supply-chain:
     name: supply-chain (audit + deny)

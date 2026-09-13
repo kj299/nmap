@@ -15,6 +15,12 @@
 //
 //   * a `Demuxed` is returned ONLY for a frame whose source address is the host we probed,
 //     so another host's traffic on the shared capture can never enter this fingerprint;
+//     THIS ONE FOUND A REAL BUG (M7.3, seed `ipv4_reply_tunnelled_in_ipv6`). `demux` used
+//     `icmp_quote::ipv4_offset`, which returns the first IPv4 header found anywhere in the
+//     header chain, so an IPv6 packet with next-header 4 got its *inner*, entirely
+//     attacker-authored IPv4 header validated by the host filter while the outer source
+//     was never looked at. Note what caught it: not a panic — the invariant. A totality
+//     target would have run happily past this for as long as it was left running.
 //   * the probe named is one the battery actually sends — nothing is "forced into the
 //     nearest slot" when it does not match.
 //
@@ -64,7 +70,10 @@ impl Cursor<'_> {
 fn source_addr(frame: &[u8], eth_included: bool) -> Option<[u8; 4]> {
     let off = if eth_included { 14usize } else { 0 };
     // An Ethernet frame only carries IPv4 when its EtherType says so; `demux` resolves
-    // this through `ipv4_offset`, which also rejects a non-4 IP version nibble.
+    // this through `outer_ipv4_offset`, which also rejects a non-4 IP version nibble.
+    // This models the OUTERMOST network header only, which is the whole contract: a
+    // reply's IPv4 header sits at the datalink offset or the frame is not a reply. It
+    // said that before the fix too — the code was what disagreed.
     if eth_included && frame.get(12..14) != Some(&[0x08, 0x00]) {
         return None;
     }

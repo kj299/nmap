@@ -138,12 +138,50 @@ impl Default for RunConfig {
 /// *opposite* would change behaviour does NOT belong here: `-n` qualifies
 /// because no reverse lookup exists to suppress, while `-R` (always resolve)
 /// does not, because this port cannot do what it asks.
-const ALREADY_SATISFIED: &[(&str, &str)] = &[(
-    "-n",
-    "never do reverse DNS: this port performs no reverse lookup anywhere. \
-     `Host::hostname` is only ever set from the user's own target expression \
-     (see the CLI's target resolution), so there is nothing for -n to disable.",
-)];
+///
+/// Two of these qualify for a second reason worth stating separately: the C
+/// itself does nothing with them. `--release-memory` and `--log-errors` are
+/// no-ops in `nmap.cc`, kept only so existing scan scripts keep working. So
+/// accepting them here is not a concession — it is exact parity, and refusing
+/// them would have this port reject a command C nmap accepts and ignores.
+const ALREADY_SATISFIED: &[(&str, &str)] = &[
+    (
+        "-n",
+        "never do reverse DNS: this port performs no reverse lookup anywhere. \
+         `Host::hostname` is only ever set from the user's own target expression \
+         (see the CLI's target resolution), so there is nothing for -n to disable.",
+    ),
+    (
+        "-r",
+        "scan ports sequentially, do not randomise: this port never randomises \
+         port order. Ports are emitted by `ports::parse_port_spec` in ascending \
+         order and sorted by `(protocol, number)` before reporting \
+         (`sys::scan` and `sys::group`), which `sys::scan`'s own test asserts. \
+         There is no randomisation to turn off.",
+    ),
+    (
+        "--release-memory",
+        "release memory before exiting: a no-op in C nmap too — `nmap.cc` \
+         handles it with the comment `/* No-op. We always release memory now. */`. \
+         Accepting it is parity with the reference, not a concession.",
+    ),
+    (
+        "--no-stylesheet",
+        "do not reference an XSL stylesheet from the XML output: this port never \
+         emits one. `output::xml` writes the XML declaration and goes straight to \
+         `<nmaprun>` (see `output.rs`), with no `<?xml-stylesheet?>` processing \
+         instruction anywhere — so there is nothing to suppress. Its opposites, \
+         `--stylesheet` and `--webxml`, stay refused: this port cannot emit the \
+         reference they ask for.",
+    ),
+    (
+        "--log-errors",
+        "log errors to the normal output file: deprecated and always-on in C nmap, \
+         whose handler says it is `left in so as to not break anybody's scanning \
+         scripts`. This port likewise writes errors unconditionally, so there is \
+         nothing to enable.",
+    ),
+];
 
 /// Parse a `--min-rate`/`--max-rate` value: a positive, finite probes-per-second
 /// number. Anything else (empty, non-numeric, `<= 0`, NaN) is rejected as `None`
@@ -324,18 +362,25 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 }
                 consumed_extra = adv;
             }
-            _ if s.starts_with("-oN") => {
-                let (v, adv) = opt_value(args, i, "-oN");
+            // Both spellings, because C nmap accepts both. `getopt_long_only`
+            // (nmap.cc:653) matches a long option after a SINGLE dash, and the
+            // table carries "oN"/"oX"/"oG" as long options — so `-oN f` and
+            // `--oN f` are the same command there. This port matched only the
+            // short spelling, so `--oN` was refused while `-oN` worked: a parity
+            // gap in a feature that is fully implemented, and one found by
+            // running the binary rather than reading it (as M7.0's was).
+            _ if s.starts_with("-oN") || s.starts_with("--oN") => {
+                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oN" } else { "-oN" });
                 cfg.out_normal = Some(v);
                 consumed_extra = adv;
             }
-            _ if s.starts_with("-oX") => {
-                let (v, adv) = opt_value(args, i, "-oX");
+            _ if s.starts_with("-oX") || s.starts_with("--oX") => {
+                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oX" } else { "-oX" });
                 cfg.out_xml = Some(v);
                 consumed_extra = adv;
             }
-            _ if s.starts_with("-oG") => {
-                let (v, adv) = opt_value(args, i, "-oG");
+            _ if s.starts_with("-oG") || s.starts_with("--oG") => {
+                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oG" } else { "-oG" });
                 cfg.out_grep = Some(v);
                 consumed_extra = adv;
             }
@@ -578,6 +623,27 @@ mod tests {
     #[test]
     fn the_no_op_carve_out_does_not_leak_to_its_opposite() {
         assert_eq!(cfg(&["-R", "127.0.0.1"]).unrecognized, vec!["-R"]);
+        // Same test, one entry per carve-out: the option that asks for the
+        // OPPOSITE of what the port unconditionally does must still be refused,
+        // because there the port cannot do what is asked.
+        //   -n  (no reverse DNS)        <-> -R                (always resolve)
+        //   -r  (sequential ports)      <-> --randomize-hosts (and its --rH alias)
+        //   --no-stylesheet             <-> --stylesheet, --webxml
+        // `--release-memory` and `--log-errors` have no opposite in C nmap's
+        // grammar, so there is nothing to pair them with here.
+        for opposite in [
+            "-R",
+            "--randomize-hosts",
+            "--rH",
+            "--stylesheet",
+            "--webxml",
+        ] {
+            assert_eq!(
+                cfg(&[opposite, "127.0.0.1"]).unrecognized,
+                vec![opposite.to_string()],
+                "{opposite} asks for behaviour this port does not have and must be refused"
+            );
+        }
         // And it does not accidentally swallow the constraint options that
         // motivated failing closed in the first place.
         for flag in [
@@ -591,6 +657,59 @@ mod tests {
                 cfg(&[flag, "127.0.0.1"]).unrecognized,
                 vec![flag.to_string()],
                 "{flag} must still be refused"
+            );
+        }
+    }
+
+    /// The four accepted no-ops are accepted, and each for its own stated reason.
+    ///
+    /// Pinned individually rather than by iterating the table: a loop over
+    /// `ALREADY_SATISFIED` would pass no matter what the table contained, which is
+    /// the opposite of what this is for.
+    #[test]
+    fn each_already_satisfied_option_is_accepted_and_scans() {
+        for flag in [
+            "-n",
+            "-r",
+            "--release-memory",
+            "--log-errors",
+            "--no-stylesheet",
+        ] {
+            let c = cfg(&[flag, "127.0.0.1"]);
+            assert!(
+                c.unrecognized.is_empty(),
+                "{flag} should be accepted as a no-op, got {:?}",
+                c.unrecognized
+            );
+            assert_eq!(
+                c.targets,
+                vec!["127.0.0.1"],
+                "{flag} must not eat the target"
+            );
+        }
+    }
+
+    /// C nmap's `getopt_long_only` accepts a long option after one dash OR two,
+    /// so `-oN f` and `--oN f` are the same command there. Both spellings must
+    /// reach the same field here, attached or separate.
+    #[test]
+    fn output_flags_accept_both_the_short_and_long_spelling() {
+        for (short, long) in [("-oN", "--oN"), ("-oX", "--oX"), ("-oG", "--oG")] {
+            let sep_s = cfg(&[short, "out.txt", "127.0.0.1"]);
+            let sep_l = cfg(&[long, "out.txt", "127.0.0.1"]);
+            assert_eq!(sep_s, sep_l, "{short} and {long} must parse identically");
+            assert!(sep_l.unrecognized.is_empty(), "{long} must not be refused");
+            assert_eq!(
+                sep_l.targets,
+                vec!["127.0.0.1"],
+                "{long} must not eat the target"
+            );
+
+            let att_s = cfg(&[&format!("{short}out.txt"), "127.0.0.1"]);
+            let att_l = cfg(&[&format!("{long}out.txt"), "127.0.0.1"]);
+            assert_eq!(
+                att_s, att_l,
+                "attached {short}/{long} must parse identically"
             );
         }
     }

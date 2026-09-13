@@ -62,6 +62,13 @@
     ],
     "core::sigstore::verify": [
       "sigstore_verify"
+    ],
+    "options": [
+      "target_scope"
+    ],
+    "targets": [
+      "parse_target",
+      "target_scope"
     ]
   },
   "exemptions": {
@@ -170,7 +177,7 @@
     "engine": "unsafe_audited",
     "model": "unsafe_audited",
     "net": "unsafe_audited",
-    "options": "differential",
+    "options": "unsafe_audited",
     "output": "differential",
     "ports": "unsafe_audited",
     "sys::capture": "unsafe_audited",

@@ -88,6 +88,18 @@ pub struct RunConfig {
     pub min_rate: Option<f64>,
     /// `--max-rate <n>`: ceiling on probes/sec (`None` ⇒ unset).
     pub max_rate: Option<f64>,
+    /// `--exclude <spec[,spec...]>`: hosts to leave out, as given. Parsed by
+    /// `targets::exclude_specs`; combined with [`RunConfig::exclude_file`]
+    /// exactly as C loads both into one `exclude_group`.
+    pub exclude: Option<String>,
+    /// `--excludefile <file>`: a list file of hosts to leave out.
+    pub exclude_file: Option<String>,
+    /// `-iL <file>`: read target specs from a file (`-` = stdin). C allows one
+    /// only (`fatal("Only one input filename allowed")`), so a second is
+    /// recorded as a conflict rather than silently replacing the first.
+    pub input_file: Option<String>,
+    /// `-iL` given more than once — refused, matching C.
+    pub input_file_repeated: bool,
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
     /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
@@ -117,6 +129,10 @@ impl Default for RunConfig {
             out_grep: None,
             min_rate: None,
             max_rate: None,
+            exclude: None,
+            exclude_file: None,
+            input_file: None,
+            input_file_repeated: false,
             unrecognized: Vec::new(),
         }
     }
@@ -286,12 +302,54 @@ fn opt_value(args: &[String], i: usize, prefix: &str) -> (String, usize) {
     }
 }
 
+/// Does `arg` name the long option `name`, in any spelling `getopt_long_only`
+/// accepts? That is one dash or two, with the value attached after `=` or given
+/// as the next argument: `--exclude`, `-exclude`, `--exclude=h`, `-exclude=h`.
+///
+/// Returns the prefix actually used, so [`long_opt_value`] slices the right
+/// number of bytes off the attached form.
+fn long_flag<'a>(arg: &str, name: &str, buf: &'a mut String) -> Option<&'a str> {
+    for dashes in ["--", "-"] {
+        buf.clear();
+        buf.push_str(dashes);
+        buf.push_str(name);
+        if arg == buf
+            || arg
+                .strip_prefix(buf.as_str())
+                .is_some_and(|r| r.starts_with('='))
+        {
+            return Some(buf.as_str());
+        }
+    }
+    None
+}
+
+/// Value of a **long** option, which `getopt_long_only` accepts in four forms:
+/// `--name value`, `--name=value`, `-name value` and `-name=value`.
+///
+/// [`opt_value`] slices straight after the prefix, which is right for a short
+/// option's attached form (`-oNfile`) but leaves the `=` on `--exclude=host`.
+/// Stripping it here and not there matters: `-p=80` is a *short* option in C's
+/// getopt string, so its value really is `=80`, and stripping globally would
+/// silently change what `-p=80` scans. Only the attached form is touched — in
+/// the separate form a leading `=` is part of the operand.
+fn long_opt_value(args: &[String], i: usize, prefix: &str) -> (String, usize) {
+    let (v, adv) = opt_value(args, i, prefix);
+    if adv == 0 {
+        (v.strip_prefix('=').unwrap_or(&v).to_string(), adv)
+    } else {
+        (v, adv)
+    }
+}
+
 /// Parse argv (without the program name) into a [`RunConfig`]. Total and
 /// panic-free over any input.
 // Index arithmetic is bounded by `args.len()` and only ever advances.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn parse_args(args: &[String]) -> RunConfig {
     let mut cfg = RunConfig::default();
+    let mut keybuf = String::new();
+    let mut keybuf2 = String::new();
     let mut i = 0;
     while i < args.len() {
         let s = args[i].as_str();
@@ -362,6 +420,39 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 }
                 consumed_extra = adv;
             }
+            // Scope options. These take a value, so they MUST consume it: an
+            // unimplemented value-taking option used to leave its argument in
+            // argv where the positional handler read it as a target, which is
+            // how `--exclude H` got H scanned (M7.0). Now they are implemented,
+            // and `opt_value` consumes the argument in either spelling.
+            _ if long_flag(s, "excludefile", &mut keybuf).is_some() => {
+                let key = long_flag(s, "excludefile", &mut keybuf2).unwrap_or("--excludefile");
+                let (v, adv) = long_opt_value(args, i, key);
+                cfg.exclude_file = Some(v);
+                consumed_extra = adv;
+            }
+            // AFTER excludefile: `--exclude` is a prefix of it, and matching in
+            // the other order would read `--excludefile x` as `--exclude` with
+            // the attached value "file", silently excluding a host named "file"
+            // and leaving the real list unread.
+            _ if long_flag(s, "exclude", &mut keybuf).is_some() => {
+                let key = long_flag(s, "exclude", &mut keybuf2).unwrap_or("--exclude");
+                let (v, adv) = long_opt_value(args, i, key);
+                cfg.exclude = Some(v);
+                consumed_extra = adv;
+            }
+            // `-iL` and `--iL` both, as with the output flags: getopt_long_only
+            // matches a long option after one dash or two.
+            _ if s.starts_with("-iL") || s.starts_with("--iL") => {
+                let key = if s.starts_with("--") { "--iL" } else { "-iL" };
+                let (v, adv) = long_opt_value(args, i, key);
+                if cfg.input_file.is_some() {
+                    cfg.input_file_repeated = true;
+                } else {
+                    cfg.input_file = Some(v);
+                }
+                consumed_extra = adv;
+            }
             // Both spellings, because C nmap accepts both. `getopt_long_only`
             // (nmap.cc:653) matches a long option after a SINGLE dash, and the
             // table carries "oN"/"oX"/"oG" as long options — so `-oN f` and
@@ -370,17 +461,20 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             // gap in a feature that is fully implemented, and one found by
             // running the binary rather than reading it (as M7.0's was).
             _ if s.starts_with("-oN") || s.starts_with("--oN") => {
-                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oN" } else { "-oN" });
+                let (v, adv) =
+                    long_opt_value(args, i, if s.starts_with("--") { "--oN" } else { "-oN" });
                 cfg.out_normal = Some(v);
                 consumed_extra = adv;
             }
             _ if s.starts_with("-oX") || s.starts_with("--oX") => {
-                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oX" } else { "-oX" });
+                let (v, adv) =
+                    long_opt_value(args, i, if s.starts_with("--") { "--oX" } else { "-oX" });
                 cfg.out_xml = Some(v);
                 consumed_extra = adv;
             }
             _ if s.starts_with("-oG") || s.starts_with("--oG") => {
-                let (v, adv) = opt_value(args, i, if s.starts_with("--") { "--oG" } else { "-oG" });
+                let (v, adv) =
+                    long_opt_value(args, i, if s.starts_with("--") { "--oG" } else { "-oG" });
                 cfg.out_grep = Some(v);
                 consumed_extra = adv;
             }
@@ -646,13 +740,10 @@ mod tests {
         }
         // And it does not accidentally swallow the constraint options that
         // motivated failing closed in the first place.
-        for flag in [
-            "--exclude",
-            "--scan-delay",
-            "-T2",
-            "--max-retries",
-            "--top-ports",
-        ] {
+        // `--exclude` has left this list: M7.4 implements it. The others are
+        // still unimplemented and still refused, which is the property that
+        // matters — implementing one scope option must not relax the rest.
+        for flag in ["--scan-delay", "-T2", "--max-retries", "--top-ports"] {
             assert_eq!(
                 cfg(&[flag, "127.0.0.1"]).unrecognized,
                 vec![flag.to_string()],
@@ -712,6 +803,113 @@ mod tests {
                 "attached {short}/{long} must parse identically"
             );
         }
+    }
+
+    /// The three scope options parse in every spelling getopt_long_only takes,
+    /// and — the part that matters — each CONSUMES its argument.
+    ///
+    /// This is the M7.0 bug's exact shape. An unimplemented value-taking option
+    /// left its value in argv, where the positional handler collected it as a
+    /// target: `--exclude 127.0.0.2 127.0.0.1` scanned *two* hosts, and naming a
+    /// host to protect it was what got it scanned. So every assertion below
+    /// checks the target list too, not just that the flag was recognised.
+    #[test]
+    fn scope_options_parse_in_every_spelling_and_eat_their_argument() {
+        let one = |v: Vec<&str>| {
+            let owned: Vec<String> = v.iter().map(|s| (*s).to_string()).collect();
+            cfg(&owned.iter().map(String::as_str).collect::<Vec<_>>())
+        };
+        for (args, exclude) in [
+            (vec!["--exclude", "10.0.0.2", "127.0.0.1"], "10.0.0.2"),
+            (vec!["--exclude=10.0.0.2", "127.0.0.1"], "10.0.0.2"),
+            (vec!["-exclude", "10.0.0.2", "127.0.0.1"], "10.0.0.2"),
+        ] {
+            let c = one(args.clone());
+            assert_eq!(c.exclude.as_deref(), Some(exclude), "{args:?}");
+            assert!(c.unrecognized.is_empty(), "{args:?} must not be refused");
+            assert_eq!(
+                c.targets,
+                vec!["127.0.0.1"],
+                "{args:?} must not scan the excluded host"
+            );
+        }
+        for args in [
+            vec!["--excludefile", "ex.txt", "127.0.0.1"],
+            vec!["--excludefile=ex.txt", "127.0.0.1"],
+        ] {
+            let c = one(args.clone());
+            assert_eq!(c.exclude_file.as_deref(), Some("ex.txt"), "{args:?}");
+            assert_eq!(c.targets, vec!["127.0.0.1"], "{args:?}");
+        }
+        for args in [
+            vec!["-iL", "hosts.txt"],
+            vec!["--iL", "hosts.txt"],
+            vec!["-iLhosts.txt"],
+            vec!["--iL=hosts.txt"],
+        ] {
+            let c = one(args.clone());
+            assert_eq!(c.input_file.as_deref(), Some("hosts.txt"), "{args:?}");
+            assert!(
+                c.targets.is_empty(),
+                "{args:?} must not treat the filename as a target"
+            );
+        }
+    }
+
+    /// `--exclude` is a prefix of `--excludefile`, so the match arms' ORDER is
+    /// load-bearing. With `exclude` first, `--excludefile hosts.txt` would read
+    /// as `--exclude` with the attached value "file": a host named "file" would
+    /// be excluded, the real exclusion list would never be opened, and
+    /// "hosts.txt" would fall through to the positional handler and be SCANNED.
+    /// Silent, and in the dangerous direction — the M7.0 failure wearing a
+    /// different hat.
+    #[test]
+    fn excludefile_is_not_swallowed_by_the_exclude_prefix() {
+        for args in [
+            vec!["--excludefile", "hosts.txt", "127.0.0.1"],
+            vec!["-excludefile", "hosts.txt", "127.0.0.1"],
+            vec!["--excludefile=hosts.txt", "127.0.0.1"],
+        ] {
+            let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            let c = cfg(&owned.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_eq!(c.exclude_file.as_deref(), Some("hosts.txt"), "{args:?}");
+            assert_eq!(c.exclude, None, "{args:?} is not --exclude");
+            assert_eq!(
+                c.targets,
+                vec!["127.0.0.1"],
+                "{args:?} must not scan the list file"
+            );
+        }
+    }
+
+    /// C: `fatal("Only one input filename allowed")`. Recorded rather than
+    /// silently overwriting, so the CLI can refuse — quietly dropping the first
+    /// list would scan a different set than the operator asked for.
+    #[test]
+    fn a_second_input_file_is_recorded_as_a_conflict() {
+        let c = cfg(&["-iL", "a.txt", "-iL", "b.txt"]);
+        assert!(c.input_file_repeated);
+        assert_eq!(c.input_file.as_deref(), Some("a.txt"), "the first is kept");
+    }
+
+    /// A short option's attached form must NOT lose a leading `=`: `-p` is in
+    /// C's short-option string, so `-p=80` really does mean the port spec
+    /// `=80` (which then fails to parse) rather than `80`.
+    #[test]
+    fn stripping_equals_is_confined_to_long_options() {
+        assert_eq!(
+            cfg(&["-p=80", "127.0.0.1"]).port_spec.as_deref(),
+            Some("=80")
+        );
+        assert_eq!(
+            cfg(&["--exclude=10.0.0.2", "127.0.0.1"]).exclude.as_deref(),
+            Some("10.0.0.2")
+        );
+        // Separate form: a leading `=` is part of the operand, not a separator.
+        assert_eq!(
+            cfg(&["--exclude", "=weird"]).exclude.as_deref(),
+            Some("=weird")
+        );
     }
 
     /// Every entry in the table has to carry a stated reason; an entry added

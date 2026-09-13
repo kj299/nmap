@@ -289,3 +289,8 @@ test = false
 name = "osprobe_demux"
 path = "fuzz_targets/osprobe_demux.rs"
 test = false
+
+[[bin]]
+name = "target_scope"
+path = "fuzz_targets/target_scope.rs"
+test = false

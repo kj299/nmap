@@ -15,8 +15,9 @@ use nmap_core::options::{RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
-    parse_args, parse_port_spec, parse_target, render_grepable, render_normal, render_xml,
-    ScanMeta, ScanResults, ServiceTable, TargetSpec, TimingParams, TimingTemplate,
+    exclude_specs, host_specs, parse_args, parse_port_spec, parse_target, render_grepable,
+    render_normal, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable, TargetSpec,
+    TimingParams, TimingTemplate,
 };
 use nmap_sys::net::resolve_host;
 use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig};
@@ -31,7 +32,7 @@ const MAX_TARGETS: usize = 65_536;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = parse_args(&args);
+    let mut cfg = parse_args(&args);
     nmap_core::log::init(cfg.verbose, cfg.debugging);
     nmap_core::debug!(1, "parsed config: {cfg:?}");
 
@@ -74,11 +75,45 @@ async fn main() -> ExitCode {
         eprintln!("See the output of nmap-rs -h for a summary of supported options.");
         return ExitCode::FAILURE;
     }
+    // `-iL`: C allows exactly one (`fatal("Only one input filename allowed")`).
+    // Refuse rather than pick one — scanning the wrong list is worse than not
+    // scanning.
+    if cfg.input_file_repeated {
+        eprintln!("nmap-rs: only one input filename allowed (-iL given more than once)");
+        return ExitCode::FAILURE;
+    }
+    // Target specs from `-iL`, appended AFTER the positional ones. That order is
+    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3783) returns argv
+    // entries while `optind < argc` and only then reads the input file.
+    if let Some(path) = cfg.input_file.clone() {
+        match read_host_list(&path) {
+            Ok(specs) => cfg.targets.extend(specs),
+            Err(e) => {
+                eprintln!("nmap-rs: failed to read input file \"{path}\": {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     if cfg.targets.is_empty() {
         eprintln!("nmap-rs: no targets specified");
         print_usage();
         return ExitCode::FAILURE;
     }
+
+    // Exclusions from `--exclude` and `--excludefile`, which combine: C loads
+    // both into one `exclude_group` (nmap.cc:2070-2074).
+    let excludes = match build_excludes(&cfg).await {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!("nmap-rs: {e}");
+            eprintln!(
+                "nmap-rs: refusing to scan — an exclusion that cannot be applied would \
+                 scan a host you asked to protect."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     let services = load_services();
     if services.is_none() {
@@ -95,9 +130,27 @@ async fn main() -> ExitCode {
     };
 
     // Resolve every target expression into (ip, optional hostname).
-    let targets = resolve_targets(&cfg).await;
+    let mut targets = resolve_targets(&cfg).await;
+    let mut excluded_all = false;
+    if !excludes.is_empty() {
+        let before = targets.len();
+        targets.retain(|(ip, _)| !excludes.contains(*ip));
+        let dropped = before.saturating_sub(targets.len());
+        if dropped > 0 {
+            nmap_core::verbose!(1, "excluded {dropped} host(s)");
+        }
+        excluded_all = before > 0 && targets.is_empty();
+    }
     if targets.is_empty() {
-        eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
+        // Distinguish "nothing resolved" from "you excluded everything". They
+        // need opposite reactions from the operator, and reporting a successful
+        // exclusion as a resolution failure would send them looking for a bug
+        // that is not there.
+        if excluded_all {
+            eprintln!("nmap-rs: no targets left to scan — every host matched an exclusion");
+        } else {
+            eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
+        }
         return ExitCode::FAILURE;
     }
 
@@ -803,6 +856,81 @@ fn select_ports(
         }
     }
     Ok((1u16..=1024).collect())
+}
+
+/// Read a `-iL` / `--excludefile` list into host specifications.
+///
+/// `-` means stdin, as in C (`o.inputfd = stdin`). Any read failure is an error
+/// the caller must refuse on: C `pfatal`s here, and the safe direction is the
+/// same one — a target list we could not read is not an empty list, and an
+/// exclusion list we could not read must never become "exclude nothing".
+fn read_host_list(path: &str) -> Result<Vec<String>, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if path == "-" {
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+    } else {
+        bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    }
+    match host_specs(&bytes) {
+        Ok(specs) => Ok(specs.into_iter().map(str::to_string).collect()),
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
+
+/// Build the exclusion set from `--exclude` and `--excludefile` combined.
+///
+/// Every failure path refuses, and that is the whole point of this function.
+/// An exclusion is the operator saying "not this host"; if we cannot parse it,
+/// cannot read it, or cannot resolve it, the only safe answer is to stop. The
+/// alternative — carrying on with a partial exclusion set — scans exactly the
+/// host the operator took an explicit step to protect, which is the failure
+/// M7.0 found and this milestone exists to close.
+async fn build_excludes(cfg: &RunConfig) -> Result<ExcludeSet, String> {
+    let mut set = ExcludeSet::new();
+    let mut pending_names: Vec<String> = Vec::new();
+
+    let add = |set: &mut ExcludeSet, spec: &str, names: &mut Vec<String>| -> Result<(), String> {
+        match set.add(spec, cfg.ipv6) {
+            Ok(Added::Numeric) => Ok(()),
+            Ok(Added::NeedsResolution(n)) => {
+                names.push(n);
+                Ok(())
+            }
+            Err(e) => Err(format!("bad exclusion \"{spec}\": {e:?}")),
+        }
+    };
+
+    if let Some(spec) = &cfg.exclude {
+        for one in exclude_specs(spec) {
+            add(&mut set, one, &mut pending_names)?;
+        }
+    }
+    if let Some(path) = &cfg.exclude_file {
+        let specs = read_host_list(path)
+            .map_err(|e| format!("failed to read exclude file \"{path}\": {e}"))?;
+        for one in &specs {
+            add(&mut set, one, &mut pending_names)?;
+        }
+    }
+
+    // A named exclusion has to become addresses before it can exclude anything.
+    // C resolves these too (`load_exclude_file` runs them through
+    // `nmap_mass_dns`). A name we cannot resolve is an error, not a warning.
+    for name in pending_names {
+        match resolve_host(&name).await {
+            Ok(ips) if !ips.is_empty() => {
+                for ip in ips {
+                    set.add_addr(ip);
+                }
+            }
+            Ok(_) => return Err(format!("excluded name \"{name}\" resolved to no addresses")),
+            Err(e) => return Err(format!("could not resolve excluded name \"{name}\": {e}")),
+        }
+    }
+    Ok(set)
 }
 
 /// Expand and resolve all target expressions into scannable IPs (with the name

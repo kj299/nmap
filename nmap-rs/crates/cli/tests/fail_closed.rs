@@ -39,12 +39,17 @@ fn run(args: &[&str]) -> (String, String, bool) {
     )
 }
 
+/// This used to be written with `--exclude`, which M7.4 implements. The example
+/// moved to a still-unimplemented value-taking option rather than being deleted:
+/// the property under test is not about any one flag, it is that an option we
+/// cannot honour stops the scan instead of leaking its argument into the target
+/// list.
 #[test]
 fn an_unimplemented_option_refuses_to_scan() {
-    let (stdout, stderr, ok) = run(&["--exclude", "127.0.0.2", "-sT", "-p", "80", "127.0.0.1"]);
+    let (stdout, stderr, ok) = run(&["--scan-delay", "5s", "-sT", "-p", "80", "127.0.0.1"]);
     assert!(!ok, "must exit non-zero, like C nmap's `case '?'`");
     assert!(
-        stderr.contains("--exclude"),
+        stderr.contains("--scan-delay"),
         "the offending option should be named: {stderr}"
     );
     assert!(
@@ -55,14 +60,26 @@ fn an_unimplemented_option_refuses_to_scan() {
 
 /// The sharp version of the bug: the excluded address must not be scanned.
 ///
-/// Without `--exclude` this command scans exactly one host. The old code
-/// scanned two — 127.0.0.1 *and* the address named in `--exclude`.
+/// Without `--exclude` this command scans exactly one host. The original bug
+/// scanned two — 127.0.0.1 *and* the address named in `--exclude` — because the
+/// unimplemented option left its value in argv for the positional handler.
+///
+/// This assertion has now held for three different reasons in three milestones,
+/// which is why it is worth keeping exactly as written: before M7.0 it FAILED
+/// (the address was scanned); from M7.0 it passed because the whole scan was
+/// refused; from M7.4 it passes because `--exclude` is implemented and actually
+/// excludes. The behaviour the operator cares about never changed.
 #[test]
 fn the_excluded_address_is_never_scanned() {
-    let (stdout, _, _) = run(&["--exclude", "127.0.0.2", "-sT", "-p", "80", "127.0.0.1"]);
+    let (stdout, _, ok) = run(&["--exclude", "127.0.0.2", "-sT", "-p", "80", "127.0.0.1"]);
+    assert!(ok, "--exclude is implemented now; this must scan");
     assert!(
         !stdout.contains("127.0.0.2"),
         "the address named in --exclude was scanned: {stdout}"
+    );
+    assert!(
+        stdout.contains("Nmap scan report for 127.0.0.1"),
+        "the un-excluded target must still be scanned: {stdout}"
     );
 }
 

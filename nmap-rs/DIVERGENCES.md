@@ -2033,6 +2033,22 @@ removed: that one was theatre, this one is unobservable.
       beside `-n`.
       *(Introduced at M7.0; extended at M7.3.)*
 
+- [ ] `illegal-netmask-accepted-without-a-warning` (`core::targets`, M7.4) —
+      **an out-of-range netmask is clamped to one host, as in C, but silently.**
+      `NetBlock::parse_expr` (`libnetutil/NetBlock.cc:266`) checks `bits > 32`,
+      prints `Illegal netmask in "..." Assuming /32 (one host)` and carries on.
+      `parse_target` does the same clamping and prints nothing, so
+      `10.0.0.0/33` and `10.0.0.0/999` are accepted as a single address with no
+      diagnostic. The *behaviour* matches; only the warning is missing.
+      Pre-existing (the clamp has been there since M1) but newly worth
+      recording, because M7.4 routes `--exclude` through the same parser: an
+      operator who writes `--exclude 10.0.0.0/33` meaning a /24 gets one host
+      excluded and no hint that their mask was nonsense. Pinned as behaviour by
+      `an_out_of_range_netmask_is_one_host_as_in_c`, which also documents the
+      missing warning so it is not mistaken for a behavioural divergence.
+      *(Open: needs a warning channel out of `parse_target`, which currently
+      returns `Ok` with no way to say "accepted, but".)*
+
 - [x] `osprobe-demux-accepted-tunnelled-replies` (`core::osprobe::demux`, M7.3) —
       **an OS-probe reply forged inside an IPv6 tunnel was attributed to the
       probed host.** A divergence being *removed*; recorded because the broken

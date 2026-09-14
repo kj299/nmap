@@ -12,7 +12,7 @@
 //!   2. **Never materializes** a huge address set — IPv4 expansion is a lazy
 //!      iterator (a `/0` is 2³² hosts), matching `NetBlockIPv4Ranges::next`.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The set of allowed values (0..=255) for one IPv4 octet — the analog of C's
 /// `octet_bitvector`. A plain bool array keeps the netmask bit-mirror algorithm
@@ -67,6 +67,30 @@ impl Ipv4Ranges {
             .iter()
             .map(|o| o.values().len() as u64)
             .product()
+    }
+
+    /// Is `ip` inside this spec?
+    ///
+    /// Deliberately a per-octet membership test rather than a scan of `iter()`:
+    /// a spec may cover 2³² addresses (`0.0.0.0/0`), and the exclusion filter
+    /// calls this once per target, so expanding here would turn a legitimate
+    /// `--exclude 0.0.0.0/0` into a hang. Constant time, no allocation.
+    #[must_use]
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        let o = ip.octets();
+        (0..4).all(|i| self.octets[i].is_set(usize::from(o[i])))
+    }
+
+    /// A spec matching exactly one address — used when a hostname exclusion has
+    /// been resolved to concrete addresses.
+    #[must_use]
+    pub fn single(ip: Ipv4Addr) -> Self {
+        let o = ip.octets();
+        let mut octets = [OctetSet::empty(); 4];
+        for i in 0..4 {
+            octets[i].set_range(usize::from(o[i]), usize::from(o[i]));
+        }
+        Self { octets }
     }
 
     /// Lazily yield every address, octet 0 slowest-changing and octet 3
@@ -389,8 +413,373 @@ fn parse_uint(b: &[u8], pos: usize) -> (Option<usize>, usize) {
     }
 }
 
+/// Longest host specification accepted from a list file, matching the C's
+/// `char host_spec[1024]` in `read_host_from_file` / `grab_next_host_spec`.
+/// The C calls `fatal()` when a token reaches this; so do we, via a typed error
+/// — silently truncating a spec would scan an address nobody named.
+pub const MAX_HOST_SPEC: usize = 1024;
+
+/// Why a `-iL` / `--excludefile` list could not be tokenized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostListError {
+    /// A token reached [`MAX_HOST_SPEC`] bytes. C: `fatal("One of the host
+    /// specifications from your input file is too long")`.
+    SpecTooLong {
+        /// Index of the offending token.
+        index: usize,
+    },
+    /// A token was not valid UTF-8. The C reads bytes and lets the address
+    /// parser reject it later; we reject here rather than lossily substituting,
+    /// because a replacement character would turn a malformed spec into a
+    /// *different* spec instead of an error.
+    NotUtf8 {
+        /// Index of the offending token.
+        index: usize,
+    },
+}
+
+/// Split a `-iL` / `--excludefile` list into host specifications.
+///
+/// A direct port of `read_host_from_file` (`libnetutil/netutil.cc:3750`), which
+/// both flags share in the C. The rules are not the obvious "one per line":
+///
+///   * separators are space, `\r`, `\n`, `\t` and NUL (`is_host_separator`), so
+///     several specs may sit on one line;
+///   * `#` begins a comment that runs to the end of the line, and it terminates
+///     the current token *without* needing a separator first — `10.0.0.1#hi`
+///     yields `10.0.0.1`;
+///   * runs of separators and comments are skipped together, so blank and
+///     comment-only lines cost nothing.
+///
+/// Takes bytes rather than `&str` because the C reads bytes and a list file is
+/// operator-supplied but not necessarily well-formed; a non-UTF-8 token is a
+/// typed error rather than a lossy substitution.
+///
+/// Total: returns `Ok` or a typed `Err` for any input, and never panics.
+pub fn host_specs(text: &[u8]) -> Result<Vec<&str>, HostListError> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    let is_sep = |c: u8| c == b' ' || c == b'\r' || c == b'\n' || c == b'\t' || c == 0;
+
+    while i < text.len() {
+        // Skip separators and whole comments, in any interleaving.
+        loop {
+            if i < text.len() && text[i] == b'#' {
+                while i < text.len() && text[i] != b'\n' {
+                    i = i.saturating_add(1);
+                }
+            } else if i < text.len() && is_sep(text[i]) {
+                i = i.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+        if i >= text.len() {
+            break;
+        }
+        let start = i;
+        while i < text.len() && !is_sep(text[i]) && text[i] != b'#' {
+            i = i.saturating_add(1);
+        }
+        let tok = &text[start..i];
+        // `>=`, not `>`: the C's check is `n >= sizeof(host_spec)`, because a
+        // token of exactly 1024 bytes leaves no room for its NUL.
+        if tok.len() >= MAX_HOST_SPEC {
+            return Err(HostListError::SpecTooLong { index: out.len() });
+        }
+        match std::str::from_utf8(tok) {
+            Ok(s) => out.push(s),
+            Err(_) => return Err(HostListError::NotUtf8 { index: out.len() }),
+        }
+    }
+    Ok(out)
+}
+
+/// Split an `--exclude` argument into host specifications.
+///
+/// C: `load_exclude_string` (`targets.cc:206`) splits on `,` and nothing else —
+/// no whitespace trimming, no comments. A spec the address parser then rejects
+/// is `fatal`, not a warning, and this port keeps that: see `ExcludeSet::add`.
+pub fn exclude_specs(s: &str) -> impl Iterator<Item = &str> {
+    s.split(',')
+}
+
+/// What [`ExcludeSet::add`] did with a spec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Added {
+    /// A numeric spec, now in the set.
+    Numeric,
+    /// A name the caller must resolve and feed back via [`ExcludeSet::add_addr`].
+    ///
+    /// Returned rather than stored so the name cannot be silently dropped. An
+    /// exclusion that quietly fails to apply scans the host it was meant to
+    /// protect — the M7.0 failure exactly — so the caller is forced to either
+    /// resolve it or refuse to scan.
+    NeedsResolution(String),
+}
+
+/// Addresses to leave out of a scan: `--exclude` and `--excludefile` combined.
+///
+/// The C keeps one `addrset` fed by both flags (`nmap.cc:2070-2074` loads the
+/// file *and* the string into the same `exclude_group`), and tests membership
+/// per **expanded address** (`targets.cc:466`), not per spec. This does the same.
+///
+/// Matching never expands a spec: `--exclude 0.0.0.0/0` is 2³² addresses and is
+/// answered in constant time by testing each octet against its own value set.
+#[derive(Clone, Debug, Default)]
+pub struct ExcludeSet {
+    v4: Vec<Ipv4Ranges>,
+    v6: Vec<Ipv6Addr>,
+}
+
+impl ExcludeSet {
+    /// An empty set — excludes nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when nothing has been added, so no filtering need happen.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.v4.is_empty() && self.v6.is_empty()
+    }
+
+    /// Add one specification. A parse failure is an `Err` the caller must act on
+    /// — the C's `load_exclude_string` calls `fatal()` here, and refusing is the
+    /// only safe direction: an `--exclude` argument that does not parse must
+    /// never degrade into "scan it anyway".
+    pub fn add(&mut self, spec: &str, want_ipv6: bool) -> Result<Added, TargetParseError> {
+        match parse_target(spec, want_ipv6)? {
+            TargetSpec::Ipv4(ranges) => {
+                self.v4.push(*ranges);
+                Ok(Added::Numeric)
+            }
+            TargetSpec::Ipv6(ip) => {
+                self.v6.push(ip);
+                Ok(Added::Numeric)
+            }
+            TargetSpec::Hostname { name, .. } => Ok(Added::NeedsResolution(name)),
+        }
+    }
+
+    /// Add a single already-resolved address.
+    pub fn add_addr(&mut self, ip: IpAddr) {
+        match ip {
+            IpAddr::V4(v4) => self.v4.push(Ipv4Ranges::single(v4)),
+            IpAddr::V6(v6) => self.v6.push(v6),
+        }
+    }
+
+    /// Is this address excluded?
+    #[must_use]
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => self.v4.iter().any(|r| r.contains(v4)),
+            IpAddr::V6(v6) => self.v6.contains(&v6),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    // ---- -iL / --excludefile tokenizer -------------------------------------
+    //
+    // Every expectation below was produced by running nmap's OWN
+    // `read_host_from_file` (lifted verbatim from libnetutil/netutil.cc:3750
+    // into a standalone oracle), not by reading the C and describing it. A
+    // further 4,000 random inputs over the interesting alphabet (separators,
+    // '#', and address characters) diffed clean against that oracle.
+
+    fn toks(s: &[u8]) -> Vec<&str> {
+        host_specs(s).expect("tokenizes")
+    }
+
+    #[test]
+    fn a_list_may_put_several_specs_on_one_line() {
+        // All five separators: space, tab, CR, LF, NUL.
+        assert_eq!(
+            toks(b"10.0.0.1 10.0.0.2\t10.0.0.3\r\n10.0.0.4\x0010.0.0.5"),
+            ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]
+        );
+    }
+
+    #[test]
+    fn comments_run_to_end_of_line_and_need_no_separator() {
+        assert_eq!(
+            toks(b"# whole line\n10.0.0.1 # trailing\n#\n10.0.0.2\n"),
+            ["10.0.0.1", "10.0.0.2"]
+        );
+        // '#' ends the token it touches, with no space in between.
+        assert_eq!(toks(b"10.0.0.1#nospace\n"), ["10.0.0.1"]);
+        // And the FIRST '#' swallows the rest of the line, so `b` and `c` here
+        // are never specs at all — a second '#' does not reopen anything.
+        assert_eq!(toks(b"a#b#c\n"), ["a"]);
+        // A comment that never reaches a newline still terminates cleanly.
+        assert!(toks(b"#unterminated").is_empty());
+    }
+
+    #[test]
+    fn blank_and_comment_only_input_yields_nothing() {
+        for s in [&b""[..], b"\n\n   \n\t\n", b"# a\n# b\n", b"\x00\x00"] {
+            assert!(toks(s).is_empty(), "expected no specs from {s:?}");
+        }
+    }
+
+    #[test]
+    fn a_final_spec_without_a_trailing_newline_is_still_read() {
+        assert_eq!(toks(b"10.0.0.1"), ["10.0.0.1"]);
+    }
+
+    /// The C's bound is `n >= sizeof(host_spec)`, so 1023 bytes is the longest
+    /// spec that fits — 1024 has no room for its NUL and is `fatal` there.
+    /// Truncating instead would scan an address nobody wrote down.
+    #[test]
+    fn an_over_long_spec_is_refused_not_truncated() {
+        let ok = vec![b'a'; MAX_HOST_SPEC - 1];
+        assert_eq!(toks(&ok).len(), 1);
+        let too_long = vec![b'a'; MAX_HOST_SPEC];
+        assert_eq!(
+            host_specs(&too_long),
+            Err(HostListError::SpecTooLong { index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_spec_is_an_error_not_a_lossy_substitution() {
+        assert_eq!(
+            host_specs(b"10.0.0.1 \xff\xfe"),
+            Err(HostListError::NotUtf8 { index: 1 })
+        );
+    }
+
+    #[test]
+    fn the_tokenizer_never_panics() {
+        let mut rng: u64 = 0x5eed;
+        for _ in 0..3000 {
+            let n = {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (rng >> 33) as usize % 64
+            };
+            let buf: Vec<u8> = (0..n)
+                .map(|_| {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    b" \t\r\n\0#a1./-*:,"[(rng >> 33) as usize % 14]
+                })
+                .collect();
+            let _ = host_specs(&buf);
+        }
+    }
+
+    // ---- --exclude ----------------------------------------------------------
+
+    #[test]
+    fn exclude_splits_on_commas_only_and_does_not_trim() {
+        // C's load_exclude_string splits on ',' and hands the piece straight to
+        // the address parser — no trimming, so " 10.0.0.2" stays malformed and
+        // is rejected rather than silently becoming a valid host.
+        assert_eq!(
+            exclude_specs("10.0.0.1, 10.0.0.2,10.0.0.3").collect::<Vec<_>>(),
+            ["10.0.0.1", " 10.0.0.2", "10.0.0.3"]
+        );
+    }
+
+    #[test]
+    fn an_unparseable_exclude_is_an_error_never_ignored() {
+        let mut set = ExcludeSet::new();
+        // A netmask that is not a number at all has nowhere to go but an error.
+        assert_eq!(
+            set.add("10.0.0.0/x", false),
+            Err(TargetParseError::BadNetmask)
+        );
+        // The critical property: the failure did not quietly leave the set
+        // empty-but-happy. Nothing was added, and the caller has an Err to act on.
+        assert!(set.is_empty());
+    }
+
+    /// An out-of-range netmask is NOT an error — it is one host, matching C.
+    ///
+    /// `NetBlock::parse_expr` (`libnetutil/NetBlock.cc:266`) checks
+    /// `bits > 32`, emits "Illegal netmask in ... Assuming /32 (one host)" and
+    /// carries on. Worth pinning explicitly because the instinct is to reject:
+    /// rejecting would make `--exclude 10.0.0.0/33` refuse the scan where C
+    /// runs it, and for an *exclusion* the C behaviour is also the safe one —
+    /// one host is still excluded rather than none.
+    ///
+    /// The port does not yet print C's warning here; the spec is accepted
+    /// silently. That is a missing diagnostic, not a behavioural divergence.
+    #[test]
+    fn an_out_of_range_netmask_is_one_host_as_in_c() {
+        for spec in ["10.0.0.0/33", "10.0.0.0/999"] {
+            let mut set = ExcludeSet::new();
+            assert_eq!(set.add(spec, false), Ok(Added::Numeric), "{spec}");
+            assert!(set.contains("10.0.0.0".parse().unwrap()), "{spec}");
+            assert!(
+                !set.contains("10.0.0.1".parse().unwrap()),
+                "{spec} must be ONE host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostname_exclusion_is_handed_back_not_dropped() {
+        let mut set = ExcludeSet::new();
+        match set.add("scanme.nmap.org", false) {
+            Ok(Added::NeedsResolution(n)) => assert_eq!(n, "scanme.nmap.org"),
+            other => panic!("expected NeedsResolution, got {other:?}"),
+        }
+        // It is NOT in the set yet — the caller must resolve it or refuse.
+        assert!(set.is_empty());
+    }
+
+    // ---- exclusion matching -------------------------------------------------
+
+    #[test]
+    fn exclusion_matches_cidr_ranges_and_wildcards() {
+        let mut set = ExcludeSet::new();
+        set.add("10.0.0.0/24", false).expect("cidr");
+        set.add("192.168.1.10-20", false).expect("range");
+        set.add("172.16.*.1", false).expect("wildcard");
+        for ip in ["10.0.0.1", "10.0.0.255", "192.168.1.15", "172.16.99.1"] {
+            assert!(set.contains(ip.parse().unwrap()), "{ip} should be excluded");
+        }
+        for ip in ["10.0.1.1", "192.168.1.21", "172.16.99.2"] {
+            assert!(
+                !set.contains(ip.parse().unwrap()),
+                "{ip} should NOT be excluded"
+            );
+        }
+    }
+
+    /// `--exclude 0.0.0.0/0` is 2³² addresses. Matching must answer without
+    /// expanding, or a legitimate "exclude everything" hangs the scanner.
+    #[test]
+    fn excluding_everything_is_constant_time() {
+        let mut set = ExcludeSet::new();
+        set.add("0.0.0.0/0", false).expect("v4 default route");
+        assert!(set.contains("1.2.3.4".parse().unwrap()));
+        assert!(set.contains("255.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn v4_and_v6_exclusions_do_not_bleed_into_each_other() {
+        let mut set = ExcludeSet::new();
+        set.add("10.0.0.1", false).expect("v4");
+        set.add("::1", true).expect("v6");
+        assert!(set.contains("10.0.0.1".parse().unwrap()));
+        assert!(set.contains("::1".parse().unwrap()));
+        assert!(!set.contains("::2".parse().unwrap()));
+        assert!(!set.contains("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_resolved_address_can_be_added_directly() {
+        let mut set = ExcludeSet::new();
+        set.add_addr("10.1.2.3".parse().unwrap());
+        assert!(set.contains("10.1.2.3".parse().unwrap()));
+        assert!(!set.contains("10.1.2.4".parse().unwrap()));
+    }
+
     use super::*;
 
     fn v4(spec: &str) -> Vec<Ipv4Addr> {

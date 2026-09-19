@@ -157,6 +157,18 @@ async fn main() -> ExitCode {
         }
     };
 
+    // C: fatal("You cannot use -F (fast scan) or -p (explicit port selection)
+    // when not doing a port scan") — nmap.cc:1584. Refusing rather than
+    // ignoring matters for the same reason the rest of this CLI refuses: an
+    // operator who wrote `-sL -p 80` has asked for two incompatible things, and
+    // silently honouring one is a guess about which they meant.
+    if cfg.scan == ScanKind::List && cfg.port_spec.is_some() {
+        eprintln!(
+            "nmap-rs: you cannot use -p (explicit port selection) when not doing a port scan"
+        );
+        return ExitCode::FAILURE;
+    }
+
     let services = load_services();
     if services.is_none() {
         nmap_core::verbose!(1, "nmap-services not found; service names limited");
@@ -269,6 +281,17 @@ async fn run_scan(
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
     match cfg.scan {
+        // `-sL` sends nothing at all. C sets listscan + noportscan +
+        // PINGTYPE_NONE (nmap.cc:1307), so the targets are expanded, reported
+        // and that is the whole scan. Their liveness is `Unknown` rather than
+        // `Down` because we never asked — see the renderers, and C's grepable
+        // `Status: Unknown`.
+        ScanKind::List => ScanResults {
+            hosts: ips
+                .iter()
+                .map(|ip| nmap_core::model::Host::new(*ip, nmap_core::model::HostState::Unknown))
+                .collect(),
+        },
         ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
         ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par, overrides).await,
         ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par, overrides).await,

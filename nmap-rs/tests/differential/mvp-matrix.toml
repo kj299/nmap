@@ -55,3 +55,29 @@ args = ["-sT", "-Pn", "-n", "--min-rate", "100", "-p", "18080,18443,18081,19999"
 [[case]]
 name = "sv-ssh-banner"
 args = ["-sV", "-Pn", "-n", "-p", "18022", "127.0.0.1"]
+
+# ---- `-sL` list scan (M7.6) ------------------------------------------------
+# The dry run: expand the targets, print them, send nothing. C sets listscan +
+# noportscan + PINGTYPE_NONE (nmap.cc:1307), so these cases also assert that
+# neither tool reports port state or host liveness for a scan that probed
+# nothing — host status must be `unknown`, not a guessed `down`.
+#
+# `-n` is load-bearing here rather than just deterministic: C does reverse DNS
+# in a list scan by default and this port resolves nothing anywhere, so without
+# it the two disagree on the hostname for 127.0.0.1 (`localhost` vs none). That
+# is the port's standing no-resolution scope decision, not a list-scan bug.
+[[case]]
+name = "list-scan-single"
+args = ["-sL", "-n", "127.0.0.1"]
+
+# Range expansion with no probing: the target set is the whole result.
+[[case]]
+name = "list-scan-range"
+args = ["-sL", "-n", "127.0.0.1-3"]
+
+# Exclusion applies to a list scan exactly as to a real one — the dry run has to
+# tell you what a real scan WOULD do, so if these ever diverge the preview is
+# lying about the scan it previews.
+[[case]]
+name = "list-scan-with-exclusion"
+args = ["-sL", "-n", "--exclude", "127.0.0.2", "127.0.0.1-3"]

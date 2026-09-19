@@ -179,6 +179,7 @@ async fn udp_scan_resolves_closed_on_loopback() {
             0,
             base_port,
             true,
+            Default::default(),
         ),
     )
     .await

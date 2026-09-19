@@ -139,6 +139,7 @@ async fn ack_and_fin_scans_resolve_a_closed_port() {
                 0,
                 base_port,
                 true,
+                Default::default(),
             ),
         )
         .await

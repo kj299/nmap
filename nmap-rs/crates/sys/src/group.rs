@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use nmap_core::build::{BuildError, Ipv4Spec};
+use nmap_core::build::{BuildError, Ipv4Spec, PacketOverrides};
 use nmap_core::classify::{default_port_state, ScanType};
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe};
 use nmap_core::flagscan::{build_flag_probe, flags_for, match_flag_response, FlagMatchCtx};
@@ -118,6 +118,7 @@ pub async fn group_scan<K, S, P>(
     max_parallelism: usize,
     base_port: u16,
     eth_included: bool,
+    overrides: PacketOverrides,
 ) -> Vec<Host>
 where
     K: RawScanKind,
@@ -171,7 +172,11 @@ where
                     continue;
                 };
                 ipid = ipid.wrapping_add(1);
-                let spec = Ipv4Spec::new(src.octets(), ctx.target.octets(), DEFAULT_TTL, ipid);
+                // The one site where --ttl / --badsum / -S take effect. A default
+                // `overrides` leaves these bytes exactly as before the options
+                // existed, which is what makes the wiring safe to review.
+                let spec = Ipv4Spec::new(src.octets(), ctx.target.octets(), DEFAULT_TTL, ipid)
+                    .with_overrides(overrides);
                 match kind.build_probes(&spec, base_port, probe.port, probe.tryno) {
                     // One logical probe, one outstanding entry, however many datagrams
                     // it takes — a reply is matched by (port, tryno), and for UDP we
@@ -561,6 +566,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
     ports: &[u16],
     template: TimingTemplate,
     max_parallelism: usize,
+    overrides: PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
     use crate::capture::pcap_source::PcapSource;
     use crate::rawio::RawIpv4Sender;
@@ -606,6 +612,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
             max_parallelism,
             base_port,
             eth,
+            overrides,
         )
         .await;
         for ((slot, _), host) in members.into_iter().zip(hosts) {
@@ -754,6 +761,7 @@ mod tests {
             0,
             base,
             true,
+            Default::default(),
         )
         .await
     }
@@ -919,6 +927,7 @@ mod tests {
             0,
             40000,
             true,
+            Default::default(),
         )
         .await;
 
@@ -973,6 +982,7 @@ mod tests {
             0,
             40000,
             true,
+            Default::default(),
         )
         .await;
         // Every datagram is empty and addressed to 53 — no payload table, no extras.

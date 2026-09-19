@@ -108,7 +108,55 @@ pub struct Ipv4Spec {
     pub bad_sum: bool,
 }
 
+/// Operator overrides for the IP layer of every probe a scan sends —
+/// nmap's `--ttl`, `--badsum` and `-S`.
+///
+/// One struct rather than three parameters because it threads through the whole
+/// raw-scan stack (`syn`/`udp`/`flag` entry points → `group_scan_targets` → the
+/// per-probe `Ipv4Spec`), and those signatures were already five arguments long.
+///
+/// `Default` is "change nothing", so a scan that names none of these builds
+/// byte-identical packets to one compiled before these options existed. That is
+/// worth stating because it is what makes the wiring safe: the override is
+/// applied at exactly one site, and its absence is the previous behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PacketOverrides {
+    /// `--ttl N`: IP time-to-live for every probe. `None` leaves the scan's default.
+    pub ttl: Option<u8>,
+    /// `--badsum`: corrupt the L4 checksum, so only a host that ignores checksums
+    /// (typically a firewall or IDS, not a real stack) replies.
+    pub bad_sum: bool,
+    /// `-S addr`: claim this IPv4 source address instead of the routed one.
+    /// Replies will go to whatever really owns it, so this is only useful when
+    /// the operator can observe that traffic.
+    pub spoof_src: Option<[u8; 4]>,
+}
+
+impl PacketOverrides {
+    /// True when nothing is overridden — lets a caller skip the raw-scan warning.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Ipv4Spec {
+    /// Apply operator overrides, if any. The single site where `--ttl`,
+    /// `--badsum` and `-S` take effect.
+    #[must_use]
+    pub fn with_overrides(mut self, o: PacketOverrides) -> Ipv4Spec {
+        if let Some(ttl) = o.ttl {
+            self.ttl = ttl;
+        }
+        if o.bad_sum {
+            self.bad_sum = true;
+        }
+        if let Some(src) = o.spoof_src {
+            self.src = src;
+        }
+        self
+    }
+
     /// A spec with no options, DF clear, valid checksums — the common case.
     #[must_use]
     pub fn new(src: [u8; 4], dst: [u8; 4], ttl: u8, ipid: u16) -> Ipv4Spec {
@@ -319,6 +367,82 @@ pub fn build_icmp_raw(
 
 #[cfg(test)]
 mod tests {
+    /// The default override changes nothing — the property that makes wiring
+    /// these options safe. A scan naming none of them must build byte-identical
+    /// packets to one built before the options existed.
+    #[test]
+    fn default_overrides_are_a_no_op() {
+        let base = Ipv4Spec::new([10, 0, 0, 1], [10, 0, 0, 2], 64, 0x1234);
+        assert_eq!(
+            base.clone().with_overrides(PacketOverrides::default()),
+            base
+        );
+        assert!(PacketOverrides::default().is_empty());
+    }
+
+    #[test]
+    fn each_override_changes_only_its_own_field() {
+        let base = Ipv4Spec::new([10, 0, 0, 1], [10, 0, 0, 2], 64, 0x1234);
+
+        let t = base.clone().with_overrides(PacketOverrides {
+            ttl: Some(7),
+            ..Default::default()
+        });
+        assert_eq!(t.ttl, 7);
+        assert_eq!(
+            (t.src, t.dst, t.bad_sum),
+            (base.src, base.dst, base.bad_sum)
+        );
+
+        let b = base.clone().with_overrides(PacketOverrides {
+            bad_sum: true,
+            ..Default::default()
+        });
+        assert!(b.bad_sum);
+        assert_eq!((b.ttl, b.src), (base.ttl, base.src));
+
+        let s = base.clone().with_overrides(PacketOverrides {
+            spoof_src: Some([192, 0, 2, 9]),
+            ..Default::default()
+        });
+        assert_eq!(s.src, [192, 0, 2, 9]);
+        assert_eq!((s.dst, s.ttl), (base.dst, base.ttl));
+    }
+
+    /// `--ttl 0` is a real value, not "unset". C accepts 0..=255 inclusive, and a
+    /// TTL of 0 is a legitimate probe (the first hop must drop it), so `Option`
+    /// carries presence and 0 stays meaningful.
+    #[test]
+    fn a_ttl_of_zero_is_applied_not_ignored() {
+        let base = Ipv4Spec::new([10, 0, 0, 1], [10, 0, 0, 2], 64, 1);
+        let out = base.with_overrides(PacketOverrides {
+            ttl: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(out.ttl, 0);
+    }
+
+    /// The overrides compose, and the spoofed source reaches the built packet
+    /// rather than stopping at the spec.
+    #[test]
+    fn overrides_reach_the_wire() {
+        let spec = Ipv4Spec::new([10, 0, 0, 1], [10, 0, 0, 2], 64, 0x1234).with_overrides(
+            PacketOverrides {
+                ttl: Some(13),
+                bad_sum: true,
+                spoof_src: Some([192, 0, 2, 9]),
+            },
+        );
+        let pkt = build_tcp_raw(&spec, 1234, 80, 1, 0, 0, 0x02, 1024, 0, &[], &[]).expect("builds");
+        assert_eq!(pkt[8], 13, "TTL byte");
+        assert_eq!(&pkt[12..16], &[192, 0, 2, 9], "source address");
+        // And the same probe without bad_sum differs only in the L4 checksum.
+        let clean = Ipv4Spec::new([192, 0, 2, 9], [10, 0, 0, 2], 13, 0x1234);
+        let clean_pkt =
+            build_tcp_raw(&clean, 1234, 80, 1, 0, 0, 0x02, 1024, 0, &[], &[]).expect("builds");
+        assert_ne!(pkt, clean_pkt, "--badsum must change the bytes");
+    }
+
     use super::*;
     use crate::packet_parser::{parse_packet, Header};
 

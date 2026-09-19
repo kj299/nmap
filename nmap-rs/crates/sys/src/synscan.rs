@@ -27,10 +27,12 @@ pub async fn syn_scan_targets(
     ports: &[u16],
     template: TimingTemplate,
     max_parallelism: usize,
+    overrides: nmap_core::build::PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
     // One per-scan sequence mask for the whole scan (base ports are drawn per
     // route-group inside the engine).
     let (seqmask, _base) = crate::route::random_scan_keys();
     let kind = crate::group::SynKind { seqmask };
-    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism).await
+    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism, overrides)
+        .await
 }

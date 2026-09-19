@@ -78,3 +78,52 @@ entry the port closes, not re-ports):
 | `output.cc:719` `strcpy(protocol, IPPROTO2STR(...))` | CWE-120 | **yes** | Rust `String`/`&str` — no fixed buffer |
 | `output.cc:923/928` `vfprintf(fmt, …)` non-literal format | CWE-134 | **yes** | Rust type-safe `format!`/`write!` — format-string class gone |
 | `output.cc:1564/2003/2027/2048` (`strcat`/`sprintf` of OS-detect seq/ipid/ts) | CWE-120 | **no (M5)** | osscan output path; logged for M5, not ported in M1 |
+
+## 7. Traffic obfuscation and attribution — scope decision (M7.5)
+
+C nmap ships an evasion suite: decoys (`-D`), source-address spoofing (`-S`),
+MAC spoofing (`--spoof-mac`), fragmentation (`-f`/`--ff`/`--mtu`), bogus
+checksums (`--badsum`), custom payloads (`--data*`), IP options
+(`--ip-options`) and TTL control (`--ttl`). Nothing in this document previously
+said whether the port should carry them, so this section is the precedent
+rather than an application of one.
+
+**The decision is not "evasion yes/no".** Framing it that way was the mistake
+that kept it open through three milestones. These options differ enormously in
+what they cost us and in what they let an operator do, and the useful split is
+by *machinery*, not by intent.
+
+**Ported (M7.5).** `--ttl`, `--badsum`, and `-S`. The packet builder already
+carried `Ipv4Spec { ttl, bad_sum, src }` with tests
+(`bad_sum_corrupts_the_l4_checksum`), because the raw scan paths needed those
+fields to exist regardless. Declining these would not have meant *not building*
+something — it would have meant deliberately leaving working, gated capability
+unreachable, which is a much stronger claim than "we did not do that work" and
+one nobody had actually made.
+
+The operative argument for porting rather than withholding: this port's users
+are people doing authorised testing. Withholding `-S` does not stop a scan from
+being spoofed; it sends that operator back to C nmap, which is worse for
+everyone including us — they lose the memory-safety properties this project
+exists to provide, and we lose a user whose bug reports we would want.
+
+**Deferred on cost, not on principle.**
+
+| option | why not yet |
+|---|---|
+| `--ip-options` | the *transport* exists (`Ipv4Spec.options`, tested), but the spec string is a ~150-line state machine in C (`parse_ip_options`, `libnetutil/netutil.cc:207`) with `\x` escapes, `R`/`T`/`S`/`L` route and timestamp forms, `*` repetition and address lists. By this project's standards a new parser over operator-supplied text needs a differential oracle and a fuzz target. That is a piece of work, not a wiring job. |
+| `-f` / `--ff` / `--mtu` | real IP fragmentation, which the builder does not do at all |
+| `--data` / `--data-string` / `--data-length` | small, genuinely unstarted |
+| `-D` (decoys) | needs a new sending model — N copies with varied sources, interleaved — and it *multiplies* generated traffic, so it interacts directly with the rate-limiting work in M7.3's MUST tier. Landing it before `-T`, `--scan-delay` and `--max-rate` exist would add a traffic multiplier to a scanner that cannot yet be told to slow down. |
+| `--spoof-mac` | needs the L2 send path |
+
+**What this section commits to.** Nothing here is "not ever". The boundary is
+cost and ordering, and it is written down so that a future milestone picking
+one of these up is continuing a plan rather than reopening a question. The one
+ordering constraint that is a *safety* constraint, not a preference: **`-D`
+does not land before the rate-limit options do.**
+
+**What this section does not change.** The operator remains trusted (§5): they
+can already pass any target and any flag, and that is the tool's purpose. These
+options do not widen what a *remote* attacker can do to us, which is what the
+rest of this document is about.

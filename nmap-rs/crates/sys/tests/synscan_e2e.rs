@@ -182,6 +182,7 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
             0,
             base_port,
             true,
+            Default::default(),
         ),
     )
     .await

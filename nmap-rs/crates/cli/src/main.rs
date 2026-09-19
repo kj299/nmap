@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use nmap_core::build::PacketOverrides;
 use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
 use nmap_core::options::{RunConfig, ScanKind};
@@ -103,6 +104,47 @@ async fn main() -> ExitCode {
 
     // Exclusions from `--exclude` and `--excludefile`, which combine: C loads
     // both into one `exclude_group` (nmap.cc:2070-2074).
+    // `-S` once only, matching C's
+    // `fatal("You can only use the source option once!")`. Two source addresses
+    // is not a preference to resolve — it is an ambiguous command.
+    if cfg.spoof_source_repeated {
+        eprintln!("nmap-rs: you can only use the source option (-S) once");
+        return ExitCode::FAILURE;
+    }
+    let overrides = match packet_overrides(&cfg) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("nmap-rs: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Raw-only options with a scan that cannot send raw packets. C warns and
+    // continues here (nmap.cc:1817) and so do we — these options shape packets
+    // rather than constrain scope, so ignoring one does not scan more hosts or
+    // faster, and the M7.0 fail-closed rule is not engaged. The message names
+    // which options were dropped, which C's does not.
+    if cfg.raw_scan_options && cfg.scan == ScanKind::Connect {
+        let mut dropped: Vec<&str> = Vec::new();
+        if cfg.ttl.is_some() {
+            dropped.push("--ttl");
+        }
+        if cfg.bad_sum {
+            dropped.push("--badsum");
+        }
+        if cfg.spoof_source.is_some() {
+            dropped.push("-S");
+        }
+        eprintln!(
+            "nmap-rs: {} {} raw socket access and will not be honored for TCP connect scan",
+            dropped.join(", "),
+            if dropped.len() == 1 {
+                "requires"
+            } else {
+                "require"
+            }
+        );
+    }
+
     let excludes = match build_excludes(&cfg).await {
         Ok(set) => set,
         Err(e) => {
@@ -164,7 +206,7 @@ async fn main() -> ExitCode {
     let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
     let started = now_string();
     let clock = Instant::now();
-    let mut results = run_scan(&cfg, &ips, &ports, template, max_par).await;
+    let mut results = run_scan(&cfg, &ips, &ports, template, max_par, overrides).await;
     let elapsed = clock.elapsed().as_secs_f64();
 
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
@@ -223,25 +265,66 @@ async fn run_scan(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+    overrides: PacketOverrides,
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
     match cfg.scan {
         ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
-        ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par).await,
-        ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par).await,
-        ScanKind::Ack => flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Ack).await,
+        ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par, overrides).await,
+        ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par, overrides).await,
+        ScanKind::Ack => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Ack, overrides).await
+        }
         ScanKind::Window => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Window).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                max_par,
+                ScanType::Window,
+                overrides,
+            )
+            .await
         }
         ScanKind::Maimon => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Maimon).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                max_par,
+                ScanType::Maimon,
+                overrides,
+            )
+            .await
         }
-        ScanKind::Fin => flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Fin).await,
+        ScanKind::Fin => {
+            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Fin, overrides).await
+        }
         ScanKind::Null => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Null).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                max_par,
+                ScanType::Null,
+                overrides,
+            )
+            .await
         }
         ScanKind::Xmas => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Xmas).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                max_par,
+                ScanType::Xmas,
+                overrides,
+            )
+            .await
         }
     }
 }
@@ -271,8 +354,9 @@ async fn syn_or_fallback(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+    overrides: PacketOverrides,
 ) -> ScanResults {
-    match nmap_sys::synscan::syn_scan_targets(ips, ports, template, max_par).await {
+    match nmap_sys::synscan::syn_scan_targets(ips, ports, template, max_par, overrides).await {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
@@ -295,6 +379,8 @@ async fn syn_or_fallback(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+    // Signature parity with the pcap build; nothing here sends packets.
+    _overrides: PacketOverrides,
 ) -> ScanResults {
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)"
@@ -312,8 +398,18 @@ async fn udp_or_fallback(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+    overrides: PacketOverrides,
 ) -> ScanResults {
-    match nmap_sys::udpscan::udp_scan_targets(ips, ports, template, max_par, udp_payloads()).await {
+    match nmap_sys::udpscan::udp_scan_targets(
+        ips,
+        ports,
+        template,
+        max_par,
+        udp_payloads(),
+        overrides,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
@@ -371,6 +467,8 @@ async fn udp_or_fallback(
     ports: &[u16],
     template: TimingTemplate,
     max_par: usize,
+    // Signature parity with the pcap build; nothing here sends packets.
+    _overrides: PacketOverrides,
 ) -> ScanResults {
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
@@ -388,8 +486,11 @@ async fn flag_or_fallback(
     template: TimingTemplate,
     max_par: usize,
     scan: nmap_core::classify::ScanType,
+    overrides: PacketOverrides,
 ) -> ScanResults {
-    match nmap_sys::flagscan::flag_scan_targets(scan, ips, ports, template, max_par).await {
+    match nmap_sys::flagscan::flag_scan_targets(scan, ips, ports, template, max_par, overrides)
+        .await
+    {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
@@ -413,6 +514,8 @@ async fn flag_or_fallback(
     template: TimingTemplate,
     max_par: usize,
     _scan: nmap_core::classify::ScanType,
+    // Signature parity with the pcap build; nothing here sends packets.
+    _overrides: PacketOverrides,
 ) -> ScanResults {
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
@@ -856,6 +959,33 @@ fn select_ports(
         }
     }
     Ok((1u16..=1024).collect())
+}
+
+/// Build the IP-layer overrides (`--ttl`, `--badsum`, `-S`) from the parsed
+/// options.
+///
+/// Only `-S` can fail, and it fails rather than falling back: an operator who
+/// asked to send from a particular address and silently got the routed one has
+/// been told something untrue about their own traffic. C resolves this argument
+/// through `resolve()`, so a hostname works there; here it must be an IPv4
+/// literal, which is a narrow divergence recorded in `DIVERGENCES.md`.
+fn packet_overrides(cfg: &RunConfig) -> Result<PacketOverrides, String> {
+    let spoof_src = match &cfg.spoof_source {
+        None => None,
+        Some(a) => match a.trim().parse::<std::net::Ipv4Addr>() {
+            Ok(ip) => Some(ip.octets()),
+            Err(_) => {
+                return Err(format!(
+                    "-S expects an IPv4 address, got \"{a}\" (names are not resolved here)"
+                ))
+            }
+        },
+    };
+    Ok(PacketOverrides {
+        ttl: cfg.ttl,
+        bad_sum: cfg.bad_sum,
+        spoof_src,
+    })
 }
 
 /// Read a `-iL` / `--excludefile` list into host specifications.

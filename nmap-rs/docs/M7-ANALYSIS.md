@@ -325,7 +325,15 @@ M7.0/M7.1.
    closed the only real gap, in an afternoon rather than a milestone. What `sys`
    actually needed was not fuzzing at all but a **sanitizer that compiles its
    feature-gated `unsafe`** — see §3c.
-4. **Still unanswered from M6**: the M6.0 port order, and whether M6 resumes
-   after M7. M6.1 and M6.2 are merged and were deliberately chosen to be
-   independent of the Lua-runtime decision; **M6.3 is not**, so M6 is blocked at
-   that decision regardless of what M7 does.
+4. ~~**Still unanswered from M6**: the M6.0 port order, and whether M6 resumes
+   after M7.~~ **Answered in M7.5 — see `M6-ANALYSIS.md` Decision 3.** Note that
+   the *runtime* choice was never the open question: Decision 1 settled that in
+   the M6 analysis (extend `piccolo`, ship no C). What needed approval was the
+   port order, and it is now: resolve `piccolo`'s `gc-arena` git-rev pin first
+   and alone (the supply-chain gate rejects a git dependency, so this decides
+   fork-vendors-it vs wait-for-a-release before any Lua code exists), then
+   Lua patterns → `string.format` → `string.pack`, ordered by **files** touched
+   rather than call sites, because a file blocked on one missing function is as
+   blocked as a file blocked on fifty. M6 is sequenced after the MUST tier, not
+   against it: M7's cutover profile excludes scripting and none of the 21
+   remaining MUST options need Lua.

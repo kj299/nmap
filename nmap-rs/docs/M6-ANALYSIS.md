@@ -303,3 +303,39 @@ Nothing blocks M6.1 and M6.2 (the `.nse` parser and the `--script` selection
 grammar) — both are pure, fuzzable, and independent of the runtime decision.
 The runtime work (M6.0) needs port-order approval before any Rust is written,
 per the kit.
+
+## Decision 3 — the M6.0 port order (approved M7.5)
+
+M6.1 and M6.2 are merged. M6.3 is the first piece that needs a running VM, so
+this is what unblocks the rest of M6.
+
+**Prerequisite, done first and alone:** resolve `piccolo` master's `gc-arena`
+**git-rev pin**. The supply-chain gate (`cargo deny check`, `sources`) rejects a
+git dependency outright, so this is not a detail to discover during the first
+stdlib PR — it decides whether the fork vendors `gc-arena` or waits on a
+published version. It is also the cheapest possible test of the whole plan: if
+the pin cannot be resolved acceptably, that is worth knowing before any Lua code
+is written, not after three subsystems of it.
+
+**Then, descending by files touched**, so each piece unblocks the largest slice
+of the 744-file corpus and is independently gateable before the next begins:
+
+| order | subsystem | call sites | files | why here |
+|---|---|---|---|---|
+| 1 | Lua patterns (`find`/`match`/`gmatch`/`gsub`) | 1,890 | **421** | most files, and the hardest — a mini-language with its own semantics. Doing it first means the risk is known early rather than discovered last. |
+| 2 | `string.format` | 1,568 | **397** | nearly as broad, far simpler; a fast confirmation that the pattern set up in (1) generalises. |
+| 3 | `string.pack`/`unpack`/`packsize` | 1,747 | 169 | most call sites but fewest files — concentrated in binary protocol libraries, so it unblocks the least breadth per unit of work. |
+| 4 | the tail | 238 | ~90 | `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal`, `string.rep` |
+
+Ordering by **files** rather than call sites is deliberate: the goal of each
+step is to make more of the corpus *runnable*, and a file blocked on one missing
+function is as blocked as a file blocked on fifty.
+
+`require` is not in the table because it is not a gap (see above) — NSE installs
+its own searcher, which is ours to write.
+
+**On whether M6 resumes at all:** M7's cutover profile explicitly excludes
+scripting, so M7 can finish without M6, and none of the 21 remaining MUST-tier
+options need Lua. M6 is therefore sequenced *after* the MUST tier rather than
+competing with it. That is a scheduling decision and reversible; the port order
+above is not affected by when it starts.

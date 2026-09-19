@@ -100,6 +100,20 @@ pub struct RunConfig {
     pub input_file: Option<String>,
     /// `-iL` given more than once — refused, matching C.
     pub input_file_repeated: bool,
+    /// `--ttl N`: IP time-to-live for raw probes. C: `atoi`, then
+    /// `fatal` unless 0..=255, so an out-of-range value is a refusal here too.
+    pub ttl: Option<u8>,
+    /// `--badsum`: send a deliberately wrong L4 checksum.
+    pub bad_sum: bool,
+    /// `-S <addr>`: claim this source address on raw probes, as given.
+    pub spoof_source: Option<String>,
+    /// `-S` given more than once — refused, matching C's
+    /// `fatal("You can only use the source option once!")`.
+    pub spoof_source_repeated: bool,
+    /// An option that only affects raw packets was given (`--ttl`, `--badsum`,
+    /// `-S`). C tracks the same thing as `delayed_options.raw_scan_options` so it
+    /// can tell the operator when the chosen scan cannot honour them.
+    pub raw_scan_options: bool,
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
     /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
@@ -129,6 +143,11 @@ impl Default for RunConfig {
             out_grep: None,
             min_rate: None,
             max_rate: None,
+            ttl: None,
+            bad_sum: false,
+            spoof_source: None,
+            spoof_source_repeated: false,
+            raw_scan_options: false,
             exclude: None,
             exclude_file: None,
             input_file: None,
@@ -419,6 +438,40 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                     cfg.unrecognized.push(format!("--version-intensity {v}"));
                 }
                 consumed_extra = adv;
+            }
+            // Packet-shaping options (M7.5). These affect only raw probes; the
+            // CLI warns when the chosen scan cannot honour them, as C does at
+            // nmap.cc:1817. Each sets `raw_scan_options` for exactly that check.
+            "--badsum" | "-badsum" => {
+                cfg.bad_sum = true;
+                cfg.raw_scan_options = true;
+            }
+            _ if long_flag(s, "ttl", &mut keybuf).is_some() => {
+                let key = long_flag(s, "ttl", &mut keybuf2).unwrap_or("--ttl");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.raw_scan_options = true;
+                // C: `o.ttl = atoi(optarg)` then fatal unless 0..=255. `atoi`
+                // yields 0 for junk, which would silently become a valid TTL of
+                // 0 — so parse strictly and record the junk as unrecognized
+                // rather than inventing a value the operator did not write.
+                // `u8` IS the 0..=255 check C spells with `atoi` + `fatal`:
+                // "256", "999" and "-1" all fail to parse and are recorded as
+                // unrecognized, which the fail-closed gate turns into a refusal.
+                match v.trim().parse::<u8>() {
+                    Ok(n) => cfg.ttl = Some(n),
+                    Err(_) => cfg.unrecognized.push(format!("--ttl {v}")),
+                }
+            }
+            _ if s == "-S" || s.starts_with("-S") && s.len() > 2 => {
+                let (v, adv) = opt_value(args, i, "-S");
+                consumed_extra = adv;
+                cfg.raw_scan_options = true;
+                if cfg.spoof_source.is_some() {
+                    cfg.spoof_source_repeated = true;
+                } else {
+                    cfg.spoof_source = Some(v);
+                }
             }
             // Scope options. These take a value, so they MUST consume it: an
             // unimplemented value-taking option used to leave its argument in
@@ -910,6 +963,106 @@ mod tests {
             cfg(&["--exclude", "=weird"]).exclude.as_deref(),
             Some("=weird")
         );
+    }
+
+    /// The three packet-shaping options, in every spelling, each consuming its
+    /// argument and each flagging `raw_scan_options` so the CLI can tell the
+    /// operator when the chosen scan cannot honour them.
+    #[test]
+    fn packet_shaping_options_parse_and_flag_raw() {
+        let one = |v: Vec<&str>| {
+            let owned: Vec<String> = v.iter().map(|s| (*s).to_string()).collect();
+            cfg(&owned.iter().map(String::as_str).collect::<Vec<_>>())
+        };
+        for args in [
+            vec!["--ttl", "7", "-sS", "127.0.0.1"],
+            vec!["--ttl=7", "-sS", "127.0.0.1"],
+            vec!["-ttl", "7", "-sS", "127.0.0.1"],
+        ] {
+            let c = one(args.clone());
+            assert_eq!(c.ttl, Some(7), "{args:?}");
+            assert!(c.raw_scan_options, "{args:?}");
+            assert!(c.unrecognized.is_empty(), "{args:?}");
+            assert_eq!(
+                c.targets,
+                vec!["127.0.0.1"],
+                "{args:?} must not eat the target"
+            );
+        }
+        for args in [
+            vec!["-S", "192.0.2.9", "-sS", "127.0.0.1"],
+            vec!["-S192.0.2.9", "-sS", "127.0.0.1"],
+        ] {
+            let c = one(args.clone());
+            assert_eq!(c.spoof_source.as_deref(), Some("192.0.2.9"), "{args:?}");
+            assert!(c.raw_scan_options);
+            assert_eq!(c.targets, vec!["127.0.0.1"], "{args:?}");
+        }
+        let c = one(vec!["--badsum", "-sS", "127.0.0.1"]);
+        assert!(c.bad_sum && c.raw_scan_options);
+        assert_eq!(c.targets, vec!["127.0.0.1"]);
+    }
+
+    /// `u8` parsing IS C's `atoi` + `fatal unless 0..=255`. An out-of-range or
+    /// junk TTL becomes `unrecognized`, which the fail-closed gate turns into a
+    /// refusal — never a silently-invented TTL. `atoi("abc")` is 0 in C, which
+    /// would have been a valid TTL, so parsing strictly here is the safer read
+    /// of the same rule.
+    #[test]
+    fn an_out_of_range_or_junk_ttl_is_refused_not_coerced() {
+        for bad in ["256", "999", "-1", "abc", "", "7x"] {
+            let c = cfg(&["--ttl", bad, "-sS", "127.0.0.1"]);
+            assert_eq!(c.ttl, None, "--ttl {bad} must not produce a value");
+            assert_eq!(
+                c.unrecognized,
+                vec![format!("--ttl {bad}")],
+                "--ttl {bad} must be refused"
+            );
+            assert_eq!(
+                c.targets,
+                vec!["127.0.0.1"],
+                "--ttl {bad} must still eat its argument"
+            );
+        }
+        // The boundaries are accepted.
+        assert_eq!(cfg(&["--ttl", "0", "-sS", "127.0.0.1"]).ttl, Some(0));
+        assert_eq!(cfg(&["--ttl", "255", "-sS", "127.0.0.1"]).ttl, Some(255));
+    }
+
+    /// C: `fatal("You can only use the source option once!")`.
+    #[test]
+    fn a_second_source_address_is_recorded_as_a_conflict() {
+        let c = cfg(&["-S", "1.1.1.1", "-S", "2.2.2.2", "-sS", "127.0.0.1"]);
+        assert!(c.spoof_source_repeated);
+        assert_eq!(
+            c.spoof_source.as_deref(),
+            Some("1.1.1.1"),
+            "the first is kept"
+        );
+    }
+
+    /// A scan that names none of them must not set the raw flag, or every
+    /// ordinary invocation would draw the "will not be honored" warning.
+    #[test]
+    fn raw_scan_options_is_not_set_by_an_ordinary_scan() {
+        for args in [
+            &["-sT", "-p", "80", "127.0.0.1"][..],
+            &["-sS", "-p", "80", "127.0.0.1"][..],
+            &["--exclude", "10.0.0.1", "-sT", "127.0.0.1"][..],
+        ] {
+            assert!(!cfg(args).raw_scan_options, "{args:?}");
+        }
+    }
+
+    /// `-S` must not be confused with the lowercase scan-type flags that
+    /// surround it in the match.
+    #[test]
+    fn uppercase_s_does_not_collide_with_scan_types() {
+        assert_eq!(cfg(&["-sS", "127.0.0.1"]).scan, ScanKind::Syn);
+        assert_eq!(cfg(&["-sS", "127.0.0.1"]).spoof_source, None);
+        let c = cfg(&["-S", "192.0.2.9", "-sS", "127.0.0.1"]);
+        assert_eq!(c.scan, ScanKind::Syn);
+        assert_eq!(c.spoof_source.as_deref(), Some("192.0.2.9"));
     }
 
     /// Every entry in the table has to carry a stated reason; an entry added

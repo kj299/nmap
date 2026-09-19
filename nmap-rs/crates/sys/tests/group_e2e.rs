@@ -73,6 +73,7 @@ async fn two_loopback_hosts_scanned_as_one_group() {
             0,
             base_port,
             true,
+            Default::default(),
         ),
     )
     .await

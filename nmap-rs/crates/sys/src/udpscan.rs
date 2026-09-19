@@ -33,8 +33,10 @@ pub async fn udp_scan_targets(
     template: TimingTemplate,
     max_parallelism: usize,
     payloads: UdpPayloads,
+    overrides: nmap_core::build::PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
     // UDP has no sequence to mask; the base port alone encodes the attempt.
     let kind = crate::group::UdpKind::new(payloads);
-    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism).await
+    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism, overrides)
+        .await
 }

@@ -890,9 +890,21 @@ These entries are the M2 retrospective.
   <repo>`), pass the same flag in the differential harness's oracle wrapper so
   every case compares like with like, and say in the test module why the flag is
   there — the next person to regenerate goldens will not otherwise know.
+- **Coda, the same day:** the *integration* tests for the same feature walked
+  into the other half of this. They run the built binary, which searches for
+  `nmap-services` and falls back to `/usr/share/nmap/nmap-services`. On this
+  machine, with nmap installed, they read the installed database — passing while
+  comparing against goldens from a different file. On a CI runner without nmap
+  they found nothing at all, fell back to a 1-1024 port sweep, and reported 1024
+  ports for `--top-ports 10`. Pinning the golden generation was necessary and
+  not sufficient: **the thing under test has to be pinned to the same data as
+  the oracle**, which for a binary means setting its data-directory variable in
+  the test harness, not trusting its search path.
 - **Kit change:** `harnesses/differential/diff_run.py` — before trusting a
   divergence, confirm both sides read the same data files (databases, signature
-  files, dictionaries, locale, timezone). The tell that saves the time:
+  files, dictionaries, locale, timezone), and pin the *rewrite's* lookup as
+  explicitly as the oracle's. A search path that ends in a system location is a
+  silent dependency on the developer's machine. The tell that saves the time:
   **a divergence that appears only past some threshold — the tail of a ranking,
   the long inputs, the rare branch — is more often a data mismatch than a logic
   bug**, because shared data usually agrees on the common cases and diverges at

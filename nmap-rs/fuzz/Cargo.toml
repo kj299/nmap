@@ -300,3 +300,9 @@ name = "timespec"
 path = "fuzz_targets/timespec.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "logfile"
+path = "fuzz_targets/logfile.rs"
+test = false
+doc = false

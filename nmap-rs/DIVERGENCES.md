@@ -70,11 +70,17 @@ here so the format-level differential planned for M2/M3 treats them as known and
 not as regressions. None is a fidelity bug in *what was scanned*; each is a
 narrower *rendering* of the same result.
 
-- **Collapsed non-open ports.** C nmap lists every scanned port individually (incl.
-  `closed`/`filtered`) until a per-state count crosses its "Not shown" threshold;
-  the MVP always collapses non-open ports into a single `<extraports>` / `Not shown`
-  summary. `project.py` canonicalizes both to a per-(state,proto) count, so the
-  *set* is verified even though per-closed-port identity is not rendered.
+- **Collapsed non-open ports.** ~~C nmap lists every scanned port individually
+  (incl. `closed`/`filtered`) until a per-state count crosses its "Not shown"
+  threshold; the MVP always collapses non-open ports into a single
+  `<extraports>` / `Not shown` summary.~~ **CLOSED at M7.10.** The abbreviation
+  outlived its justification: collapsing unconditionally is precisely what
+  `--open` does, so this port behaved as though `--open` were always given, for
+  nine milestones. The renderer now implements nmap's real threshold (25 per
+  state, scaled by `-v`/`-d`; verified against the reference at 25 and 26), and
+  `project.py` no longer canonicalizes the two representations — it compares
+  each listed non-open port's identity and reason, and distinguishes listing
+  from collapsing. The differential is strictly stronger for it.
 - **No decorative XML preamble.** The MVP omits `<!DOCTYPE nmaprun>`,
   `<?xml-stylesheet?>`, `<scaninfo>`, `<verbose>`, `<debugging>`, `<hostnames>`,
   `<times>`, `reason_ttl`, and `startstr`/`xmloutputversion` attributes. These are
@@ -2224,3 +2230,52 @@ removed: that one was theatre, this one is unobservable.
       the port is being sloppy; it is being faithful, and the reference was run
       to confirm it. The same `strtod` port from M7.7 (`timespec::strtod_value`)
       serves both, so the two option families cannot drift apart.
+
+- [x] `output-filename-escapes-unexpanded` (`cli`, M7.9) — **`-oN`, `-oX` and
+      `-oG` wrote the escape sequence instead of the date.** Every output
+      filename in nmap passes through `logfilename` (`output.cc:853`), which
+      expands eleven strftime conversions. This port passed the argument
+      straight to `std::fs::write`:
+
+      ```console
+      $ nmap    -sL -n -oN 'c-%Y%m%d.txt' 127.0.0.1  ->  c-20260920.txt
+      $ nmap-rs -sL -n -oN 'r-%Y%m%d.txt' 127.0.0.1  ->  r-%Y%m%d.txt
+      ```
+
+      The quiet version of this is the damaging one: an operator with
+      `-oN scan-%Y%m%d.txt` in a nightly cron job got a single file overwritten
+      every night, and would find out when they went looking for last week's
+      scan. Found while implementing `-oA`, by checking what C does to the
+      *argument* rather than only what `-oA` does with it.
+      Fixed for all four options at once; pinned by
+      `strftime_escapes_are_expanded_in_every_output_option` and by a 3204-vector
+      differential against the C oracle.
+      *(Introduced at M1; found and fixed at M7.9.)*
+
+- [x] `output-filename-unvalidated` (`cli`, M7.9) — **`-oN -foo` created a file
+      called `-foo`.** C's `test_file_name` refuses a name beginning with `-`
+      and names the escape hatch ("Try '-oN ./-foo' if you really want it"),
+      because a file whose name starts with a dash is read as a flag by the
+      next command that touches it. This port had no validation at all. Fixed
+      for all four options; all five refusal messages match C word for word.
+      *(Introduced at M1; found and fixed at M7.9.)*
+
+- [ ] `logfile-name-in-utc` (`core::logfile`, M7.9) — **`%F` and friends expand
+      against UTC, where C uses local time.** C's callers pass `localtime()`;
+      reproducing that needs a timezone database, a dependency this crate does
+      not carry for a handful of output fields. The same choice was already made
+      for `-O`'s boot time (`uptime-boot-time-in-utc`) and the scan-start
+      banner, so this keeps one convention rather than adding a third.
+      Observable and narrow: an operator west of Greenwich running
+      `-oA scan-%F` late in the evening gets tomorrow's date in the filename.
+
+- [ ] `host-line-latency` (`core::output`, M7.10) — **the "Host is up" line
+      carries no latency.** C prints `Host is up (0.000071s latency).`, and with
+      `--reason`, `Host is up, received user-set (0.000055s latency).` This port
+      prints `Host is up.` and `Host is up, received user-set.` — the reason is
+      reproduced, the latency is not, because nothing here measures per-host RTT
+      for reporting. Pre-existing (M1); recorded now because M7.10 is the change
+      that touches this exact line, and leaving it unrecorded while modifying it
+      would be the easiest way for it to be forgotten. The differential does not
+      see it: `project.py` reads XML, where the latency lives in `<times>`,
+      which the MVP omits (already ledgered above).

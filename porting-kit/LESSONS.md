@@ -944,6 +944,47 @@ These entries are the M2 retrospective.
   `--all-features`, and an unscoped package selector are part of the gate's
   identity, not decoration on it.
 
+## 031. A ledgered "intentional abbreviation" is a divergence with an expiry date nobody set
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.10, `--open` / `--reason`
+- **What happened:** M1 shipped a renderer that collapsed every non-open port into a
+  single "Not shown" summary, where the C lists them individually until a per-state
+  count crosses a threshold. This was **known**: it was written into
+  `DIVERGENCES.md` as an "intentional MVP renderer abbreviation", and the
+  differential's projection was *deliberately* built to canonicalize both
+  representations to a per-state count so the abbreviation would not show up as a
+  divergence. Both of those were reasonable calls for an MVP whose contract was
+  "did we get every port's state and reason right".
+  The abbreviation then survived nine milestones. Nobody revisited it, because it
+  was not failing anything — the projection had been taught not to look. What
+  finally exposed it was implementing **`--open`**, the flag whose entire purpose
+  is to collapse non-open ports: the port had been behaving as though `--open` were
+  permanently on, for every scan, for the whole project.
+- **Cost:** No incident — the port states were always right, only their rendering
+  was narrower. But every operator reading this scanner's output had been getting
+  `--open` semantics without asking for them, and the differential could not have
+  told anyone.
+- **Root cause:** A ledger entry records a decision; it does not record *when the
+  decision stops being right*. "Intentional MVP abbreviation" is a statement about
+  a milestone that ended eight milestones ago. Worse, the harness had been adapted
+  to the abbreviation, so the one mechanism that could have flagged it had been
+  explicitly configured not to.
+- **Fix:** Implement the real rule (nmap's 25-per-state threshold, scaled by
+  verbosity), stop canonicalizing the two representations in the projection, and
+  compare each non-open port's identity and reason. The differential got strictly
+  stronger: same 20/20, now port-by-port.
+- **Kit change:** `PLAYBOOK.md` and the divergence-ledger template — a ledger entry
+  that records a **temporary** simplification must name the milestone that retires
+  it, and the retrospective must re-read the ledger for entries whose stated scope
+  has passed. Two sharper rules fall out:
+  1. **When a harness is taught to tolerate a divergence, the tolerance is part of
+     the divergence.** Write it in the same ledger entry, so removing one forces
+     removing the other.
+  2. **Implementing a flag is a good moment to check whether its behaviour is
+     already the default.** A flag that turns out to be a no-op is not a cheap win;
+     it is evidence that the unflagged path was wrong all along.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

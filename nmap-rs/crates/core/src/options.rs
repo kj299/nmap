@@ -137,6 +137,17 @@ pub struct RunConfig {
     /// `--exclude-ports` given more than once — refused, matching C's
     /// `fatal("Only 1 --exclude-ports option allowed, …")`.
     pub exclude_ports_repeated: bool,
+    /// `--open`: show only hosts and ports that are (or may be) open.
+    ///
+    /// Two effects in C, and the second is easy to miss: every non-open state
+    /// is forced into the "Not shown" summary regardless of how few ports are
+    /// in it (`portlist.cc:806`), AND a host with no open ports is omitted from
+    /// the report entirely (`nmap.cc:2312`) while still counting as up.
+    pub open_only: bool,
+    /// `--reason`: add the REASON column to the normal port table, and say what
+    /// established each host's liveness. XML and grepable already carry the
+    /// reason unconditionally, so this flag does not touch them.
+    pub reason: bool,
     /// `--allports`: version-scan every open port, including the ones
     /// `nmap-service-probes` names in its `Exclude` directive.
     ///
@@ -322,6 +333,8 @@ impl Default for RunConfig {
             fast_scan: false,
             exclude_ports: None,
             exclude_ports_repeated: false,
+            open_only: false,
+            reason: false,
             allports: false,
             timing_template: None,
             min_rtt_timeout_ms: None,
@@ -704,6 +717,26 @@ fn parse_timing_template(cfg: &mut RunConfig, raw: &str) {
     }
 }
 
+/// One `-oN`/`-oX`/`-oG` argument: refuse it, or keep it for the CLI to expand.
+///
+/// The strftime escapes are expanded by the CLI, not here, because expanding
+/// them needs a clock and this module is pure — the property that lets the
+/// whole option surface be unit-tested without one. `parse_args` therefore
+/// stores the *unexpanded* name and [`crate::logfile::expand`] runs once, at
+/// the boundary, against the scan's start time.
+///
+/// A refusal is recorded and the destination left unset, so the CLI reports it
+/// and exits rather than writing to a name the operator did not intend.
+fn output_file(invalid: &mut Vec<String>, raw: &str, option: &str) -> Option<String> {
+    match crate::logfile::validate(raw, option) {
+        Err(e) => {
+            invalid.push(e.message());
+            None
+        }
+        Ok(()) => Some(raw.to_string()),
+    }
+}
+
 /// Parse argv (without the program name) into a [`RunConfig`]. Total and
 /// panic-free over any input.
 // Index arithmetic is bounded by `args.len()` and only ever advances.
@@ -742,6 +775,14 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             // probes; see the field docs for why it is not related to
             // `--exclude-ports` despite the name.
             _ if long_flag(s, "allports", &mut keybuf).is_some() => cfg.allports = true,
+            // `--open` also sets C's `defeat_rst_ratelimit`, with the comment
+            // "If they only want open, don't spend extra time (potentially)
+            // distinguishing closed from filtered" — a pacing choice this
+            // engine has no equivalent knob for, so only the reporting effect
+            // is reproduced. Reporting is the whole observable point of the
+            // flag; the pacing tweak only makes C slightly faster.
+            _ if long_flag(s, "open", &mut keybuf).is_some() => cfg.open_only = true,
+            _ if long_flag(s, "reason", &mut keybuf).is_some() => cfg.reason = true,
             // ---- port selection (M7.8) ----------------------------------
             // `-F`: fast scan. C sets `o.fastscan`, which `gettoppts` turns
             // into `level = 100` when no explicit level was given.
@@ -1100,23 +1141,57 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             // short spelling, so `--oN` was refused while `-oN` worked: a parity
             // gap in a feature that is fully implemented, and one found by
             // running the binary rather than reading it (as M7.0's was).
+            // Each of these validates its argument and expands the
+            // strftime-style escapes in it, exactly as C does for all four
+            // (`nmap.cc:890-915`). Before M7.9 this port did neither, so
+            // `-oN scan-%Y%m%d.txt` wrote a file literally called
+            // `scan-%Y%m%d.txt` -- one file silently overwritten every night
+            // where the operator asked for a dated series -- and `-oN -foo`
+            // happily created a file whose name later shell commands read as a
+            // flag.
             _ if s.starts_with("-oN") || s.starts_with("--oN") => {
                 let (v, adv) =
                     long_opt_value(args, i, if s.starts_with("--") { "--oN" } else { "-oN" });
-                cfg.out_normal = Some(v);
+                cfg.out_normal = output_file(&mut cfg.invalid, &v, "oN");
                 consumed_extra = adv;
             }
             _ if s.starts_with("-oX") || s.starts_with("--oX") => {
                 let (v, adv) =
                     long_opt_value(args, i, if s.starts_with("--") { "--oX" } else { "-oX" });
-                cfg.out_xml = Some(v);
+                cfg.out_xml = output_file(&mut cfg.invalid, &v, "oX");
                 consumed_extra = adv;
             }
             _ if s.starts_with("-oG") || s.starts_with("--oG") => {
                 let (v, adv) =
                     long_opt_value(args, i, if s.starts_with("--") { "--oG" } else { "-oG" });
-                cfg.out_grep = Some(v);
+                cfg.out_grep = output_file(&mut cfg.invalid, &v, "oG");
                 consumed_extra = adv;
+            }
+            // `-oA <base>`: all three formats at once, as <base>.nmap,
+            // <base>.gnmap and <base>.xml. The suffixes are not the option
+            // letters, and `-oA` does NOT imply `-oS`.
+            //
+            // It sets the same three fields the individual options do, so a
+            // later `-oN` overrides just that one -- which is C's behaviour,
+            // since they all assign to the same `delayed_options` members in
+            // argument order.
+            _ if s.starts_with("-oA") || s.starts_with("--oA") => {
+                let (v, adv) =
+                    long_opt_value(args, i, if s.starts_with("--") { "--oA" } else { "-oA" });
+                consumed_extra = adv;
+                match crate::logfile::validate(&v, "oA") {
+                    Err(e) => cfg.invalid.push(e.message()),
+                    Ok(()) => {
+                        // The suffix is appended BEFORE expansion, which is
+                        // safe because no suffix contains a '%': expanding
+                        // "s-%Y" and then appending ".nmap" gives the same
+                        // string as appending first and expanding after.
+                        let (normal, grep, xml) = crate::logfile::all_formats(&v);
+                        cfg.out_normal = Some(normal);
+                        cfg.out_grep = Some(grep);
+                        cfg.out_xml = Some(xml);
+                    }
+                }
             }
             _ if s.starts_with("-p") => {
                 let (v, adv) = opt_value(args, i, "-p");

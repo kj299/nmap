@@ -859,6 +859,45 @@ These entries are the M2 retrospective.
   but will not reproduce outside the harness, suspect the harness's shared state
   before the code under test.** Deterministic is not the same as caused-by-the-diff.
 
+## 029. A differential against a data-driven tool must pin the DATA, not just the binary
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.8, `--top-ports` / `--port-ratio` / `-F`
+- **What happened:** `--top-ports N` returns the N most common ports according to
+  ratios in the `nmap-services` data file. To check the port's ranking, the exact
+  sets C selects were captured from the real binary with `--packet-trace` — a good
+  oracle, better than transcribing `gettoppts`. Ten values of N were compared.
+  Eight matched exactly. **N=500 and N=1000 did not**, each off by two ports, and
+  the disagreeing ports all sat at identical ratios — the signature of a
+  tie-break bug. C sorts a `std::list` with `a.ratio > b.ratio` and
+  `std::list::sort` is stable, so ties keep file order; the Rust used a stable
+  sort too, so the hunt was on for how the orders had come apart.
+  They had not. The installed `nmap` reads `/usr/share/nmap/nmap-services`; the
+  port reads the one in the source tree. **They are different files.** `wsman`
+  (5985/tcp) carries ratio 0.000076 in one and 0.000380 in the other, which moves
+  it across the N=500 boundary. Re-running the comparison with both sides on the
+  same file: ten of ten exact, no tie-break bug, nothing to fix.
+- **Cost:** Maybe twenty minutes, and it came within one edit of "fixing" a
+  correct stable sort into an incorrect one to match golden data that was never
+  comparable. That is the expensive failure mode here — not the lost time, but a
+  differential that argues you into breaking working code.
+- **Root cause:** The oracle was pinned (a specific binary) and the *input matrix*
+  was pinned (specific arguments), but the tool's third input — its data files —
+  was left to whatever the binary happened to find. For a data-driven tool that is
+  most of its behaviour. Nothing in the harness expressed the dependency, so
+  nothing could flag it.
+- **Fix:** Generate every golden with the data file pinned (`nmap --datadir
+  <repo>`), pass the same flag in the differential harness's oracle wrapper so
+  every case compares like with like, and say in the test module why the flag is
+  there — the next person to regenerate goldens will not otherwise know.
+- **Kit change:** `harnesses/differential/diff_run.py` — before trusting a
+  divergence, confirm both sides read the same data files (databases, signature
+  files, dictionaries, locale, timezone). The tell that saves the time:
+  **a divergence that appears only past some threshold — the tail of a ranking,
+  the long inputs, the rare branch — is more often a data mismatch than a logic
+  bug**, because shared data usually agrees on the common cases and diverges at
+  the margins. Pin the data, re-run, and only then start reading code.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

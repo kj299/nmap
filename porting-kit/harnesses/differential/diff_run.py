@@ -21,6 +21,22 @@ the harness's shared state, not at the code under test.** Deterministic is not
 the same as caused-by-the-diff — a queue that fills at the same point every run
 fails just as repeatably as a logic bug.
 
+PIN THE DATA FILES, NOT JUST THE BINARY (LESSONS #029). A data-driven tool --
+one that reads a services database, signature file, dictionary or ruleset --
+gets most of its behaviour from those files, and the oracle binary will load
+whatever copy it finds installed. If the rewrite reads the copy in the
+repository, the two are comparing different inputs and every difference in the
+data shows up as a difference in the code. Pass the tool's own flag (nmap's
+`--datadir`) in the oracle wrapper, and regenerate goldens the same way.
+
+The tell that saves the time: **a divergence that appears only past some
+threshold -- the tail of a ranking, the longest inputs, the rarest branch -- is
+more often a data mismatch than a logic bug.** Shared data files usually agree
+on the common cases and drift at the margins, which is exactly the shape a
+subtle algorithm bug also has. nmap's port ranking matched for the top 250
+ports and diverged at 500, which read as a tie-break bug and was two versions
+of nmap-services disagreeing about one port's ratio.
+
 Two comparison modes:
   * same-binary-both-platforms: --oracle and --rust are real binaries.
   * oracle-substitution: when the reference can't run here, point --oracle at a

@@ -548,3 +548,74 @@ Decision 3's order stands, with one change: the string metatable is **not** part
 of "the tail", it is a **prerequisite of step 1**. Lua patterns are reached
 through `s:find(...)` in most of the corpus, so shipping the pattern matcher
 without method dispatch would leave it unreachable from 454 of 758 files.
+
+### The adversarial pass, and the one objection that landed
+
+Three attacks were run against the decision above. Two failed; both corrected
+something on the way.
+
+**"It blocks M6.4"** — *failed, and fixed a probe error.* The claim was that
+piccolo cannot suspend a Rust callback and resume it from an external async
+runtime, which is NSE's whole concurrency model. It traced to a probe reporting
+`Executor::resume()` returning `Err(bad executor mode: Result, expected
+Suspended)` and escalating that into an API-shape constraint. It is not one:
+`do_yield` with `to_thread: None` pushes **two** frames, `Yielded` then
+`Result`, and the documented protocol is take_result-**then**-resume
+(`src/thread/thread.rs:129-131`). The probe called `resume()` with the `Result`
+frame still on the stack and reported its own missing call as a property of the
+VM. Host-driven suspension works, on both versions.
+
+**"It ships known defects"** — *failed against the decision, fatal to the
+dissent.* One judge preferred vendoring published **v0.3.3** on maintenance
+grounds. The attack found that 0.3.3 inverts every NaN `>` and `>=` comparison
+(see the table above). That option is dead.
+
+**"It is gate evasion"** — **partly upheld, and acted on.** Its three claims
+were checked against the workflow file and by running the gates:
+
+| claim | verdict |
+|---|---|
+| clippy's safety lints are vacuous on dependency code | **true — and it is an argument *for* this decision**, not against it |
+| ASan never executes the VM | **true, and unaddressed. Fixed below.** |
+| hand-writing SAFETY comments for upstream code is itself a risk | **true as a caution**, not as a refutation |
+
+On the first: `cargo clippy --all-targets --all-features -D
+clippy::undocumented_unsafe_blocks` — the repo's exact escalation — reports
+**14 missing-safety-comment errors** when piccolo is a vendored *workspace
+member*, and **0** when it is a registry dependency. The project already
+recorded this failure mode for `ffi.rs` (`nmap-rs-ci.yml:186-190`: *"cargo
+clippy mentioned ffi.rs 0 times, so the `-D clippy::undocumented_unsafe_blocks`
+escalation above was a hard error aimed at code it never saw"*). Vendoring as a
+member is what converts that gate from vacuous to firing. Depending on the
+published crate would have left it silent — which is the strongest argument yet
+against Option A, and it is an argument the campaign only reached by attacking
+its own answer.
+
+On the second, the attack is right and the decision was incomplete. The
+sanitizer job is `cargo +nightly test -p nmap-sys --all-features`
+(`nmap-rs-ci.yml:235`), scoped to the one crate that holds first-party `unsafe`.
+The VM will not live in `nmap-sys`, so **ASan would execute none of it** — in a
+job whose own header comment exists because a sanitizer gate that does not
+execute the unsafe is vacuous. That is precisely the failure this project keeps
+writing lessons about. **The ASan job must be extended to the crate hosting the
+VM as part of M6.0, not after it**; a vendored GC-backed interpreter is the
+single most sanitizer-worthy thing in the tree.
+
+On the third: a `SAFETY:` comment written by someone who did not write the code
+is an assertion, and writing one to turn a gate green is exactly the fabrication
+this project should fear. The discipline is therefore: **document only the
+invariants actually verified, and where an invariant cannot be verified from the
+code, say so in the comment and ledger it** — a `SAFETY:` that reads "upstream
+asserts X; not independently verified" is honest and still passes the harness,
+while a confident invention does not become true by compiling. The scale is
+tractable precisely because `gc-arena` is **not** vendored: the figure of 108
+undocumented sites came from a probe that vendored both crates. For piccolo
+alone it is **16** by the audit harness and **14** by clippy.
+
+One practical consequence, recorded so it is not rediscovered: clippy on the
+vendored member reports **124 errors in total**, of which only 14 are safety
+lints — the rest are style lints on code we did not write and have no business
+policing. The vendored crate therefore needs a narrow `allow` list at its root
+for the stylistic lints, and that list must **never** include
+`undocumented_unsafe_blocks` or `missing_safety_doc`. Silencing those two is the
+only way this decision could become the gate evasion it was accused of being.

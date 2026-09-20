@@ -1465,7 +1465,12 @@ fn now_string() -> String {
     format!("epoch+{secs}s")
 }
 
-#[cfg(test)]
+// Skipped under Miri: every test here reads a golden file, and Miri's isolation
+// blocks `open`. Miri is checking for UB in `unsafe`, of which this module has
+// none, so nothing is lost -- but the guard has to be here, because the CI job
+// runs `cargo miri test` over the WHOLE workspace while it is tempting to run
+// it locally scoped to the crate you just changed. That is how this reached CI.
+#[cfg(all(test, not(miri)))]
 mod port_selection_tests {
     //! `select_ports` against C nmap itself.
     //!

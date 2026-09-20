@@ -898,6 +898,40 @@ These entries are the M2 retrospective.
   bug**, because shared data usually agrees on the common cases and diverges at
   the margins. Pin the data, re-run, and only then start reading code.
 
+## 030. Running a gate scoped to the crate you changed is not running the gate
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.8, port selection
+- **What happened:** M7.8 added unit tests inside the CLI binary crate that read
+  golden files from disk. Every other filesystem- or process-touching test in the
+  repository carries `#![cfg(not(miri))]`, because Miri's isolation blocks `open`.
+  These did not, and CI's Miri job went red on a PR that had passed every check
+  run locally.
+  The local Miri run had been `cargo +nightly miri test -p nmap-core <filter>` —
+  scoped to the crate the previous milestone touched, because that is the crate
+  whose module was new and because a full Miri run takes many minutes. CI runs
+  `cargo +nightly miri test`, unscoped. The habit of narrowing a slow gate to
+  "the part I changed" is exactly what let a test in a *different* crate reach CI
+  unchecked.
+- **Cost:** One red CI cycle and one extra push. Cheap this time, and only because
+  the failure was loud. A gate narrowed for speed fails silently far more often
+  than it fails loudly.
+- **Root cause:** Two different commands were both called "running Miri". The
+  scoped one is a fast inner-loop check; the unscoped one is the gate. Nothing
+  distinguished them, so the fast one felt like the gate had run.
+- **Fix:** Gate the new module with `#[cfg(all(test, not(miri)))]`, and say in the
+  comment *why* the guard is there — naming the trap ("the CI job runs
+  `cargo miri test` over the whole workspace while it is tempting to run it
+  locally scoped to the crate you just changed") so the next person adding a
+  filesystem test in a new crate sees it.
+- **Kit change:** `PLAYBOOK.md` Phase 4 — **before a PR, run each gate with the
+  exact command CI runs, not a narrowed version of it.** Narrowing for the inner
+  loop is correct and fast; the pre-push run is not the inner loop. The general
+  shape, of which this is the third instance in this port (see #023, #026):
+  *a gate you have customised for convenience is a different gate.* `--all`,
+  `--all-features`, and an unscoped package selector are part of the gate's
+  identity, not decoration on it.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

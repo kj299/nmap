@@ -1,0 +1,382 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 06712a6..04cc085 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -19,7 +19,7 @@ repository = "https://github.com/kyren/piccolo"
+ ahash = "0.8"
+ allocator-api2 = "0.2"
+ anyhow = "1.0"
+-gc-arena = { git = "https://github.com/kyren/gc-arena", rev = "5a7534b883b703f23cfb8c3cfdf033460aa77ea9", features = ["allocator-api2", "hashbrown"] }
++gc-arena = { version = "=0.5.3", features = ["allocator-api2", "hashbrown"] }
+ hashbrown = { version = "0.14", features = ["raw"] }
+ rand = { version = "0.8", features = ["small_rng"] }
+ serde = "1.0"
+diff --git a/src/any.rs b/src/any.rs
+index 2c50521..bbe59e3 100644
+--- a/src/any.rs
++++ b/src/any.rs
+@@ -187,13 +187,13 @@ impl<'gc, M> Any<'gc, M> {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use gc_arena::arena::rootless_mutate;
++    use gc_arena::rootless_arena;
+ 
+     use super::*;
+ 
+     #[test]
+     fn test_any_value() {
+-        rootless_mutate(|mc| {
++        rootless_arena(|mc| {
+             #[derive(Collect)]
+             #[collect(no_drop)]
+             struct A<'gc>(Gc<'gc, i32>);
+diff --git a/src/callback.rs b/src/callback.rs
+index 28898ba..6a80ad9 100644
+--- a/src/callback.rs
++++ b/src/callback.rs
+@@ -317,7 +317,7 @@ pub trait Sequence<'gc>: Collect {
+ ///
+ /// We use a `Box` rather than `Gc` because a `Sequence` is mutable and not shared -- it is
+ /// generally owned only by the `Thread` in which it is running.
+-pub struct BoxSequence<'gc>(Pin<boxed::Box<dyn Sequence<'gc> + 'gc, MetricsAlloc<'static>>>);
++pub struct BoxSequence<'gc>(Pin<boxed::Box<dyn Sequence<'gc> + 'gc, MetricsAlloc<'gc>>>);
+ 
+ unsafe impl<'gc> Collect for BoxSequence<'gc> {
+     fn trace(&self, cc: &gc_arena::Collection) {
+@@ -337,12 +337,12 @@ impl<'gc> fmt::Debug for BoxSequence<'gc> {
+ 
+ impl<'gc> BoxSequence<'gc> {
+     pub fn new(mc: &Mutation<'gc>, sequence: impl Sequence<'gc> + 'gc) -> Self {
+-        let b = boxed::Box::new_in(sequence, MetricsAlloc::from_metrics(mc.metrics().clone()));
++        let b = boxed::Box::new_in(sequence, MetricsAlloc::new(mc));
+         // TODO: Required unsafety due to do lack of `CoerceUnsized` on allocator_api2 `Box` type,
+         // replace with safe cast when one of allocator_api or CoerceUnsized is stabilized.
+         let (ptr, alloc) = boxed::Box::into_raw_with_allocator(b);
+-        let b = unsafe { boxed::Box::from_raw_in(ptr as *mut dyn Sequence, alloc) };
+-        Self(boxed::Box::into_pin(b))
++        let b = unsafe { boxed::Box::from_raw_in(ptr as *mut (dyn Sequence<'gc> + 'gc), alloc) };
++        Self(unsafe { Pin::new_unchecked(b) })
+     }
+ 
+     pub fn poll(
+diff --git a/src/lua.rs b/src/lua.rs
+index 67f0300..47ad652 100644
+--- a/src/lua.rs
++++ b/src/lua.rs
+@@ -197,7 +197,7 @@ impl Lua {
+ 
+     /// Finish the current collection cycle completely, calls `gc_arena::Arena::collect_all()`.
+     pub fn gc_collect(&mut self) {
+-        if self.arena.collection_phase() != CollectionPhase::Sweeping {
++        if self.arena.collection_phase() != CollectionPhase::Collecting {
+             self.arena.mark_all().unwrap().finalize(|fc, root| {
+                 root.finalizers.prepare(fc);
+             });
+@@ -233,7 +233,7 @@ impl Lua {
+ 
+         let r = self.arena.mutate(move |mc, state| f(state.ctx(mc)));
+         if self.arena.metrics().allocation_debt() > COLLECTOR_GRANULARITY {
+-            if self.arena.collection_phase() == CollectionPhase::Sweeping {
++            if self.arena.collection_phase() == CollectionPhase::Collecting {
+                 self.arena.collect_debt();
+             } else {
+                 if let Some(marked) = self.arena.mark_debt() {
+@@ -243,8 +243,8 @@ impl Lua {
+                     self.arena.mark_all().unwrap().finalize(|fc, root| {
+                         root.finalizers.finalize(fc);
+                     });
+-                    // Immediately transition to `CollectionPhase::Sweeping`.
+-                    self.arena.mark_all().unwrap().start_sweeping();
++                    // Immediately transition to `CollectionPhase::Collecting`.
++                    self.arena.mark_all().unwrap().start_collecting();
+                 }
+             }
+         }
+diff --git a/src/stash.rs b/src/stash.rs
+index 784a243..7f1693d 100644
+--- a/src/stash.rs
++++ b/src/stash.rs
+@@ -1,6 +1,6 @@
+ use std::fmt;
+ 
+-use gc_arena::{DynamicRoot, DynamicRootSet, Mutation, Rootable};
++use gc_arena::{DynamicRoot, DynamicRootSet, Gc, Mutation, Rootable};
+ 
+ use crate::{
+     callback::CallbackInner,
+@@ -34,7 +34,7 @@ pub trait Fetchable {
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedString(DynamicRoot<Rootable![StringInner]>);
++pub struct StashedString(DynamicRoot<Rootable![Gc<'_, StringInner>]>);
+ 
+ impl fmt::Debug for StashedString {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -48,7 +48,7 @@ impl<'gc> Stashable<'gc> for String<'gc> {
+     type Stashed = StashedString;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedString(roots.stash::<Rootable![StringInner]>(mc, self.into_inner()))
++        StashedString(roots.stash::<Rootable![Gc<'_, StringInner>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -56,12 +56,12 @@ impl Fetchable for StashedString {
+     type Fetched<'gc> = String<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        String::from_inner(roots.fetch(&self.0))
++        String::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedTable(DynamicRoot<Rootable![TableInner<'_>]>);
++pub struct StashedTable(DynamicRoot<Rootable![Gc<'_, TableInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedTable {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -75,7 +75,7 @@ impl<'gc> Stashable<'gc> for Table<'gc> {
+     type Stashed = StashedTable;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedTable(roots.stash::<Rootable![TableInner<'_>]>(mc, self.into_inner()))
++        StashedTable(roots.stash::<Rootable![Gc<'_, TableInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -83,12 +83,12 @@ impl Fetchable for StashedTable {
+     type Fetched<'gc> = Table<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        Table::from_inner(roots.fetch(&self.0))
++        Table::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedClosure(DynamicRoot<Rootable![ClosureInner<'_>]>);
++pub struct StashedClosure(DynamicRoot<Rootable![Gc<'_, ClosureInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedClosure {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -102,7 +102,7 @@ impl<'gc> Stashable<'gc> for Closure<'gc> {
+     type Stashed = StashedClosure;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedClosure(roots.stash::<Rootable![ClosureInner<'_>]>(mc, self.into_inner()))
++        StashedClosure(roots.stash::<Rootable![Gc<'_, ClosureInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -110,12 +110,12 @@ impl Fetchable for StashedClosure {
+     type Fetched<'gc> = Closure<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        Closure::from_inner(roots.fetch(&self.0))
++        Closure::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedCallback(DynamicRoot<Rootable![CallbackInner<'_>]>);
++pub struct StashedCallback(DynamicRoot<Rootable![Gc<'_, CallbackInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedCallback {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -129,7 +129,7 @@ impl<'gc> Stashable<'gc> for Callback<'gc> {
+     type Stashed = StashedCallback;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedCallback(roots.stash::<Rootable![CallbackInner<'_>]>(mc, self.into_inner()))
++        StashedCallback(roots.stash::<Rootable![Gc<'_, CallbackInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -137,12 +137,12 @@ impl Fetchable for StashedCallback {
+     type Fetched<'gc> = Callback<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        Callback::from_inner(roots.fetch(&self.0))
++        Callback::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedThread(DynamicRoot<Rootable![ThreadInner<'_>]>);
++pub struct StashedThread(DynamicRoot<Rootable![Gc<'_, ThreadInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedThread {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -156,7 +156,7 @@ impl<'gc> Stashable<'gc> for Thread<'gc> {
+     type Stashed = StashedThread;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedThread(roots.stash::<Rootable![ThreadInner<'_>]>(mc, self.into_inner()))
++        StashedThread(roots.stash::<Rootable![Gc<'_, ThreadInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -164,12 +164,12 @@ impl Fetchable for StashedThread {
+     type Fetched<'gc> = Thread<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        Thread::from_inner(roots.fetch(&self.0))
++        Thread::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedUserData(DynamicRoot<Rootable![UserDataInner<'_>]>);
++pub struct StashedUserData(DynamicRoot<Rootable![Gc<'_, UserDataInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedUserData {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -183,7 +183,7 @@ impl<'gc> Stashable<'gc> for UserData<'gc> {
+     type Stashed = StashedUserData;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedUserData(roots.stash::<Rootable![UserDataInner<'_>]>(mc, self.into_inner()))
++        StashedUserData(roots.stash::<Rootable![Gc<'_, UserDataInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -191,12 +191,12 @@ impl Fetchable for StashedUserData {
+     type Fetched<'gc> = UserData<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        UserData::from_inner(roots.fetch(&self.0))
++        UserData::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+ #[derive(Clone)]
+-pub struct StashedExecutor(DynamicRoot<Rootable![ExecutorInner<'_>]>);
++pub struct StashedExecutor(DynamicRoot<Rootable![Gc<'_, ExecutorInner<'_>>]>);
+ 
+ impl fmt::Debug for StashedExecutor {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+@@ -210,7 +210,7 @@ impl<'gc> Stashable<'gc> for Executor<'gc> {
+     type Stashed = StashedExecutor;
+ 
+     fn stash(self, mc: &Mutation<'gc>, roots: DynamicRootSet<'gc>) -> Self::Stashed {
+-        StashedExecutor(roots.stash::<Rootable![ExecutorInner<'_>]>(mc, self.into_inner()))
++        StashedExecutor(roots.stash::<Rootable![Gc<'_, ExecutorInner<'_>>]>(mc, self.into_inner()))
+     }
+ }
+ 
+@@ -218,7 +218,7 @@ impl Fetchable for StashedExecutor {
+     type Fetched<'gc> = Executor<'gc>;
+ 
+     fn fetch<'gc>(&self, roots: DynamicRootSet<'gc>) -> Self::Fetched<'gc> {
+-        Executor::from_inner(roots.fetch(&self.0))
++        Executor::from_inner(*roots.fetch(&self.0))
+     }
+ }
+ 
+diff --git a/src/string.rs b/src/string.rs
+index a3f4310..44f56a1 100644
+--- a/src/string.rs
++++ b/src/string.rs
+@@ -8,7 +8,7 @@ use std::{
+ use ahash::AHasher;
+ use gc_arena::{
+     allocator_api::MetricsAlloc, barrier::Unlock, lock::RefLock, metrics::Metrics, Collect,
+-    Collection, Gc, GcWeak, Mutation, Static,
++    Collection, Gc, GcWeak, Mutation, StaticCollect,
+ };
+ use hashbrown::{hash_map, raw::RawTable, HashMap};
+ 
+@@ -295,7 +295,7 @@ struct InternedStaticStrings<'gc>(
+         'gc,
+         RefLock<
+             HashMap<
+-                Static<*const [u8]>,
++                StaticCollect<*const [u8]>,
+                 String<'gc>,
+                 BuildHasherDefault<AHasher>,
+                 MetricsAlloc<'gc>,
+@@ -316,7 +316,7 @@ impl<'gc> InternedStaticStrings<'gc> {
+     }
+ 
+     fn intern(self, mc: &Mutation<'gc>, s: &'static [u8]) -> String<'gc> {
+-        let key = Static(s as *const _);
++        let key = StaticCollect(s as *const _);
+ 
+         // SAFETY: If a new string is added, we call the write barrier.
+         let mut static_strings = unsafe { self.0.unlock_unchecked() }.borrow_mut();
+@@ -365,13 +365,13 @@ impl<'gc> InternedStringSet<'gc> {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use gc_arena::arena::rootless_mutate;
++    use gc_arena::rootless_arena;
+ 
+     use super::*;
+ 
+     #[test]
+     fn test_string_header() {
+-        rootless_mutate(|mc| {
++        rootless_arena(|mc| {
+             let test1 = String::from_buffer(mc, Box::from(b"test 1".as_slice()));
+             let test2 = String::from_buffer(mc, Box::from(b"test 2".as_slice()));
+ 
+diff --git a/src/userdata.rs b/src/userdata.rs
+index d8b860e..1d2188b 100644
+--- a/src/userdata.rs
++++ b/src/userdata.rs
+@@ -3,7 +3,7 @@ use std::{
+     mem,
+ };
+ 
+-use gc_arena::{arena::Root, barrier, lock, Collect, Gc, Mutation, Rootable, Static};
++use gc_arena::{arena::Root, barrier, lock, Collect, Gc, Mutation, Rootable, StaticCollect};
+ use thiserror::Error;
+ 
+ use crate::{
+@@ -84,14 +84,14 @@ impl<'gc> UserData<'gc> {
+ 
+     /// Create a new `UserData` type from a non-GC value.
+     ///
+-    /// This equivalent to calling [`UserData::new`] with the given value wrapped in the [`Static`]
+-    /// wrapper provided by `gc-arena` and the `R` type set to `Static<T>`.
++    /// This equivalent to calling [`UserData::new`] with the given value wrapped in the [`StaticCollect`]
++    /// wrapper provided by `gc-arena` and the `R` type set to `StaticCollect<T>`.
+     ///
+     /// This is provided as a convenience as an easier API than dealing with the [`trait@Rootable`]
+     /// trait. In order to downcast values created with this method, you can use the *static*
+     /// variants of `UserData` methods as a further convenience, like [`UserData::downcast_static`].
+     pub fn new_static<T: 'static>(mc: &Mutation<'gc>, val: T) -> Self {
+-        Self::new::<Static<T>>(mc, Static(val))
++        Self::new::<Rootable![StaticCollect<T>]>(mc, StaticCollect(val))
+     }
+ 
+     pub fn from_inner(inner: Gc<'gc, UserDataInner<'gc>>) -> Self {
+@@ -116,9 +116,9 @@ impl<'gc> UserData<'gc> {
+ 
+     /// Check if a `UserData` is of type `T` created with [`UserData::new_static`].
+     ///
+-    /// This is equivalent to calling `this.is::<Static<T>>()`.
++    /// This is equivalent to calling `this.is::<StaticCollect<T>>()`.
+     pub fn is_static<T: 'static>(self) -> bool {
+-        self.is::<Static<T>>()
++        self.is::<Rootable![StaticCollect<T>]>()
+     }
+ 
+     /// Downcast a GC `UserData` and get a reference to it.
+@@ -157,10 +157,10 @@ impl<'gc> UserData<'gc> {
+     /// If [`UserData::is_static`] returns true for the provided type `T`, then this will return a
+     /// reference to the held type, otherwise it will return `Err(BadUserDataType)`.
+     ///
+-    /// This is equivalent to calling `this.downcast::<Static<T>>()` (except this returns a
+-    /// reference to the inner [`Static::0`] field instead).
++    /// This is equivalent to calling `this.downcast::<StaticCollect<T>>()` (except this returns a
++    /// reference to the inner [`StaticCollect::0`] field instead).
+     pub fn downcast_static<T: 'static>(self) -> Result<&'gc T, BadUserDataType> {
+-        self.downcast::<Static<T>>().map(|r| &r.0)
++        self.downcast::<Rootable![StaticCollect<T>]>().map(|r| &r.0)
+     }
+ 
+     pub fn metatable(self) -> Option<Table<'gc>> {

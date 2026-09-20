@@ -131,6 +131,14 @@ jobs:
       # root against the workspace crates.
       - run: python3 porting-kit/harnesses/unsafe-audit/audit_unsafe.py nmap-rs/crates/
         working-directory: .
+      # Vendored third-party source must stay EXACTLY `upstream commit + patches/`.
+      # Without this, someone fixes a bug directly in crates/vendor/piccolo/src/, the
+      # patch series stops describing the delta, and from then on nobody can tell our
+      # changes from upstream's — the vendored-code form of the silent drift every
+      # other gate here exists to prevent. Needs network (it fetches the pinned commit)
+      # and deliberately fails rather than skips when it cannot verify.
+      - run: nmap-rs/crates/vendor/piccolo/check_vendor.sh
+        working-directory: .
       # Fails if a shipped module never reached progress.json. The kit template has
       # carried this step since LESSONS #021 ("keep the table current" was a habit,
       # and habits rot silently — one milestone added ten modules and none reached
@@ -232,7 +240,26 @@ jobs:
       # default). It was measured clean over the full suite with the pcap feature on, so
       # there is no `detect_leaks=0` here — a suppression nobody needs is a suppression
       # that later hides a real leak.
-      - run: cargo +nightly test -p nmap-sys --all-features --target x86_64-unknown-linux-gnu
+      #
+      # TWO packages, not one. `-p nmap-sys` alone was correct while `sys` held every
+      # `unsafe` block in the tree; M6.0 vendored a Lua VM into `crates/vendor/piccolo`,
+      # which brought 30 more — a GC-backed interpreter with raw-pointer casts, hand-rolled
+      # inline vtables and a `Pin`ned boxed trait object. That is the single most
+      # sanitizer-worthy code in the repository, and this job would have executed NONE of
+      # it: piccolo is not in `nmap-sys`, so the package filter excluded it silently.
+      #
+      # Caught by the adversarial review of the M6.0 decision, not by the gate, which is
+      # the point: a job scoped by package name goes quietly vacuous the moment unsafe
+      # appears in a package the filter does not name. This is the same failure the
+      # comment block above records for `raw-ffi`, one layer out.
+      # `--lib --tests` excludes DOCTESTS, and that is a toolchain limit rather than a
+      # preference: rustdoc compiles a doctest with the sanitizer RUSTFLAGS but does not
+      # link the ASan runtime, so piccolo's one doctest fails with
+      # `undefined symbol: __asan_report_load4` before it runs a line. Everything that
+      # actually exercises unsafe is a real test binary and is still covered — measured
+      # at 21 binaries, including the 43 Lua programs in piccolo's golden-script suite,
+      # which is what drives the VM hard enough for this job to mean anything.
+      - run: cargo +nightly test -p nmap-sys -p piccolo --all-features --lib --tests --target x86_64-unknown-linux-gnu
         env:
           RUSTFLAGS: "-Zsanitizer=address"
 

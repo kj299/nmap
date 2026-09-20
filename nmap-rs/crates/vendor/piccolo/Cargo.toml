@@ -1,0 +1,67 @@
+# VENDORED THIRD-PARTY CODE — see PROVENANCE.md before editing anything here.
+#
+# `piccolo`, a stackless pure-Rust Lua VM, at upstream commit ce709eb plus the
+# one patch in patches/. It is vendored rather than depended on from crates.io
+# for two reasons, both measured (docs/M6-ANALYSIS.md, Decision 4):
+#
+#   * upstream master pins `gc-arena` by GIT REV, which `cargo deny check
+#     sources` rejects outright, and the published 0.3.3 is materially worse
+#     (32 of 68 semantics divergences against nmap's own Lua, vs 16 for master;
+#     5 process-aborting panics vs 2; every NaN `>`/`>=` comparison inverted).
+#   * this port must patch the VM regardless — it has no string metatable, so
+#     `s:sub(1, 2)` cannot work, and 454 of the 758 shipped NSE files use that
+#     form. That fix is in `meta_ops::index`, i.e. internals.
+#
+# It lives under `crates/` ON PURPOSE. `audit_unsafe.py` has no `--exclude`:
+# the path argument IS the exclusion, and CI walks `nmap-rs/crates/`. Moving it
+# elsewhere would hide 30 unsafe blocks from the gate. Being a WORKSPACE MEMBER
+# is equally deliberate — clippy's `undocumented_unsafe_blocks` sees a member
+# and is silent on a registry dependency (measured: 14 findings vs 0).
+[package]
+publish = false          # vendored third party; never published to crates.io
+name = "piccolo"
+version = "0.3.3"
+edition = "2021"
+license = "MIT"
+description = "Stackless Lua VM implemented in pure Rust (vendored; see PROVENANCE.md)"
+repository = "https://github.com/kyren/piccolo"
+
+[dependencies]
+ahash = "0.8"
+allocator-api2 = "0.2"
+anyhow = "1.0"
+# `=0.5.3`, exactly. This is the whole point of the back-port: 0.6.0 DELETED
+# `MetricsAlloc`, which is what ties GC pacing to Lua data growth. Without it a
+# hostile NSE script can allocate without the collector noticing. 0.7.0 also
+# fails this workspace's declared MSRV (it uses the unstable
+# `ptr_as_ref_unchecked`). Do not "upgrade" this without reading Decision 4.
+gc-arena = { version = "=0.5.3", features = ["allocator-api2", "hashbrown"] }
+hashbrown = { version = "0.14", features = ["raw"] }
+rand = { version = "0.8", features = ["small_rng"] }
+thiserror = "1.0"
+
+# Vendored code is held to this project's SAFETY documentation standard but not
+# to its style preferences: we did not write it and have no business policing
+# its idioms. The allow list below is therefore stylistic ONLY.
+#
+# `undocumented_unsafe_blocks` and `missing_safety_doc` are deliberately ABSENT
+# and must stay absent. Silencing those two is the only way vendoring this crate
+# could become the gate evasion it was accused of being during review.
+[lints.clippy]
+# Style is allowed WHOLESALE and safety documentation is denied explicitly.
+#
+# Enumerating the ~26 style lints this tree happens to trip today would be a
+# list that rots: the next clippy release adds lints, the build goes red on
+# someone else's idioms, and the reflex fix is to reach for a blanket allow that
+# takes the safety lints with it. Saying it once, as a group allow plus two
+# named denies, states the actual policy and cannot drift into that.
+#
+# `priority = -1` makes the group apply first so the two denies below win.
+#
+# The two denies are the whole point of vendoring this crate under `crates/` as
+# a workspace member: clippy reports `undocumented_unsafe_blocks` for a member
+# and is silent for a registry dependency (measured: 14 findings vs 0). Removing
+# either line silently deletes that gate — do not.
+all = { level = "allow", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

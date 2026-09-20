@@ -1,12 +1,27 @@
 # Architecture skeleton for a safety-first C-to-Rust port. Copy this directory to
 # your new project root and rename the crates. The layering (see
 # ../ARCHITECTURE-TEMPLATE.md) makes safety STRUCTURAL:
-#   core : #![forbid(unsafe_code)]  — all pure logic lives here, testable anywhere
-#   sys  : the ONLY crate allowed unsafe — FFI wrapped in audited safe fns + RAII
+#   core   : #![forbid(unsafe_code)]  — all pure logic lives here, testable anywhere
+#   sys    : the only FIRST-PARTY crate allowed unsafe — FFI wrapped in audited
+#            safe fns + RAII
+#   vendor : third-party source we ship (M6.0 onward: the Lua VM). Not written
+#            here and not `forbid`-able, so it is held to the same SAFETY
+#            documentation standard instead, by the same two gates that cover
+#            `sys` — audit_unsafe.py and clippy's undocumented_unsafe_blocks —
+#            plus a provenance check that re-derives it from upstream + patches.
+#            See crates/vendor/piccolo/PROVENANCE.md.
 #   cli  : thin — parse -> core -> render
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/sys", "crates/cli"]
+members = ["crates/core", "crates/sys", "crates/cli", "crates/vendor/piccolo"]
+
+# `crates/vendor/` holds third-party source we ship, currently just the Lua VM.
+# It is a workspace MEMBER and sits under `crates/` for one reason each, both
+# measured (docs/M6-ANALYSIS.md, Decision 4): `audit_unsafe.py` has no
+# `--exclude`, so the path CI walks (`nmap-rs/crates/`) is the only exclusion
+# mechanism there is; and clippy's `undocumented_unsafe_blocks` fires on a
+# workspace member and is silent on a registry dependency (14 findings vs 0).
+# Vendored code that no gate can see is the failure this layout exists to avoid.
 
 [workspace.package]
 edition = "2021"

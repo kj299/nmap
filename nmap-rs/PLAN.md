@@ -25,7 +25,8 @@ record; edit it as milestones complete.
 > **We are here:** Milestones 0-5 are complete and merged. `nmap-rs` runs `-sT`,
 > `-sS`, `-sU`, the six TCP flag scans, `-sV` and `-O` (IPv4 **and** IPv6), with
 > normal, XML and grepable output. The workspace holds **55 shipped modules**;
-> `core` is `#![forbid(unsafe_code)]` and `sys` is the only crate with `unsafe`, all
+> `core` is `#![forbid(unsafe_code)]` and `sys` is the only *first-party* crate with
+> `unsafe` (M6.0 added `crates/vendor/piccolo`, third-party and gated the same way), all
 > of it documented and gated by the unsafe-audit harness; miri is clean; CI is green
 > in ~14 minutes across 12 jobs (an `msrv` gate joined them).
 >

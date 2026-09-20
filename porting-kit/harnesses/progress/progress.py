@@ -335,6 +335,18 @@ def _self_test():
         check("bare-name and sub-module tracking both count as covered",
               cmd_drift(p, [os.path.join(d, "crates")]) == 0)
 
+        # A vendored tree must be skipped, and skipping it must not make an
+        # UNVENDORED untracked module disappear along with it.
+        vend = os.path.join(d, "crates", "vendor", "thirdparty", "src")
+        os.makedirs(vend)
+        open(os.path.join(vend, "lib.rs"), "w").write("pub mod x;\npub mod y;\n")
+        open(os.path.join(d, "crates", "vendor", "thirdparty", "PROVENANCE.md"), "w").write("x")
+        check("a PROVENANCE.md tree is not walked",
+              cmd_drift(p, [os.path.join(d, "crates")]) == 0)
+        open(os.path.join(crate, "lib.rs"), "a").write("pub mod d;\n")
+        check("skipping a vendored tree still catches real drift beside it",
+              cmd_drift(p, [os.path.join(d, "crates")]) == 1)
+
         # --- per-gate exemptions -------------------------------------------------
         cmd_init(p, ["sched", "parser"])
         cmd_set(p, "sched", "differential")
@@ -405,8 +417,27 @@ def shipped_modules(srcs):
     maturing port puts most of its code.
     """
     found = set()
+    vendored = []
     for src in srcs:
-        for dirpath, _dirs, files in os.walk(src):
+        for dirpath, dirs, files in os.walk(src):
+            # A tree that declares its own provenance is VENDORED THIRD PARTY, not a
+            # ported module, and must not be walked: the table tracks this port's own
+            # code through the six gates, and "ported -> differential -> fuzzed" is a
+            # claim that cannot be true of code nobody here ported. Listing a vendored
+            # dependency's sub-modules would either force 29 false gate claims or force
+            # someone to delete the gate.
+            #
+            # The marker is PROVENANCE.md rather than a path pattern or a --exclude
+            # flag, because a vendored tree has to carry one anyway (upstream, commit,
+            # local patches) and a directory cannot acquire one by accident.
+            #
+            # The skip is REPORTED, never silent. This is the same harness whose walk
+            # once missed every mod.rs and reported "0 untracked" while 25 sub-modules
+            # sat outside it; an exclusion nobody can see is how that happens again.
+            if "PROVENANCE.md" in files:
+                vendored.append(dirpath)
+                dirs[:] = []
+                continue
             for fname in ("lib.rs", "mod.rs"):
                 if fname not in files:
                     continue
@@ -427,7 +458,7 @@ def shipped_modules(srcs):
                 for m in MOD_RE.findall(text):
                     full = f"{prefix}::{m}" if prefix else m
                     found.add(f"{crate}::{full}")
-    return found
+    return found, sorted(vendored)
 
 
 def cmd_drift(path, srcs):
@@ -445,11 +476,14 @@ def cmd_drift(path, srcs):
                 return True
         return False
 
-    shipped = shipped_modules(srcs)
+    shipped, vendored = shipped_modules(srcs)
     missing = sorted(m for m in shipped if not covered(m))
     for m in missing:
         print(f"UNTRACKED: {m}")
-    print(f"\n{len(shipped)} shipped module(s), {len(missing)} untracked")
+    for v in vendored:
+        print(f"vendored (not walked, see {v}/PROVENANCE.md): {v}")
+    print(f"\n{len(shipped)} shipped module(s), {len(missing)} untracked"
+          + (f", {len(vendored)} vendored tree(s) skipped" if vendored else ""))
     if missing:
         print("Add them with: progress.py --file <f> set <module> <gate>")
     return 1 if missing else 0

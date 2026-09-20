@@ -194,6 +194,71 @@ correct, and exactly the kind of thing C gets wrong.
 `require` is not really a gap. NSE does not use stock `package` loading — it
 installs its own searcher in `nse_main.cc`, which is ours to write anyway.
 
+### Correction (M6.0): the table above counts functions, and the corpus needs dispatch
+
+**The gap table is incomplete in a way that changes the plan.** It measures
+missing *functions*. It does not measure the *mechanisms those calls travel
+through*, and the corpus depends on one that piccolo does not have.
+
+`s:sub(1, 2)` is not a call to `string.sub` that a runtime satisfies by defining
+`string.sub`. It is an `__index` lookup on a string **value**, which needs a
+string metatable the VM itself supports. PUC-Lua installs one in
+`luaopen_string` — `createmetatable` (`liblua/lstrlib.c:1852-1863`) sets a
+metatable on a dummy string and points its `__index` at the `string` library —
+and `OP_SELF` (`liblua/lvm.c:1383`) reaches it via `luaV_finishget`, which calls
+`luaT_gettmbyobj(L, t, TM_INDEX)` for any non-table receiver (`lvm.c:296`).
+
+piccolo has no such thing, in **either** the published 0.3.3 or master:
+
+* `meta_ops::index` (`src/meta_ops.rs:182` on master, `:66` at v0.3.3) matches
+  `Value::Table` and `Value::UserData`; every other value falls to `_ =>` and
+  errors.
+* The VM's method opcode routes straight there — `Operation::Method`,
+  `src/thread/vm.rs:336` — so there is no separate path to special-case.
+* `setmetatable`/`getmetatable` reject non-tables outright
+  (`src/stdlib/base.rs:200`: *"'getmetatable' can only be used on table types"*),
+  and `debug.setmetatable` — PUC-Lua's only route to installing one from Lua —
+  is marked unimplemented in `COMPATIBILITY.md`.
+
+So a runtime built by working down the gap table could implement every entry in
+it and still fail on most of the corpus. Measured by
+[`nse_corpus_census.py`](nse_corpus_census.py) over the 758 shipped
+`.nse`/`.lua` files, counting code only (Lua comments and string literals are
+blanked first, offsets preserved — without that, a grep for `//` reports 2,271
+integer-division sites where there are 38, the rest being URLs in comments):
+
+| | sites | files |
+|---|---|---|
+| method form, `s:NAME(...)` | **3,340** | **454 of 758 (59.9%)** |
+| …of which the receiver is a string **literal** | **992** | **284** |
+| `:format` method form | 885 | 269 |
+| `string.format(…)` direct form | 692 | 183 |
+
+The last two rows are the shape of the problem: the method form is not a
+minority spelling, it is the **dominant** one. And the 992 literal-receiver
+sites — `(" "):rep(n)`, `("%d"):format(x)` — are unambiguous: there is no
+reading under which those are anything but a string metatable lookup.
+
+**Consequence for Decision 3's prerequisite.** Adding string-method dispatch
+means a per-type metatable and a new arm in `meta_ops::index` — piccolo
+*internals*, not reachable from a downstream crate through its public API. So
+**a fork is required regardless of how the `gc-arena` pin resolves**, which
+removes "depend on the published crate and extend it only from outside" from the
+options. The prerequisite is still the right thing to do first; it just has one
+fewer way to end.
+
+Two things that *do* check out, recorded so they are not re-litigated:
+
+* **`_ENV` works.** piccolo compiles the top-level chunk with an `_ENV` upvalue
+  and exposes `Closure::new_with_env` (`src/closure.rs:219-269`,
+  `src/compiler/compiler.rs:1424-1462`). NSE's per-script environment
+  (`nse_main.lua:472-479` — `setmetatable(env, {__index = _G})` then
+  `local _ENV = env`) maps onto it directly. 337 sites in 134 corpus files.
+* **Lua 5.3/5.4 operators work.** Bitwise `& | ~ << >>` have opcodes
+  (`src/opcode.rs:257-277`) and `goto`/labels parse
+  (`src/compiler/parser.rs:446-682`). The corpus uses them in 80, 41, 26, 23 and
+  8 files respectively.
+
 ### The honest cost, and the risks
 
 This is a subproject, not a slice — comparable in size to M3 and M4 combined.

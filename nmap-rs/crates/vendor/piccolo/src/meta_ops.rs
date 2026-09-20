@@ -1,12 +1,13 @@
 use std::io::Write;
 
-use gc_arena::Collect;
+use gc_arena::{Collect, Rootable};
 use thiserror::Error;
 
 use crate::async_callback::{AsyncSequence, Locals};
 use crate::{async_sequence, SequenceReturn, Stack};
 use crate::{
-    table::InvalidTableKey, Callback, CallbackReturn, Context, Function, IntoValue, Table, Value,
+    table::InvalidTableKey, Callback, CallbackReturn, Context, Function, IntoValue, Singleton,
+    Table, Value,
 };
 
 /// An enum of every possible Lua metamethod.
@@ -161,10 +162,41 @@ pub enum MetaOperatorError {
 #[error("could not call a {} value", .0)]
 pub struct MetaCallError(&'static str);
 
-fn get_metatable<'gc>(val: Value<'gc>) -> Option<Table<'gc>> {
+/// The metatable shared by every Lua string value.
+///
+/// Lua gives strings a metatable, and it is what makes method-call syntax work: `s:sub(1, 2)` is
+/// an `__index` lookup on a *string*, not a call to `string.sub`. PUC-Lua builds this in
+/// `luaopen_string` -- `createmetatable` (`lstrlib.c`) sets a metatable on a dummy string and
+/// points its `__index` at the `string` library -- and there is exactly one of them per state, so
+/// `rawequal(getmetatable("a"), getmetatable("b"))` is true.
+///
+/// It is a [`Singleton`] for that reason: one table per [`Lua`](crate::Lua) instance, created on
+/// first use. It starts EMPTY; [`load_string`](crate::stdlib::load_string) is what installs
+/// `__index`. That split is deliberate rather than incidental -- an embedder that builds its
+/// stdlib from `Lua::empty()` can install its own `__index` here and get method dispatch over its
+/// own string library, without this module needing to know anything about it.
+pub fn string_metatable<'gc>(ctx: Context<'gc>) -> Table<'gc> {
+    #[derive(Copy, Clone, Collect)]
+    #[collect(no_drop)]
+    struct StringMeta<'gc>(Table<'gc>);
+
+    impl<'gc> Singleton<'gc> for StringMeta<'gc> {
+        fn create(ctx: Context<'gc>) -> Self {
+            Self(Table::new(&ctx))
+        }
+    }
+
+    ctx.singleton::<Rootable![StringMeta<'_>]>().0
+}
+
+fn get_metatable<'gc>(ctx: Context<'gc>, val: Value<'gc>) -> Option<Table<'gc>> {
     match val {
         Value::Table(t) => t.metatable(),
         Value::UserData(u) => u.metatable(),
+        // Every string shares one metatable. Returning it here is what lets the metamethod
+        // lookups below see it; since it holds only `__index`, every other metamethod resolves to
+        // nil exactly as it did before, so no arithmetic or comparison behaviour changes.
+        Value::String(_) => Some(string_metatable(ctx)),
         _ => None,
     }
 }
@@ -174,7 +206,7 @@ fn get_metamethod<'gc>(
     val: Value<'gc>,
     method: MetaMethod,
 ) -> Option<Value<'gc>> {
-    get_metatable(val)
+    get_metatable(ctx, val)
         .map(|mt| mt.get_value(ctx, method))
         .filter(|v| !v.is_nil())
 }
@@ -209,6 +241,23 @@ pub fn index<'gc>(
             } else {
                 Value::Nil
             };
+
+            if idx.is_nil() {
+                return Err(MetaOperatorError::Unary(
+                    MetaMethod::Index,
+                    table.type_name(),
+                ));
+            }
+
+            idx
+        }
+        // Strings. This arm is what makes `s:sub(1, 2)` and `("x"):rep(3)` work: the VM lowers
+        // both a method call and a plain index to this function (`Operation::Method`,
+        // `Operation::GetIndex` and `Operation::GetField` all route here), so one arm covers
+        // every path. Without it a string index raises, and no amount of filling in the `string`
+        // library helps, because the lookup never reaches that table.
+        Value::String(_) => {
+            let idx = string_metatable(ctx).get_value(ctx, MetaMethod::Index);
 
             if idx.is_nil() {
                 return Err(MetaOperatorError::Unary(

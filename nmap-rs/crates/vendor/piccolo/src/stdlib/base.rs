@@ -193,14 +193,19 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
     ctx.set_global(
         "getmetatable",
         Callback::from_fn(&ctx, |ctx, _, mut stack| {
-            if let Value::Table(t) = stack.get(0) {
-                stack.replace(ctx, t.metatable());
-                Ok(CallbackReturn::Return)
-            } else {
-                Err("'getmetatable' can only be used on table types"
-                    .into_value(ctx)
-                    .into())
-            }
+            // PUC-Lua's `getmetatable` never errors: it returns the value's metatable or nil
+            // (`lbaselib.c: luaB_getmetatable` -> `lua_getmetatable`, which returns 0 and pushes
+            // nothing when there is none). Verified against nmap's own Lua 5.4: a table, number,
+            // boolean, function and nil all give nil, and a string gives the shared string
+            // metatable. Refusing every non-table, as this did, diverged for all five.
+            let mt = match stack.get(0) {
+                Value::Table(t) => t.metatable(),
+                Value::UserData(u) => u.metatable(),
+                Value::String(_) => Some(meta_ops::string_metatable(ctx)),
+                _ => None,
+            };
+            stack.replace(ctx, mt);
+            Ok(CallbackReturn::Return)
         }),
     );
 

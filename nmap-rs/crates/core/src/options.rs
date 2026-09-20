@@ -39,6 +39,13 @@ pub enum ScanKind {
     Null,
     /// `-sX`: TCP Xmas scan.
     Xmas,
+    /// `-sL`: list scan — expand the targets, print them, send nothing.
+    ///
+    /// C sets `listscan`, `noportscan` **and** `PINGTYPE_NONE` (`nmap.cc:1307`),
+    /// so it is the one scan type that puts no packet on the wire. That is what
+    /// makes it the dry run: an operator can ask "what would you scan?" without
+    /// touching anything.
+    List,
 }
 
 // No `Eq`: `min_rate`/`max_rate` are `f64` (only `PartialEq`). Equality is used
@@ -394,6 +401,7 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-sF" => cfg.scan = ScanKind::Fin,
             "-sN" => cfg.scan = ScanKind::Null,
             "-sX" => cfg.scan = ScanKind::Xmas,
+            "-sL" => cfg.scan = ScanKind::List,
             "-sV" => cfg.service_version = true,
             "-O" => cfg.os_detection = true,
             // nmap accepts both spellings for the same behaviour.

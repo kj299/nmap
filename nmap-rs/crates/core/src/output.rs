@@ -120,11 +120,13 @@ pub fn render_normal(
     );
 
     let mut up = 0usize;
+    let mut first = true;
     for host in &results.hosts {
         if host.state == crate::model::HostState::Up {
             up = up.saturating_add(1);
         }
-        render_host_normal(&mut out, host, services, meta.service_version);
+        render_host_normal(&mut out, host, services, meta.service_version, first);
+        first = false;
     }
 
     let fps = collect_service_fingerprints(results);
@@ -197,13 +199,38 @@ fn render_host_normal(
     host: &Host,
     services: Option<&ServiceTable>,
     service_version: bool,
+    first: bool,
 ) {
     let name = match &host.hostname {
         Some(h) => format!("{h} ({})", host.address),
         None => host.address.to_string(),
     };
-    let _ = writeln!(out, "\nNmap scan report for {name}");
+    // The blank line SEPARATES host blocks; it does not prefix them, and a host
+    // with no block needs none. C emits "Nmap scan report" immediately after the
+    // Starting banner, blank-lines only between hosts that have something under
+    // them, and — in a list scan — no blank lines at all, because there is no
+    // port table for one to belong to:
+    //
+    //     Nmap scan report for 127.0.0.1
+    //     Nmap scan report for 127.0.0.2     <- `-sL`, no separators
+    //
+    // The old code emitted a leading "\n" unconditionally, which put a stray
+    // blank line at the top of every report. Invisible in a normal scan (the
+    // differential harness normalizes whitespace) but `-sL`'s entire output is
+    // these lines, which is what made it visible.
+    if !first && host.state != crate::model::HostState::Unknown {
+        out.push('\n');
+    }
+    let _ = writeln!(out, "Nmap scan report for {name}");
 
+    // A list scan (`-sL`) sends nothing, so it learns nothing about liveness.
+    // C prints the report line alone for those hosts — no "Host is up", no port
+    // table — and its grepable output calls the state `Unknown` rather than
+    // guessing `Down`. Saying "Host seems down" about a host we never probed
+    // would be inventing a result.
+    if host.state == crate::model::HostState::Unknown {
+        return;
+    }
     if host.state != crate::model::HostState::Up {
         let _ = writeln!(out, "Host seems down.");
         return;
@@ -307,10 +334,11 @@ pub fn render_grepable(
     );
     for host in &results.hosts {
         let hostname = host.hostname.as_deref().unwrap_or("");
-        let status = if host.state == crate::model::HostState::Up {
-            "Up"
-        } else {
-            "Down"
+        let status = match host.state {
+            crate::model::HostState::Up => "Up",
+            crate::model::HostState::Down => "Down",
+            // C emits `Status: Unknown` for a list scan.
+            crate::model::HostState::Unknown => "Unknown",
         };
         let _ = writeln!(
             out,
@@ -613,7 +641,11 @@ pub fn render_xml(
         let _ = writeln!(
             out,
             "<status state=\"{}\"/>",
-            if is_up { "up" } else { "down" }
+            match host.state {
+                crate::model::HostState::Up => "up",
+                crate::model::HostState::Down => "down",
+                crate::model::HostState::Unknown => "unknown",
+            }
         );
         let _ = writeln!(
             out,
@@ -673,6 +705,98 @@ pub fn render_xml(
 
 #[cfg(test)]
 mod tests {
+    /// A list scan's hosts render as the report line ALONE — no "Host is up",
+    /// no "Host seems down", no port table, and no blank lines between them.
+    ///
+    /// Verified against the reference: `nmap -sL -n 127.0.0.1-3` differs from
+    /// this port's `-sL` only in the banner and elapsed time.
+    #[test]
+    fn a_list_scan_host_renders_as_one_line() {
+        let mut results = ScanResults { hosts: Vec::new() };
+        for last in 1u8..=3 {
+            results.hosts.push(Host::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)),
+                HostState::Unknown,
+            ));
+        }
+        let out = render_normal(&results, &meta(), None);
+        for last in 1..=3 {
+            assert!(
+                out.contains(&format!("Nmap scan report for 127.0.0.{last}")),
+                "missing host {last}:\n{out}"
+            );
+        }
+        // Nothing may be claimed about a host we never probed.
+        assert!(!out.contains("Host is up"), "claimed liveness:\n{out}");
+        assert!(!out.contains("Host seems down"), "guessed down:\n{out}");
+        assert!(!out.contains("PORT"), "rendered a port table:\n{out}");
+        // Three report lines, back to back, with no blank between them.
+        assert!(
+            out.contains(
+                "Nmap scan report for 127.0.0.1\nNmap scan report for 127.0.0.2\nNmap scan report for 127.0.0.3"
+            ),
+            "expected no blank lines between list-scan hosts:\n{out}"
+        );
+        // And 0 hosts up, because nothing was probed.
+        assert!(
+            out.contains("(0 hosts up)"),
+            "a list scan must report 0 up:\n{out}"
+        );
+    }
+
+    /// The blank line separates host blocks; it does not prefix them. C emits
+    /// "Nmap scan report" immediately after the Starting banner.
+    #[test]
+    fn the_first_host_has_no_blank_line_before_it() {
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        host.ports.push(Port::new(
+            80,
+            Protocol::Tcp,
+            PortState::Closed,
+            Reason::ConnRefused,
+        ));
+        let results = ScanResults { hosts: vec![host] };
+        let out = render_normal(&results, &meta(), None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("Starting "), "got: {:?}", lines[0]);
+        assert!(
+            lines[1].starts_with("Nmap scan report"),
+            "expected the report line immediately after the banner, got: {:?}",
+            lines[1]
+        );
+    }
+
+    /// Grepable and XML must say `Unknown`/`unknown`, not collapse to Down.
+    /// C's grepable prints `Status: Unknown` for a list scan.
+    #[test]
+    fn unknown_liveness_is_not_reported_as_down() {
+        let results = ScanResults {
+            hosts: vec![Host::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                HostState::Unknown,
+            )],
+        };
+        let g = render_grepable(&results, &meta(), None);
+        assert!(g.contains("Status: Unknown"), "grepable:\n{g}");
+        assert!(!g.contains("Status: Down"), "grepable claimed down:\n{g}");
+        let x = render_xml(&results, &meta(), None);
+        assert!(x.contains("<status state=\"unknown\"/>"), "xml:\n{x}");
+        assert!(!x.contains("state=\"down\""), "xml claimed down:\n{x}");
+        // Runstats counts it as DOWN, which looks inconsistent with the
+        // per-host `state="unknown"` above — and is exactly what C does:
+        //
+        //     $ nmap -sL -n -oX - 127.0.0.1-2 | grep hosts
+        //     <hosts up="0" down="2" total="2"/>
+        //
+        // So the inconsistency belongs to the reference, and mirroring it is
+        // the correct behaviour. Asserted so nobody "fixes" it into a real
+        // divergence later.
+        assert!(
+            x.contains("<hosts up=\"0\" down=\"1\" total=\"1\"/>"),
+            "xml:\n{x}"
+        );
+    }
+
     use super::*;
     use crate::model::{Host, HostState, Port, Reason};
     use std::net::{IpAddr, Ipv4Addr};

@@ -132,6 +132,15 @@ fn scanned_count(args: &[&str]) -> usize {
     full.extend_from_slice(&["-sT", "-Pn", "-n", "127.0.0.1"]);
     let (stdout, stderr, ok) = run(&full);
     assert!(ok, "{args:?}: {stderr}");
+    // Ports reach the report two ways: listed individually, or summarized in
+    // "Not shown". Which one depends on how many share a state — M7.10 ported
+    // nmap's real threshold (25, scaled by -v/-d), so a handful of closed ports
+    // are now LISTED where this port used to summarize them unconditionally.
+    //
+    // This helper used to count only "Not shown" plus open lines, which was
+    // correct only while every non-open port was summarized. Counting both
+    // forms measures the thing the test is actually about — how many ports the
+    // selection sent to the scan — under either rendering.
     let not_shown = stdout
         .lines()
         .find_map(|l| {
@@ -142,7 +151,12 @@ fn scanned_count(args: &[&str]) -> usize {
         .unwrap_or(0);
     let listed = stdout
         .lines()
-        .filter(|l| l.contains("/tcp") && l.contains("open"))
+        .filter(|l| {
+            l.split('/')
+                .next()
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+                && l.contains("/tcp")
+        })
         .count();
     not_shown.saturating_add(listed)
 }

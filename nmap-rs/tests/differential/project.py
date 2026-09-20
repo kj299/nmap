@@ -10,14 +10,21 @@ Why a projection instead of a raw diff? The two tools' full output legitimately
 differs in ways that are NOT fidelity bugs and are out of M1 scope (logged in
 DIVERGENCES.md): the MVP renderer omits nmap's decorative XML preamble
 (`<!DOCTYPE>`, `<?xml-stylesheet?>`, `<scaninfo>`, `<verbose>`, `<debugging>`,
-`<times>`), collapses non-open ports into `<extraports>` where nmap lists each
-individually, and does not emit latency/`reason_ttl`/service-guess elements.
+`<times>`) and does not emit latency/`reason_ttl`/service-guess elements.
 Diffing raw XML would drown the load-bearing signal — did we get every port's
 STATE and REASON right? — in that intentional noise. This filter canonicalizes
 BOTH representations (per-port `<port state="closed">` AND aggregated
 `<extraports>`) to the same shape, so a genuine regression (an open port reported
 closed, a wrong reason, a miscounted closed set) breaks the match while the
-ledgered abbreviations stay invisible. Service NAMES are excluded on purpose: M1
+ledgered abbreviations stay invisible.
+
+As of M7.10 the "collapses non-open ports" abbreviation is GONE: this port
+implements nmap's real per-state listing threshold, so a closed port below it is
+listed by both tools and its identity and reason are compared, not merely its
+count. The aggregation is retained for the above-threshold case, where both
+tools emit `<extraports>`.
+
+Service NAMES are excluded on purpose: M1
 does no version detection, and the port-table service label is a decorative
 nmap-services lookup, not a scan finding.
 
@@ -25,6 +32,7 @@ Output is line-oriented and sorted-stable:
     host <addr> <status>
     open <portid> <proto> <reason>
     openfiltered <portid> <proto> <reason>
+    closed <portid> <proto> <reason>        (when listed individually)
     closed-count <proto> <n>
     filtered-count <proto> <n>
 
@@ -95,7 +103,16 @@ def project(xml_text):
                 elif st == "open|filtered":
                     lines.append(f"openfiltered {portid} {proto} {reason}")
                 elif st in COUNTED_STATES:
+                    # Identity, not just a count. Until M7.10 this port
+                    # collapsed every non-open port into <extraports> while C
+                    # listed them individually below its 25-per-state threshold,
+                    # so the projection could only compare COUNTS -- and a
+                    # ledgered "intentional MVP abbreviation" quietly meant this
+                    # scanner behaved as though `--open` were always given.
+                    # Both sides now follow nmap's real threshold, so the
+                    # individual ports are comparable and are compared.
                     counts[(st, proto)] = counts.get((st, proto), 0) + 1
+                    lines.append(f"{st} {portid} {proto} {reason}")
                 else:
                     # Any other state (e.g. unfiltered) — surface it explicitly.
                     lines.append(f"{st} {portid} {proto} {reason}")
@@ -128,7 +145,8 @@ def _self_test():
         <port protocol="tcp" portid="18443"><state state="open" reason="syn-ack"/></port>
         <port protocol="tcp" portid="19999"><state state="closed" reason="conn-refused"/><service name="dnp-sec"/></port>
       </ports></host></nmaprun>"""
-    # nmap-rs-style: open listed, closed collapsed into extraports.
+    # The same scan with the closed ports collapsed into <extraports>, which is
+    # what this port used to emit unconditionally.
     rs_xml = """<?xml version="1.0"?><nmaprun>
       <host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/>
       <ports>
@@ -137,7 +155,23 @@ def _self_test():
         <port protocol="tcp" portid="18443"><state state="open" reason="syn-ack"/><service name="unknown"/></port>
       </ports></host></nmaprun>"""
     a, b = project(nmap_xml), project(rs_xml)
-    check("per-port and extraports collapse to the same projection", a == b)
+    # THIS ASSERTION IS INVERTED FROM ITS ORIGINAL FORM. It used to require the
+    # two representations to project identically, which is what allowed this
+    # port to summarize every closed port while C listed them and still MATCH.
+    # Since M7.10 both tools follow nmap's real per-state threshold, so choosing
+    # the wrong representation is a genuine divergence and the projection must
+    # say so.
+    check("listing and collapsing are now DISTINGUISHED, not canonicalized", a != b)
+    # Both still agree on the closed COUNT, which is what makes the
+    # above-threshold case (where both tools emit <extraports>) comparable.
+    def closed_count(proj):
+        return [l for l in proj.splitlines() if l.startswith("closed-count")]
+
+    check("closed counts still agree across representations",
+          closed_count(a) == closed_count(b) == ["closed-count tcp 2"])
+    # And the individually-listed form carries per-port identity and reason.
+    check("listed closed ports carry identity and reason",
+          "closed 18081 tcp conn-refused" in a and "closed 19999 tcp conn-refused" in a)
     check("open ports + reason retained", "open 18080 tcp syn-ack" in a)
     check("closed aggregated to a count", "closed-count tcp 2" in a)
     check("service names excluded (decorative)", "dnp-sec" not in a and "unknown" not in b)

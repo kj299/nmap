@@ -105,6 +105,10 @@ pub enum Reason {
     AdminProhibited,
     /// ICMP time-exceeded → filtered (`ER_TIMEEXCEEDED`).
     TimeExceeded,
+    /// The operator asserted it (`ER_USER`, "user-set"). `-Pn` marks every host
+    /// up without probing, so this is the only honest host reason there is:
+    /// nothing was received, the liveness was declared.
+    UserSet,
     /// Reason not otherwise classified (`ER_UNKNOWN`).
     Unknown,
 }
@@ -113,6 +117,7 @@ impl Reason {
     /// Short reason token as nmap emits it (e.g. `"conn-refused"`, `"syn-ack"`).
     pub fn as_str(self) -> &'static str {
         match self {
+            Reason::UserSet => "user-set",
             Reason::ConnAccept => "syn-ack",
             Reason::ConnRefused => "conn-refused",
             Reason::Reset => "reset",
@@ -215,6 +220,13 @@ pub struct Host {
     /// that is what it describes, and because the XML and grepable renderers need it
     /// per host without a second lookup.
     pub os: Option<crate::osscan::HostOsReport>,
+    /// Why this host is believed up — C's `currenths->reason`, printed by
+    /// `--reason` as "Host is up, received syn-ack". `None` when nothing
+    /// established it (a list scan, or a host that is down).
+    ///
+    /// With `-Pn` C reports `user-set`: the operator asserted liveness, so the
+    /// honest answer is "because you said so" rather than a probe result.
+    pub reason: Option<Reason>,
 }
 
 impl Host {
@@ -223,6 +235,7 @@ impl Host {
             address,
             hostname: None,
             state,
+            reason: None,
             ports: Vec::new(),
             os: None,
         }

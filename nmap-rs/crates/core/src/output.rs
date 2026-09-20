@@ -31,6 +31,16 @@ pub struct ScanMeta<'a> {
     /// Whether `-sV` was requested — adds the VERSION column / `<service>` version
     /// attributes to the output, matching nmap.
     pub service_version: bool,
+    /// `--open`: force every non-open state into the summary, and drop hosts
+    /// with no open ports entirely.
+    pub open_only: bool,
+    /// `--reason`: add the REASON column and the host-liveness reason.
+    pub reason: bool,
+    /// `-v` / `-d` levels. They are here because nmap's decision about which
+    /// ports to *list* rather than summarize scales with them
+    /// (`portlist.cc:811`), so the renderer cannot make that call without them.
+    pub verbose: u8,
+    pub debugging: u8,
 }
 
 /// Assemble the human-readable VERSION column for a port from its `-sV` fields,
@@ -54,10 +64,78 @@ fn version_display(svc: &crate::model::ServiceInfo) -> String {
     s
 }
 
-/// A port is *shown* in the table iff it is open (or open|filtered); every other
-/// state is summarized as an ignored state ("Not shown" / `<extraports>`).
-fn is_shown(state: PortState) -> bool {
-    matches!(state, PortState::Open | PortState::OpenFiltered)
+/// Is this state summarized ("Not shown" / `<extraports>`) rather than listed?
+///
+/// A port of C's `PortList::isIgnoredState` (`portlist.cc:785`). **This used to
+/// be `matches!(state, Open | OpenFiltered)`** — i.e. this port always behaved
+/// as though `--open` had been given, summarizing every closed port however few
+/// there were. C lists them until a state exceeds a threshold:
+///
+/// ```console
+/// $ nmap    -sT -Pn -n -p 18080,18081,18443,19999 127.0.0.1
+/// 18080/tcp open   unknown
+/// 18081/tcp closed unknown          <- listed
+/// 18443/tcp open   unknown
+/// 19999/tcp closed dnp-sec          <- listed
+///
+/// $ nmap-rs (before M7.10)
+/// Not shown: 2 closed tcp ports (conn-refused)     <- summarized
+/// 18080/tcp open  unknown
+/// 18443/tcp open  unknown
+/// ```
+///
+/// The differential harness could not see it: `project.py` compares open ports
+/// and closed/filtered *counts*, and both spellings carry the same counts. It
+/// took implementing the flag that is *supposed* to cause this behaviour to
+/// notice that the behaviour was already unconditional.
+///
+/// The threshold is 25, scaled by verbosity and debugging exactly as C scales
+/// it; verified against the reference at 25 (listed) and 26 (summarized).
+fn is_ignored_state(host: &Host, state: PortState, meta: &ScanMeta) -> bool {
+    // `-d3` and above: nothing is ignored.
+    if meta.debugging > 2 {
+        return false;
+    }
+    // Open can never be ignored — which is what makes `--open` mean "only
+    // open", rather than "nothing at all".
+    if matches!(state, PortState::Open | PortState::Unknown) {
+        return false;
+    }
+    if state == PortState::OpenFiltered && (meta.verbose > 2 || meta.debugging > 2) {
+        return false;
+    }
+    let count = host.ports.iter().filter(|p| p.state == state).count();
+    // `--open`: everything that is not at least possibly open is summarized,
+    // however few there are.
+    if meta.open_only
+        && !matches!(state, PortState::OpenFiltered | PortState::Unfiltered)
+        && count > 0
+    {
+        return true;
+    }
+    let mut max_per_state: usize = 25;
+    if meta.verbose > 0 || meta.debugging > 0 {
+        let scale = usize::from(meta.verbose)
+            .saturating_add(1)
+            .saturating_add(20usize.saturating_mul(usize::from(meta.debugging)));
+        max_per_state = max_per_state.saturating_mul(scale);
+    }
+    count > max_per_state
+}
+
+/// The ports listed individually for a host, in the order they were discovered.
+fn shown_ports<'a>(host: &'a Host, meta: &ScanMeta) -> Vec<&'a crate::model::Port> {
+    host.ports
+        .iter()
+        .filter(|p| !is_ignored_state(host, p.state, meta))
+        .collect()
+}
+
+/// `--open` drops a host with no open ports from the report entirely
+/// (`nmap.cc:2312`). It still counts as up in the footer — the host was found,
+/// it just has nothing the operator asked to see.
+fn host_is_reportable(host: &Host, meta: &ScanMeta) -> bool {
+    !meta.open_only || host.ports.iter().any(|p| p.state == PortState::Open)
 }
 
 /// Service name for a port: the port's own info if present, else a lookup in the
@@ -106,7 +184,7 @@ fn service_column<'a>(
 }
 
 /// Ignored states (state → count), in nmap's display order, for a host.
-fn ignored_states(host: &Host) -> Vec<(PortState, usize)> {
+fn ignored_states(host: &Host, meta: &ScanMeta) -> Vec<(PortState, usize)> {
     // Order: closed, filtered, then any others we might carry.
     const ORDER: [PortState; 5] = [
         PortState::Closed,
@@ -117,6 +195,13 @@ fn ignored_states(host: &Host) -> Vec<(PortState, usize)> {
     ];
     let mut out = Vec::new();
     for state in ORDER {
+        // Only states the ignore rule actually ignores belong here. Listing a
+        // state in "Not shown" while also printing its ports would double-count
+        // them, and claiming ports are hidden when they are visible is the kind
+        // of small lie an operator reasonably relies on.
+        if !is_ignored_state(host, state, meta) {
+            continue;
+        }
         let n = host.ports.iter().filter(|p| p.state == state).count();
         if n > 0 {
             out.push((state, n));
@@ -154,10 +239,16 @@ pub fn render_normal(
     let mut up = 0usize;
     let mut first = true;
     for host in &results.hosts {
+        // The host still counts as up even when `--open` drops it from the
+        // report: it WAS found, it just has nothing the operator asked to see.
+        // C counts it the same way (`nmap.cc:2312` skips only the printing).
         if host.state == crate::model::HostState::Up {
             up = up.saturating_add(1);
         }
-        render_host_normal(&mut out, host, services, meta.service_version, first);
+        if !host_is_reportable(host, meta) {
+            continue;
+        }
+        render_host_normal(&mut out, host, services, meta, first);
         first = false;
     }
 
@@ -230,9 +321,10 @@ fn render_host_normal(
     out: &mut String,
     host: &Host,
     services: Option<&ServiceTable>,
-    service_version: bool,
+    meta: &ScanMeta,
     first: bool,
 ) {
+    let service_version = meta.service_version;
     let name = match &host.hostname {
         Some(h) => format!("{h} ({})", host.address),
         None => host.address.to_string(),
@@ -267,11 +359,24 @@ fn render_host_normal(
         let _ = writeln!(out, "Host seems down.");
         return;
     }
-    let _ = writeln!(out, "Host is up.");
+    // `--reason` says what established liveness: "Host is up, received syn-ack".
+    // With `-Pn` C reports `user-set` — the operator asserted it, so the honest
+    // answer is "because you said so" rather than a probe result.
+    //
+    // C also prints a latency here ("Host is up (0.000071s latency)"), which
+    // this port does not measure; see DIVERGENCES.md.
+    match (meta.reason, host.reason) {
+        (true, Some(r)) => {
+            let _ = writeln!(out, "Host is up, received {}.", r.as_str());
+        }
+        _ => {
+            let _ = writeln!(out, "Host is up.");
+        }
+    }
 
     // "Not shown" summary of ignored states. The protocol label follows the host's
     // ports (a `-sU` scan reports "udp ports"), defaulting to tcp.
-    let ignored = ignored_states(host);
+    let ignored = ignored_states(host, meta);
     if !ignored.is_empty() {
         let proto = host
             .ports
@@ -293,62 +398,78 @@ fn render_host_normal(
         let _ = writeln!(out, "Not shown: {}", parts.join(", "));
     }
 
-    let shown: Vec<_> = host.ports.iter().filter(|p| is_shown(p.state)).collect();
+    let shown = shown_ports(host, meta);
     if shown.is_empty() {
         return;
     }
 
-    // Column-aligned PORT / STATE / SERVICE [/ VERSION] table (nmap's
-    // NmapOutputTable shape). The VERSION column appears only under `-sV`.
-    let rows: Vec<(String, &str, String, String)> = shown
+    // Column-aligned table (nmap's NmapOutputTable shape). The columns are
+    // PORT STATE SERVICE [REASON] [VERSION], in that order — REASON sits
+    // *between* SERVICE and VERSION rather than being appended, which is where
+    // C puts it:
+    //
+    //     PORT      STATE  SERVICE REASON       VERSION
+    //
+    // Built generically rather than as four hand-written branches, because the
+    // two optional columns give four combinations and the widths have to be
+    // computed over whichever are present.
+    let mut headers: Vec<&str> = vec!["PORT", "STATE", "SERVICE"];
+    if meta.reason {
+        headers.push("REASON");
+    }
+    if service_version {
+        headers.push("VERSION");
+    }
+    let rows: Vec<Vec<String>> = shown
         .iter()
         .map(|p| {
-            (
+            let mut row = vec![
                 format!("{}/{}", p.number, p.protocol.as_str()),
-                p.state.as_str(),
+                p.state.as_str().to_string(),
                 service_column(p.number, p.protocol, &p.service, services, service_version),
-                if service_version {
-                    version_display(&p.service)
-                } else {
-                    String::new()
-                },
-            )
+            ];
+            if meta.reason {
+                row.push(p.reason.as_str().to_string());
+            }
+            if service_version {
+                row.push(version_display(&p.service));
+            }
+            row
         })
         .collect();
-    let port_w = rows
+
+    // Every column is padded to its widest cell except the last, whose padding
+    // would only produce trailing whitespace.
+    let widths: Vec<usize> = headers
         .iter()
-        .map(|(p, ..)| p.len())
-        .chain([4])
-        .max()
-        .unwrap_or(4);
-    let state_w = rows
-        .iter()
-        .map(|(_, s, ..)| s.len())
-        .chain([5])
-        .max()
-        .unwrap_or(5);
-    if service_version {
-        let svc_w = rows
+        .enumerate()
+        .map(|(i, h)| {
+            rows.iter()
+                .filter_map(|r| r.get(i).map(String::len))
+                .chain([h.len()])
+                .max()
+                .unwrap_or(h.len())
+        })
+        .collect();
+    let emit = |cells: &[&str]| -> String {
+        let last = cells.len().saturating_sub(1);
+        let line: String = cells
             .iter()
-            .map(|(_, _, svc, _)| svc.len())
-            .chain([7])
-            .max()
-            .unwrap_or(7);
-        let _ = writeln!(
-            out,
-            "{:port_w$} {:state_w$} {:svc_w$} VERSION",
-            "PORT", "STATE", "SERVICE"
-        );
-        for (p, s, svc, ver) in rows {
-            // Trailing space is trimmed so an empty VERSION leaves no dangling ws.
-            let line = format!("{p:port_w$} {s:state_w$} {svc:svc_w$} {ver}");
-            let _ = writeln!(out, "{}", line.trim_end());
-        }
-    } else {
-        let _ = writeln!(out, "{:port_w$} {:state_w$} SERVICE", "PORT", "STATE");
-        for (p, s, svc, _) in rows {
-            let _ = writeln!(out, "{p:port_w$} {s:state_w$} {svc}");
-        }
+            .enumerate()
+            .map(|(i, c)| {
+                if i == last {
+                    (*c).to_string()
+                } else {
+                    format!("{:w$} ", c, w = widths.get(i).copied().unwrap_or(0))
+                }
+            })
+            .collect();
+        line.trim_end().to_string()
+    };
+    let _ = writeln!(out, "{}", emit(&headers));
+    for row in &rows {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        let _ = writeln!(out, "{}", emit(&cells));
     }
 }
 
@@ -365,6 +486,9 @@ pub fn render_grepable(
         meta.scanner, meta.version, meta.started
     );
     for host in &results.hosts {
+        if !host_is_reportable(host, meta) {
+            continue;
+        }
         let hostname = host.hostname.as_deref().unwrap_or("");
         let status = match host.state {
             crate::model::HostState::Up => "Up",
@@ -378,7 +502,7 @@ pub fn render_grepable(
             host.address, hostname, status
         );
 
-        let shown: Vec<_> = host.ports.iter().filter(|p| is_shown(p.state)).collect();
+        let shown = shown_ports(host, meta);
         if !shown.is_empty() {
             let entries: Vec<String> = shown
                 .iter()
@@ -670,6 +794,11 @@ pub fn render_xml(
         if is_up {
             up = up.saturating_add(1);
         }
+        // Counted above, then skipped: `--open` hides the host, it does not
+        // un-find it.
+        if !host_is_reportable(host, meta) {
+            continue;
+        }
         let _ = writeln!(out, "<host>");
         let addrtype = if host.address.is_ipv6() {
             "ipv6"
@@ -701,7 +830,7 @@ pub fn render_xml(
 
         let _ = writeln!(out, "<ports>");
         // <extraports> for each ignored state.
-        for (st, count) in ignored_states(host) {
+        for (st, count) in ignored_states(host, meta) {
             let _ = writeln!(
                 out,
                 "<extraports state=\"{}\" count=\"{}\"/>",
@@ -709,7 +838,7 @@ pub fn render_xml(
                 count
             );
         }
-        for p in host.ports.iter().filter(|p| is_shown(p.state)) {
+        for p in shown_ports(host, meta) {
             let svc = service_name(p.number, p.protocol, p.service.name.as_deref(), services);
             let _ = writeln!(
                 out,
@@ -879,6 +1008,10 @@ mod tests {
             started: "TIME",
             elapsed_secs: 1.0,
             service_version: false,
+            open_only: false,
+            reason: false,
+            verbose: 0,
+            debugging: 0,
         }
     }
 
@@ -956,18 +1089,130 @@ mod tests {
         ServiceTable::parse("ssh 22/tcp 0.18\nhttp 80/tcp 0.48\n")
     }
 
+    /// **These assertions were inverted until M7.10.** They required the two
+    /// closed ports to be summarized, which is what this port did
+    /// unconditionally — i.e. it always behaved as though `--open` had been
+    /// given. C lists a state's ports until the state exceeds 25 of them, so
+    /// with two closed ports it lists them. Verified against the reference.
+    ///
+    /// The old assertion is kept, inverted, rather than deleted: the previous
+    /// behaviour is exactly what must not come back.
     #[test]
-    fn normal_shows_open_ports_and_not_shown_summary() {
+    fn normal_lists_a_small_number_of_closed_ports() {
         let out = render_normal(&sample(), &meta(), Some(&services()));
         assert!(out.contains("Nmap scan report for 127.0.0.1"));
         assert!(out.contains("Host is up."));
-        assert!(out.contains("Not shown: 2 closed tcp ports (conn-refused)"));
-        assert!(out.contains("PORT   STATE SERVICE"));
-        assert!(out.contains("22/tcp open  ssh"));
-        assert!(out.contains("80/tcp open  http"));
-        // Closed ports are summarized, not listed.
-        assert!(!out.contains("443/tcp"));
+        assert!(out.contains("PORT    STATE  SERVICE"), "{out}");
+        assert!(out.contains("22/tcp  open   ssh"), "{out}");
+        assert!(out.contains("80/tcp  open   http"), "{out}");
+        // Two closed ports are below the threshold, so they are LISTED …
+        assert!(out.contains("443/tcp closed"), "{out}");
+        // … and therefore must not also be claimed as hidden.
+        assert!(
+            !out.contains("Not shown:"),
+            "a listed port must not also be summarized:\n{out}"
+        );
         assert!(out.contains("Nmap done: 1 IP address (1 host up) scanned"));
+    }
+
+    /// The other side of the same threshold: past 25 ports in a state, C
+    /// summarizes. Both sides are asserted because a rule with a boundary needs
+    /// both of them — testing only one cannot tell a correct threshold from a
+    /// missing one.
+    #[test]
+    fn normal_summarizes_a_large_number_of_closed_ports() {
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        for n in 1..=26u16 {
+            host.ports.push(Port::new(
+                n,
+                Protocol::Tcp,
+                PortState::Closed,
+                Reason::ConnRefused,
+            ));
+        }
+        let results = ScanResults { hosts: vec![host] };
+        let out = render_normal(&results, &meta(), None);
+        assert!(
+            out.contains("Not shown: 26 closed tcp ports (conn-refused)"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("1/tcp"),
+            "summarized ports must not be listed:\n{out}"
+        );
+    }
+
+    /// `--open` forces the summary however few ports there are — that is the
+    /// flag's whole job, and the behaviour this port used to have by default.
+    #[test]
+    fn open_only_summarizes_even_a_couple_of_closed_ports() {
+        let m = ScanMeta {
+            open_only: true,
+            ..meta()
+        };
+        let out = render_normal(&sample(), &m, Some(&services()));
+        assert!(
+            out.contains("Not shown: 2 closed tcp ports (conn-refused)"),
+            "{out}"
+        );
+        assert!(!out.contains("443/tcp"), "{out}");
+        assert!(out.contains("22/tcp open  ssh"), "{out}");
+    }
+
+    /// `--open` drops a host with no open ports entirely, while still counting
+    /// it as up: it was found, it just has nothing the operator asked to see.
+    #[test]
+    fn open_only_hides_a_host_with_nothing_open() {
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        host.ports.push(Port::new(
+            80,
+            Protocol::Tcp,
+            PortState::Closed,
+            Reason::ConnRefused,
+        ));
+        let results = ScanResults { hosts: vec![host] };
+        let m = ScanMeta {
+            open_only: true,
+            ..meta()
+        };
+        let out = render_normal(&results, &m, None);
+        assert!(!out.contains("Nmap scan report"), "{out}");
+        assert!(
+            out.contains("(1 host up)"),
+            "the host is hidden, not un-found:\n{out}"
+        );
+        // The same suppression applies to the machine-readable formats.
+        assert!(!render_xml(&results, &m, None).contains("<address addr="));
+        assert!(!render_grepable(&results, &m, None).contains("Host: 127.0.0.1"));
+    }
+
+    /// `--reason` adds the REASON column *between* SERVICE and VERSION, and
+    /// names what established the host's liveness.
+    #[test]
+    fn reason_adds_a_column_and_a_host_reason() {
+        let mut results = sample();
+        results.hosts[0].reason = Some(Reason::UserSet);
+        let m = ScanMeta {
+            reason: true,
+            ..meta()
+        };
+        let out = render_normal(&results, &m, Some(&services()));
+        assert!(out.contains("Host is up, received user-set."), "{out}");
+        assert!(out.contains("PORT    STATE  SERVICE REASON"), "{out}");
+        assert!(out.contains("22/tcp  open   ssh     syn-ack"), "{out}");
+        assert!(out.contains("443/tcp closed"), "{out}");
+    }
+
+    /// Without `--reason` the column is absent and the host line is bare, even
+    /// when the reason data is present — the flag controls the rendering, not
+    /// the collection.
+    #[test]
+    fn without_reason_the_column_is_absent() {
+        let mut results = sample();
+        results.hosts[0].reason = Some(Reason::UserSet);
+        let out = render_normal(&results, &meta(), Some(&services()));
+        assert!(!out.contains("REASON"), "{out}");
+        assert!(out.contains("Host is up."), "{out}");
     }
 
     #[test]
@@ -983,7 +1228,12 @@ mod tests {
         let out = render_xml(&sample(), &meta(), Some(&services()));
         assert!(out.starts_with("<?xml version=\"1.0\""));
         assert!(out.contains("<address addr=\"127.0.0.1\" addrtype=\"ipv4\"/>"));
-        assert!(out.contains("<extraports state=\"closed\" count=\"2\"/>"));
+        // Two closed ports are below nmap's 25-per-state threshold, so the XML
+        // lists them individually and emits no <extraports>. This assertion was
+        // the other way round until M7.10; see
+        // `normal_lists_a_small_number_of_closed_ports`.
+        assert!(!out.contains("<extraports"), "{out}");
+        assert!(out.contains("portid=\"443\""), "{out}");
         assert!(out.contains(
             "<port protocol=\"tcp\" portid=\"22\"><state state=\"open\" reason=\"syn-ack\"/><service name=\"ssh\""
         ));

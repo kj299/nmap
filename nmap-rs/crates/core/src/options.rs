@@ -137,6 +137,17 @@ pub struct RunConfig {
     /// `--exclude-ports` given more than once — refused, matching C's
     /// `fatal("Only 1 --exclude-ports option allowed, …")`.
     pub exclude_ports_repeated: bool,
+    /// `--open`: show only hosts and ports that are (or may be) open.
+    ///
+    /// Two effects in C, and the second is easy to miss: every non-open state
+    /// is forced into the "Not shown" summary regardless of how few ports are
+    /// in it (`portlist.cc:806`), AND a host with no open ports is omitted from
+    /// the report entirely (`nmap.cc:2312`) while still counting as up.
+    pub open_only: bool,
+    /// `--reason`: add the REASON column to the normal port table, and say what
+    /// established each host's liveness. XML and grepable already carry the
+    /// reason unconditionally, so this flag does not touch them.
+    pub reason: bool,
     /// `--allports`: version-scan every open port, including the ones
     /// `nmap-service-probes` names in its `Exclude` directive.
     ///
@@ -322,6 +333,8 @@ impl Default for RunConfig {
             fast_scan: false,
             exclude_ports: None,
             exclude_ports_repeated: false,
+            open_only: false,
+            reason: false,
             allports: false,
             timing_template: None,
             min_rtt_timeout_ms: None,
@@ -762,6 +775,14 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             // probes; see the field docs for why it is not related to
             // `--exclude-ports` despite the name.
             _ if long_flag(s, "allports", &mut keybuf).is_some() => cfg.allports = true,
+            // `--open` also sets C's `defeat_rst_ratelimit`, with the comment
+            // "If they only want open, don't spend extra time (potentially)
+            // distinguishing closed from filtered" — a pacing choice this
+            // engine has no equivalent knob for, so only the reporting effect
+            // is reproduced. Reporting is the whole observable point of the
+            // flag; the pacing tweak only makes C slightly faster.
+            _ if long_flag(s, "open", &mut keybuf).is_some() => cfg.open_only = true,
+            _ if long_flag(s, "reason", &mut keybuf).is_some() => cfg.reason = true,
             // ---- port selection (M7.8) ----------------------------------
             // `-F`: fast scan. C sets `o.fastscan`, which `gettoppts` turns
             // into `level = 100` when no explicit level was given.

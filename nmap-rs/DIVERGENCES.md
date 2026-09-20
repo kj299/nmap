@@ -70,11 +70,17 @@ here so the format-level differential planned for M2/M3 treats them as known and
 not as regressions. None is a fidelity bug in *what was scanned*; each is a
 narrower *rendering* of the same result.
 
-- **Collapsed non-open ports.** C nmap lists every scanned port individually (incl.
-  `closed`/`filtered`) until a per-state count crosses its "Not shown" threshold;
-  the MVP always collapses non-open ports into a single `<extraports>` / `Not shown`
-  summary. `project.py` canonicalizes both to a per-(state,proto) count, so the
-  *set* is verified even though per-closed-port identity is not rendered.
+- **Collapsed non-open ports.** ~~C nmap lists every scanned port individually
+  (incl. `closed`/`filtered`) until a per-state count crosses its "Not shown"
+  threshold; the MVP always collapses non-open ports into a single
+  `<extraports>` / `Not shown` summary.~~ **CLOSED at M7.10.** The abbreviation
+  outlived its justification: collapsing unconditionally is precisely what
+  `--open` does, so this port behaved as though `--open` were always given, for
+  nine milestones. The renderer now implements nmap's real threshold (25 per
+  state, scaled by `-v`/`-d`; verified against the reference at 25 and 26), and
+  `project.py` no longer canonicalizes the two representations — it compares
+  each listed non-open port's identity and reason, and distinguishes listing
+  from collapsing. The differential is strictly stronger for it.
 - **No decorative XML preamble.** The MVP omits `<!DOCTYPE nmaprun>`,
   `<?xml-stylesheet?>`, `<scaninfo>`, `<verbose>`, `<debugging>`, `<hostnames>`,
   `<times>`, `reason_ttl`, and `startstr`/`xmloutputversion` attributes. These are
@@ -2262,3 +2268,14 @@ removed: that one was theatre, this one is unobservable.
       banner, so this keeps one convention rather than adding a third.
       Observable and narrow: an operator west of Greenwich running
       `-oA scan-%F` late in the evening gets tomorrow's date in the filename.
+
+- [ ] `host-line-latency` (`core::output`, M7.10) — **the "Host is up" line
+      carries no latency.** C prints `Host is up (0.000071s latency).`, and with
+      `--reason`, `Host is up, received user-set (0.000055s latency).` This port
+      prints `Host is up.` and `Host is up, received user-set.` — the reason is
+      reproduced, the latency is not, because nothing here measures per-host RTT
+      for reporting. Pre-existing (M1); recorded now because M7.10 is the change
+      that touches this exact line, and leaving it unrecorded while modifying it
+      would be the easiest way for it to be forgotten. The differential does not
+      see it: `project.py` reads XML, where the latency lives in `<times>`,
+      which the MVP omits (already ledgered above).

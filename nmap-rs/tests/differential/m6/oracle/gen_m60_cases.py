@@ -80,6 +80,26 @@ CASES: list[tuple[str, str, str]] = [
     ("nan_eq_self", "return 0/0 == 0/0", "false"),
     ("nan_lt", "return 0/0 < 1", "false"),
     ("nan_not_lt", "return not (0/0 < 1)", "true — the negation must also hold"),
+    # EVERY NaN comparison, in both operand orders. All six are false in Lua,
+    # which is the whole point: NaN is unordered, so a compiler that lowers
+    # `a > b` to `not (a <= b)` instead of to `b < a` inverts exactly these and
+    # nothing else. That is a silent wrong answer, not a crash, and it is
+    # invisible unless `>` and `>=` are tested SEPARATELY from `<` and `<=`.
+    ("nan_gt", "return 0/0 > 1", "false"),
+    ("nan_ge", "return 0/0 >= 1", "false"),
+    ("nan_le", "return 0/0 <= 1", "false"),
+    ("gt_nan", "return 1 > 0/0", "false"),
+    ("ge_nan", "return 1 >= 0/0", "false"),
+    ("lt_nan", "return 1 < 0/0", "false"),
+    ("le_nan", "return 1 <= 0/0", "false"),
+    ("nan_gt_nan", "return 0/0 > 0/0", "false"),
+    ("nan_ge_nan", "return 0/0 >= 0/0", "false"),
+    # and the ordinary orderings, so a wholesale inversion cannot hide behind
+    # the NaN rows alone
+    ("gt_true", "return 2 > 1", "true"),
+    ("ge_eq", "return 1 >= 1", "true"),
+    ("gt_false", "return 1 > 2", "false"),
+    ("gt_mixed", "return 2 > 1.5", "true — integer vs float ordering"),
     ("inf_pos", "return 1/0", "inf"),
     ("inf_neg", "return -1/0", "-inf"),
 

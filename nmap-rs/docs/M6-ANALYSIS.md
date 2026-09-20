@@ -431,16 +431,23 @@ collection pacing."
 
 | option | builds | `cargo deny` | MSRV 1.88 | GC pacing | divergences / panics |
 |---|---|---|---|---|---|
-| **A** published 0.3.3 | yes, 0 errors | **all ok** | yes | intact | **26 / 55, 5 panics** |
-| **B** fork → gc-arena 0.7.0 | yes, after ~100 lines | all ok | **NO** | **lost** | 16 / 55, 2 panics |
-| **B′** fork → gc-arena 0.6.1 | yes | all ok | yes | **lost** | 16 / 55, 2 panics |
-| **C** fork → gc-arena `=0.5.3` | yes, after **~40 lines** | **all ok** | **yes** | **intact** | **16 / 55, 2 panics** |
+| **A** published 0.3.3 | yes, 0 errors | **all ok** | yes | intact | **32 / 68, 5 panics** |
+| **B** fork → gc-arena 0.7.0 | yes, after ~100 lines | all ok | **NO** | **lost** | 16 / 68, 2 panics |
+| **B′** fork → gc-arena 0.6.1 | yes | all ok | yes | **lost** | 16 / 68, 2 panics |
+| **C** fork → gc-arena `=0.5.3` | yes, after **~40 lines** | **all ok** | **yes** | **intact** | **16 / 68, 2 panics** |
 
 Divergence counts are against [`m60_semantics_golden.txt`](../tests/differential/m6/m60_semantics_golden.txt),
-55 cases evaluated by nmap's own Lua. See the M6.0 oracle commit for the defect
-detail; the short version is that `math.mininteger % -1` **aborts the process**
-in every version, `pcall` does not contain it, and 0.3.3 additionally gets
-`-7 // 2` wrong and panics on three bit-shift cases.
+68 cases evaluated by nmap's own Lua. `math.mininteger % -1` **aborts the
+process** in every version and `pcall` does not contain it. 0.3.3 additionally
+gets `-7 // 2` wrong, panics on three bit-shift cases, and — found by the
+adversarial pass, not by any probe — **inverts every NaN `>` and `>=`
+comparison**: `v0.3.3 src/compiler/operators.rs:146-155` lowers `a > b` to
+`LessEq { skip_if: !skip_if }`, a *negation*, where master lowers it to
+`Less { left: right, right: left }`, an operand *swap*. NaN is unordered, so
+`a <= b` is false and the negation yields `true`. All six NaN ordering cases are
+wrong in 0.3.3 and right in master. That is a silent wrong answer in float
+comparison on parsed protocol data, and it is invisible unless `>`/`>=` are
+tested separately from `<`/`<=` — which the corpus now does.
 
 Two measurements decided it, and neither was in the original framing:
 

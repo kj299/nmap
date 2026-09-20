@@ -60,7 +60,10 @@ if (( REFRESH )); then
 fi
 
 for patch in "${PATCHES[@]}"; do
-  if ! git -C "$WORK/up" apply --include='src/*' "$patch" 2>"$WORK/apply.err"; then
+  # Patches may touch src/ AND tests/. Cargo.toml stays excluded because ours is
+  # a rewrite rather than a patch: upstream's is a workspace root and cannot be
+  # vendored as-is, which PROVENANCE.md records.
+  if ! git -C "$WORK/up" apply --include='src/*' --include='tests/*' "$patch" 2>"$WORK/apply.err"; then
     echo "check_vendor: $(basename "$patch") does not apply to ${COMMIT:0:12}" >&2
     cat "$WORK/apply.err" >&2
     exit 1
@@ -86,7 +89,7 @@ if (( ok )); then
   exit 0
 fi
 
-echo "FAIL: vendored src/ is not 'upstream + patches'." >&2
+echo "FAIL: vendored src/ or tests/ is not 'upstream + patches'." >&2
 echo "  Either the edit belongs in patches/ -- update the patch that owns that" >&2
 echo "  intent, or add a new numbered one -- or it was not meant to be there." >&2
 head -60 "$WORK/drift.diff" >&2

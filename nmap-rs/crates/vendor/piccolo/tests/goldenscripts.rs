@@ -11,6 +11,21 @@
 //! where `mode` dictates how to handle errors
 //! and `script` is a valid Lua script.
 
+// Skipped under Miri: this suite walks `tests/scripts/` with `read_dir`, and
+// Miri's isolation refuses directory access ("unsupported operation: `opendir`
+// not available when isolation is enabled"). The alternative, running the whole
+// Miri job with `-Zmiri-disable-isolation`, would weaken the gate for this
+// port's OWN code to accommodate a vendored dependency's test harness, which is
+// the wrong trade. The same accommodation was already made for this port's
+// file-reading tests in `cli` (LESSONS #030).
+//
+// What this costs is worth stating plainly rather than leaving implied: Miri
+// still covers piccolo's `--lib` tests, which is where every one of its 30
+// `unsafe` blocks lives, and ASan covers the golden scripts instead -- that job
+// runs them under instrumentation with no isolation to fight, which is why
+// `tests/` is vendored at all.
+#![cfg(not(miri))]
+
 use piccolo::{Closure, Executor, Lua};
 use std::{fs::read_dir, io::BufRead, path::PathBuf, sync::mpsc::channel};
 

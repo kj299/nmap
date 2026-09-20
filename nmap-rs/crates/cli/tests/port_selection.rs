@@ -16,8 +16,35 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_nmap-rs")
 }
 
+/// The repository root, which holds `nmap-services` and `nmap-service-probes`.
+fn datadir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
+/// Run the binary with its data directory **pinned to this repository**.
+///
+/// This is not tidiness, it is the difference between a test that means
+/// something and one that does not. `load_services` searches the working
+/// directory, two parents, and finally `/usr/share/nmap/nmap-services`. On a
+/// developer machine with nmap installed, these tests therefore read the
+/// *installed* database — a different file from the one the golden port sets
+/// were generated from (LESSONS #029: `wsman` carries a different ratio in
+/// each). On a CI runner without nmap, none of the candidates resolve at all,
+/// the selection falls back to the historical 1-1024 sweep, and
+/// `--top-ports 10` scans 1024 ports.
+///
+/// Both happened on the same PR: green here for the wrong reason, red on CI for
+/// the right one. Pinning makes the binary read the same file the goldens came
+/// from, on every machine.
 fn run(args: &[&str]) -> (String, String, bool) {
+    let dir = datadir();
+    assert!(
+        dir.join("nmap-services").exists(),
+        "nmap-services missing from {} — these tests cannot mean anything without it",
+        dir.display()
+    );
     let out = Command::new(bin())
+        .env("NMAP_RS_DATADIR", &dir)
         .args(args)
         .output()
         .expect("nmap-rs runs");

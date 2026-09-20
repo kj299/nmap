@@ -313,6 +313,20 @@ async fn main() -> ExitCode {
         if cfg.assume_up && host.state != HostState::Up {
             host.state = HostState::Up;
         }
+        // Why this host is believed up, for `--reason`. With -Pn the answer is
+        // `user-set`: the operator asserted liveness and nothing probed it, so
+        // reporting a packet reason would be inventing evidence. Otherwise the
+        // host is up because some port answered, and the reason is that port's.
+        if host.state == HostState::Up {
+            host.reason = if cfg.assume_up {
+                Some(nmap_core::model::Reason::UserSet)
+            } else {
+                host.ports
+                    .iter()
+                    .find(|p| p.state == PortState::Open || p.state == PortState::Closed)
+                    .map(|p| p.reason)
+            };
+        }
     }
 
     // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
@@ -342,6 +356,10 @@ async fn main() -> ExitCode {
         started: &started,
         elapsed_secs: elapsed,
         service_version: cfg.service_version,
+        open_only: cfg.open_only,
+        reason: cfg.reason,
+        verbose: cfg.verbose,
+        debugging: cfg.debugging,
     };
 
     if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref(), start_epoch) {

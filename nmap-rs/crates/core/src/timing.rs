@@ -155,7 +155,22 @@ pub struct TimingParams {
     pub max_parallelism: u32,
     pub scan_delay_ms: i64,
     pub max_tcp_scan_delay_ms: i64,
+    /// UDP keeps its own ceiling. `-T4`/`-T5` deliberately do NOT lower it —
+    /// C's comment is "No call to setMaxUDPScanDelay because of rate-limiting
+    /// and unreliability" — so an aggressive template speeds up TCP and SCTP
+    /// while leaving UDP paced as before.
+    pub max_udp_scan_delay_ms: i64,
+    pub max_sctp_scan_delay_ms: i64,
     pub max_retransmissions: u32,
+    /// `--host-timeout`: give up on a host after this long. `0` is nmap's "no
+    /// timeout", and is the default at every template except Insane.
+    pub host_timeout_ms: i64,
+    /// `--min-parallelism`; `0` means unset (`NmapOps::min_parallelism`).
+    pub min_parallelism: u32,
+    /// `--min-hostgroup` / `--max-hostgroup`: how many hosts are scanned as one
+    /// batch. No template changes these; only the explicit options do.
+    pub min_hostgroup: u32,
+    pub max_hostgroup: u32,
 }
 
 impl Default for TimingParams {
@@ -169,7 +184,13 @@ impl Default for TimingParams {
             max_parallelism: 0,
             scan_delay_ms: 0,
             max_tcp_scan_delay_ms: 1000, // MAX_TCP_SCAN_DELAY
+            max_udp_scan_delay_ms: 1000, // MAX_UDP_SCAN_DELAY
+            max_sctp_scan_delay_ms: 1000,
             max_retransmissions: 10,
+            host_timeout_ms: 0,     // NmapOps.cc:264 — 0 is "no timeout"
+            min_parallelism: 0,     // NmapOps.cc:250 — 0 is "unset"
+            min_hostgroup: 1,       // NmapOps.cc:256
+            max_hostgroup: 100_000, // NmapOps.cc:257
         }
     }
 }
@@ -200,6 +221,8 @@ impl TimingParams {
                 p.set_max_rtt(1250);
                 p.set_initial_rtt(500);
                 p.max_tcp_scan_delay_ms = 10;
+                p.max_sctp_scan_delay_ms = 10;
+                // Deliberately not max_udp_scan_delay_ms; see the field docs.
                 p.max_retransmissions = 6;
             }
             TimingTemplate::Insane => {
@@ -207,6 +230,9 @@ impl TimingParams {
                 p.set_max_rtt(300);
                 p.set_initial_rtt(250);
                 p.max_tcp_scan_delay_ms = 5;
+                p.max_sctp_scan_delay_ms = 5;
+                // Insane is the only template that sets a host timeout at all.
+                p.host_timeout_ms = 900_000; // 15 minutes, nmap.cc:1392
                 p.max_retransmissions = 2;
             }
         }
@@ -214,7 +240,7 @@ impl TimingParams {
     }
 
     /// `setInitialRttTimeout`: also raises max / lowers min to stay consistent.
-    fn set_initial_rtt(&mut self, ms: i64) {
+    pub(crate) fn set_initial_rtt(&mut self, ms: i64) {
         self.initial_rtt_timeout_ms = ms;
         if ms > self.max_rtt_timeout_ms {
             self.max_rtt_timeout_ms = ms;
@@ -225,7 +251,7 @@ impl TimingParams {
     }
 
     /// `setMaxRttTimeout`: also lowers min / initial if they exceed the new max.
-    fn set_max_rtt(&mut self, ms: i64) {
+    pub(crate) fn set_max_rtt(&mut self, ms: i64) {
         self.max_rtt_timeout_ms = ms;
         if ms < self.min_rtt_timeout_ms {
             self.min_rtt_timeout_ms = ms;
@@ -236,7 +262,7 @@ impl TimingParams {
     }
 
     /// `setMinRttTimeout`: also raises max / initial if they are below the new min.
-    fn set_min_rtt(&mut self, ms: i64) {
+    pub(crate) fn set_min_rtt(&mut self, ms: i64) {
         self.min_rtt_timeout_ms = ms;
         if ms > self.max_rtt_timeout_ms {
             self.max_rtt_timeout_ms = ms;

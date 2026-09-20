@@ -195,6 +195,7 @@
     "sys::synscan": "unsafe_audited",
     "sys::udpscan": "unsafe_audited",
     "targets": "unsafe_audited",
+    "timespec": "unsafe_audited",
     "timing": "unsafe_audited"
   }
 }

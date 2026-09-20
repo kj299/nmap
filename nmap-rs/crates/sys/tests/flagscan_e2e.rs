@@ -136,6 +136,9 @@ async fn ack_and_fin_scans_resolve_a_closed_port() {
                     seqmask: 0x2468_ACE0,
                 },
                 nmap_core::timing::TimingTemplate::Insane,
+                nmap_core::timing::TimingParams::for_template(
+                    nmap_core::timing::TimingTemplate::Insane,
+                ),
                 0,
                 base_port,
                 true,

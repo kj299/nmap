@@ -5,6 +5,22 @@ failed: the C may itself be buggy (the prime directive), so a difference is a
 question — "Rust bug, or intentional fix of a C defect?" — and the intentional
 ones live in a ledger (DIVERGENCES.md) that suppresses them on future runs.
 
+FIXTURES MUST BE STATELESS ACROSS CASES (LESSONS #028). Every case in a matrix
+usually runs against one shared fixture — a listener, a server, a temp tree. If
+that fixture holds anything with a bounded queue (a listen backlog, a thread
+pool, a connection or file-handle limit), it must be drained or reset between
+cases. Otherwise the fixture's meaning drifts as the matrix runs: nmap's
+differential bound "open" ports with `listen(16)` and never accepted, so the
+17th connection was dropped instead of answered, and the case with the tightest
+retry budget reported a plainly-open port as `filtered` at case 14 of 16. It
+reproduced on every run and looked exactly like a fidelity bug in the rewrite.
+
+The diagnostic that saves the time: **a case that fails deterministically inside
+the harness but will not reproduce against a hand-rolled fixture is pointing at
+the harness's shared state, not at the code under test.** Deterministic is not
+the same as caused-by-the-diff — a queue that fills at the same point every run
+fails just as repeatably as a logic bug.
+
 Two comparison modes:
   * same-binary-both-platforms: --oracle and --rust are real binaries.
   * oracle-substitution: when the reference can't run here, point --oracle at a

@@ -46,6 +46,7 @@ pub mod servicescan;
 pub mod sigstore;
 pub mod synscan;
 pub mod targets;
+pub mod timespec;
 pub mod timing;
 pub mod trace;
 pub mod udpscan;

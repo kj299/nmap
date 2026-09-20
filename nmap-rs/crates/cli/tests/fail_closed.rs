@@ -39,17 +39,21 @@ fn run(args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// This used to be written with `--exclude`, which M7.4 implements. The example
-/// moved to a still-unimplemented value-taking option rather than being deleted:
-/// the property under test is not about any one flag, it is that an option we
-/// cannot honour stops the scan instead of leaking its argument into the target
-/// list.
+/// This example has now moved twice: it was `--exclude` until M7.4 implemented
+/// that, then `--scan-delay` until M7.7 implemented that. Each time the example
+/// moved to a still-unimplemented value-taking option rather than being
+/// deleted, because the property under test is not about any one flag — it is
+/// that an option we cannot honour stops the scan instead of leaking its
+/// argument into the target list.
+///
+/// When `--top-ports` lands, move it again. The day no unimplemented
+/// value-taking option is left is the day this test can go.
 #[test]
 fn an_unimplemented_option_refuses_to_scan() {
-    let (stdout, stderr, ok) = run(&["--scan-delay", "5s", "-sT", "-p", "80", "127.0.0.1"]);
+    let (stdout, stderr, ok) = run(&["--top-ports", "5", "-sT", "-p", "80", "127.0.0.1"]);
     assert!(!ok, "must exit non-zero, like C nmap's `case '?'`");
     assert!(
-        stderr.contains("--scan-delay"),
+        stderr.contains("--top-ports"),
         "the offending option should be named: {stderr}"
     );
     assert!(
@@ -85,12 +89,21 @@ fn the_excluded_address_is_never_scanned() {
 
 /// Rate limits are constraints too: ignoring `-T2` or `--scan-delay` scans
 /// harder than asked, which can take a fragile target down.
+///
+/// M7.7 implemented most of this list, so the test now asserts the *stronger*
+/// half of the same property for those: a constraint we accept must actually
+/// bind. The refusal half stays, aimed at the constraints this engine still
+/// cannot honour. Both halves say the same thing — a limit the operator set is
+/// never silently exceeded — and which half a flag belongs in is the only thing
+/// that changes as the port fills in.
 #[test]
-fn ignoring_a_rate_limit_is_also_refused() {
+fn a_constraint_we_cannot_honour_is_refused() {
     for args in [
-        &["-T2", "-sT", "-p", "80", "127.0.0.1"][..],
-        &["--scan-delay", "5s", "-sT", "-p", "80", "127.0.0.1"][..],
-        &["--max-retries", "1", "-sT", "-p", "80", "127.0.0.1"][..],
+        // No per-host deadline in the engine, so a --host-timeout would be a
+        // bound we run straight past.
+        &["--host-timeout", "30s", "-sT", "-p", "80", "127.0.0.1"][..],
+        // No hostgroup batching, so a ceiling on concurrency would not bind.
+        &["--max-hostgroup", "2", "-sT", "-p", "80", "127.0.0.1"][..],
         &["--top-ports", "5", "-sT", "127.0.0.1"][..],
     ] {
         let (stdout, _, ok) = run(args);
@@ -100,6 +113,24 @@ fn ignoring_a_rate_limit_is_also_refused() {
             "{args:?} scanned anyway"
         );
     }
+}
+
+/// The other half of the same property, for the constraints M7.7 implemented:
+/// accepting them is only correct if they bind. `-T2` is a 400ms inter-probe
+/// delay, so three ports cannot complete in under 800ms — if the option were
+/// accepted and ignored, this scan would finish immediately and be far louder
+/// than the operator asked for.
+#[test]
+fn a_constraint_we_do_accept_actually_binds() {
+    let start = std::time::Instant::now();
+    let (stdout, stderr, ok) = run(&["-T2", "-sT", "-Pn", "-n", "-p", "1-3", "127.0.0.1"]);
+    assert!(ok, "-T2 is implemented now; this must scan: {stderr}");
+    assert!(stdout.contains("Nmap scan report for 127.0.0.1"));
+    assert!(
+        start.elapsed().as_millis() >= 800,
+        "-T2 finished in {:?}: its scan delay was accepted and then ignored",
+        start.elapsed()
+    );
 }
 
 /// The gate must not fire on a supported invocation.

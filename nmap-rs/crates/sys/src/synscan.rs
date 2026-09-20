@@ -11,7 +11,7 @@
 use std::net::IpAddr;
 
 #[cfg(feature = "pcap")]
-use nmap_core::timing::TimingTemplate;
+use nmap_core::timing::{TimingParams, TimingTemplate};
 
 /// Run a SYN scan over several targets with route/source selection and pcap capture —
 /// the CLI-facing entry point (feature `pcap`). Targets sharing an egress route are
@@ -26,6 +26,7 @@ pub async fn syn_scan_targets(
     targets: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_parallelism: usize,
     overrides: nmap_core::build::PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
@@ -33,6 +34,14 @@ pub async fn syn_scan_targets(
     // route-group inside the engine).
     let (seqmask, _base) = crate::route::random_scan_keys();
     let kind = crate::group::SynKind { seqmask };
-    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism, overrides)
-        .await
+    crate::group::group_scan_targets(
+        &kind,
+        targets,
+        ports,
+        template,
+        params,
+        max_parallelism,
+        overrides,
+    )
+    .await
 }

@@ -101,6 +101,10 @@ struct HostCtx {
     sched: HostScheduler,
     target: Ipv4Addr,
     finals: Vec<(u16, PortState, Reason)>,
+    /// `--scan-delay`: earliest time (microseconds since the scan started) this
+    /// host may be probed again. Per host, as nmap's scan delay is — `-T0`
+    /// waits five minutes between probes *to a host*.
+    next_send_us: i64,
 }
 
 /// Run a group scan over `targets` that share one route (interface + source), driving
@@ -115,6 +119,7 @@ pub async fn group_scan<K, S, P>(
     source: P,
     kind: &K,
     template: TimingTemplate,
+    params: TimingParams,
     max_parallelism: usize,
     base_port: u16,
     eth_included: bool,
@@ -126,8 +131,13 @@ where
     P: PacketSource,
 {
     let max_par = u32::try_from(max_parallelism).unwrap_or(u32::MAX);
-    let params = TimingParams::for_template(template);
+    // `params` arrives resolved (template + explicit --*-rtt-timeout /
+    // --max-retries / --scan-delay). It used to be re-derived from the template
+    // right here, which silently dropped every explicit knob.
     let max_tryno = params.max_retransmissions;
+    let scan_delay_us = params.scan_delay_ms.max(0).saturating_mul(1000);
+    // `--min-parallelism`; the CLI used to pass a hardcoded 0 here.
+    let min_par = params.min_parallelism;
     let match_params = MatchParams {
         our_ip: src.octets(),
         base_port,
@@ -137,9 +147,10 @@ where
     let mut ctxs: Vec<HostCtx> = targets
         .iter()
         .map(|&t| HostCtx {
-            sched: HostScheduler::with_params(ports, template, params, 0, max_par),
+            sched: HostScheduler::with_params(ports, template, params, min_par, max_par),
             target: t,
             finals: Vec::new(),
+            next_send_us: 0,
         })
         .collect();
     // src IP -> host index, for O(1) reply demux.
@@ -149,7 +160,7 @@ where
         .map(|(i, c)| (c.target.octets(), i))
         .collect();
 
-    let mut group = GroupScheduler::new(template, 0, max_par);
+    let mut group = GroupScheduler::new(template, min_par, max_par);
     let mut capture = AsyncCapture::spawn(source, CAPTURE_CAPACITY);
     let start = Instant::now();
     // (host_idx, port, tryno) -> (send_us, deadline_us).
@@ -164,8 +175,14 @@ where
                 break;
             }
             let mut launched = false;
+            let now_launch = now_us(start);
             for (idx, ctx) in ctxs.iter_mut().enumerate() {
                 if ctx.sched.is_done() || !ctx.sched.may_send() {
+                    continue;
+                }
+                // `--scan-delay`: skip this host, not the whole group, so one
+                // host's delay does not stall the others.
+                if ctx.next_send_us > now_launch {
                     continue;
                 }
                 let Some(probe) = ctx.sched.next_probe() else {
@@ -187,6 +204,7 @@ where
                         }
                         group.on_send();
                         let now = now_us(start);
+                        ctx.next_send_us = now.saturating_add(scan_delay_us);
                         outstanding.insert(
                             (idx, probe.port, probe.tryno),
                             (now, now.saturating_add(ctx.sched.probe_timeout_us())),
@@ -216,7 +234,19 @@ where
         }
 
         let now = now_us(start);
-        let next_deadline = outstanding.values().map(|(_, d)| *d).min();
+        // Wake for whichever comes first: the next probe timeout, or the moment
+        // a scan-delayed host is allowed to send again. Leaving the delay out
+        // would sleep for IDLE_WAIT with work ready, making a delayed scan
+        // slower than it was asked to be.
+        let next_deadline = outstanding
+            .values()
+            .map(|(_, d)| *d)
+            .chain(
+                ctxs.iter()
+                    .filter(|c| !c.sched.is_done() && c.next_send_us > now)
+                    .map(|c| c.next_send_us),
+            )
+            .min();
         let sleep_dur = next_deadline
             .map(|d| micros_to_duration(d.saturating_sub(now)))
             .unwrap_or(IDLE_WAIT);
@@ -565,6 +595,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
     targets: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_parallelism: usize,
     overrides: PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
@@ -576,8 +607,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
     // Probe raw-socket capability once; PermissionDenied here is the fallback signal.
     drop(RawIpv4Sender::new()?);
 
-    let span =
-        u16::try_from(TimingParams::for_template(template).max_retransmissions).unwrap_or(16);
+    let span = u16::try_from(params.max_retransmissions).unwrap_or(16);
 
     // Bucket the IPv4 targets by (interface, source, eth). Non-IPv4 / unroutable
     // targets become `Down` placeholders, keeping the output aligned with the input.
@@ -609,6 +639,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
             source,
             kind,
             template,
+            params,
             max_parallelism,
             base_port,
             eth,
@@ -758,6 +789,7 @@ mod tests {
             },
             kind,
             TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
             0,
             base,
             true,
@@ -924,6 +956,7 @@ mod tests {
             },
             &UdpKind::new(payloads),
             TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
             0,
             40000,
             true,
@@ -979,6 +1012,7 @@ mod tests {
             },
             &UdpKind::bare(),
             TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
             0,
             40000,
             true,

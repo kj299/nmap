@@ -1,0 +1,192 @@
+diff --git a/src/any.rs b/src/any.rs
+index bbe59e3..73580b3 100644
+--- a/src/any.rs
++++ b/src/any.rs
+@@ -166,6 +166,9 @@ impl<'gc, M> Any<'gc, M> {
+         Root<'gc, R>: Sized,
+     {
+         if TypeId::of::<R>() == self.0.type_id {
++            // SAFETY: the `TypeId` equality tested on the line above establishes that this
++            // erased payload was created as `Value<M, Root<'gc, R>>` for this exact `R`,
++            // which is the precondition `Gc::cast` requires.
+             let ptr = unsafe { Gc::cast::<Value<M, Root<'gc, R>>>(self.0) };
+             Some(&ptr.as_ref().value)
+         } else {
+diff --git a/src/async_callback.rs b/src/async_callback.rs
+index 675f887..3b2f605 100644
+--- a/src/async_callback.rs
++++ b/src/async_callback.rs
+@@ -340,11 +340,11 @@ where
+         mut stack: Stack<'gc, '_>,
+         error: Option<Error<'gc>>,
+     ) -> Result<SequencePoll<'gc>, Error<'gc>> {
+-        // SAFETY: We do not move out of the returned reference.
+         let Self {
+             shared,
+             roots: locals,
+             fut,
++            // SAFETY: We do not move out of the returned reference.
+         } = unsafe { self.get_unchecked_mut() };
+         let locals = *locals;
+ 
+@@ -473,13 +473,13 @@ impl SharedSlot {
+     }
+ 
+     fn with<'gc, 'a, R>(&self, shared: &mut Shared<'gc, 'a>, f: impl FnOnce() -> R) -> R {
+-        // SAFETY: We are erasing the lifetimes of the `Shared` pointer.
+-        //
+         // We know this is sound because the only way we *access* the `Shared` pointer is through
+         // `SharedSlot::visit`, which takes a callback which must work for *any* lifetimes 'gc and
+         // 'a. In addition, We know the real lifetimes of `Shared` are valid for the body of this
+         // function, and this function is the only thing that sets the inner pointer and it is unset
+         // before the function exits using drop guards.
++        //
++        // SAFETY: We are erasing the lifetimes of the `Shared` pointer, per the above.
+         unsafe {
+             self.0.set(mem::transmute::<
+                 *mut Shared<'_, '_>,
+diff --git a/src/callback.rs b/src/callback.rs
+index 6a80ad9..d3f1fb9 100644
+--- a/src/callback.rs
++++ b/src/callback.rs
+@@ -121,6 +121,11 @@ impl<'gc> Callback<'gc> {
+             mc,
+             HeaderCallback {
+                 header: CallbackInner {
++                    // SAFETY: this fn pointer is reachable only through the `header` field of a
++                    // `HeaderCallback<C>`, a type private to this function. `HeaderCallback` is
++                    // `#[repr(C)]` with that header as its first field, so the `*const
++                    // CallbackInner` the VM hands back is the address of a live
++                    // `HeaderCallback<C>` for the same `C` this closure was written for.
+                     call: |ptr, ctx, exec, stack| unsafe {
+                         let hc = ptr as *const HeaderCallback<C>;
+                         ((*hc).callback).call(ctx, exec, stack)
+@@ -130,6 +135,9 @@ impl<'gc> Callback<'gc> {
+             },
+         );
+ 
++        // SAFETY: `HeaderCallback<'gc, C>` is `#[repr(C)]` with `header:
++        // CallbackInner<'gc>` first, so narrowing the allocation to its offset-0
++        // prefix is exactly what `Gc::cast` permits here.
+         Self(unsafe { Gc::cast::<CallbackInner>(hc) })
+     }
+ 
+@@ -207,6 +215,9 @@ impl<'gc> Callback<'gc> {
+         exec: Execution<'gc, '_>,
+         stack: Stack<'gc, '_>,
+     ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
++        // SAFETY: `self.0.call` is the inline-vtable entry installed by
++        // `Callback::new` for this very allocation, and it is passed a pointer to
++        // that same allocation -- the contract it was written against.
+         unsafe { (self.0.call)(Gc::as_ptr(self.0), ctx, exec, stack) }
+     }
+ }
+@@ -319,6 +330,10 @@ pub trait Sequence<'gc>: Collect {
+ /// generally owned only by the `Thread` in which it is running.
+ pub struct BoxSequence<'gc>(Pin<boxed::Box<dyn Sequence<'gc> + 'gc, MetricsAlloc<'gc>>>);
+ 
++// SAFETY: `Collect` requires `trace` to reach every `Gc` pointer this value owns.
++// It owns exactly one, the boxed `Sequence`, and forwards to that value's own
++// `Collect::trace`, so this impl is complete exactly when the inner one is. The
++// impl is hand-written only because `gc-arena` provides none for `Pin<T>`.
+ unsafe impl<'gc> Collect for BoxSequence<'gc> {
+     fn trace(&self, cc: &gc_arena::Collection) {
+         // SAFETY: We have to manually implement `Collect` for `BoxSequence<'gc>` because `gc-arena`
+@@ -341,7 +356,14 @@ impl<'gc> BoxSequence<'gc> {
+         // TODO: Required unsafety due to do lack of `CoerceUnsized` on allocator_api2 `Box` type,
+         // replace with safe cast when one of allocator_api or CoerceUnsized is stabilized.
+         let (ptr, alloc) = boxed::Box::into_raw_with_allocator(b);
++        // SAFETY: `ptr` and `alloc` came from `Box::into_raw_with_allocator` on the
++        // line above, so this reconstructs the same allocation, once, under the same
++        // allocator. The cast is the unsizing coercion `*mut C -> *mut dyn Sequence`,
++        // which `allocator_api2::Box` cannot express for want of `CoerceUnsized`.
+         let b = unsafe { boxed::Box::from_raw_in(ptr as *mut (dyn Sequence<'gc> + 'gc), alloc) };
++        // SAFETY: `b` was created immediately above and is moved straight into
++        // `BoxSequence`, which never moves it out or hands it back by value, so the
++        // pinning invariant holds for the rest of its life.
+         Self(unsafe { Pin::new_unchecked(b) })
+     }
+ 
+diff --git a/src/error.rs b/src/error.rs
+index 462c9cd..6633c69 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -91,6 +91,8 @@ impl<'gc> From<LuaError<'gc>> for ExternLuaError {
+ // SAFETY: The pointers in `ExternLuaError` are not actually dereferenced at all, they are purely
+ // informational.
+ unsafe impl Send for ExternLuaError {}
++// SAFETY: as above -- the pointers are informational and never dereferenced,
++// so sharing a reference across threads cannot observe anything through them.
+ unsafe impl Sync for ExternLuaError {}
+ 
+ /// A shareable, dynamically typed wrapper around a normal Rust error.
+diff --git a/src/string.rs b/src/string.rs
+index 44f56a1..239ab40 100644
+--- a/src/string.rs
++++ b/src/string.rs
+@@ -50,6 +50,10 @@ impl<'gc> String<'gc> {
+         impl Drop for Owned {
+             fn drop(&mut self) {
+                 match self.header.buffer {
++                    // SAFETY: `Owned` is private to `from_buffer`, and its single construction
++                    // there sets `Buffer::Indirect(Box::into_raw(s))`. The only other producer of
++                    // an indirect buffer, `from_static`, builds a bare `StringInner` and never an
++                    // `Owned`, so a borrowed pointer cannot reach this `Drop`. One box, freed once.
+                     Buffer::Indirect(ptr) => unsafe {
+                         self.metrics.mark_external_deallocation(ptr.len());
+                         drop(Box::from_raw(ptr as *mut [u8]));
+@@ -229,10 +233,17 @@ struct InternedDynStringsInner<'gc>(
+ #[collect(no_drop)]
+ struct InternedDynStrings<'gc>(Gc<'gc, InternedDynStringsInner<'gc>>);
+ 
++// SAFETY: `trace` visits every bucket of the interning table and traces each
++// weak string that is still live, erasing the rest, so every `Gc` pointer this
++// value owns is reached.
+ unsafe impl<'gc> Collect for InternedDynStringsInner<'gc> {
+     fn trace(&self, cc: &Collection) {
+         // SAFETY: No new Gc pointers are adopted or reparented.
+         let mut dyn_strings = unsafe { self.0.unlock_unchecked() }.borrow_mut();
++        // SAFETY: `RawTable::iter` requires that the table is not resized while the
++        // iterator is live and that only buckets the iterator has already yielded
++        // are erased. The loop below inserts nothing and erases only the bucket it
++        // is currently holding, so both hold.
+         unsafe {
+             for bucket in dyn_strings.iter() {
+                 let s = bucket.as_ref().0;
+diff --git a/src/table/raw.rs b/src/table/raw.rs
+index b5a458c..08e8a3f 100644
+--- a/src/table/raw.rs
++++ b/src/table/raw.rs
+@@ -151,6 +151,9 @@ impl<'gc> RawTable<'gc> {
+         // entry.
+         let raw_map = self.map.raw_table_mut();
+         if let Some(bucket) = raw_map.find(hash, |(k, _)| k.eq(table_key)) {
++            // SAFETY: `bucket` was returned by `raw_map.find` on the line above and the
++            // table has not been touched since, so it still points at a live entry. The
++            // `&mut` ends before any further table operation.
+             let (k, v) = unsafe { bucket.as_mut() };
+             if k.is_dead_key() {
+                 // Resurrect the key if it is dead.
+@@ -351,6 +354,10 @@ impl<'gc> RawTable<'gc> {
+                 }
+             }
+ 
++            // SAFETY: the scan is bounded by `raw_table.buckets()` and every index
++            // is checked with `is_bucket_full` before `bucket()`/`as_ref()`, so each
++            // dereference is of an initialised entry. Nothing mutates the table
++            // inside the loop.
+             unsafe {
+                 for bucket_index in 0..raw_table.buckets() {
+                     if raw_table.is_bucket_full(bucket_index) {
+@@ -377,6 +384,11 @@ impl<'gc> RawTable<'gc> {
+             if let Some(bucket) = raw_table.find(self.hash_builder.hash_one(table_key), |(k, _)| {
+                 k.eq(table_key)
+             }) {
++                // SAFETY: `bucket` was just returned by `raw_table.find` and the
++                // table has not been touched since, so `bucket_index` is valid. The
++                // scan that follows is bounded by `buckets()` and checks
++                // `is_bucket_full` before each dereference; nothing mutates the
++                // table inside the loop.
+                 unsafe {
+                     let bucket_index = raw_table.bucket_index(&bucket);
+                     for i in bucket_index + 1..raw_table.buckets() {

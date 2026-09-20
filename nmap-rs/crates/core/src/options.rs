@@ -11,6 +11,8 @@
 //! process; the thin `cli` binary calls [`parse_args`] then
 //! [`crate::log::init`].
 
+use crate::timing::{TimingParams, TimingTemplate};
+
 /// nmap clamps verbosity/debugging to `box(0, 10, …)`.
 const MAX_LEVEL: u8 = 10;
 
@@ -121,9 +123,143 @@ pub struct RunConfig {
     /// `-S`). C tracks the same thing as `delayed_options.raw_scan_options` so it
     /// can tell the operator when the chosen scan cannot honour them.
     pub raw_scan_options: bool,
+    /// `-T<0-5>` or `-T<name>`: the timing template. `None` ⇒ `-T3` (Normal),
+    /// nmap's default.
+    pub timing_template: Option<TimingTemplate>,
+    /// `--min-rtt-timeout` / `--max-rtt-timeout` / `--initial-rtt-timeout`, in
+    /// milliseconds. `None` ⇒ leave whatever the template chose.
+    pub min_rtt_timeout_ms: Option<i64>,
+    pub max_rtt_timeout_ms: Option<i64>,
+    pub initial_rtt_timeout_ms: Option<i64>,
+    /// `--scan-delay` / `--max-scan-delay`, in milliseconds.
+    pub scan_delay_ms: Option<i64>,
+    pub max_scan_delay_ms: Option<i64>,
+    /// `--host-timeout`, in milliseconds. `0` is C's explicit "no timeout", and
+    /// it overrides a template that set one — which is why this is an
+    /// `Option<i64>` and not an `i64` defaulting to 0.
+    pub host_timeout_ms: Option<i64>,
+    /// `--max-retries`: cap on probe retransmissions.
+    pub max_retries: Option<u32>,
+    /// `--min-parallelism` / `--max-parallelism` (also spelled `-M`).
+    pub min_parallelism: Option<u32>,
+    pub max_parallelism: Option<u32>,
+    /// `--min-hostgroup` / `--max-hostgroup`.
+    pub min_hostgroup: Option<u32>,
+    pub max_hostgroup: Option<u32>,
+    /// Options we recognize but whose argument is unusable. Distinct from
+    /// [`RunConfig::unrecognized`] because the two need different messages: one
+    /// is "I do not know this option", the other is "I know it and your value
+    /// is wrong". C `fatal()`s on each of these, and so does the CLI.
+    pub invalid: Vec<String>,
+    /// Non-fatal complaints — C's `error()` calls, which print and continue.
+    pub warnings: Vec<String>,
     /// Flags we do not yet recognize — recorded, never silently dropped, so the
     /// CLI can warn instead of misparsing them.
     pub unrecognized: Vec<String>,
+}
+
+impl RunConfig {
+    /// Resolve `-T` and the explicit timing knobs into one set of parameters.
+    ///
+    /// The order is nmap's, from the block at `nmap.cc:1472-1500` that runs
+    /// *after* the whole argument loop, under the comment "After the arguments
+    /// are fully processed we now make any of the timing tweaks the user
+    /// might've specified". Two consequences fall out of that, and both are
+    /// observable:
+    ///
+    /// 1. **An explicit knob always beats `-T`, whichever came first on the
+    ///    command line.** `-T4 --scan-delay 5` and `--scan-delay 5 -T4` are the
+    ///    same scan. Applying them in argv order instead would make the second
+    ///    form silently discard the operator's delay.
+    /// 2. **The RTT setters run in the order initial, min, max** — and each one
+    ///    drags its siblings (see [`TimingParams`]), so reordering them changes
+    ///    the result. `--min-rtt-timeout 900 --max-rtt-timeout 100` ends at
+    ///    min=100, max=100 because max runs last and pulls min down with it.
+    pub fn timing_params(&self) -> TimingParams {
+        let mut p =
+            TimingParams::for_template(self.timing_template.unwrap_or(TimingTemplate::Normal));
+
+        if let Some(v) = self.max_parallelism {
+            p.max_parallelism = v;
+        }
+        if let Some(v) = self.min_parallelism {
+            p.min_parallelism = v;
+        }
+        if let Some(v) = self.scan_delay_ms {
+            p.scan_delay_ms = v;
+            // A delay longer than the ceiling would be clamped away, so C
+            // raises the ceiling to match rather than quietly ignoring the
+            // operator's delay.
+            p.max_tcp_scan_delay_ms = p.max_tcp_scan_delay_ms.max(v);
+            p.max_udp_scan_delay_ms = p.max_udp_scan_delay_ms.max(v);
+            p.max_sctp_scan_delay_ms = p.max_sctp_scan_delay_ms.max(v);
+        }
+        if let Some(v) = self.max_scan_delay_ms {
+            p.max_tcp_scan_delay_ms = v;
+            p.max_udp_scan_delay_ms = v;
+            p.max_sctp_scan_delay_ms = v;
+        }
+        // Initial, then min, then max — C's order, which is not interchangeable.
+        if let Some(v) = self.initial_rtt_timeout_ms {
+            p.set_initial_rtt(v);
+        }
+        if let Some(v) = self.min_rtt_timeout_ms {
+            p.set_min_rtt(v);
+        }
+        if let Some(v) = self.max_rtt_timeout_ms {
+            p.set_max_rtt(v);
+        }
+        if let Some(v) = self.max_retries {
+            p.max_retransmissions = v;
+        }
+        if let Some(v) = self.host_timeout_ms {
+            p.host_timeout_ms = v;
+        }
+        if let Some(v) = self.min_hostgroup {
+            p.min_hostgroup = v;
+        }
+        if let Some(v) = self.max_hostgroup {
+            p.max_hostgroup = v;
+        }
+        p
+    }
+
+    /// Complaints that are not refusals: C's `error()` calls, which print and
+    /// carry on. The two that can only be known after the whole command line is
+    /// read live here rather than in the parse loop.
+    pub fn timing_warnings(&self) -> Vec<String> {
+        let mut out = self.warnings.clone();
+        // nmap.cc:1483 — the pacing options do not compose, and C says so
+        // rather than silently letting one win.
+        if self.scan_delay_ms.is_some()
+            && (self.max_parallelism.is_some() || self.min_parallelism.is_some())
+        {
+            out.push(
+                "Warning: --min-parallelism and --max-parallelism are ignored with --scan-delay."
+                    .to_string(),
+            );
+        }
+        out
+    }
+
+    /// `--min-hostgroup` may not exceed `--max-hostgroup`, and the maximum may
+    /// not be zero. C enforces both inside the setters, where the check is
+    /// against whatever the *other* value happens to be at the time; here the
+    /// whole command line is known, so the comparison is against the final
+    /// pair.
+    pub fn hostgroup_error(&self) -> Option<String> {
+        let p = self.timing_params();
+        if p.max_hostgroup == 0 {
+            return Some("Max host size must be at least 1".to_string());
+        }
+        if p.min_hostgroup > p.max_hostgroup {
+            return Some(format!(
+                "Minimum host group size may not be set to greater than maximum size (currently {})",
+                p.max_hostgroup
+            ));
+        }
+        None
+    }
 }
 
 impl Default for RunConfig {
@@ -159,6 +295,20 @@ impl Default for RunConfig {
             exclude_file: None,
             input_file: None,
             input_file_repeated: false,
+            timing_template: None,
+            min_rtt_timeout_ms: None,
+            max_rtt_timeout_ms: None,
+            initial_rtt_timeout_ms: None,
+            scan_delay_ms: None,
+            max_scan_delay_ms: None,
+            host_timeout_ms: None,
+            max_retries: None,
+            min_parallelism: None,
+            max_parallelism: None,
+            min_hostgroup: None,
+            max_hostgroup: None,
+            invalid: Vec::new(),
+            warnings: Vec::new(),
             unrecognized: Vec::new(),
         }
     }
@@ -368,6 +518,161 @@ fn long_opt_value(args: &[String], i: usize, prefix: &str) -> (String, usize) {
     }
 }
 
+/// C's `%g` with the default precision of 6 significant digits, used by the
+/// "since April 2010" messages. Reproduced because an operator who hits one of
+/// those messages will be searching for C's exact wording, numbers included.
+// `exp` comes from log10 of a finite non-zero magnitude, so it is within
+// [-308, 308] and `5 - exp` cannot overflow.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn g6(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let exp = v.abs().log10().floor() as i32;
+    let s = if (-4..6).contains(&exp) {
+        let decimals = usize::try_from(5 - exp).unwrap_or(0);
+        format!("{v:.decimals$}")
+    } else {
+        format!("{v:.5e}")
+    };
+    if s.contains('.') && !s.contains('e') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
+/// How C phrases the "since April 2010" guard for a given option. Each of the
+/// four shapes below is a distinct `fatal()` string in `nmap.cc`, differing in
+/// the unit it converts to and in the fix it suggests, so one generic message
+/// would be wrong for three of them.
+#[derive(Clone, Copy)]
+enum GuardPhrasing {
+    /// `--min/max/initial-rtt-timeout`: "... is N seconds. Use "Nms" for N milliseconds."
+    SecondsUseMs,
+    /// `--scan-delay`: "... is N minutes. Use "Nms" for N milliseconds."
+    MinutesUseMs,
+    /// `--max-scan-delay`: "... is N minutes. If this is what you want, use "Ns"."
+    MinutesUseS,
+    /// `--host-timeout`: "... is N hours. If this is what you want, use "Ns"."
+    HoursUseS,
+}
+
+impl GuardPhrasing {
+    fn message(self, name: &str, raw: &str, ms: i64) -> String {
+        #[allow(clippy::cast_precision_loss)]
+        let secs = ms as f64 / 1000.0;
+        let head = format!(
+            "Since April 2010, the default unit for {name} is seconds, so your time of \"{raw}\" is"
+        );
+        match self {
+            GuardPhrasing::SecondsUseMs => format!(
+                "{head} {} seconds. Use \"{raw}ms\" for {} milliseconds.",
+                g6(secs),
+                g6(secs)
+            ),
+            GuardPhrasing::MinutesUseMs => format!(
+                "{head} {:.1} minutes. Use \"{raw}ms\" for {} milliseconds.",
+                secs / 60.0,
+                g6(secs)
+            ),
+            GuardPhrasing::MinutesUseS => format!(
+                "{head} {:.1} minutes. If this is what you want, use \"{raw}s\".",
+                secs / 60.0
+            ),
+            GuardPhrasing::HoursUseS => format!(
+                "{head} {:.1} hours. If this is what you want, use \"{raw}s\".",
+                secs / 60.0 / 60.0
+            ),
+        }
+    }
+}
+
+/// One `tval2msecs`-backed timing option, with the two checks C wraps around
+/// every one of them.
+///
+/// The order is C's and it is load-bearing: the floor check runs first, so an
+/// unparseable value (which `tval2msecs` reports and C represents as `-1`)
+/// trips the floor and produces the floor's message, not a separate "cannot
+/// parse" one. `--max-rtt-timeout zzz` says "must be at least 5ms" in C, and
+/// says it here too.
+///
+/// The second check is the "since April 2010" footgun guard. A bare number this
+/// large is almost certainly an operator who meant milliseconds, so C refuses
+/// it — but the *same value with an explicit unit* is honoured, which is the
+/// only reason [`crate::timespec::tval_unit`] exists.
+fn time_option(
+    cfg: &mut RunConfig,
+    name: &str,
+    raw: &str,
+    floor: i64,
+    floor_msg: &str,
+    guard_ms: i64,
+    phrasing: GuardPhrasing,
+) -> Option<i64> {
+    let ms = crate::timespec::tval2msecs(raw).unwrap_or(-1);
+    if ms < floor {
+        cfg.invalid.push(floor_msg.to_string());
+        return None;
+    }
+    if ms >= guard_ms && crate::timespec::tval_unit(raw).is_none() {
+        cfg.invalid.push(phrasing.message(name, raw, ms));
+        return None;
+    }
+    Some(ms)
+}
+
+/// C's `atoi` for a count option: a leading integer, or 0 when there is no
+/// leading integer at all. `atoi` does not report failure, so `--max-retries
+/// banana` is zero retries in C rather than an error, and the bound checks that
+/// follow are the only validation there is.
+// The only arithmetic is negating a non-negative `i64` that came from parsing
+// digits, which saturates at `i64::MAX` and so cannot overflow on negation.
+#[allow(clippy::arithmetic_side_effects)]
+fn atoi(raw: &str) -> i64 {
+    let t = raw.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (neg, t) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+    let v: i64 = digits
+        .parse()
+        .unwrap_or(if digits.is_empty() { 0 } else { i64::MAX });
+    if neg {
+        -v
+    } else {
+        v
+    }
+}
+
+/// `-T`: the timing template.
+///
+/// C accepts a digit `0`-`5` by looking at the **first character only**, so
+/// `-T4abc` is Aggressive there, and it has an easter egg: `-T11` prints a
+/// message and silently means `-T5` (Insane). That last one is a trap — it
+/// turns a typo of `-T1`, the second most cautious template, into the most
+/// aggressive one — and reaching it in C also reads past the end of a stack
+/// array. This port accepts exactly the digits `0`-`5` and the six names, and
+/// refuses everything else. See `DIVERGENCES.md`.
+fn parse_timing_template(cfg: &mut RunConfig, raw: &str) {
+    let t = TimingTemplate::from_name(raw).or_else(|| {
+        let mut chars = raw.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => c
+                .to_digit(10)
+                .and_then(|d| u8::try_from(d).ok().and_then(TimingTemplate::from_level)),
+            _ => None,
+        }
+    });
+    match t {
+        Some(t) => cfg.timing_template = Some(t),
+        None => cfg.invalid.push(format!(
+            "Unknown timing mode (-T argument \"{raw}\").  Use either \"Paranoid\", \"Sneaky\", \"Polite\", \"Normal\", \"Aggressive\", \"Insane\" or a number from 0 (Paranoid) to 5 (Insane)"
+        )),
+    }
+}
+
 /// Parse argv (without the program name) into a [`RunConfig`]. Total and
 /// panic-free over any input.
 // Index arithmetic is bounded by `args.len()` and only ever advances.
@@ -402,6 +707,194 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-sN" => cfg.scan = ScanKind::Null,
             "-sX" => cfg.scan = ScanKind::Xmas,
             "-sL" => cfg.scan = ScanKind::List,
+            // ---- the -T group (M7.7) ------------------------------------
+            // `-T` takes a required argument, so `-T4` and `-T 4` both parse;
+            // `opt_value` handles the attached and separate spellings alike.
+            _ if s == "-T" || s.starts_with("-T") => {
+                let (v, adv) = opt_value(args, i, "-T");
+                consumed_extra = adv;
+                parse_timing_template(&mut cfg, &v);
+            }
+            // `--max-rtt-timeout` before `--max-retries`? No: they share no
+            // prefix. But `--max-scan-delay` and `--max-retries` do not either,
+            // so these may be ordered freely — unlike --excludefile/--exclude.
+            _ if long_flag(s, "max-rtt-timeout", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "max-rtt-timeout", &mut keybuf2).unwrap_or("--max-rtt-timeout");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                // C checks `l < 5` BEFORE the unit guard, and warns below 20ms.
+                cfg.max_rtt_timeout_ms = time_option(
+                    &mut cfg,
+                    "--max-rtt-timeout",
+                    &v,
+                    5,
+                    "Bogus --max-rtt-timeout argument specified, must be at least 5ms",
+                    50 * 1000,
+                    GuardPhrasing::SecondsUseMs,
+                );
+                if let Some(ms) = cfg.max_rtt_timeout_ms {
+                    if ms < 20 {
+                        cfg.warnings.push(format!(
+                            "WARNING: You specified a round-trip time timeout ({ms} ms) that is EXTRAORDINARILY SMALL.  Accuracy may suffer."
+                        ));
+                    }
+                }
+            }
+            _ if long_flag(s, "min-rtt-timeout", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "min-rtt-timeout", &mut keybuf2).unwrap_or("--min-rtt-timeout");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.min_rtt_timeout_ms = time_option(
+                    &mut cfg,
+                    "--min-rtt-timeout",
+                    &v,
+                    0,
+                    "Bogus --min-rtt-timeout argument specified",
+                    50 * 1000,
+                    GuardPhrasing::SecondsUseMs,
+                );
+            }
+            _ if long_flag(s, "initial-rtt-timeout", &mut keybuf).is_some() => {
+                let key = long_flag(s, "initial-rtt-timeout", &mut keybuf2)
+                    .unwrap_or("--initial-rtt-timeout");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                // C's floor here is `l <= 0`, not `l < 0`: an initial RTT of
+                // zero is refused where a minimum of zero is allowed.
+                cfg.initial_rtt_timeout_ms = time_option(
+                    &mut cfg,
+                    "--initial-rtt-timeout",
+                    &v,
+                    1,
+                    "Bogus --initial-rtt-timeout argument specified.  Must be positive",
+                    50 * 1000,
+                    GuardPhrasing::SecondsUseMs,
+                );
+            }
+            // BEFORE `--scan-delay`: `--max-scan-delay` would otherwise never
+            // match, because `long_flag(s, "scan-delay")` does not match it —
+            // but the reverse ordering trap is the same shape as
+            // --excludefile/--exclude, so keep the specific one first as a rule.
+            _ if long_flag(s, "max-scan-delay", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "max-scan-delay", &mut keybuf2).unwrap_or("--max-scan-delay");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.max_scan_delay_ms = time_option(
+                    &mut cfg,
+                    "--max-scan-delay",
+                    &v,
+                    0,
+                    "Bogus --max-scan-delay argument specified.",
+                    100 * 1000,
+                    GuardPhrasing::MinutesUseS,
+                );
+            }
+            _ if long_flag(s, "scan-delay", &mut keybuf).is_some() => {
+                let key = long_flag(s, "scan-delay", &mut keybuf2).unwrap_or("--scan-delay");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.scan_delay_ms = time_option(
+                    &mut cfg,
+                    "--scan-delay",
+                    &v,
+                    0,
+                    "Bogus --scan-delay argument specified.",
+                    100 * 1000,
+                    GuardPhrasing::MinutesUseMs,
+                );
+            }
+            _ if long_flag(s, "host-timeout", &mut keybuf).is_some() => {
+                let key = long_flag(s, "host-timeout", &mut keybuf2).unwrap_or("--host-timeout");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                // The guard here is 10000 seconds, not 50 or 100: a host
+                // timeout legitimately runs to hours.
+                cfg.host_timeout_ms = time_option(
+                    &mut cfg,
+                    "--host-timeout",
+                    &v,
+                    0,
+                    "Bogus --host-timeout argument specified",
+                    10_000 * 1000,
+                    GuardPhrasing::HoursUseS,
+                );
+            }
+            _ if long_flag(s, "max-retries", &mut keybuf).is_some() => {
+                let key = long_flag(s, "max-retries", &mut keybuf2).unwrap_or("--max-retries");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                let n = atoi(&v);
+                if n < 0 {
+                    cfg.invalid.push("max-retries must be positive".to_string());
+                } else {
+                    cfg.max_retries = u32::try_from(n).ok();
+                }
+            }
+            _ if long_flag(s, "min-parallelism", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "min-parallelism", &mut keybuf2).unwrap_or("--min-parallelism");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                let n = atoi(&v);
+                if n < 1 {
+                    cfg.invalid
+                        .push("Argument to --min-parallelism must be at least 1!".to_string());
+                } else {
+                    if n > 100 {
+                        cfg.warnings.push(
+                            "Warning: Your --min-parallelism option is pretty high!  This can hurt reliability.".to_string(),
+                        );
+                    }
+                    cfg.min_parallelism = u32::try_from(n).ok();
+                }
+            }
+            // `-M` is the short spelling of --max-parallelism.
+            _ if long_flag(s, "max-parallelism", &mut keybuf).is_some()
+                || s == "-M"
+                || (s.starts_with("-M") && s.len() > 2) =>
+            {
+                let (v, adv) = if s.starts_with("-M") {
+                    opt_value(args, i, "-M")
+                } else {
+                    let key = long_flag(s, "max-parallelism", &mut keybuf2)
+                        .unwrap_or("--max-parallelism");
+                    long_opt_value(args, i, key)
+                };
+                consumed_extra = adv;
+                let n = atoi(&v);
+                if n < 1 {
+                    cfg.invalid
+                        .push("Argument to -M must be at least 1!".to_string());
+                } else {
+                    if n > 900 {
+                        cfg.warnings.push(
+                            "Warning: Your max-parallelism (-M) option is extraordinarily high, which can hurt reliability".to_string(),
+                        );
+                    }
+                    cfg.max_parallelism = u32::try_from(n).ok();
+                }
+            }
+            _ if long_flag(s, "max-hostgroup", &mut keybuf).is_some() => {
+                let key = long_flag(s, "max-hostgroup", &mut keybuf2).unwrap_or("--max-hostgroup");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.max_hostgroup = u32::try_from(atoi(&v)).ok();
+            }
+            _ if long_flag(s, "min-hostgroup", &mut keybuf).is_some() => {
+                let key = long_flag(s, "min-hostgroup", &mut keybuf2).unwrap_or("--min-hostgroup");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                let n = atoi(&v);
+                if n > 100 {
+                    cfg.warnings.push(
+                        "Warning: You specified a highly aggressive --min-hostgroup.".to_string(),
+                    );
+                }
+                cfg.min_hostgroup = u32::try_from(n).ok();
+            }
             "-sV" => cfg.service_version = true,
             "-O" => cfg.os_detection = true,
             // nmap accepts both spellings for the same behaviour.
@@ -573,6 +1066,153 @@ pub fn parse_args(args: &[String]) -> RunConfig {
         i += 1 + consumed_extra;
     }
     cfg
+}
+
+#[cfg(test)]
+mod timing_group_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> RunConfig {
+        parse_args(&args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>())
+    }
+
+    /// The RTT setters run initial, then min, then max, and each drags its
+    /// siblings. Reordering them changes the answer, so the order is pinned.
+    ///
+    /// `--min-rtt-timeout 900 --max-rtt-timeout 100` ends at min=100 because
+    /// max runs last and `set_max_rtt` pulls min down to it. Applying them in
+    /// argv order would give min=900, max=900 instead.
+    #[test]
+    fn the_rtt_setters_run_in_cs_order_not_argv_order() {
+        let p =
+            parse(&["--min-rtt-timeout", "900ms", "--max-rtt-timeout", "100ms"]).timing_params();
+        assert_eq!(p.max_rtt_timeout_ms, 100);
+        assert_eq!(
+            p.min_rtt_timeout_ms, 100,
+            "max ran last and pulled min down"
+        );
+
+        // Reversing the command line changes nothing, because argv order is not
+        // what decides.
+        let q =
+            parse(&["--max-rtt-timeout", "100ms", "--min-rtt-timeout", "900ms"]).timing_params();
+        assert_eq!(p, q);
+    }
+
+    /// An explicit knob beats `-T` from either side of it. C applies the
+    /// explicit set after the whole argument loop, so position is irrelevant.
+    #[test]
+    fn an_explicit_knob_beats_the_template_from_either_side() {
+        let before = parse(&["--scan-delay", "7ms", "-T0"]).timing_params();
+        let after = parse(&["-T0", "--scan-delay", "7ms"]).timing_params();
+        assert_eq!(before, after);
+        assert_eq!(before.scan_delay_ms, 7, "-T0's 300000ms must not win");
+    }
+
+    /// A later `-T` does beat an earlier one, though: those are both handled in
+    /// the loop, so the last one wins.
+    #[test]
+    fn the_last_template_wins() {
+        assert_eq!(
+            parse(&["-T0", "-T4"]).timing_template,
+            Some(TimingTemplate::Aggressive)
+        );
+    }
+
+    /// A scan delay longer than the ceiling would be clamped away, so C raises
+    /// the ceiling to match rather than quietly ignoring the delay.
+    #[test]
+    fn a_scan_delay_raises_the_ceiling_it_would_otherwise_exceed() {
+        let p = parse(&["--scan-delay", "3000ms"]).timing_params();
+        assert_eq!(p.scan_delay_ms, 3000);
+        assert!(
+            p.max_tcp_scan_delay_ms >= 3000,
+            "the 1000ms default ceiling would have clamped the delay away"
+        );
+    }
+
+    /// `-T4` and `-T5` speed up TCP and SCTP but deliberately leave UDP's
+    /// ceiling alone — C's comment is "No call to setMaxUDPScanDelay because of
+    /// rate-limiting and unreliability".
+    #[test]
+    fn aggressive_templates_do_not_speed_up_udp() {
+        let p = parse(&["-T4"]).timing_params();
+        assert_eq!(p.max_tcp_scan_delay_ms, 10);
+        assert_eq!(p.max_sctp_scan_delay_ms, 10);
+        assert_eq!(
+            p.max_udp_scan_delay_ms, 1000,
+            "UDP keeps the default ceiling"
+        );
+    }
+
+    /// Insane is the only template that sets a host timeout at all.
+    #[test]
+    fn only_insane_sets_a_host_timeout() {
+        assert_eq!(parse(&["-T5"]).timing_params().host_timeout_ms, 900_000);
+        for t in ["-T0", "-T1", "-T2", "-T3", "-T4"] {
+            assert_eq!(parse(&[t]).timing_params().host_timeout_ms, 0, "{t}");
+        }
+    }
+
+    /// `--host-timeout 0` is C's explicit "no timeout" and must override a
+    /// template that set one — which is why the field is an `Option`, not an
+    /// `i64` defaulting to zero.
+    #[test]
+    fn an_explicit_zero_host_timeout_overrides_the_template() {
+        let p = parse(&["-T5", "--host-timeout", "0"]).timing_params();
+        assert_eq!(p.host_timeout_ms, 0);
+    }
+
+    /// Every option in the group consumes its argument in all four spellings.
+    /// One that did not would leave the value in argv for the positional
+    /// handler to read as a target — the M7.0 bug.
+    #[test]
+    fn every_timing_option_consumes_its_argument() {
+        for name in [
+            "min-rtt-timeout",
+            "max-rtt-timeout",
+            "initial-rtt-timeout",
+            "scan-delay",
+            "max-scan-delay",
+            "host-timeout",
+            "max-retries",
+            "min-parallelism",
+            "max-parallelism",
+            "min-hostgroup",
+            "max-hostgroup",
+        ] {
+            for spelling in [
+                vec![format!("--{name}"), "5".to_string()],
+                vec![format!("--{name}=5")],
+                vec![format!("-{name}"), "5".to_string()],
+                vec![format!("-{name}=5")],
+            ] {
+                let mut argv: Vec<String> = spelling;
+                argv.push("127.0.0.1".to_string());
+                let cfg = parse_args(&argv);
+                assert_eq!(
+                    cfg.targets,
+                    ["127.0.0.1"],
+                    "--{name} ({argv:?}) leaked its argument into the target list"
+                );
+            }
+        }
+    }
+
+    /// `-T` takes a required argument, so both spellings must work and neither
+    /// may swallow the target.
+    #[test]
+    fn the_timing_template_parses_attached_and_separate() {
+        for argv in [vec!["-T4", "127.0.0.1"], vec!["-T", "4", "127.0.0.1"]] {
+            let cfg = parse(&argv);
+            assert_eq!(
+                cfg.timing_template,
+                Some(TimingTemplate::Aggressive),
+                "{argv:?}"
+            );
+            assert_eq!(cfg.targets, ["127.0.0.1"], "{argv:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -801,14 +1441,34 @@ mod tests {
         }
         // And it does not accidentally swallow the constraint options that
         // motivated failing closed in the first place.
-        // `--exclude` has left this list: M7.4 implements it. The others are
-        // still unimplemented and still refused, which is the property that
-        // matters — implementing one scope option must not relax the rest.
-        for flag in ["--scan-delay", "-T2", "--max-retries", "--top-ports"] {
+        //
+        // This list keeps shrinking, which is the point: `--exclude` left in
+        // M7.4, and `--scan-delay`, `-T2` and `--max-retries` left in M7.7.
+        // Each departure is a flag that graduated from "refused" to
+        // "implemented and honoured" — never to "quietly accepted". The
+        // property that matters is unchanged: implementing one option must not
+        // relax the rest.
+        for flag in ["--top-ports", "--exclude-ports", "--port-ratio"] {
             assert_eq!(
                 cfg(&[flag, "127.0.0.1"]).unrecognized,
                 vec![flag.to_string()],
                 "{flag} must still be refused"
+            );
+        }
+        // The graduated ones must now parse rather than land in `unrecognized`.
+        // Asserting only the departures would leave the arrival unchecked,
+        // which is how LESSONS #027 happened.
+        for flag in [
+            vec!["--scan-delay", "5ms"],
+            vec!["-T2"],
+            vec!["--max-retries", "3"],
+        ] {
+            let mut argv = flag.clone();
+            argv.push("127.0.0.1");
+            let parsed = cfg(&argv);
+            assert!(
+                parsed.unrecognized.is_empty() && parsed.invalid.is_empty(),
+                "{flag:?} is implemented now and must parse cleanly: {parsed:?}"
             );
         }
     }

@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::model::{HostState, PortState};
-use nmap_core::timing::TimingTemplate;
+use nmap_core::timing::{TimingParams, TimingTemplate};
 
 use nmap_sys::group::{group_scan, SynKind};
 use nmap_sys::rawio::RawIpv4Sender;
@@ -70,6 +70,7 @@ async fn two_loopback_hosts_scanned_as_one_group() {
             source,
             &kind,
             TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
             0,
             base_port,
             true,

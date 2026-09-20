@@ -65,6 +65,45 @@ async fn main() -> ExitCode {
     // `nmap.cc:653`'s getopt loop, which calls `error()` and `exit(-1)` without
     // scanning anything. Failing closed here restores that behaviour and is
     // the safe direction besides.
+    // A recognized option with an unusable argument. C `fatal()`s on each of
+    // these; the message is C's, because an operator who hits it will be
+    // searching for C's wording.
+    if !cfg.invalid.is_empty() {
+        for msg in &cfg.invalid {
+            eprintln!("nmap-rs: {msg}");
+        }
+        return ExitCode::FAILURE;
+    }
+    // Fail closed on the two knobs this engine cannot yet honour. Accepting
+    // them would be the M7.0 mistake in a new place: `--max-hostgroup 5` that
+    // does nothing scans every target at once, which is louder than the
+    // operator asked for, and a `--host-timeout` that does nothing runs past a
+    // bound they set. Refusing is noisy; silently exceeding an explicit limit
+    // is worse. Both are tracked in docs/M7.3-CLI-PARITY.md.
+    if cfg.host_timeout_ms.is_some() {
+        eprintln!(
+            "nmap-rs: --host-timeout is parsed but not yet enforced — this engine has no \
+             per-host deadline, so honouring it would be a lie. Refusing rather than \
+             running past the bound you set."
+        );
+        return ExitCode::FAILURE;
+    }
+    if cfg.min_hostgroup.is_some() || cfg.max_hostgroup.is_some() {
+        eprintln!(
+            "nmap-rs: --min-hostgroup/--max-hostgroup are parsed but not yet enforced — this \
+             engine scans a route's targets as one group, so a hostgroup ceiling would not \
+             limit concurrency. Refusing rather than scanning wider than you asked."
+        );
+        return ExitCode::FAILURE;
+    }
+    if let Some(msg) = cfg.hostgroup_error() {
+        eprintln!("nmap-rs: {msg}");
+        return ExitCode::FAILURE;
+    }
+    for msg in cfg.timing_warnings() {
+        eprintln!("{msg}");
+    }
+
     if !cfg.unrecognized.is_empty() {
         for flag in &cfg.unrecognized {
             eprintln!("nmap-rs: unrecognized or unsupported option '{flag}'");
@@ -208,17 +247,20 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Milestone 2: the scan engine derives its per-probe timeout adaptively from
-    // observed RTTs and paces probes by the congestion window, so the CLI passes
-    // the timing *template* rather than a fixed timeout. (`-T` selection is a
-    // later CLI refinement; the default is Normal / -T3.)
-    let max_par = TimingParams::default().max_parallelism as usize;
-    let template = TimingTemplate::Normal;
+    // The scan engine derives its per-probe timeout adaptively from observed
+    // RTTs and paces probes by the congestion window, so the CLI passes the
+    // timing *template* rather than a fixed timeout. `-T` selects it; the
+    // explicit knobs (--scan-delay, --max-rtt-timeout, …) are folded in by
+    // `timing_params` in nmap's own order, so they win over -T regardless of
+    // where they appeared on the command line.
+    let timing = cfg.timing_params();
+    let template = cfg.timing_template.unwrap_or(TimingTemplate::Normal);
+    let max_par = timing.max_parallelism as usize;
 
     let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
     let started = now_string();
     let clock = Instant::now();
-    let mut results = run_scan(&cfg, &ips, &ports, template, max_par, overrides).await;
+    let mut results = run_scan(&cfg, &ips, &ports, template, timing, max_par, overrides).await;
     let elapsed = clock.elapsed().as_secs_f64();
 
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
@@ -276,6 +318,7 @@ async fn run_scan(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     overrides: PacketOverrides,
 ) -> ScanResults {
@@ -292,11 +335,27 @@ async fn run_scan(
                 .map(|ip| nmap_core::model::Host::new(*ip, nmap_core::model::HostState::Unknown))
                 .collect(),
         },
-        ScanKind::Connect => connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await,
-        ScanKind::Syn => syn_or_fallback(cfg, ips, ports, template, max_par, overrides).await,
-        ScanKind::Udp => udp_or_fallback(cfg, ips, ports, template, max_par, overrides).await,
+        ScanKind::Connect => {
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+        }
+        ScanKind::Syn => {
+            syn_or_fallback(cfg, ips, ports, template, params, max_par, overrides).await
+        }
+        ScanKind::Udp => {
+            udp_or_fallback(cfg, ips, ports, template, params, max_par, overrides).await
+        }
         ScanKind::Ack => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Ack, overrides).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                params,
+                max_par,
+                ScanType::Ack,
+                overrides,
+            )
+            .await
         }
         ScanKind::Window => {
             flag_or_fallback(
@@ -304,6 +363,7 @@ async fn run_scan(
                 ips,
                 ports,
                 template,
+                params,
                 max_par,
                 ScanType::Window,
                 overrides,
@@ -316,6 +376,7 @@ async fn run_scan(
                 ips,
                 ports,
                 template,
+                params,
                 max_par,
                 ScanType::Maimon,
                 overrides,
@@ -323,7 +384,17 @@ async fn run_scan(
             .await
         }
         ScanKind::Fin => {
-            flag_or_fallback(cfg, ips, ports, template, max_par, ScanType::Fin, overrides).await
+            flag_or_fallback(
+                cfg,
+                ips,
+                ports,
+                template,
+                params,
+                max_par,
+                ScanType::Fin,
+                overrides,
+            )
+            .await
         }
         ScanKind::Null => {
             flag_or_fallback(
@@ -331,6 +402,7 @@ async fn run_scan(
                 ips,
                 ports,
                 template,
+                params,
                 max_par,
                 ScanType::Null,
                 overrides,
@@ -343,6 +415,7 @@ async fn run_scan(
                 ips,
                 ports,
                 template,
+                params,
                 max_par,
                 ScanType::Xmas,
                 overrides,
@@ -357,11 +430,16 @@ fn connect_cfg(
     cfg: &RunConfig,
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
 ) -> ConnectScanConfig {
     ConnectScanConfig {
         ports: ports.to_vec(),
         template,
+        // Passed in already resolved (template + the explicit knobs). The
+        // engine used to re-derive this from the template alone, which
+        // silently dropped --max-rtt-timeout, --max-retries and --scan-delay.
+        params,
         max_parallelism: max_par,
         min_rate: cfg.min_rate,
         max_rate: cfg.max_rate,
@@ -376,20 +454,23 @@ async fn syn_or_fallback(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     overrides: PacketOverrides,
 ) -> ScanResults {
-    match nmap_sys::synscan::syn_scan_targets(ips, ports, template, max_par, overrides).await {
+    match nmap_sys::synscan::syn_scan_targets(ips, ports, template, params, max_par, overrides)
+        .await
+    {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
                 "nmap-rs: -sS requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
             eprintln!("nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
     }
 }
@@ -401,6 +482,7 @@ async fn syn_or_fallback(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     // Signature parity with the pcap build; nothing here sends packets.
     _overrides: PacketOverrides,
@@ -408,7 +490,7 @@ async fn syn_or_fallback(
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)"
     );
-    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+    connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
 
 /// Run a `-sU` UDP scan, falling back to a connect scan on missing privilege or setup
@@ -420,6 +502,7 @@ async fn udp_or_fallback(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     overrides: PacketOverrides,
 ) -> ScanResults {
@@ -427,6 +510,7 @@ async fn udp_or_fallback(
         ips,
         ports,
         template,
+        params,
         max_par,
         udp_payloads(),
         overrides,
@@ -438,11 +522,11 @@ async fn udp_or_fallback(
             eprintln!(
                 "nmap-rs: -sU requires root/CAP_NET_RAW; falling back to a TCP connect scan (-sT)"
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
             eprintln!("nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
     }
 }
@@ -489,6 +573,7 @@ async fn udp_or_fallback(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     // Signature parity with the pcap build; nothing here sends packets.
     _overrides: PacketOverrides,
@@ -496,34 +581,41 @@ async fn udp_or_fallback(
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
     );
-    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+    connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
 
 /// Run a stateless TCP flag scan (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`), falling back to
 /// a connect scan on missing privilege or setup failure (built with `pcap`).
+// One argument over the limit since the resolved `TimingParams` joined the
+// template. Grouping them into a struct would only move the same fields behind
+// a name that no other call site wants.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "pcap")]
 async fn flag_or_fallback(
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     scan: nmap_core::classify::ScanType,
     overrides: PacketOverrides,
 ) -> ScanResults {
-    match nmap_sys::flagscan::flag_scan_targets(scan, ips, ports, template, max_par, overrides)
-        .await
+    match nmap_sys::flagscan::flag_scan_targets(
+        scan, ips, ports, template, params, max_par, overrides,
+    )
+    .await
     {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!(
                 "nmap-rs: this scan requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
             eprintln!("nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
     }
 }
@@ -535,6 +627,7 @@ async fn flag_or_fallback(
     ips: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_par: usize,
     _scan: nmap_core::classify::ScanType,
     // Signature parity with the pcap build; nothing here sends packets.
@@ -543,7 +636,7 @@ async fn flag_or_fallback(
     eprintln!(
         "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
     );
-    connect_scan(ips, &connect_cfg(cfg, ports, template, max_par)).await
+    connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
 
 /// Run `-sV` over every open TCP port and merge the results back into `results`.

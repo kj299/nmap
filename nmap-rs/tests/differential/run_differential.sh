@@ -64,12 +64,37 @@ BANNER_PORT="18022"
 python3 - "$OPEN_PORTS" "$BANNER_PORT" <<'PY' &
 import socket, sys, threading, time
 socks = []
+
+
+def drain(sock):
+    """Accept and immediately close, forever.
+
+    The silent listeners used to `listen(16)` and never accept. That is enough
+    for a couple of cases, but the queue is never drained, so pending
+    connections accumulate across the whole matrix and the 17th connection to a
+    port is dropped rather than answered. The symptom is a late, retry-sensitive
+    case reporting `filtered` for a port that is plainly open -- which is what
+    M7.7's `--max-retries 2` case hit, at case 14 of 16, deterministically.
+
+    It looked exactly like a fidelity bug in the port and was not one. Draining
+    keeps the fixture's meaning ("this port is open") true no matter how many
+    cases run, so adding a case can never again break an unrelated one.
+    """
+    while True:
+        try:
+            c, _ = sock.accept()
+            c.close()
+        except OSError:
+            break
+
+
 for p in sys.argv[1].split():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", int(p)))
-    s.listen(16)
+    s.listen(64)
     socks.append(s)
+    threading.Thread(target=drain, args=(s,), daemon=True).start()
 
 # The banner port: accept in a loop and answer with the OpenSSH banner. `-sV`
 # connects several times (NULL probe + retries) across both tools.
@@ -91,7 +116,9 @@ def serve():
 
 threading.Thread(target=serve, daemon=True).start()
 # Hold the listeners open long enough for both scans; the parent kills us.
-time.sleep(120)
+# Generous because the matrix grows: M7.7's --scan-delay case alone spends a
+# measurable fraction of a second per port, per tool.
+time.sleep(600)
 PY
 FIXTURE_PID=$!
 trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT

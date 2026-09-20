@@ -176,6 +176,9 @@ async fn udp_scan_resolves_closed_on_loopback() {
             source,
             &UdpKind::bare(),
             nmap_core::timing::TimingTemplate::Insane,
+            nmap_core::timing::TimingParams::for_template(
+                nmap_core::timing::TimingTemplate::Insane,
+            ),
             0,
             base_port,
             true,

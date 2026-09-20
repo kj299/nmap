@@ -30,9 +30,18 @@ use crate::net::{tcp_connect, ConnectResult};
 pub struct ConnectScanConfig {
     /// TCP ports to probe.
     pub ports: Vec<u16>,
-    /// Timing template (`-T0..-T5`) driving congestion control and the initial
-    /// RTT timeout.
+    /// Timing template (`-T0..-T5`). Congestion control branches on the level
+    /// itself (the CWND increment and the ssthresh divisor), so the template is
+    /// carried alongside the resolved parameters rather than replaced by them.
     pub template: TimingTemplate,
+    /// The resolved timing parameters: the template's values with the explicit
+    /// `--*-rtt-timeout` / `--max-retries` / `--scan-delay` knobs folded in.
+    ///
+    /// This used to be re-derived here with `TimingParams::for_template`, which
+    /// silently discarded every explicit knob — `--max-rtt-timeout 100` parsed,
+    /// validated, and then did nothing. Passing the resolved set in is what
+    /// makes those options real.
+    pub params: TimingParams,
     /// Hard ceiling on concurrent connects per host (nmap's `--max-parallelism`;
     /// `0` = the template default). Caps each congestion window.
     pub max_parallelism: usize,
@@ -48,6 +57,14 @@ struct HostCtx {
     host: Host,
     /// Finalized port outcomes, recorded as each port resolves.
     finals: Vec<(u16, PortState, Reason)>,
+    /// Earliest time (microseconds since the scan started) this host may be
+    /// probed again — `--scan-delay`. Zero means "no delay pending".
+    ///
+    /// This is per host, not per group, because that is what nmap's scan delay
+    /// is: `-T0` waits five minutes between probes *to a host*, and without it
+    /// `-T0` is not Paranoid at all, just serialised. A group-wide delay would
+    /// be a different and much slower thing.
+    next_send_us: i64,
 }
 
 /// Run an unprivileged TCP connect scan over `targets` (already-resolved IPs) as a
@@ -55,25 +72,32 @@ struct HostCtx {
 /// [`ScanResults`] in target order.
 pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> ScanResults {
     let max_par = u32::try_from(config.max_parallelism).unwrap_or(u32::MAX);
+    // `--min-parallelism`. The scheduler has always taken a floor; the CLI was
+    // passing a hardcoded 0, so the option parsed and then did nothing.
+    let min_par = config.params.min_parallelism;
     let mut ctxs: Vec<HostCtx> = targets
         .iter()
         .map(|&ip| HostCtx {
             sched: HostScheduler::with_params(
                 &config.ports,
                 config.template,
-                TimingParams::for_template(config.template),
-                0,
+                config.params,
+                min_par,
                 max_par,
             ),
             host: Host::new(ip, HostState::Down),
             finals: Vec::new(),
+            next_send_us: 0,
         })
         .collect();
 
-    let mut group = GroupScheduler::new(config.template, 0, max_par);
+    let mut group = GroupScheduler::new(config.template, min_par, max_par);
     let mut rate = RateLimiter::new(config.min_rate, config.max_rate);
+    // Milliseconds to microseconds, saturating: a scan delay is never negative
+    // (the CLI refuses that) and an absurd one simply means "effectively never".
+    let scan_delay_us = config.params.scan_delay_ms.max(0).saturating_mul(1000);
 
-    run_group(&mut ctxs, &mut group, &mut rate).await;
+    run_group(&mut ctxs, &mut group, &mut rate, scan_delay_us).await;
 
     let mut results = ScanResults::new();
     for mut ctx in ctxs {
@@ -90,12 +114,17 @@ pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> Sca
 
 /// The group event loop: launch every probe the gates permit, then await the next
 /// completion, until every host is done.
-async fn run_group(ctxs: &mut [HostCtx], group: &mut GroupScheduler, rate: &mut RateLimiter) {
+async fn run_group(
+    ctxs: &mut [HostCtx],
+    group: &mut GroupScheduler,
+    rate: &mut RateLimiter,
+    scan_delay_us: i64,
+) {
     let start = Instant::now();
     let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();
 
     loop {
-        launch_ready(ctxs, group, rate, start, &mut set);
+        launch_ready(ctxs, group, rate, start, &mut set, scan_delay_us);
 
         if set.is_empty() {
             // Nothing in flight. Either the whole group is finished, or the rate
@@ -116,8 +145,29 @@ async fn run_group(ctxs: &mut [HostCtx], group: &mut GroupScheduler, rate: &mut 
             // should be launched on the next iteration, not that the scan is
             // stuck. Retrying (never breaking) classifies every port; it cannot
             // spin, because `launch_ready` dispatches whenever a host can send.
-            if let RateVerdict::TooEarly(t) = rate.verdict(now_us(start)) {
-                tokio::time::sleep(micros_to_duration(t.saturating_sub(now_us(start)))).await;
+            //
+            // With `--scan-delay` there is a second thing that can hold every
+            // host back, so the sleep is until whichever reopens first. Missing
+            // the delay here would busy-loop instead of waiting.
+            let now = now_us(start);
+            let rate_wait = match rate.verdict(now) {
+                RateVerdict::TooEarly(t) => Some(t.saturating_sub(now)),
+                _ => None,
+            };
+            let delay_wait = ctxs
+                .iter()
+                .filter(|c| !c.sched.is_done())
+                .map(|c| c.next_send_us.saturating_sub(now))
+                .min()
+                .filter(|w| *w > 0);
+            match (rate_wait, delay_wait) {
+                (Some(a), Some(b)) => {
+                    tokio::time::sleep(micros_to_duration(a.min(b))).await;
+                }
+                (Some(w), None) | (None, Some(w)) => {
+                    tokio::time::sleep(micros_to_duration(w)).await;
+                }
+                (None, None) => {}
             }
             continue;
         }
@@ -153,6 +203,7 @@ fn launch_ready(
     rate: &mut RateLimiter,
     start: Instant,
     set: &mut JoinSet<(usize, Probe, ConnectResult)>,
+    scan_delay_us: i64,
 ) {
     loop {
         let incomplete = ctxs.iter().filter(|c| !c.sched.is_done()).count();
@@ -169,13 +220,20 @@ fn launch_ready(
         // Find a host that can and wants to send. `next_probe` applies the host's
         // own congestion gate, so a host at its window is skipped.
         let mut launched = false;
+        let now = now_us(start);
         for (idx, ctx) in ctxs.iter_mut().enumerate() {
             if ctx.sched.is_done() {
+                continue;
+            }
+            // `--scan-delay`: this host sent too recently. Skip it rather than
+            // returning, so other hosts are not held up by one host's delay.
+            if ctx.next_send_us > now {
                 continue;
             }
             if let Some(probe) = ctx.sched.next_probe() {
                 group.on_send();
                 rate.record_send(now_us(start));
+                ctx.next_send_us = now.saturating_add(scan_delay_us);
                 let timeout = micros_to_duration(ctx.sched.probe_timeout_us());
                 let addr = SocketAddr::new(ctx.host.address, probe.port);
                 set.spawn(async move { (idx, probe, tcp_connect(addr, timeout).await) });
@@ -223,6 +281,7 @@ mod tests {
         ConnectScanConfig {
             ports,
             template: TimingTemplate::Normal,
+            params: TimingParams::default(),
             max_parallelism: 0,
             min_rate: None,
             max_rate: None,

@@ -294,3 +294,9 @@ test = false
 name = "target_scope"
 path = "fuzz_targets/target_scope.rs"
 test = false
+
+[[bin]]
+name = "timespec"
+path = "fuzz_targets/timespec.rs"
+test = false
+doc = false

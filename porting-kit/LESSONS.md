@@ -820,6 +820,45 @@ These entries are the M2 retrospective.
   audit, `[-]` rendering, self-test), `harnesses/ci/porting-ci.template.yml` (audit
   step).
 
+## 028. A shared test fixture with an undrained queue makes adding a case break an unrelated one
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.7, the `-T` timing group
+- **What happened:** The differential harness binds loopback listeners to stand in
+  for "open" ports, then runs every matrix case against that one fixture. The
+  listeners for the plain state-fidelity ports were `listen(16)` with **no accept
+  loop at all** — nothing ever drained the queue. That is fine while the matrix is
+  small. It stops being fine at the 17th connection to a port, which is silently
+  dropped rather than answered.
+  M7.7 added four cases, one of which passes `--max-retries 2`. At case 14 of 16 the
+  backlog was exhausted, that case gave up after three attempts where the default
+  eleven would have papered over it, and the harness reported a port that is plainly
+  open as `filtered`. **Deterministically** — it reproduced on every run, which is
+  what made it look like a real fidelity bug in the port.
+  It was not. The tell was that it would not reproduce against a hand-rolled
+  listener with the same options, only inside the matrix — which is the signature of
+  a *shared* resource, not of the code under test.
+- **Cost:** About half an hour, all of it spent suspecting the wrong thing: the
+  newly written timing code, in a milestone whose whole subject is timeouts and
+  retries. A retry-sensitive case failing in a retry-related milestone is about as
+  convincing a false positive as this project has produced.
+- **Root cause:** The fixture encoded "this port is open" as *a socket exists*, when
+  what the scanner actually observes is *a SYN gets a SYN-ACK*. Those agree only
+  while the accept queue has room. The fixture's meaning therefore depended on how
+  many cases had run before — a hidden coupling between cases that nothing in the
+  matrix expressed.
+- **Fix:** Give every listener a drain thread (`accept()` then immediate `close()`)
+  and raise the backlog. The fixture's meaning is now independent of how many cases
+  precede a case, so adding one can never again break another.
+- **Kit change:** `harnesses/differential/README.md` — a shared fixture must be
+  **stateless across cases**. Anything with a bounded queue (listen backlogs, thread
+  pools, connection limits, temp-file quotas) has to be drained or reset between
+  cases, or the matrix acquires an ordering dependency that nobody wrote down and
+  that only shows up as a mysterious failure in whichever case is most sensitive.
+  The generalisation worth keeping: **when a differential case fails deterministically
+  but will not reproduce outside the harness, suspect the harness's shared state
+  before the code under test.** Deterministic is not the same as caused-by-the-diff.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

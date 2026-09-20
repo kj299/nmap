@@ -13,7 +13,7 @@ use std::net::IpAddr;
 #[cfg(feature = "pcap")]
 use nmap_core::payload::UdpPayloads;
 #[cfg(feature = "pcap")]
-use nmap_core::timing::TimingTemplate;
+use nmap_core::timing::{TimingParams, TimingTemplate};
 
 /// Run a UDP scan over several targets with route/source selection and pcap capture —
 /// the CLI-facing entry point (feature `pcap`). Targets sharing an egress route are
@@ -31,12 +31,21 @@ pub async fn udp_scan_targets(
     targets: &[IpAddr],
     ports: &[u16],
     template: TimingTemplate,
+    params: TimingParams,
     max_parallelism: usize,
     payloads: UdpPayloads,
     overrides: nmap_core::build::PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
     // UDP has no sequence to mask; the base port alone encodes the attempt.
     let kind = crate::group::UdpKind::new(payloads);
-    crate::group::group_scan_targets(&kind, targets, ports, template, max_parallelism, overrides)
-        .await
+    crate::group::group_scan_targets(
+        &kind,
+        targets,
+        ports,
+        template,
+        params,
+        max_parallelism,
+        overrides,
+    )
+    .await
 }

@@ -81,3 +81,41 @@ args = ["-sL", "-n", "127.0.0.1-3"]
 [[case]]
 name = "list-scan-with-exclusion"
 args = ["-sL", "-n", "--exclude", "127.0.0.2", "127.0.0.1-3"]
+
+# ---- the -T group (M7.7) ---------------------------------------------------
+# Timing options change *pacing*, which the output does not show — so what
+# these cases actually prove is the thing most worth proving: that selecting a
+# template does not change the RESULT. A scan run at -T4 must classify the same
+# ports the same way as one run at the default, or the speed was bought by
+# getting answers wrong.
+[[case]]
+name = "timing-template-aggressive"
+args = ["-sT", "-Pn", "-n", "-T4", "-p", "18080,18443,18081,19999", "127.0.0.1"]
+
+# The explicit knobs, same argument: tightening the RTT bounds and capping
+# retries must not change any port's verdict on a local target that answers
+# immediately.
+[[case]]
+name = "timing-explicit-rtt-bounds"
+args = [
+  "-sT", "-Pn", "-n",
+  "--min-rtt-timeout", "50ms",
+  "--max-rtt-timeout", "800ms",
+  "--initial-rtt-timeout", "200ms",
+  "--max-retries", "2",
+  "-p", "18080,18443,18081,19999", "127.0.0.1",
+]
+
+# A scan delay is the one timing option whose effect is visible in the elapsed
+# time rather than the port table, so this case is deliberately tiny: three
+# ports at 20ms apart, just enough that both tools take the delay and neither
+# takes long enough to make the suite slow.
+[[case]]
+name = "timing-scan-delay"
+args = ["-sT", "-Pn", "-n", "--scan-delay", "20ms", "-p", "18080,18443,19999", "127.0.0.1"]
+
+# -T5 on a list scan: no packets, so this isolates the template's effect on the
+# option parsing and the report from its effect on the wire.
+[[case]]
+name = "timing-template-insane-listscan"
+args = ["-sL", "-n", "-T5", "127.0.0.1-3"]

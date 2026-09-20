@@ -2105,3 +2105,84 @@ removed: that one was theatre, this one is unobservable.
       Both spellings now reach the same field, attached or separate, pinned by
       `options::tests::output_flags_accept_both_the_short_and_long_spelling`.
       *(Introduced at M7.3.)*
+
+- [ ] `timespec-undefined-conversion` (`core::timespec`, M7.7) — **two command
+      lines reach undefined behaviour in C's time parser, and this port refuses
+      them instead.** `tval2msecs` (`nbase/nbase_misc.c:325`) guards its
+      `double`→`long` conversion with
+
+      ```c
+      if (ms > LONG_MAX || ms < LONG_MIN)
+          return -1;
+      return (long) ms;
+      ```
+
+      which is wrong twice. Every comparison with NaN is false, so
+      `--host-timeout nan` falls through to `(long) NaN`; and `LONG_MAX` is not
+      representable as a `double`, converting to 2^63, so `ms == 2^63` is not
+      *greater than* it and `--host-timeout 9223372036854775.808` falls through
+      too. Both are undefined; on x86-64 both yield `LONG_MIN`. Confirmed by
+      running the oracle rather than by reading the C:
+
+      ```text
+      $ printf '%s\0' nan 9223372036854775.808 | ./tval_oracle
+      nan                     -9223372036854775808    (null)
+      9223372036854776        -9223372036854775808    (null)
+      ```
+
+      This port returns `TimeSpecError::Unparseable` for both. **No observable
+      behaviour differs**: all six callers reject a negative (`< 0`, `<= 0`, or
+      `< 5`), so C's `LONG_MIN` and this port's error end as the same refusal
+      with the same message. The divergence is in a value nothing can observe,
+      and mirroring it would mean reproducing undefined behaviour to preserve
+      it. Pinned by
+      `timespec::tests::the_inputs_that_are_undefined_in_c_are_refused_here`.
+
+- [ ] `timing-template-strict-argument` (`core::options`, M7.7) — **`-T` accepts
+      only `0`–`5` and the six names here; C reads the first character and has
+      an easter egg.** C's `-T` handler opens with a deliberately obfuscated
+      line (`nmap.cc:1361`) whose only observable effect beyond "look at the
+      first character" is that **`-T11` prints a message and means `-T5`**.
+      Verified against the reference:
+
+      ```console
+      $ nmap -T11 -sL -n 127.0.0.1
+      ok nigel
+      Starting Nmap 7.94SVN ...
+      ```
+
+      So a typo of `-T1` — Sneaky, the second most cautious template — silently
+      selects Insane, the most aggressive one. Reaching it in C also reads past
+      the end of the stack array `k` (`nmap.cc:520`), which holds the packed
+      message and carries no terminator within its 40 bytes.
+
+      Under the fail-closed rule this port refuses anything that is not exactly
+      a digit `0`–`5` or one of the six names, which also means refusing C's
+      `-T4abc` (Aggressive there) and `-T44`. Nobody writes those deliberately;
+      the operator who does write one gets a message naming every accepted
+      spelling instead of a silently chosen template. Pinned by
+      `a_malformed_timing_template_is_refused_rather_than_guessed`.
+
+- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`,
+      `--min-hostgroup` and `--max-hostgroup` parse and are then refused.** The
+      engine has no per-host deadline and scans a route's targets as one group,
+      so honouring either would be a claim it cannot keep: a `--host-timeout`
+      that does nothing runs past a bound the operator set, and a
+      `--max-hostgroup` that does nothing scans every target at once. Accepting
+      them would be the M7.0 mistake in a new place, so they refuse with a
+      message that says exactly what is missing. `-T5`'s *implied* 15-minute
+      host timeout is likewise not enforced — it is recorded in
+      `TimingParams::host_timeout_ms` and read by nothing yet. Pinned by
+      `fail_closed::a_constraint_we_cannot_honour_is_refused`.
+
+- [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
+      representable subnormal written in decimal would be refused here and
+      accepted by C.** glibc raises the IEEE underflow signal (and so sets
+      `ERANGE`, which nmap treats as unparseable) only when an underflowing
+      result is also *inexact*; `0x1p-1030` is an exact subnormal and parses
+      fine, while `1e-323` does not. The hex path tests exactness properly. The
+      decimal path treats every nonzero subnormal as inexact, which is wrong
+      only for a literal that is exactly a subnormal — and since `d * 10^-k` is
+      a binary float only when `5^k` divides `d`, and a subnormal needs
+      `k >= 308`, such a literal carries at least 216 significant digits. Not
+      reachable by an operator, and not reachable by the fuzzer by chance.

@@ -2186,3 +2186,41 @@ removed: that one was theatre, this one is unobservable.
       a binary float only when `5^k` divides `d`, and a subnormal needs
       `k >= 308`, such a literal carries at least 216 significant digits. Not
       reachable by an operator, and not reachable by the fuzzer by chance.
+
+- [x] `service-probe-exclude-directive` (`cli`, M7.8) — **`-sV` version-probed
+      the ports `nmap-service-probes` tells it not to.** The probe file opens
+      with `Exclude T:9100-9107` — the JetDirect printer ports, where a version
+      probe is not a read but a *print job*. C honours it
+      (`service_scan.cc:1447`); `--allports` is the flag that overrides it.
+
+      This port parsed the directive from M3 on and unit-tested it
+      (`probedb::is_excluded(9100, Tcp)` asserts true, and passes), and then
+      called it from **nowhere**. So `-sV` here behaved exactly like C's
+      `-sV --allports`:
+
+      ```console
+      $ nmap    -sV -Pn -n -p 9100 127.0.0.1   ->  9100/tcp open  jetdirect?
+      $ nmap-rs -sV -Pn -n -p 9100 127.0.0.1   ->  9100/tcp open  tcpwrapped
+      ```
+
+      `tcpwrapped` is a probe *result* — proof the probes went out. Found by
+      following `--allports` to what it actually overrides, not by reading the
+      scan path. A parser test that never checks the behaviour is LESSONS #027's
+      shape, and this is the sharpest instance of it in the port so far: the
+      data was parsed, the predicate was correct, the test was green, and the
+      scanner did the thing the data existed to prevent.
+
+      Fixed: the `-sV` driver filters excluded ports unless `--allports`, and
+      the renderer marks an unconfirmed service name with `?` as C does. All
+      three cases (`-sV`, `-sV --allports`, no `-sV`) now match C exactly.
+      Pinned by `service_probe_exclusions::*`.
+      *(Introduced at M3; found and fixed at M7.8.)*
+
+- [ ] `top-ports-strtod-arguments` (`core::options`, M7.8) — **`--top-ports
+      0x10` scans sixteen ports and `--top-ports 5abc` scans five**, here as in
+      C, because C parses both with `strtod` and then ignores the tail entirely
+      (`nmap.cc:971`). Not a divergence — recorded because it looks like one.
+      A reviewer meeting `--top-ports 5abc` in a test would reasonably assume
+      the port is being sloppy; it is being faithful, and the reference was run
+      to confirm it. The same `strtod` port from M7.7 (`timespec::strtod_value`)
+      serves both, so the two option families cannot drift apart.

@@ -222,6 +222,15 @@ failure). Tracing added reactively at hang-fix step 4 of 5.
 
 **Goal:** each module ends safer than its C original, proven, before merge.
 
+**Run each gate with the exact command CI runs, not a narrowed version of it.**
+Narrowing a slow gate to the crate you are editing is the right inner loop and
+the wrong pre-push check: `cargo miri test -p one-crate` and `cargo miri test`
+are different gates, and only the second is the one CI will run. The same holds
+for `--all`, `--all-features`, and any package selector — they are part of a
+gate's identity, not decoration on it. Three separate failures in this kit's
+history came from a gate that had been customised for convenience and therefore
+stopped covering what it was aimed at (LESSONS #023, #026, #030).
+
 For a hazardous module (flagged in Phase 1), **spike first**: a timeboxed
 experiment on the one scary syscall/idiom to learn its behavior (does it block?
 need privilege? vary by version?) *before* committing to a design. Record the

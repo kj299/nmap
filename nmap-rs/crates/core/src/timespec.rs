@@ -439,6 +439,24 @@ pub fn tval_unit(spec: &str) -> Option<&str> {
     Some(&spec[parsed.tail..])
 }
 
+/// C's `strtod` return value for `spec`: the longest valid numeric prefix,
+/// converted, or `0.0` when no conversion is possible.
+///
+/// Exposed because several nmap options call `strtod` directly and then ignore
+/// the tail entirely — `--top-ports 5abc` is five ports and `--top-ports 0x10`
+/// is sixteen, both confirmed against the reference. Sharing this with the time
+/// specifications means those options inherit a parser that is already checked
+/// against the C oracle and fuzzed, rather than growing a second, subtly
+/// different number reader.
+///
+/// The `errno`/`ERANGE` signal is deliberately not surfaced: the callers in
+/// `nmap.cc` do not check it either, so an overflowing `--top-ports 1e400`
+/// yields infinity there and is caught by the range checks that follow.
+#[must_use]
+pub fn strtod_value(spec: &str) -> f64 {
+    strtod(spec).value
+}
+
 /// A time specification as a count of seconds — C's `tval2secs`.
 ///
 /// Returns C's `-1.0` sentinel on failure. That sentinel collides with the

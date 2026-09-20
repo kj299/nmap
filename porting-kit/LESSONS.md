@@ -859,6 +859,91 @@ These entries are the M2 retrospective.
   but will not reproduce outside the harness, suspect the harness's shared state
   before the code under test.** Deterministic is not the same as caused-by-the-diff.
 
+## 029. A differential against a data-driven tool must pin the DATA, not just the binary
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.8, `--top-ports` / `--port-ratio` / `-F`
+- **What happened:** `--top-ports N` returns the N most common ports according to
+  ratios in the `nmap-services` data file. To check the port's ranking, the exact
+  sets C selects were captured from the real binary with `--packet-trace` — a good
+  oracle, better than transcribing `gettoppts`. Ten values of N were compared.
+  Eight matched exactly. **N=500 and N=1000 did not**, each off by two ports, and
+  the disagreeing ports all sat at identical ratios — the signature of a
+  tie-break bug. C sorts a `std::list` with `a.ratio > b.ratio` and
+  `std::list::sort` is stable, so ties keep file order; the Rust used a stable
+  sort too, so the hunt was on for how the orders had come apart.
+  They had not. The installed `nmap` reads `/usr/share/nmap/nmap-services`; the
+  port reads the one in the source tree. **They are different files.** `wsman`
+  (5985/tcp) carries ratio 0.000076 in one and 0.000380 in the other, which moves
+  it across the N=500 boundary. Re-running the comparison with both sides on the
+  same file: ten of ten exact, no tie-break bug, nothing to fix.
+- **Cost:** Maybe twenty minutes, and it came within one edit of "fixing" a
+  correct stable sort into an incorrect one to match golden data that was never
+  comparable. That is the expensive failure mode here — not the lost time, but a
+  differential that argues you into breaking working code.
+- **Root cause:** The oracle was pinned (a specific binary) and the *input matrix*
+  was pinned (specific arguments), but the tool's third input — its data files —
+  was left to whatever the binary happened to find. For a data-driven tool that is
+  most of its behaviour. Nothing in the harness expressed the dependency, so
+  nothing could flag it.
+- **Fix:** Generate every golden with the data file pinned (`nmap --datadir
+  <repo>`), pass the same flag in the differential harness's oracle wrapper so
+  every case compares like with like, and say in the test module why the flag is
+  there — the next person to regenerate goldens will not otherwise know.
+- **Coda, the same day:** the *integration* tests for the same feature walked
+  into the other half of this. They run the built binary, which searches for
+  `nmap-services` and falls back to `/usr/share/nmap/nmap-services`. On this
+  machine, with nmap installed, they read the installed database — passing while
+  comparing against goldens from a different file. On a CI runner without nmap
+  they found nothing at all, fell back to a 1-1024 port sweep, and reported 1024
+  ports for `--top-ports 10`. Pinning the golden generation was necessary and
+  not sufficient: **the thing under test has to be pinned to the same data as
+  the oracle**, which for a binary means setting its data-directory variable in
+  the test harness, not trusting its search path.
+- **Kit change:** `harnesses/differential/diff_run.py` — before trusting a
+  divergence, confirm both sides read the same data files (databases, signature
+  files, dictionaries, locale, timezone), and pin the *rewrite's* lookup as
+  explicitly as the oracle's. A search path that ends in a system location is a
+  silent dependency on the developer's machine. The tell that saves the time:
+  **a divergence that appears only past some threshold — the tail of a ranking,
+  the long inputs, the rare branch — is more often a data mismatch than a logic
+  bug**, because shared data usually agrees on the common cases and diverges at
+  the margins. Pin the data, re-run, and only then start reading code.
+
+## 030. Running a gate scoped to the crate you changed is not running the gate
+
+- **Date:** 2026-09-20
+- **Codebase:** nmap — M7.8, port selection
+- **What happened:** M7.8 added unit tests inside the CLI binary crate that read
+  golden files from disk. Every other filesystem- or process-touching test in the
+  repository carries `#![cfg(not(miri))]`, because Miri's isolation blocks `open`.
+  These did not, and CI's Miri job went red on a PR that had passed every check
+  run locally.
+  The local Miri run had been `cargo +nightly miri test -p nmap-core <filter>` —
+  scoped to the crate the previous milestone touched, because that is the crate
+  whose module was new and because a full Miri run takes many minutes. CI runs
+  `cargo +nightly miri test`, unscoped. The habit of narrowing a slow gate to
+  "the part I changed" is exactly what let a test in a *different* crate reach CI
+  unchecked.
+- **Cost:** One red CI cycle and one extra push. Cheap this time, and only because
+  the failure was loud. A gate narrowed for speed fails silently far more often
+  than it fails loudly.
+- **Root cause:** Two different commands were both called "running Miri". The
+  scoped one is a fast inner-loop check; the unscoped one is the gate. Nothing
+  distinguished them, so the fast one felt like the gate had run.
+- **Fix:** Gate the new module with `#[cfg(all(test, not(miri)))]`, and say in the
+  comment *why* the guard is there — naming the trap ("the CI job runs
+  `cargo miri test` over the whole workspace while it is tempting to run it
+  locally scoped to the crate you just changed") so the next person adding a
+  filesystem test in a new crate sees it.
+- **Kit change:** `PLAYBOOK.md` Phase 4 — **before a PR, run each gate with the
+  exact command CI runs, not a narrowed version of it.** Narrowing for the inner
+  loop is correct and fast; the pre-push run is not the inner loop. The general
+  shape, of which this is the third instance in this port (see #023, #026):
+  *a gate you have customised for convenience is a different gate.* `--all`,
+  `--all-features`, and an unscoped package selector are part of the gate's
+  identity, not decoration on it.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

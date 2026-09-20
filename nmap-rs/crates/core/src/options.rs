@@ -123,6 +123,29 @@ pub struct RunConfig {
     /// `-S`). C tracks the same thing as `delayed_options.raw_scan_options` so it
     /// can tell the operator when the chosen scan cannot honour them.
     pub raw_scan_options: bool,
+    /// `--top-ports N` / `--port-ratio X`: nmap keeps both in ONE field,
+    /// `o.topportlevel`, so the last of the two on the command line wins and
+    /// there is no way to combine them. A value `>= 1` is a count, a value in
+    /// `(0, 1)` is a minimum open-frequency ratio. `None` is C's `-1` sentinel,
+    /// meaning "no explicit level": the default 1000, or 100 under `-F`.
+    pub top_port_level: Option<f64>,
+    /// `-F`: fast scan — the top 100 ports. Empirically identical to
+    /// `--top-ports 100` (`services.cc:421` sets `level = 100`).
+    pub fast_scan: bool,
+    /// `--exclude-ports <spec>`: ports to drop from the list, as given.
+    pub exclude_ports: Option<String>,
+    /// `--exclude-ports` given more than once — refused, matching C's
+    /// `fatal("Only 1 --exclude-ports option allowed, …")`.
+    pub exclude_ports_repeated: bool,
+    /// `--allports`: version-scan every open port, including the ones
+    /// `nmap-service-probes` names in its `Exclude` directive.
+    ///
+    /// C's flag is `override_excludeports`, and it is read only by the service
+    /// scanner (`service_scan.cc:1447`, `:2813`) — it has nothing to do with
+    /// `--exclude-ports`, which narrows the *port list*. The constraint it
+    /// cancels is the probe file's own: `Exclude T:9100-9107`, the JetDirect
+    /// printer ports, where sending version probes makes printers print.
+    pub allports: bool,
     /// `-T<0-5>` or `-T<name>`: the timing template. `None` ⇒ `-T3` (Normal),
     /// nmap's default.
     pub timing_template: Option<TimingTemplate>,
@@ -295,6 +318,11 @@ impl Default for RunConfig {
             exclude_file: None,
             input_file: None,
             input_file_repeated: false,
+            top_port_level: None,
+            fast_scan: false,
+            exclude_ports: None,
+            exclude_ports_repeated: false,
+            allports: false,
             timing_template: None,
             min_rtt_timeout_ms: None,
             max_rtt_timeout_ms: None,
@@ -518,13 +546,16 @@ fn long_opt_value(args: &[String], i: usize, prefix: &str) -> (String, usize) {
     }
 }
 
-/// C's `%g` with the default precision of 6 significant digits, used by the
-/// "since April 2010" messages. Reproduced because an operator who hits one of
-/// those messages will be searching for C's exact wording, numbers included.
+/// C's `%g` with the default precision of 6 significant digits.
+///
+/// Reproduced because an operator who hits one of the messages that uses it
+/// will be searching for C's exact wording, numbers included — the "since April
+/// 2010" time guards and the two `gettoppts` refusals both print a `double`
+/// this way.
 // `exp` comes from log10 of a finite non-zero magnitude, so it is within
 // [-308, 308] and `5 - exp` cannot overflow.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn g6(v: f64) -> String {
+pub fn g6(v: f64) -> String {
     if v == 0.0 {
         return "0".to_string();
     }
@@ -707,6 +738,61 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "-sN" => cfg.scan = ScanKind::Null,
             "-sX" => cfg.scan = ScanKind::Xmas,
             "-sL" => cfg.scan = ScanKind::List,
+            // `--allports` takes no argument. It only widens what `-sV`
+            // probes; see the field docs for why it is not related to
+            // `--exclude-ports` despite the name.
+            _ if long_flag(s, "allports", &mut keybuf).is_some() => cfg.allports = true,
+            // ---- port selection (M7.8) ----------------------------------
+            // `-F`: fast scan. C sets `o.fastscan`, which `gettoppts` turns
+            // into `level = 100` when no explicit level was given.
+            "-F" => cfg.fast_scan = true,
+            // `--top-ports` and `--port-ratio` write the SAME field in C
+            // (`o.topportlevel`), so the last one wins. Mirrored exactly: two
+            // separate fields would let both apply and silently invent a
+            // combination nmap has no way to express.
+            _ if long_flag(s, "top-ports", &mut keybuf).is_some() => {
+                let key = long_flag(s, "top-ports", &mut keybuf2).unwrap_or("--top-ports");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                // C: `strtod`, then reject anything below 1 or non-integral.
+                // The tail is ignored, so `--top-ports 5abc` is five and
+                // `--top-ports 0x10` is sixteen -- both confirmed against the
+                // reference, both a consequence of using strtod at all.
+                let level = crate::timespec::strtod_value(&v);
+                if !level.is_finite() || level < 1.0 || level.trunc() != level {
+                    cfg.invalid
+                        .push("--top-ports should be an integer 1 or greater".to_string());
+                } else {
+                    cfg.top_port_level = Some(level);
+                }
+            }
+            _ if long_flag(s, "port-ratio", &mut keybuf).is_some() => {
+                let key = long_flag(s, "port-ratio", &mut keybuf2).unwrap_or("--port-ratio");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                let level = crate::timespec::strtod_value(&v);
+                // C's range test is `< 0 || >= 1`, so zero passes HERE and is
+                // caught later by gettoppts ("should be a positive ratio below
+                // 1"). Both messages are reproduced, at the same two points.
+                // C's test is `< 0 || >= 1`, i.e. the half-open range [0, 1).
+                if !level.is_finite() || !(0.0..1.0).contains(&level) {
+                    cfg.invalid
+                        .push("--port-ratio should be between [0 and 1)".to_string());
+                } else {
+                    cfg.top_port_level = Some(level);
+                }
+            }
+            _ if long_flag(s, "exclude-ports", &mut keybuf).is_some() => {
+                let key = long_flag(s, "exclude-ports", &mut keybuf2).unwrap_or("--exclude-ports");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                if cfg.exclude_ports.is_some() {
+                    cfg.exclude_ports_repeated = true;
+                } else {
+                    cfg.exclude_ports = Some(v);
+                }
+            }
+
             // ---- the -T group (M7.7) ------------------------------------
             // `-T` takes a required argument, so `-T4` and `-T 4` both parse;
             // `opt_value` handles the attached and separate spellings alike.
@@ -1443,12 +1529,13 @@ mod tests {
         // motivated failing closed in the first place.
         //
         // This list keeps shrinking, which is the point: `--exclude` left in
-        // M7.4, and `--scan-delay`, `-T2` and `--max-retries` left in M7.7.
+        // M7.4; `--scan-delay`, `-T2` and `--max-retries` left in M7.7; and
+        // `--top-ports`, `--exclude-ports` and `--port-ratio` left in M7.8.
         // Each departure is a flag that graduated from "refused" to
         // "implemented and honoured" — never to "quietly accepted". The
         // property that matters is unchanged: implementing one option must not
         // relax the rest.
-        for flag in ["--top-ports", "--exclude-ports", "--port-ratio"] {
+        for flag in ["--source-port", "--data-length", "--spoof-mac"] {
             assert_eq!(
                 cfg(&[flag, "127.0.0.1"]).unrecognized,
                 vec![flag.to_string()],
@@ -1462,6 +1549,10 @@ mod tests {
             vec!["--scan-delay", "5ms"],
             vec!["-T2"],
             vec!["--max-retries", "3"],
+            vec!["--top-ports", "5"],
+            vec!["--exclude-ports", "80"],
+            vec!["--port-ratio", "0.5"],
+            vec!["-F"],
         ] {
             let mut argv = flag.clone();
             argv.push("127.0.0.1");

@@ -201,11 +201,45 @@ async fn main() -> ExitCode {
     // ignoring matters for the same reason the rest of this CLI refuses: an
     // operator who wrote `-sL -p 80` has asked for two incompatible things, and
     // silently honouring one is a guess about which they meant.
-    if cfg.scan == ScanKind::List && cfg.port_spec.is_some() {
+    if cfg.scan == ScanKind::List && (cfg.port_spec.is_some() || cfg.fast_scan) {
         eprintln!(
-            "nmap-rs: you cannot use -p (explicit port selection) when not doing a port scan"
+            "nmap-rs: You cannot use -F (fast scan) or -p (explicit port selection) when not doing a port scan"
         );
         return ExitCode::FAILURE;
+    }
+    // C: nmap.cc:1587. The message names the way out, so it is reproduced in
+    // full -- an operator who wanted "-F but only these ports" is being told
+    // which option actually does that.
+    if cfg.port_spec.is_some() && cfg.fast_scan {
+        eprintln!(
+            "nmap-rs: You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports"
+        );
+        return ExitCode::FAILURE;
+    }
+    if cfg.exclude_ports_repeated {
+        eprintln!(
+            "nmap-rs: Only 1 --exclude-ports option allowed, separate multiple ranges with commas."
+        );
+        return ExitCode::FAILURE;
+    }
+    // The two checks C defers to `gettoppts` rather than doing at parse time,
+    // reproduced at the same point and with the same wording. `--port-ratio 0`
+    // passes the parse-time range test (`< 0 || >= 1`) and dies here.
+    if let Some(level) = cfg.top_port_level {
+        if level <= 0.0 {
+            eprintln!(
+                "nmap-rs: Argument to gettoppts ({}) should be a positive ratio below 1 or an integer of 1 or higher",
+                nmap_core::options::g6(level)
+            );
+            return ExitCode::FAILURE;
+        }
+        if level > 65536.0 {
+            eprintln!(
+                "nmap-rs: Level argument to gettoppts ({}) is too large",
+                nmap_core::options::g6(level)
+            );
+            return ExitCode::FAILURE;
+        }
     }
 
     let services = load_services();
@@ -935,7 +969,24 @@ async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
     let db = Arc::new(db);
     let compiled = Arc::new(CompiledDb::compile(&db));
 
-    // Gather open TCP ports per host, in the host order `service_scan` expects.
+    // Gather open TCP ports per host, in the host order `service_scan` expects,
+    // minus the ports `nmap-service-probes` tells us not to probe.
+    //
+    // The probe file opens with `Exclude T:9100-9107` — the JetDirect printer
+    // ports, where a version probe is not a read but a *print job*. C honours it
+    // (`service_scan.cc:1447`), and `--allports` is the flag that overrides it.
+    //
+    // This port parsed the directive from M3 on, unit-tested it
+    // (`probedb::is_excluded(9100, Tcp)`), and then called it from nowhere. So
+    // `-sV` here behaved exactly like C's `-sV --allports`:
+    //
+    //     $ nmap    -sV -Pn -n -p 9100 127.0.0.1   ->  9100/tcp open  jetdirect?
+    //     $ nmap-rs -sV -Pn -n -p 9100 127.0.0.1   ->  9100/tcp open  tcpwrapped
+    //
+    // `tcpwrapped` is a *probe result*: proof the probes went out. A test that
+    // asserts the parser and never the behaviour is the shape of LESSONS #027,
+    // and this is the sharpest instance of it in the port so far.
+    let mut skipped_excluded = 0usize;
     let open: Vec<(IpAddr, Vec<u16>)> = results
         .hosts
         .iter()
@@ -944,11 +995,28 @@ async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
                 .ports
                 .iter()
                 .filter(|p| p.state == PortState::Open && p.protocol == nmap_core::Protocol::Tcp)
+                .filter(|p| {
+                    if cfg.allports || !db.is_excluded(p.number, nmap_core::Protocol::Tcp) {
+                        return true;
+                    }
+                    skipped_excluded = skipped_excluded.saturating_add(1);
+                    false
+                })
                 .map(|p| p.number)
                 .collect();
             (h.address, ports)
         })
         .collect();
+    if skipped_excluded > 0 {
+        // C says the same thing the other way round, when the override is on:
+        // "Overriding exclude ports option! Some undesirable ports may be
+        // version scanned!" Saying it in the quiet direction too means the
+        // operator can tell a port was left alone on purpose.
+        nmap_core::verbose!(
+            1,
+            "{skipped_excluded} port(s) not version-scanned (nmap-service-probes Exclude); --allports overrides"
+        );
+    }
     if open.iter().all(|(_, ports)| ports.is_empty()) {
         return; // nothing open to probe
     }
@@ -1060,21 +1128,87 @@ fn print_usage() {
     println!("        hosts without both an open and a closed port; -A implies -sV -O).");
 }
 
-/// Choose the TCP ports to scan.
+/// Choose the TCP ports to scan — this port's `gettoppts` (`services.cc:390`).
+///
+/// The shape is C's, and the order of the three steps is what makes it correct:
+///
+///   1. **Candidates.** `-p` names them explicitly; otherwise every port is a
+///      candidate.
+///   2. **`--exclude-ports` removes from the candidates FIRST**, before the top-N
+///      cut. C is explicit about this — "the specified ports are excluded first
+///      and only then are the top N ports taken" — and the order is observable:
+///      excluding afterwards would return fewer than N ports, while excluding
+///      first backfills with the next most common ones. Getting it backwards
+///      silently scans less than asked, which is the quieter failure but still
+///      the scanner not doing what it was told.
+///   3. **The level.** `>= 1` is a count, `(0, 1)` is a minimum ratio, absent is
+///      1000 (or 100 under `-F`).
+///
+/// With `-p` and no explicit level, the port list is used as given and no
+/// top-ports cut happens at all (`services.cc:416`).
 fn select_ports(
     cfg: &RunConfig,
     services: Option<&ServiceTable>,
 ) -> Result<Vec<u16>, nmap_core::PortSpecError> {
-    if let Some(spec) = &cfg.port_spec {
-        return Ok(parse_port_spec(spec, services)?.tcp);
-    }
-    if let Some(t) = services {
-        let top = t.top_ports(nmap_core::Protocol::Tcp, DEFAULT_TOP_PORTS);
-        if !top.is_empty() {
-            return Ok(top);
+    // The candidate set, before any top-N cut.
+    let explicit: Option<Vec<u16>> = match &cfg.port_spec {
+        Some(spec) => Some(parse_port_spec(spec, services)?.tcp),
+        None => None,
+    };
+
+    // `--exclude-ports` applies to the candidates, whatever they are.
+    let excluded: Option<Vec<u16>> = match &cfg.exclude_ports {
+        Some(spec) => Some(parse_port_spec(spec, services)?.tcp),
+        None => None,
+    };
+    let keep = |p: &u16| excluded.as_ref().is_none_or(|ex| !ex.contains(p));
+
+    let Some(table) = services else {
+        // No nmap-services: fall back to the historical 1-1024 sweep, which is
+        // what C does for an old-style file without ratios (`services.cc:411`).
+        let base: Vec<u16> = explicit.unwrap_or_else(|| (1u16..=1024).collect());
+        return Ok(base.into_iter().filter(keep).collect());
+    };
+
+    // `-p` with no --top-ports/--port-ratio: use the list as given.
+    if cfg.top_port_level.is_none() && !cfg.fast_scan {
+        if let Some(list) = explicit {
+            return Ok(list.into_iter().filter(keep).collect());
         }
     }
-    Ok((1u16..=1024).collect())
+
+    let level = cfg.top_port_level.unwrap_or(if cfg.fast_scan {
+        100.0
+    } else {
+        f64::from(u32::try_from(DEFAULT_TOP_PORTS).unwrap_or(1000))
+    });
+
+    // A ratio (0, 1) selects by frequency; 1 or more is a count.
+    let ranked: Vec<u16> = if level < 1.0 {
+        table.ports_above_ratio(nmap_core::Protocol::Tcp, level)
+    } else {
+        // Take the whole ranking and cut after filtering, so that an excluded
+        // port does not consume one of the N slots -- step 2 above.
+        table.top_ports(nmap_core::Protocol::Tcp, usize::MAX)
+    };
+
+    let mut out: Vec<u16> = ranked
+        .into_iter()
+        .filter(|p| explicit.as_ref().is_none_or(|list| list.contains(p)))
+        .filter(keep)
+        .collect();
+    if level >= 1.0 {
+        // Bounded above by the 65536 check the CLI already made, and `level`
+        // is integral here because `--top-ports` rejects a non-integral value.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = usize::try_from(level as u64).unwrap_or(usize::MAX);
+        out.truncate(n);
+    }
+    out.sort_unstable();
+    if out.is_empty() && explicit.is_none() && cfg.exclude_ports.is_none() {
+        return Ok((1u16..=1024).collect());
+    }
+    Ok(out)
 }
 
 /// Build the IP-layer overrides (`--ttl`, `--badsum`, `-S`) from the parsed
@@ -1329,4 +1463,147 @@ fn now_string() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("epoch+{secs}s")
+}
+
+// Skipped under Miri: every test here reads a golden file, and Miri's isolation
+// blocks `open`. Miri is checking for UB in `unsafe`, of which this module has
+// none, so nothing is lost -- but the guard has to be here, because the CI job
+// runs `cargo miri test` over the WHOLE workspace while it is tempting to run
+// it locally scoped to the crate you just changed. That is how this reached CI.
+#[cfg(all(test, not(miri)))]
+mod port_selection_tests {
+    //! `select_ports` against C nmap itself.
+    //!
+    //! The golden files in `tests/differential/m7/topports/` are the exact port
+    //! sets the installed `nmap` probes, captured with `--packet-trace` — the
+    //! real binary, not a transcription of it.
+    //!
+    //! **They were generated with `--datadir` pointing at this repository**, and
+    //! that is not a detail. `nmap` on this machine reads
+    //! `/usr/share/nmap/nmap-services`, which is a *different file* from the
+    //! one in the tree: `wsman` (5985/tcp) carries ratio 0.000076 in one and
+    //! 0.000380 in the other. Comparing against the installed file produced four
+    //! confident "divergences" at N=500 that were nothing but two databases
+    //! disagreeing. A differential against a data-driven tool has to pin the
+    //! data, not just the binary.
+    use super::*;
+
+    fn table() -> ServiceTable {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../nmap-services");
+        ServiceTable::parse(&std::fs::read_to_string(path).expect("nmap-services"))
+    }
+
+    fn golden(name: &str) -> Vec<u16> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/differential/m7/topports")
+            .join(name);
+        std::fs::read_to_string(path)
+            .expect("golden")
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
+    fn selected(args: &[&str]) -> Vec<u16> {
+        let cfg = parse_args(&args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
+        assert!(
+            cfg.invalid.is_empty(),
+            "{args:?} did not parse: {:?}",
+            cfg.invalid
+        );
+        let t = table();
+        let mut v = select_ports(&cfg, Some(&t)).expect("select_ports");
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn top_ports_matches_c_nmap() {
+        for n in [1usize, 2, 5, 10, 20, 50, 100, 250, 500, 1000] {
+            assert_eq!(
+                selected(&["--top-ports", &n.to_string(), "127.0.0.1"]),
+                golden(&format!("top-{n}.txt")),
+                "--top-ports {n}"
+            );
+        }
+    }
+
+    /// `--port-ratio` selects by open-frequency instead of by count. The
+    /// comparison is `>=`, so a port whose ratio exactly equals the level is in.
+    #[test]
+    fn port_ratio_matches_c_nmap() {
+        for r in ["0.1", "0.05", "0.01", "0.005", "0.001"] {
+            assert_eq!(
+                selected(&["--port-ratio", r, "127.0.0.1"]),
+                golden(&format!("ratio-{r}.txt")),
+                "--port-ratio {r}"
+            );
+        }
+    }
+
+    /// `-F` is exactly `--top-ports 100` — verified against the reference
+    /// rather than assumed from `services.cc:421`.
+    #[test]
+    fn fast_scan_is_the_top_100() {
+        assert_eq!(selected(&["-F", "127.0.0.1"]), golden("fastscan.txt"));
+        assert_eq!(
+            selected(&["-F", "127.0.0.1"]),
+            selected(&["--top-ports", "100", "127.0.0.1"])
+        );
+    }
+
+    /// THE ordering property. C excludes first and takes the top N second, so
+    /// an excluded port does not consume one of the N slots — the list is
+    /// backfilled with the next most common ports and still has N entries.
+    ///
+    /// Cutting first and excluding second would return N-2 here. That is the
+    /// quieter failure (it scans less, not more), but it is still the scanner
+    /// not doing what it was told, and nothing in the output would say so.
+    #[test]
+    fn exclude_ports_applies_before_the_top_n_cut() {
+        let with = selected(&[
+            "--top-ports",
+            "20",
+            "--exclude-ports",
+            "80,443",
+            "127.0.0.1",
+        ]);
+        assert_eq!(with.len(), 20, "the list must be backfilled, not shortened");
+        assert!(!with.contains(&80) && !with.contains(&443));
+
+        let plain = selected(&["--top-ports", "20", "127.0.0.1"]);
+        let backfilled: Vec<u16> = with
+            .iter()
+            .copied()
+            .filter(|p| !plain.contains(p))
+            .collect();
+        assert_eq!(
+            backfilled.len(),
+            2,
+            "exactly the two excluded slots should be refilled, got {backfilled:?}"
+        );
+    }
+
+    /// `-p` narrows the candidates; `--top-ports` then ranks within them.
+    #[test]
+    fn an_explicit_port_list_bounds_the_top_n() {
+        assert_eq!(
+            selected(&["-p", "1-200", "--top-ports", "5", "127.0.0.1"]),
+            [21, 22, 23, 25, 80]
+        );
+    }
+
+    /// `-p` with no level is used as given — no top-ports cut at all.
+    #[test]
+    fn an_explicit_port_list_alone_is_untouched() {
+        assert_eq!(
+            selected(&["-p", "20-25", "127.0.0.1"]),
+            [20, 21, 22, 23, 24, 25]
+        );
+        assert_eq!(
+            selected(&["-p", "20-30", "--exclude-ports", "22-25", "127.0.0.1"]),
+            [20, 21, 26, 27, 28, 29, 30]
+        );
+    }
 }

@@ -73,6 +73,38 @@ fn service_name<'a>(
         .unwrap_or("unknown")
 }
 
+/// The SERVICE column, which under `-sV` marks an *unconfirmed* name with `?`.
+///
+/// C distinguishes a name that a probe confirmed from one merely looked up in
+/// `nmap-services`, and only under `-sV` — because only then was a probe even
+/// attempted, so only then does its absence mean anything:
+///
+/// ```console
+/// $ nmap -Pn -n -p 9100 127.0.0.1        # no -sV
+/// 9100/tcp open  jetdirect
+/// $ nmap -sV -Pn -n -p 9100 127.0.0.1    # -sV, but 9100 is Exclude'd
+/// 9100/tcp open  jetdirect?
+/// ```
+///
+/// The `?` is the operator's signal that nothing was verified. Reporting a bare
+/// `jetdirect` for a port this scanner deliberately did not probe would claim a
+/// confirmation it never made — the same class of overclaim as `-sL` inventing
+/// host liveness.
+fn service_column<'a>(
+    port: u16,
+    proto: Protocol,
+    svc: &'a crate::model::ServiceInfo,
+    services: Option<&'a ServiceTable>,
+    service_version: bool,
+) -> String {
+    let name = service_name(port, proto, svc.name.as_deref(), services);
+    if service_version && svc.name.is_none() {
+        format!("{name}?")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Ignored states (state → count), in nmap's display order, for a host.
 fn ignored_states(host: &Host) -> Vec<(PortState, usize)> {
     // Order: closed, filtered, then any others we might carry.
@@ -268,13 +300,13 @@ fn render_host_normal(
 
     // Column-aligned PORT / STATE / SERVICE [/ VERSION] table (nmap's
     // NmapOutputTable shape). The VERSION column appears only under `-sV`.
-    let rows: Vec<(String, &str, &str, String)> = shown
+    let rows: Vec<(String, &str, String, String)> = shown
         .iter()
         .map(|p| {
             (
                 format!("{}/{}", p.number, p.protocol.as_str()),
                 p.state.as_str(),
-                service_name(p.number, p.protocol, p.service.name.as_deref(), services),
+                service_column(p.number, p.protocol, &p.service, services, service_version),
                 if service_version {
                     version_display(&p.service)
                 } else {
@@ -366,7 +398,13 @@ pub fn render_grepable(
                         p.number,
                         p.state.as_str(),
                         p.protocol.as_str(),
-                        service_name(p.number, p.protocol, p.service.name.as_deref(), services),
+                        service_column(
+                            p.number,
+                            p.protocol,
+                            &p.service,
+                            services,
+                            meta.service_version
+                        ),
                         version,
                     )
                 })

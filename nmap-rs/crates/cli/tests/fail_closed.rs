@@ -39,21 +39,22 @@ fn run(args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// This example has now moved twice: it was `--exclude` until M7.4 implemented
-/// that, then `--scan-delay` until M7.7 implemented that. Each time the example
-/// moved to a still-unimplemented value-taking option rather than being
-/// deleted, because the property under test is not about any one flag — it is
-/// that an option we cannot honour stops the scan instead of leaking its
-/// argument into the target list.
+/// This example has now moved three times: `--exclude` until M7.4, then
+/// `--scan-delay` until M7.7, then `--top-ports` until M7.8. Each time it moved
+/// to a still-unimplemented value-taking option rather than being deleted,
+/// because the property under test is not about any one flag — it is that an
+/// option we cannot honour stops the scan instead of leaking its argument into
+/// the target list.
 ///
-/// When `--top-ports` lands, move it again. The day no unimplemented
-/// value-taking option is left is the day this test can go.
+/// `-oA` is next to land (it is in M7.3's MUST tier); move the example again
+/// then. The day no unimplemented value-taking option is left is the day this
+/// test can go.
 #[test]
 fn an_unimplemented_option_refuses_to_scan() {
-    let (stdout, stderr, ok) = run(&["--top-ports", "5", "-sT", "-p", "80", "127.0.0.1"]);
+    let (stdout, stderr, ok) = run(&["--source-port", "53", "-sT", "-p", "80", "127.0.0.1"]);
     assert!(!ok, "must exit non-zero, like C nmap's `case '?'`");
     assert!(
-        stderr.contains("--top-ports"),
+        stderr.contains("--source-port"),
         "the offending option should be named: {stderr}"
     );
     assert!(
@@ -104,7 +105,8 @@ fn a_constraint_we_cannot_honour_is_refused() {
         &["--host-timeout", "30s", "-sT", "-p", "80", "127.0.0.1"][..],
         // No hostgroup batching, so a ceiling on concurrency would not bind.
         &["--max-hostgroup", "2", "-sT", "-p", "80", "127.0.0.1"][..],
-        &["--top-ports", "5", "-sT", "127.0.0.1"][..],
+        // A value-taking option we do not implement at all.
+        &["--source-port", "53", "-sT", "-p", "80", "127.0.0.1"][..],
     ] {
         let (stdout, _, ok) = run(args);
         assert!(!ok, "{args:?} should be refused");

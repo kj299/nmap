@@ -65,16 +65,44 @@ impl ServiceTable {
     }
 
     /// The `n` highest-frequency ports for `protocol`, most-common first — the
-    /// basis of nmap's default "top ports" scan. Ties keep file order (stable).
+    /// basis of nmap's default "top ports" scan.
+    ///
+    /// Ties keep nmap-services file order, because C's `services_by_ratio` is a
+    /// `std::list` sorted with `a.ratio > b.ratio` and `std::list::sort` is
+    /// **stable** (`services.cc:258`). A different tie-break would silently pick
+    /// a different set of "top N" ports — invisible at N=100, where the ratios
+    /// are distinct, and wrong by a handful at N=500 where they are not.
     pub fn top_ports(&self, protocol: Protocol, n: usize) -> Vec<u16> {
+        self.ranked(protocol).take(n).map(|e| e.port).collect()
+    }
+
+    /// Every port for `protocol` whose open-frequency is **at or above**
+    /// `ratio` — nmap's `--port-ratio`.
+    ///
+    /// C expresses this as the same loop as `top_ports` with the count limit
+    /// removed and a `break` when `current->ratio < level` (`services.cc:478`),
+    /// which is why the comparison is `>=` and not `>`: a port whose ratio
+    /// exactly equals the requested level is included. `--port-ratio 0` would
+    /// therefore select everything, which is why C refuses it — the accepted
+    /// range is `[0, 1)` but the zero end is rejected later, in `gettoppts`,
+    /// with "should be a positive ratio below 1".
+    pub fn ports_above_ratio(&self, protocol: Protocol, ratio: f64) -> Vec<u16> {
+        self.ranked(protocol)
+            .take_while(|e| e.frequency >= ratio)
+            .map(|e| e.port)
+            .collect()
+    }
+
+    /// Entries for `protocol`, most-common first, ties in file order.
+    fn ranked(&self, protocol: Protocol) -> impl Iterator<Item = &ServiceEntry> {
         let mut ranked: Vec<&ServiceEntry> = self
             .entries
             .iter()
             .filter(|e| e.protocol == protocol)
             .collect();
-        // Stable sort by descending frequency.
+        // Stable sort by descending frequency; see `top_ports` for why stable.
         ranked.sort_by(|a, b| b.frequency.total_cmp(&a.frequency));
-        ranked.into_iter().take(n).map(|e| e.port).collect()
+        ranked.into_iter()
     }
 
     /// Ports for an exact service name whose protocol is in `mask` (used by the

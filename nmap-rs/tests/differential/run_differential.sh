@@ -127,9 +127,16 @@ sleep 1   # let the binds settle
 # --- Wrapper "binaries" the harness invokes with the matrix args ------------
 WRAP_DIR="$(mktemp -d)"
 trap 'kill "$FIXTURE_PID" 2>/dev/null || true; rm -rf "$WRAP_DIR"' EXIT
+# --datadir pins C nmap to THIS repository's nmap-services, which is the file
+# nmap-rs reads. Without it the two tools read different databases: the
+# installed /usr/share/nmap/nmap-services gives `wsman` (5985/tcp) a ratio of
+# 0.000076 where the tree gives it 0.000380, which reorders the tail of the
+# top-ports ranking. Comparing a port selection across two different databases
+# produces confident, reproducible "divergences" that are nothing of the kind
+# (LESSONS #029).
 cat > "$WRAP_DIR/oracle" <<EOF
 #!/usr/bin/env bash
-"$NMAP" "\$@" -oX - 2>/dev/null | python3 "$HERE/project.py"
+"$NMAP" --datadir "$RS_ROOT/.." "\$@" -oX - 2>/dev/null | python3 "$HERE/project.py"
 EOF
 cat > "$WRAP_DIR/rust" <<EOF
 #!/usr/bin/env bash

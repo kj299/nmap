@@ -119,3 +119,36 @@ args = ["-sT", "-Pn", "-n", "--scan-delay", "20ms", "-p", "18080,18443,19999", "
 [[case]]
 name = "timing-template-insane-listscan"
 args = ["-sL", "-n", "-T5", "127.0.0.1-3"]
+
+# ---- port selection (M7.8) -------------------------------------------------
+# The identity of each selected set is checked against C nmap's own
+# --packet-trace output by the unit tests in crates/cli/src/main.rs. These cases
+# prove the selection survives the whole pipeline and reaches the wire, which a
+# unit test over `select_ports` cannot.
+#
+# Both sides read this repository's nmap-services (the harness passes --datadir
+# to C nmap), so a ranking difference here is a real divergence and not two
+# databases disagreeing.
+[[case]]
+name = "top-ports-10"
+args = ["-sT", "-Pn", "-n", "--top-ports", "10", "127.0.0.1"]
+
+[[case]]
+name = "fast-scan"
+args = ["-sT", "-Pn", "-n", "-F", "127.0.0.1"]
+
+[[case]]
+name = "port-ratio"
+args = ["-sT", "-Pn", "-n", "--port-ratio", "0.05", "127.0.0.1"]
+
+# Exclusion reaching the scan, on the fixture's own ports so the result is
+# visible as open/closed rather than only as a count: 18081 and 19999 are
+# dropped, so the two open ports remain and nothing is left closed.
+[[case]]
+name = "exclude-ports"
+args = [
+  "-sT", "-Pn", "-n",
+  "-p", "18080,18443,18081,19999",
+  "--exclude-ports", "18081,19999",
+  "127.0.0.1",
+]

@@ -2224,3 +2224,41 @@ removed: that one was theatre, this one is unobservable.
       the port is being sloppy; it is being faithful, and the reference was run
       to confirm it. The same `strtod` port from M7.7 (`timespec::strtod_value`)
       serves both, so the two option families cannot drift apart.
+
+- [x] `output-filename-escapes-unexpanded` (`cli`, M7.9) — **`-oN`, `-oX` and
+      `-oG` wrote the escape sequence instead of the date.** Every output
+      filename in nmap passes through `logfilename` (`output.cc:853`), which
+      expands eleven strftime conversions. This port passed the argument
+      straight to `std::fs::write`:
+
+      ```console
+      $ nmap    -sL -n -oN 'c-%Y%m%d.txt' 127.0.0.1  ->  c-20260920.txt
+      $ nmap-rs -sL -n -oN 'r-%Y%m%d.txt' 127.0.0.1  ->  r-%Y%m%d.txt
+      ```
+
+      The quiet version of this is the damaging one: an operator with
+      `-oN scan-%Y%m%d.txt` in a nightly cron job got a single file overwritten
+      every night, and would find out when they went looking for last week's
+      scan. Found while implementing `-oA`, by checking what C does to the
+      *argument* rather than only what `-oA` does with it.
+      Fixed for all four options at once; pinned by
+      `strftime_escapes_are_expanded_in_every_output_option` and by a 3204-vector
+      differential against the C oracle.
+      *(Introduced at M1; found and fixed at M7.9.)*
+
+- [x] `output-filename-unvalidated` (`cli`, M7.9) — **`-oN -foo` created a file
+      called `-foo`.** C's `test_file_name` refuses a name beginning with `-`
+      and names the escape hatch ("Try '-oN ./-foo' if you really want it"),
+      because a file whose name starts with a dash is read as a flag by the
+      next command that touches it. This port had no validation at all. Fixed
+      for all four options; all five refusal messages match C word for word.
+      *(Introduced at M1; found and fixed at M7.9.)*
+
+- [ ] `logfile-name-in-utc` (`core::logfile`, M7.9) — **`%F` and friends expand
+      against UTC, where C uses local time.** C's callers pass `localtime()`;
+      reproducing that needs a timezone database, a dependency this crate does
+      not carry for a handful of output fields. The same choice was already made
+      for `-O`'s boot time (`uptime-boot-time-in-utc`) and the scan-start
+      banner, so this keeps one convention rather than adding a third.
+      Observable and narrow: an operator west of Greenwich running
+      `-oA scan-%F` late in the evening gets tomorrow's date in the filename.

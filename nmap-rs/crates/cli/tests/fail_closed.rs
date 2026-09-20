@@ -46,9 +46,9 @@ fn run(args: &[&str]) -> (String, String, bool) {
 /// option we cannot honour stops the scan instead of leaking its argument into
 /// the target list.
 ///
-/// `-oA` is next to land (it is in M7.3's MUST tier); move the example again
-/// then. The day no unimplemented value-taking option is left is the day this
-/// test can go.
+/// `-oA` landed in M7.9 without needing this example moved again, because
+/// `--source-port` is still unimplemented. The day no unimplemented
+/// value-taking option is left is the day this test can go.
 #[test]
 fn an_unimplemented_option_refuses_to_scan() {
     let (stdout, stderr, ok) = run(&["--source-port", "53", "-sT", "-p", "80", "127.0.0.1"]);

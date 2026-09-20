@@ -1,6 +1,7 @@
-# Built artifacts — the oracle is compiled from tval_oracle.c by
-# build_tval_oracle.sh, never committed. The golden vectors it produces ARE
-# committed (../tval_vectors/), so the Rust differential runs without a C
-# compiler; rebuild the oracle only when regenerating them.
+# Built artifacts — each oracle is compiled from its .c by the matching
+# build_*.sh and is never committed. The golden vectors they produce ARE
+# committed (../tval_vectors/, ../logfile_vectors/), so the Rust differentials
+# run without a C compiler; rebuild an oracle only when regenerating them.
 tval_oracle
+logfile_oracle
 *.o

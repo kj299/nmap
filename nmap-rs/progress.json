@@ -175,6 +175,7 @@
     "core::udpscan": "unsafe_audited",
     "core::versioninfo": "unsafe_audited",
     "engine": "unsafe_audited",
+    "logfile": "unsafe_audited",
     "model": "unsafe_audited",
     "net": "unsafe_audited",
     "options": "unsafe_audited",

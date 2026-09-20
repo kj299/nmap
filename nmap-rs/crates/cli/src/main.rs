@@ -292,7 +292,17 @@ async fn main() -> ExitCode {
     let max_par = timing.max_parallelism as usize;
 
     let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
-    let started = now_string();
+    // One timestamp for the whole run: the banner, the XML, and every `%`
+    // escape in an output filename all derive from it. Reading the clock twice
+    // would let `-oA scan-%F` and the banner disagree across midnight.
+    let start_epoch = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
+    let started = format!("epoch+{start_epoch}s");
     let clock = Instant::now();
     let mut results = run_scan(&cfg, &ips, &ports, template, timing, max_par, overrides).await;
     let elapsed = clock.elapsed().as_secs_f64();
@@ -334,7 +344,7 @@ async fn main() -> ExitCode {
         service_version: cfg.service_version,
     };
 
-    if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref()) {
+    if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref(), start_epoch) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
     }
@@ -1355,22 +1365,46 @@ fn emit_outputs(
     results: &nmap_core::ScanResults,
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
+    start_epoch: i64,
 ) -> std::io::Result<()> {
     let none = cfg.out_normal.is_none() && cfg.out_xml.is_none() && cfg.out_grep.is_none();
     if none {
         print!("{}", render_normal(results, meta, services));
         return Ok(());
     }
+    // Expand the strftime escapes here rather than in `parse_args`, which is
+    // pure and has no clock. One expansion point for all four options, against
+    // the scan's start time -- so `-oA scan-%F` and a `-oN scan-%F.txt` in the
+    // same command cannot disagree about the date, even across midnight.
+    let stamp = start_epoch;
     if let Some(dest) = &cfg.out_normal {
-        write_to(dest, &render_normal(results, meta, services))?;
+        write_to(
+            &expand_dest(dest, stamp),
+            &render_normal(results, meta, services),
+        )?;
     }
     if let Some(dest) = &cfg.out_xml {
-        write_to(dest, &render_xml(results, meta, services))?;
+        write_to(
+            &expand_dest(dest, stamp),
+            &render_xml(results, meta, services),
+        )?;
     }
     if let Some(dest) = &cfg.out_grep {
-        write_to(dest, &render_grepable(results, meta, services))?;
+        write_to(
+            &expand_dest(dest, stamp),
+            &render_grepable(results, meta, services),
+        )?;
     }
     Ok(())
+}
+
+/// Expand a destination's strftime escapes; `-` (stdout) passes through
+/// untouched so it can never become a file named after the clock.
+fn expand_dest(dest: &str, epoch: i64) -> String {
+    if dest == "-" || dest.is_empty() {
+        return dest.to_string();
+    }
+    nmap_core::logfile::expand(dest, epoch)
 }
 
 /// Write `content` to `dest` (`-` = stdout, else a file).
@@ -1453,16 +1487,6 @@ fn load_probe_db_text() -> Option<String> {
         }
     }
     None
-}
-
-/// A coarse start-time string for the banner. Deliberately simple (no date
-/// dependency); the differential harness normalizes it.
-fn now_string() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("epoch+{secs}s")
 }
 
 // Skipped under Miri: every test here reads a golden file, and Miri's isolation

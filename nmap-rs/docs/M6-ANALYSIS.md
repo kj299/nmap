@@ -404,3 +404,140 @@ scripting, so M7 can finish without M6, and none of the 21 remaining MUST-tier
 options need Lua. M6 is therefore sequenced *after* the MUST tier rather than
 competing with it. That is a scheduling decision and reversible; the port order
 above is not affected by when it starts.
+
+---
+
+## Decision 4 — the `gc-arena` pin is resolved: fork master **backwards** onto published 0.5.3, vendor the fork, keep the GC on crates.io
+
+Decision 3's prerequisite, settled by building every candidate rather than
+reasoning about them. Six configurations were compiled and run; the numbers
+below are measured, and the commands are reproducible.
+
+### What was actually wrong
+
+The pin is worse than "upstream is on a git rev". `gc-arena` rev `5a7534b`
+(2024-07-22) sits **after tag `v0.5.3` and before `v0.6.0`** — v0.5.3 plus 31
+unreleased commits, several deliberately API-breaking. Its manifest still reads
+`version = "0.5.3"`, so the version number is actively misleading. And upstream
+is dead: piccolo master is `ce709eb`, 2025-07-10, unchanged since.
+
+Going forward does not help. `gc-arena 0.6.0` **deleted the `allocator-api2`
+feature** that piccolo master's dependency line requests — upstream's own commit
+(`c591dd3`) calls it "a bit of an aggressive pruning" and says the replacement
+should be "custom user logic for external allocation and manual tuning of
+collection pacing."
+
+### The options, measured
+
+| option | builds | `cargo deny` | MSRV 1.88 | GC pacing | divergences / panics |
+|---|---|---|---|---|---|
+| **A** published 0.3.3 | yes, 0 errors | **all ok** | yes | intact | **26 / 55, 5 panics** |
+| **B** fork → gc-arena 0.7.0 | yes, after ~100 lines | all ok | **NO** | **lost** | 16 / 55, 2 panics |
+| **B′** fork → gc-arena 0.6.1 | yes | all ok | yes | **lost** | 16 / 55, 2 panics |
+| **C** fork → gc-arena `=0.5.3` | yes, after **~40 lines** | **all ok** | **yes** | **intact** | **16 / 55, 2 panics** |
+
+Divergence counts are against [`m60_semantics_golden.txt`](../tests/differential/m6/m60_semantics_golden.txt),
+55 cases evaluated by nmap's own Lua. See the M6.0 oracle commit for the defect
+detail; the short version is that `math.mininteger % -1` **aborts the process**
+in every version, `pcall` does not contain it, and 0.3.3 additionally gets
+`-7 // 2` wrong and panics on three bit-shift cases.
+
+Two measurements decided it, and neither was in the original framing:
+
+* **`gc-arena 0.7.0` does not build at the declared MSRV 1.88** — it uses the
+  unstable `ptr_as_ref_unchecked`. It needs >1.94. The `msrv` CI job builds at
+  exactly `rust-version`, so Option B would have broken it. `0.6.1` and `0.5.3`
+  both build at 1.88.
+* **`MetricsAlloc` exists in 0.5.3 and is gone from 0.6.0 onward.** It is what
+  ties GC pacing to Lua data growth. Without it, a hostile NSE script can
+  allocate without the collector noticing — a memory-exhaustion vector in a tool
+  that runs untrusted scripts against hostile hosts. Going *backwards* keeps the
+  defence; going forwards discards it.
+
+Option C's back-port is **~40 functional lines across 7 files**; `util/freeze.rs`,
+predicted to be the hard case, needed none. All 31 commits in the gap were read:
+there is **no soundness fix** among them, so back-porting does not strand the
+port on a GC bug. Scored on the semantics corpus, the 0.5.3 fork behaves
+**identically** to the 0.6.1 fork — 16 divergences, same set.
+
+### How it enters the tree
+
+The fork is **vendored as a workspace member under `crates/`**, with
+`publish = false`. `gc-arena` stays an ordinary crates.io dependency pinned
+`=0.5.3` — it is *not* vendored, because it is actively maintained (last commit
+2026-08-17) and we want its security updates.
+
+Verified with the project's own `deny.toml`, byte-identical:
+
+```
+advisories ok, bans ok, licenses ok, sources ok
+```
+
+`sources ok` is the milestone blocker, gone. `Cargo.lock` contains **zero** git
+sources and resolves `gc-arena 0.5.3` from `registry+…crates.io-index`.
+
+Three details that are load-bearing and non-obvious:
+
+1. **`publish = false` is required.** Without it `bans` FAILS with
+   `allow-wildcard-paths is enabled, but does not apply to public crates`. The
+   repo's own crates already carry it (`crates/core/Cargo.toml:4`); upstream
+   crates do not.
+2. **The vendored crate goes under `crates/`, where the unsafe-audit gate can
+   see it.** `audit_unsafe.py` has no `--exclude`: the path argument *is* the
+   exclusion, and CI hardcodes `nmap-rs/crates/` (`nmap-rs-ci.yml:132`). Putting
+   vendored code anywhere else is therefore not configuration, it is
+   gate-dodging. Cost of doing it honestly: **30 unsafe blocks, 14 already
+   documented, 16 to write.**
+3. **Clippy keys off workspace *membership*, not directory**, while the audit
+   harness keys off directory only. The two gates can disagree about what is
+   covered, so both must be checked when the vendoring lands.
+
+### What the fork is *for* — and what it is not
+
+The assumption that we fork piccolo "to extend it with the stdlib NSE needs" is
+**wrong**, and testing it was the most useful thing the campaign did.
+
+`stdlib/string.rs` on master is 126 lines registering `len, byte, char, sub,
+lower, reverse, upper`. `git grep -E 'gmatch|gsub|lua_pattern' src/` returns
+**zero hits at both `v0.3.3` and master**. Forking master buys none of the three
+subsystems the port needs.
+
+Everything else works from the **published public API, unpatched** — each
+verified by running it: injecting Rust functions into the existing `string`
+table, overwriting entries already there, creating a whole new `nmap` global
+library, round-tripping non-UTF-8 bytes both ways, **yielding out of a Rust
+callback and being resumed**, and calling back into Lua from Rust
+(`gsub(s, pat, func)` and `gmatch` iterators).
+
+So the fork exists for a **short, enumerable list**:
+
+| # | change | size |
+|---|---|---|
+| 1 | the `gc-arena` back-port | ~40 lines, 7 files |
+| 2 | **string metatable** — a `Registry` singleton plus a `Value::String` arm in `meta_ops::index`, with a `pub fn string_metatable(ctx)` so the *external* crate installs its own `__index` | ~30 lines |
+| 3 | the 2 modulo panics, and the remaining semantics divergences the corpus names | small, each with a golden |
+
+Lua patterns, `string.format` and `string.pack`/`unpack` are then written **in
+our own crate**, against piccolo's public API — which means they pass through
+this project's differential, fuzz, Miri and sanitizer gates, none of which reach
+into a vendored dependency. That is a better outcome than a fat fork, and it is
+the opposite of what Decision 3's table implied.
+
+### Free, and worth recording: Decision 2's sandbox costs nothing
+
+`grep -rnE 'std::process|Command|std::fs|File::open|std::env' src/` over
+piccolo master returns **zero hits**, and `grep -rn load_os src/` returns zero
+too — there is no `os` library in either version to withhold. `Lua::core()`
+calls exactly `load_base, load_coroutine, load_math, load_string, load_table`
+(`src/lua.rs:172-180`) and never `load_io`, so `os` and `io` are both nil.
+Withholding
+process execution is not a restriction to bolt on — it is already absent, and
+`Lua::empty()` plus the public `stdlib::load_*` functions makes the surface
+opt-in by construction rather than something to tear down.
+
+### Sequencing, revised
+
+Decision 3's order stands, with one change: the string metatable is **not** part
+of "the tail", it is a **prerequisite of step 1**. Lua patterns are reached
+through `s:find(...)` in most of the corpus, so shipping the pattern matcher
+without method dispatch would leave it unreachable from 454 of 758 files.

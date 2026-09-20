@@ -1,0 +1,60 @@
+# name	oracle_status	oracle_value
+# The verdict of nmap's OWN Lua 5.4, built from liblua/ by
+# oracle/build_lua_oracle.sh. Regenerate with ./regen_m60.sh.
+# Numbers render as `integer:N` or `float:N` because NSE branches on
+# math.type; strings render as hex because they are byte strings.
+mod_min_by_neg1	ok	integer:0
+mod_neg1_by_min	ok	integer:-1
+mod_max_by_neg1	ok	integer:0
+mod_neg_by_pos	ok	integer:1
+mod_pos_by_neg	ok	integer:-1
+idiv_neg_by_pos	ok	integer:-4
+idiv_pos_by_neg	ok	integer:-4
+idiv_min_by_neg1	ok	integer:-9223372036854775808
+add_max_plus_1	ok	integer:-9223372036854775808
+sub_min_minus_1	ok	integer:9223372036854775807
+mul_min_by_neg1	ok	integer:-9223372036854775808
+unm_min	ok	integer:-9223372036854775808
+mod_by_zero	ok	boolean:false
+idiv_by_zero	ok	boolean:false
+fmod_by_zero_float	ok	float:nan
+shl_64	ok	integer:0
+shl_63	ok	integer:-9223372036854775808
+shl_neg	ok	integer:0
+shr_64	ok	integer:0
+shr_1_of_neg1	ok	integer:9223372036854775807
+bnot_zero	ok	integer:-1
+type_of_int	ok	string:696e7465676572
+type_of_float	ok	string:666c6f6174
+type_of_idiv	ok	string:696e7465676572
+type_of_div	ok	string:666c6f6174
+int_eq_float	ok	boolean:true
+max_int_vs_float	ok	boolean:false
+float_to_int_concat	ok	string:312e30
+int_concat	ok	string:31
+nan_eq_self	ok	boolean:false
+nan_lt	ok	boolean:false
+nan_not_lt	ok	boolean:true
+inf_pos	ok	float:inf
+inf_neg	ok	float:-inf
+method_rep_literal	ok	string:616261626162
+method_len_literal	ok	integer:3
+method_sub_literal	ok	string:656c
+method_upper_var	ok	string:4142
+method_on_number	ok	boolean:false
+getmetatable_string	ok	boolean:true
+string_meta_index_is_lib	ok	boolean:true
+coerce_add	ok	integer:11
+coerce_hex	ok	integer:16
+tonumber_hex	ok	integer:31
+tonumber_exp	ok	float:100.0
+tonumber_ws	ok	integer:12
+tonumber_bad	ok	nil:nil
+tonumber_base	ok	integer:255
+tonumber_huge	ok	float:inf
+tostring_int	ok	string:31
+tostring_float	ok	string:312e30
+len_embedded_nul	ok	integer:3
+byte_high	ok	integer:255
+char_roundtrip	ok	integer:255
+concat_nul	ok	integer:4

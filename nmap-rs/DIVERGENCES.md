@@ -2295,30 +2295,21 @@ from reality in either direction. Measured against
 [`m60_semantics_golden.txt`](tests/differential/m6/m60_semantics_golden.txt),
 68 cases evaluated by `liblua/` from this repository.
 
-Count at M6.0: **9 of 68**, down from 16 when the VM was vendored. The seven the
-string metatable closed are gone from this list rather than ticked, because they
-are simply correct now.
+Count at M6.0: **6 of 68**, down from 16 when the VM was vendored. **None of the
+six can abort the process** — the two that could are fixed. Entries the port has
+closed are removed rather than ticked, because they are simply correct now.
 
-### Process-aborting, and `pcall` does not contain them
-
-- [ ] `mod_min_by_neg1` — `math.mininteger % -1` **aborts the process**. Lua
-      gives `0`. `Constant::modulo` computes `((a % b) + b) % b` with plain
-      operators on raw `i64`, and `meta_ops.rs` makes that the *runtime*
-      arithmetic path, not merely constant folding — so it is reachable from any
-      Lua arithmetic on attacker-influenced integers. **A host-language panic is
-      not a Lua error**: it escapes `pcall`, so a script cannot defend itself,
-      and NSE does arithmetic on values lifted straight out of hostile packets.
-      With `overflow-checks` off it becomes a silent wrong answer instead, which
-      is not an improvement. Highest-priority fix in M6.0.
-- [ ] `mod_neg1_by_min` — `-1 % math.mininteger`, same function, different
-      overflow: the `(a % b) + b` adjustment overflows even where `a % b` does
-      not. Lua gives `-1`.
+A second corpus sits beside this one and carries **no exemptions at all**:
+[`m60_arith_cases.txt`](tests/differential/m6/m60_arith_cases.txt), 2,955 cases
+over the cross product of the operand values where 64-bit arithmetic actually
+goes wrong — the range edges, both signs, zero, the identity and its negation —
+for `% // + - * & | ~ << >>`, unary minus and bitwise not, plus float `% // /`
+over infinities, both zeroes and NaN. It matches nmap's own Lua **exactly**, and
+an arithmetic divergence is never something to carry, so it has no list to add
+to.
 
 ### Wrong answers
 
-- [ ] `shl_neg` — `1 << -1` raises where Lua reverses the shift direction and
-      gives `0`. piccolo guards negative shift counts by erroring; Lua defines
-      them. (`1 << 64` and `-1 >> 64` are already correct.)
 - [ ] `max_int_vs_float` — `math.maxinteger + 0.0 == math.maxinteger` is `true`
       here and `false` in Lua. The float cannot represent `maxinteger` exactly,
       and Lua's comparison accounts for that; piccolo's converts and compares.

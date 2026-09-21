@@ -1,0 +1,147 @@
+diff --git a/src/constant.rs b/src/constant.rs
+index fb0bb25..e2505b9 100644
+--- a/src/constant.rs
++++ b/src/constant.rs
+@@ -132,7 +132,13 @@ impl<S: AsRef<[u8]>> Constant<S> {
+                     let d = a.wrapping_div(b);
+                     let r = a.wrapping_rem(b);
+                     let d = if (r > 0 && b < 0) || (r < 0 && b > 0) {
+-                        d - 1
++                        // Cannot overflow: `d == i64::MIN` only for `a == i64::MIN` with
++                        // `b == 1` or `b == -1`, and both leave `r == 0`, so this branch is
++                        // unreachable for them. `wrapping_sub` states that rather than resting
++                        // on it -- under this workspace's `overflow-checks = true`, a plain `-`
++                        // here would be a process abort if the reasoning were ever wrong.
++                        debug_assert!(d.checked_sub(1).is_some(), "{d} - 1 overflowed");
++                        d.wrapping_sub(1)
+                     } else {
+                         d
+                     };
+@@ -145,18 +151,56 @@ impl<S: AsRef<[u8]>> Constant<S> {
+ 
+     /// Computes the Lua modulus (`%`) operator. This is unlike Rust's `%` operator which computes
+     /// the remainder.
++    ///
++    /// Both halves are ported from PUC-Lua rather than derived: the integer path from `luaV_mod`
++    /// (`lvm.c:748-760`) and the float path from `luai_nummod` (`llimits.h:332-336`). The previous
++    /// implementation computed `((a % b) + b) % b` for both, which is the obvious formula and is
++    /// wrong twice over.
++    ///
++    /// **It aborted the process.** `a % b` traps for `i64::MIN % -1`, and the `+ b` overflows for
++    /// operands like `-1 % i64::MIN`. Neither is a Lua error a script can `pcall` — a
++    /// host-language panic escapes `pcall` entirely — and `meta_ops` routes *runtime* arithmetic
++    /// through here, not merely constant folding, so any Lua `%` on attacker-influenced integers
++    /// could take the interpreter down. C avoids the first by special-casing `-1`, and says so at
++    /// the site: *"m % -1 == 0; avoid overflow with 0x80000...%-1"*.
++    ///
++    /// **It was wrong on infinities.** `5.0 % inf` is `5.0` in Lua and `NaN` under the old
++    /// formula, because `(5 + inf) % inf` is `inf % inf`.
+     pub fn modulo(&self, rhs: &Self) -> Option<Self> {
+         match (self, rhs) {
+             (&Self::Integer(a), &Self::Integer(b)) => {
+                 if b == 0 {
++                    // `n % 0` is a Lua *error*, which a script can catch. Returning None is how
++                    // this type reports that; it must never become a panic.
+                     None
++                } else if b == -1 {
++                    // The special case that exists to avoid the trap, not for speed.
++                    Some(Self::Integer(0))
+                 } else {
+-                    Some(Self::Integer(((a % b) + b) % b))
++                    // `b` is now neither 0 nor -1, so `%` cannot trap.
++                    let r = a % b;
++                    Some(Self::Integer(if r != 0 && (r ^ b) < 0 {
++                        // Rounding correction, for when `a / b` would be a negative non-integer.
++                        //
++                        // This cannot overflow: `|r| < |b|` because `r` is a remainder of `b`, and
++                        // the branch condition says `r` and `b` have opposite signs, so `r + b`
++                        // lies strictly between `b` and `-b`. `wrapping_add` rather than `+`
++                        // anyway, because if that reasoning is ever wrong the failure should be a
++                        // wrong number in one script, not a dead scan; the debug assertion is
++                        // what makes it loud in testing.
++                        debug_assert!(r.checked_add(b).is_some(), "{r} + {b} overflowed");
++                        r.wrapping_add(b)
++                    } else {
++                        r
++                    }))
+                 }
+             }
+             (a, b) => {
+                 let (a, b) = (a.to_number()?, b.to_number()?);
+-                Some(Self::Number(((a % b) + b) % b))
++                // `luai_nummod`: fmod, then one sign correction. Rust's `%` on f64 IS fmod.
++                let m = a % b;
++                let correct = if m > 0.0 { b < 0.0 } else { m < 0.0 && b > 0.0 };
++                Some(Self::Number(if correct { m + b } else { m }))
+             }
+         }
+     }
+@@ -192,25 +236,53 @@ impl<S: AsRef<[u8]>> Constant<S> {
+         Some(Self::Integer(self.to_integer()? ^ rhs.to_integer()?))
+     }
+ 
+-    pub fn shift_left(&self, rhs: &Self) -> Option<Self> {
+-        let rhs = rhs.to_integer()?;
+-        if rhs < 0 {
+-            return None;
++    /// Ported from `luaV_shiftl` (`lvm.c:780-790`).
++    ///
++    /// Lua defines shifts over the whole `i64` range of counts, with no error
++    /// case: a count at or past the word size gives 0, and a NEGATIVE count
++    /// reverses the direction. Both shifts are logical, not arithmetic --
++    /// PUC-Lua's `intop` casts through `lua_Unsigned` -- so `-1 >> 1` is
++    /// `maxinteger`, not `-1`.
++    ///
++    /// The previous implementation refused a negative count outright, which
++    /// turned 180 of the 2,955 cross-product corpus cases into a runtime error
++    /// where Lua produces a value.
++    fn shift_left_i64(x: i64, y: i64) -> i64 {
++        const NBITS: i64 = i64::BITS as i64;
++        if y < 0 {
++            // Shift right. The `<= -NBITS` test runs FIRST, which is what makes
++            // `-y` safe below: it excludes `i64::MIN`, the one value whose
++            // negation overflows.
++            if y <= -NBITS {
++                0
++            } else {
++                ((x as u64) >> (-y) as u32) as i64
++            }
++        } else if y >= NBITS {
++            0
++        } else {
++            ((x as u64) << y as u32) as i64
+         }
+-        let rhs = rhs.try_into().ok().unwrap_or(u32::MAX);
+-        Some(Self::Integer(
+-            self.to_integer()?.checked_shl(rhs).unwrap_or(0),
+-        ))
++    }
++
++    pub fn shift_left(&self, rhs: &Self) -> Option<Self> {
++        Some(Self::Integer(Self::shift_left_i64(
++            self.to_integer()?,
++            rhs.to_integer()?,
++        )))
+     }
+ 
+     pub fn shift_right(&self, rhs: &Self) -> Option<Self> {
+-        let rhs = rhs.to_integer()?;
+-        if rhs < 0 {
+-            return None;
+-        }
+-        let lhs = self.to_integer()? as u64;
+-        let rhs = rhs.try_into().ok().unwrap_or(u32::MAX);
+-        Some(Self::Integer(lhs.checked_shr(rhs).unwrap_or(0) as i64))
++        // `luaV_shiftr(x, y)` is `luaV_shiftl(x, intop(-, 0, y))` (`lvm.h:116`),
++        // and `intop` negates through the unsigned type -- so the negation
++        // WRAPS. That is not incidental: for `y == i64::MIN` the wrap leaves
++        // `i64::MIN`, still negative, so the count stays in the shift-right
++        // branch and yields 0. A checked negation would trap on exactly that
++        // value, which is the operand an attacker would reach for.
++        Some(Self::Integer(Self::shift_left_i64(
++            self.to_integer()?,
++            rhs.to_integer()?.wrapping_neg(),
++        )))
+     }
+ 
+     // Comparison operators

@@ -28,7 +28,8 @@ CHECK=0
 
 "$HERE/oracle/build_lua_oracle.sh"
 
-NAMES=(m60_semantics_cases.txt m60_semantics_golden.txt)
+NAMES=(m60_semantics_cases.txt m60_semantics_golden.txt
+       m60_arith_cases.txt m60_arith_golden.txt)
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -36,15 +37,27 @@ python3 oracle/gen_m60_cases.py > "$WORK/m60_semantics_cases.txt"
 ./oracle/lua oracle/m60_driver.lua "$WORK/m60_semantics_cases.txt" \
   > "$WORK/m60_semantics_golden.txt"
 
+# The arithmetic corpus has its own driver, and the reason is worth stating: it
+# renders floats as raw IEEE bit patterns rather than text. The VM has a known
+# `tostring` divergence, so comparing decimal here would report that one
+# formatting bug a thousand times over and bury the arithmetic signal. Bits also
+# separate +0.0 from -0.0, which fmod's sign rules can turn on.
+python3 oracle/gen_m60_arith.py > "$WORK/m60_arith_cases.txt"
+./oracle/lua oracle/m60_arith_driver.lua "$WORK/m60_arith_cases.txt" \
+  > "$WORK/m60_arith_golden.txt"
+
 # Determinism is a property worth asserting rather than assuming: a golden that
 # differs run to run silently turns this gate into noise, and the failure mode
 # (a table iterated in hash order, an address in a tostring) is exactly the kind
 # that survives a single manual eyeball.
 ./oracle/lua oracle/m60_driver.lua "$WORK/m60_semantics_cases.txt" \
   > "$WORK/second_run.txt"
-if ! diff -q "$WORK/m60_semantics_golden.txt" "$WORK/second_run.txt" >/dev/null; then
+./oracle/lua oracle/m60_arith_driver.lua "$WORK/m60_arith_cases.txt" \
+  >> "$WORK/second_run.txt"
+cat "$WORK/m60_semantics_golden.txt" "$WORK/m60_arith_golden.txt" > "$WORK/first_run.txt"
+if ! diff -q "$WORK/first_run.txt" "$WORK/second_run.txt" >/dev/null; then
   echo "FAIL: the oracle is not deterministic across two runs" >&2
-  diff -u "$WORK/m60_semantics_golden.txt" "$WORK/second_run.txt" >&2 || true
+  diff -u "$WORK/first_run.txt" "$WORK/second_run.txt" >&2 || true
   exit 1
 fi
 
@@ -61,7 +74,9 @@ for n in "${NAMES[@]}"; do
 done
 
 if (( CHECK )); then
-  (( rc == 0 )) && echo "m60: cases and golden are current ($(grep -cv '^#' m60_semantics_cases.txt) cases)"
+  (( rc == 0 )) && echo "m60: cases and golden are current ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
+    "$(grep -cv '^#' m60_arith_cases.txt) arithmetic)"
   exit $rc
 fi
-echo "m60: regenerated ($(grep -cv '^#' m60_semantics_cases.txt) cases)"
+echo "m60: regenerated ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
+  "$(grep -cv '^#' m60_arith_cases.txt) arithmetic)"

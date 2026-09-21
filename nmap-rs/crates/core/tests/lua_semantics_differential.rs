@@ -24,12 +24,6 @@ use std::path::{Path, PathBuf};
 /// entry; shrinking it is progress, growing it is a regression that must be
 /// argued for in the same commit.
 const KNOWN_DIVERGENCES: &[&str] = &[
-    // Integer overflow in the modulus operator: `((a % b) + b) % b` on raw i64.
-    // These ABORT THE PROCESS and `pcall` does not contain them.
-    "mod_min_by_neg1",
-    "mod_neg1_by_min",
-    // `1 << -1`: Lua reverses the shift direction, piccolo raises.
-    "shl_neg",
     // Integer/float comparison at the extreme: `maxinteger + 0.0 == maxinteger`.
     "max_int_vs_float",
     // Float formatting: Lua keeps the decimal marker, piccolo drops it, so
@@ -44,6 +38,31 @@ const KNOWN_DIVERGENCES: &[&str] = &[
     // `rep` is not among them. Closes when the first-party stdlib lands.
     "method_rep_literal",
 ];
+
+/// Render a value the way `oracle/m60_arith_driver.lua` does: floats as raw
+/// IEEE-754 bits rather than text.
+///
+/// The arithmetic corpus deliberately does NOT compare float text. The VM has a
+/// known, ledgered `tostring` divergence, and comparing decimal here would
+/// report that one formatting bug a thousand times over and bury the arithmetic
+/// signal. Bits are exact, and they separate `+0.0` from `-0.0`, which `fmod`'s
+/// sign rules can turn on and text cannot show.
+fn render_bits(v: Value) -> String {
+    match v {
+        Value::Integer(i) => format!("integer:{i}"),
+        // Canonical NaN: sign and payload of a produced NaN are unspecified by
+        // IEEE and differ between implementations for reasons that are not bugs.
+        Value::Number(n) if n.is_nan() => "float:7ff8000000000000".to_string(),
+        Value::Number(n) => format!("float:{:016x}", n.to_bits()),
+        Value::String(s) => format!("string:{}", hex(s.as_bytes())),
+        Value::Nil => "nil:nil".to_string(),
+        Value::Boolean(b) => format!("boolean:{b}"),
+        Value::Table(_) => "table:<table>".to_string(),
+        Value::Function(_) => "function:<function>".to_string(),
+        Value::UserData(_) => "userdata:<userdata>".to_string(),
+        Value::Thread(_) => "thread:<thread>".to_string(),
+    }
+}
 
 fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -115,7 +134,7 @@ fn render(v: Value) -> String {
 /// is NOT a Lua error. It escapes `pcall`, so a script cannot defend against
 /// it, and in the scanner it takes the process down. Catching it here lets the
 /// corpus record it as a distinct verdict instead of killing the test run.
-fn eval(src: &[u8]) -> (String, String) {
+fn eval_with(src: &[u8], render: fn(Value) -> String) -> (String, String) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut lua = Lua::core();
         let ex = match lua.try_enter(|ctx| {
@@ -142,6 +161,10 @@ fn eval(src: &[u8]) -> (String, String) {
         })
     }));
     r.unwrap_or_else(|_| ("PANIC".to_string(), "host-language panic".to_string()))
+}
+
+fn eval(src: &[u8]) -> (String, String) {
+    eval_with(src, render)
 }
 
 fn run_corpus() -> Vec<(String, bool)> {
@@ -229,5 +252,66 @@ fn the_ledgered_divergence_set_is_exact() {
     assert!(
         phantom.is_empty(),
         "KNOWN_DIVERGENCES names no such case: {phantom:?}"
+    );
+}
+
+/// The cross-product arithmetic corpus: 2,955 cases over the operand values
+/// where 64-bit integer arithmetic actually goes wrong.
+///
+/// The hand-written corpus above covers arithmetic by example, which is how the
+/// two modulus panics were found — but examples only find what someone thought
+/// to write down. Integer arithmetic has a small, enumerable set of interesting
+/// operands (the range edges, both signs, zero, the identity and its negation),
+/// and the bugs live at their *combinations*: `i64::MIN % -1` traps,
+/// `-1 % i64::MIN` overflows the correction term, `i64::MIN // -1` must wrap.
+/// So this checks the whole product rather than a sample.
+///
+/// Unlike the corpus above, this one is expected to match **exactly** — there
+/// is no exemption list, because an arithmetic divergence is never something to
+/// carry.
+#[test]
+fn arithmetic_matches_nmaps_own_lua_exactly() {
+    let golden: std::collections::HashMap<_, _> = rows("m60_arith_golden.txt")
+        .into_iter()
+        .map(|(n, s, v)| (n, (s, v)))
+        .collect();
+    let cases = rows("m60_arith_cases.txt");
+    assert!(
+        cases.len() >= 2955,
+        "arithmetic corpus shrank to {} cases — regenerate with regen_m60.sh",
+        cases.len()
+    );
+
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mismatches: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, chunk_hex, note)| {
+            let (status, value) = eval_with(&unhex(&chunk_hex), render_bits);
+            let want = golden
+                .get(&name)
+                .unwrap_or_else(|| panic!("{name}: in cases but not in golden"));
+            // The error *message* is implementation text; the golden records
+            // only that it was an error, so compare the status alone there.
+            let ok = if want.0 == "error" {
+                status == "error"
+            } else {
+                status == want.0 && value == want.1
+            };
+            (!ok).then(|| {
+                format!(
+                    "  {name} ({note}): lua={} {} piccolo={status} {value}",
+                    want.0, want.1
+                )
+            })
+        })
+        .collect();
+    std::panic::set_hook(prev);
+
+    assert!(
+        mismatches.is_empty(),
+        "{} of the arithmetic corpus diverge from nmap's own Lua:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
     );
 }

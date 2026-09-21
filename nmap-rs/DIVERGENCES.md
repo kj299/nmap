@@ -2279,3 +2279,65 @@ removed: that one was theatre, this one is unobservable.
       would be the easiest way for it to be forgotten. The differential does not
       see it: `project.py` reads XML, where the latency lives in `<times>`,
       which the MVP omits (already ledgered above).
+
+## Milestone 6.0 — known defects in the vendored Lua VM
+
+**These are not choices.** Every other entry in this file records a place the
+port deliberately differs from the C. This section is the opposite: nine cases
+where `crates/vendor/piccolo` disagrees with nmap's own Lua 5.4 and **should
+not**, listed here because a defect nobody has written down is a defect nobody
+closes. They are unticked (`- [ ]`) and stay that way until fixed.
+
+They are enforced, not merely recorded. `crates/core/tests/lua_semantics_differential.rs`
+holds the same list as `KNOWN_DIVERGENCES` and fails if a **new** divergence
+appears *or* if a listed one is silently fixed — so this section cannot drift
+from reality in either direction. Measured against
+[`m60_semantics_golden.txt`](tests/differential/m6/m60_semantics_golden.txt),
+68 cases evaluated by `liblua/` from this repository.
+
+Count at M6.0: **9 of 68**, down from 16 when the VM was vendored. The seven the
+string metatable closed are gone from this list rather than ticked, because they
+are simply correct now.
+
+### Process-aborting, and `pcall` does not contain them
+
+- [ ] `mod_min_by_neg1` — `math.mininteger % -1` **aborts the process**. Lua
+      gives `0`. `Constant::modulo` computes `((a % b) + b) % b` with plain
+      operators on raw `i64`, and `meta_ops.rs` makes that the *runtime*
+      arithmetic path, not merely constant folding — so it is reachable from any
+      Lua arithmetic on attacker-influenced integers. **A host-language panic is
+      not a Lua error**: it escapes `pcall`, so a script cannot defend itself,
+      and NSE does arithmetic on values lifted straight out of hostile packets.
+      With `overflow-checks` off it becomes a silent wrong answer instead, which
+      is not an improvement. Highest-priority fix in M6.0.
+- [ ] `mod_neg1_by_min` — `-1 % math.mininteger`, same function, different
+      overflow: the `(a % b) + b` adjustment overflows even where `a % b` does
+      not. Lua gives `-1`.
+
+### Wrong answers
+
+- [ ] `shl_neg` — `1 << -1` raises where Lua reverses the shift direction and
+      gives `0`. piccolo guards negative shift counts by erroring; Lua defines
+      them. (`1 << 64` and `-1 >> 64` are already correct.)
+- [ ] `max_int_vs_float` — `math.maxinteger + 0.0 == math.maxinteger` is `true`
+      here and `false` in Lua. The float cannot represent `maxinteger` exactly,
+      and Lua's comparison accounts for that; piccolo's converts and compares.
+- [ ] `float_to_int_concat` — `1.0 .. ''` gives `"1"`, Lua gives `"1.0"`.
+- [ ] `tostring_float` — `tostring(1.0)` gives `"1"`, Lua gives `"1.0"`. Same
+      root cause as the previous entry: Lua's `%.14g` keeps a decimal marker so
+      a float never prints as an integer. Both close together. **This one
+      corrupts NSE report output**, since scripts print numbers they computed.
+- [ ] `coerce_add` — `'10' + 1` yields float `11.0`, Lua yields integer `11`.
+- [ ] `coerce_hex` — `'0x10' + 0` yields float `16.0`, Lua yields integer `16`.
+      Same root cause: string-to-number coercion always produces a float, where
+      Lua produces an integer when the string parses as one. NSE branches on
+      `math.type` in its binary-protocol libraries, and this is exactly the
+      coercion it uses to parse protocol fields.
+
+### Blocked on a missing library function, not a missing mechanism
+
+- [ ] `method_rep_literal` — `("ab"):rep(3)` fails with *"could not call a nil
+      value"*. The `__index` lookup **succeeds**; it returns nil because
+      piccolo's entire string library is `byte, char, len, lower, reverse, sub,
+      upper` and `rep` is not among them. Closes when the first-party stdlib
+      crate lands, not before, and needs no VM change.

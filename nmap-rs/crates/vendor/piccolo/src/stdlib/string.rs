@@ -1,4 +1,6 @@
-use crate::{Callback, CallbackReturn, Context, FromValue, String, Table, Value};
+use crate::{
+    meta_ops, Callback, CallbackReturn, Context, FromValue, MetaMethod, String, Table, Value,
+};
 
 pub fn load_string<'gc>(ctx: Context<'gc>) {
     let string = Table::new(&ctx);
@@ -98,6 +100,16 @@ pub fn load_string<'gc>(ctx: Context<'gc>) {
     );
 
     ctx.set_global("string", string);
+
+    // Point the shared string metatable's `__index` at the library just built, which is what
+    // turns `s:upper()` into `string.upper(s)`. PUC-Lua does exactly this at the end of
+    // `luaopen_string` (`lstrlib.c`: `metatable.__index = string`).
+    //
+    // `set` cannot fail here: the key is a static string, never nil or NaN, which are the only
+    // rejections `InvalidTableKey` describes.
+    meta_ops::string_metatable(ctx)
+        .set(ctx, MetaMethod::Index, string)
+        .expect("`__index` is a valid table key");
 }
 
 fn sub(string: &[u8], i: i64, j: Option<i64>) -> Result<&[u8], std::num::TryFromIntError> {

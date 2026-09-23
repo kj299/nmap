@@ -10,11 +10,26 @@ one the rest of this port lives by: **no silent drift.**
 | commit | `ce709eb1dae5c543cbc78e7e12bb80249d88c55f` (2025-07-10) |
 | upstream version | `0.3.3` (the tag; master carries 139 unreleased commits on top) |
 | license | MIT **or** CC0-1.0, at your option (`LICENSE-MIT`, `LICENSE-CC0`) |
-| local changes | `patches/0001-backport-gc-arena-0.5.3.patch` — 7 files, 382 lines |
+| local changes | six patches in `patches/`, listed below |
 | omitted | the `util/` workspace member (`piccolo-util`); unused here, and it carries 4 further `unsafe` blocks |
 
 `Cargo.toml` is **ours**, not upstream's: upstream's is a workspace root and
 cannot be vendored as-is.
+
+## The patch series
+
+One file per intent, applied in name order. The split is the point: a reader can
+see which change is the supply-chain back-port and which is a semantics fix,
+without reverse-engineering it from one combined diff.
+
+| patch | what it does |
+|---|---|
+| `0001-backport-gc-arena-0.5.3.patch` | moves off the `gc-arena` git-rev pin onto the published `=0.5.3`, so `cargo deny check sources` passes |
+| `0002-document-unsafe-for-the-audit-gate.patch` | `SAFETY:` comments on all 41 `unsafe` blocks, for `audit_unsafe.py` |
+| `0003-skip-filesystem-tests-under-miri.patch` | upstream's suite walks `tests/scripts/` with `read_dir`, which Miri's isolation refuses |
+| `0004-string-metatable-dispatch.patch` | gives strings a metatable so `s:sub(1, 2)` dispatches; also corrects `getmetatable`, which errored for five of Lua's eight types |
+| `0005-port-modulo-and-shifts-from-puc-lua.patch` | `%` and the shifts, ported from `lvm.c` — the previous formula aborted the process on `i64::MIN % -1` |
+| `0006-port-float-formatting-from-puc-lua.patch` | `tostring` and `..` for floats, ported from `tostringbuff` in `lobject.c`; also fixes an `i64::MIN.abs()` abort in the concat length estimate |
 
 ## Why the fork exists
 
@@ -40,8 +55,9 @@ additionally fails this workspace's declared MSRV of 1.88.
 ```sh
 git clone https://github.com/kyren/piccolo /tmp/piccolo
 cd /tmp/piccolo && git checkout ce709eb1dae5c543cbc78e7e12bb80249d88c55f
-git apply /path/to/nmap-rs/crates/vendor/piccolo/patches/0001-backport-gc-arena-0.5.3.patch
-diff -ru src /path/to/nmap-rs/crates/vendor/piccolo/src     # expect no output
+V=/path/to/nmap-rs/crates/vendor/piccolo
+for p in "$V"/patches/*.patch; do git apply --include='src/*' --include='tests/*' "$p"; done
+diff -ru src "$V/src" && diff -ru tests "$V/tests"          # expect no output
 ```
 
 `check_vendor.sh` does exactly that and is wired into CI, so the vendored tree
@@ -65,7 +81,7 @@ Placed under `crates/` and listed as a workspace member, **both deliberately**:
 | clippy safety lints | **yes** | measured: 14 findings as a member, **0** as a registry dependency |
 | `cargo fmt --check` | yes | member or not |
 | miri | partly | workspace-wide, but only reaches code our own tests execute |
-| ASan | see below | the job is scoped `-p nmap-sys`; extending it is tracked as M6.0 work |
+| ASan | **yes** | the job runs `-p nmap-sys -p piccolo`, which drives upstream's 43 Lua programs through the VM under the sanitizer |
 
 30 `unsafe` blocks live here. That number is not an argument against piccolo —
 depending on it from crates.io would carry the identical risk and **no gate

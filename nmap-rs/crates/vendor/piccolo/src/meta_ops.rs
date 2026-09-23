@@ -4,6 +4,7 @@ use gc_arena::{Collect, Rootable};
 use thiserror::Error;
 
 use crate::async_callback::{AsyncSequence, Locals};
+use crate::number_format;
 use crate::{async_sequence, SequenceReturn, Stack};
 use crate::{
     table::InvalidTableKey, Callback, CallbackReturn, Context, Function, IntoValue, Singleton,
@@ -813,7 +814,9 @@ pub fn concat<'gc>(
             for value in [a, b] {
                 match value {
                     Value::Integer(i) => write!(&mut bytes, "{}", i).unwrap(),
-                    Value::Number(n) => write!(&mut bytes, "{}", n).unwrap(),
+                    Value::Number(n) => {
+                        write!(&mut bytes, "{}", number_format::display_float(n)).unwrap()
+                    }
                     Value::String(s) => bytes.extend(s.as_bytes()),
                     _ => return None,
                 }
@@ -833,9 +836,18 @@ fn estimate_concatenated_len<'gc>(
     let mut len = 0usize;
     for value in values {
         let value_len = match value {
-            // ilog10 panics for values <= 0
-            Value::Integer(i) => i.abs().max(1).ilog10() as usize + i.is_negative() as usize,
-            Value::Number(_n) => 10,
+            // `unsigned_abs`, not `abs`: `i64::MIN.abs()` overflows, and under
+            // this workspace's `overflow-checks` that is a process abort rather
+            // than a wrong number. It was reachable straight from a script --
+            // `math.mininteger .. '' .. ''` -- and a host-language panic is not
+            // a Lua error, so `pcall` could not contain it.
+            // `max(1)` remains because `ilog10` panics for 0.
+            Value::Integer(i) => {
+                i.unsigned_abs().max(1).ilog10() as usize + 1 + i.is_negative() as usize
+            }
+            // `%.14g` plus a sign, a point and an exponent: `-4.9406564584125e-324`
+            // is 21 bytes, and `tostring`'s trailing `.0` can add two more.
+            Value::Number(_n) => 24,
             Value::String(s) => s.as_bytes().len(),
             _ => return Ok(None),
         };
@@ -863,7 +875,9 @@ pub fn concat_many<'gc>(
         for value in values {
             match value {
                 Value::Integer(i) => write!(&mut bytes, "{}", i).unwrap(),
-                Value::Number(n) => write!(&mut bytes, "{}", n).unwrap(),
+                Value::Number(n) => {
+                    write!(&mut bytes, "{}", number_format::display_float(*n)).unwrap()
+                }
                 Value::String(s) => bytes.extend(s.as_bytes()),
                 _ => unreachable!(),
             }
@@ -927,7 +941,9 @@ pub fn concat_separated<'gc>(
         if let Some(val) = iter.next() {
             match val {
                 Value::Integer(i) => write!(&mut bytes, "{}", i).unwrap(),
-                Value::Number(n) => write!(&mut bytes, "{}", n).unwrap(),
+                Value::Number(n) => {
+                    write!(&mut bytes, "{}", number_format::display_float(*n)).unwrap()
+                }
                 Value::String(s) => bytes.extend(s.as_bytes()),
                 _ => unreachable!(),
             }
@@ -936,7 +952,9 @@ pub fn concat_separated<'gc>(
                 bytes.extend(&*sep_str);
                 match val {
                     Value::Integer(i) => write!(&mut bytes, "{}", i).unwrap(),
-                    Value::Number(n) => write!(&mut bytes, "{}", n).unwrap(),
+                    Value::Number(n) => {
+                        write!(&mut bytes, "{}", number_format::display_float(*n)).unwrap()
+                    }
                     Value::String(s) => bytes.extend(s.as_bytes()),
                     _ => unreachable!(),
                 }

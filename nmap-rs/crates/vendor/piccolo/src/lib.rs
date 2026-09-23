@@ -12,6 +12,7 @@ pub mod function;
 pub mod io;
 pub mod lua;
 pub mod meta_ops;
+pub mod number_format;
 pub mod opcode;
 pub mod registry;
 pub mod stack;

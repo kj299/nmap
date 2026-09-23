@@ -14,6 +14,10 @@
 #   m60_semantics_cases.txt   the chunks, hex-encoded (they contain NUL and
 #                             non-UTF-8 bytes, and the file is TSV)
 #   m60_semantics_golden.txt  nmap's Lua's verdict for each
+#   m60_arith_cases.txt       the arithmetic cross product
+#   m60_arith_golden.txt      its verdicts, floats as raw IEEE bits
+#   m60_floatfmt_cases.txt    doubles as bit patterns
+#   m60_floatfmt_golden.txt   what Lua PRINTS for each, via tostring and via ..
 #
 # The golden is portable by construction: NaN's printed sign is canonicalized
 # (glibc prints "-nan"), pcall cases keep only the boolean rather than
@@ -29,7 +33,8 @@ CHECK=0
 "$HERE/oracle/build_lua_oracle.sh"
 
 NAMES=(m60_semantics_cases.txt m60_semantics_golden.txt
-       m60_arith_cases.txt m60_arith_golden.txt)
+       m60_arith_cases.txt m60_arith_golden.txt
+       m60_floatfmt_cases.txt m60_floatfmt_golden.txt)
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -46,6 +51,15 @@ python3 oracle/gen_m60_arith.py > "$WORK/m60_arith_cases.txt"
 ./oracle/lua oracle/m60_arith_driver.lua "$WORK/m60_arith_cases.txt" \
   > "$WORK/m60_arith_golden.txt"
 
+# The float-formatting corpus is the counterpart to the one above: where the
+# arithmetic corpus deliberately looks past `tostring` to the bits, this one
+# looks at nothing else. Its cases are bit patterns for the same reason -- a
+# decimal literal would have to survive the lexer to reach the oracle -- but its
+# golden is text, because the text is the thing under test.
+python3 oracle/gen_m60_floatfmt.py > "$WORK/m60_floatfmt_cases.txt"
+./oracle/lua oracle/m60_floatfmt_driver.lua "$WORK/m60_floatfmt_cases.txt" \
+  > "$WORK/m60_floatfmt_golden.txt"
+
 # Determinism is a property worth asserting rather than assuming: a golden that
 # differs run to run silently turns this gate into noise, and the failure mode
 # (a table iterated in hash order, an address in a tostring) is exactly the kind
@@ -54,7 +68,10 @@ python3 oracle/gen_m60_arith.py > "$WORK/m60_arith_cases.txt"
   > "$WORK/second_run.txt"
 ./oracle/lua oracle/m60_arith_driver.lua "$WORK/m60_arith_cases.txt" \
   >> "$WORK/second_run.txt"
-cat "$WORK/m60_semantics_golden.txt" "$WORK/m60_arith_golden.txt" > "$WORK/first_run.txt"
+./oracle/lua oracle/m60_floatfmt_driver.lua "$WORK/m60_floatfmt_cases.txt" \
+  >> "$WORK/second_run.txt"
+cat "$WORK/m60_semantics_golden.txt" "$WORK/m60_arith_golden.txt" \
+    "$WORK/m60_floatfmt_golden.txt" > "$WORK/first_run.txt"
 if ! diff -q "$WORK/first_run.txt" "$WORK/second_run.txt" >/dev/null; then
   echo "FAIL: the oracle is not deterministic across two runs" >&2
   diff -u "$WORK/first_run.txt" "$WORK/second_run.txt" >&2 || true
@@ -75,8 +92,10 @@ done
 
 if (( CHECK )); then
   (( rc == 0 )) && echo "m60: cases and golden are current ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
-    "$(grep -cv '^#' m60_arith_cases.txt) arithmetic)"
+    "$(grep -cv '^#' m60_arith_cases.txt) arithmetic," \
+    "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting)"
   exit $rc
 fi
 echo "m60: regenerated ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
-  "$(grep -cv '^#' m60_arith_cases.txt) arithmetic)"
+  "$(grep -cv '^#' m60_arith_cases.txt) arithmetic," \
+  "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting)"

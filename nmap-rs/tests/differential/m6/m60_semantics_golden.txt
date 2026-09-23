@@ -67,6 +67,16 @@ tonumber_base	ok	integer:255
 tonumber_huge	ok	float:inf
 tostring_int	ok	string:31
 tostring_float	ok	string:312e30
+tostring_float_third	ok	string:302e3333333333333333333333333333
+tostring_float_exp	ok	string:31652b313030
+tostring_float_style_f	ok	string:31303030303030303030303030302e30
+tostring_float_style_e	ok	string:31652b3134
+tostring_float_negzero	ok	string:2d302e30
+tostring_float_inf	ok	string:696e662c2d696e66
+concat_float_many	ok	string:312e307c322e357c31652b313030
+table_concat_floats	ok	string:312e302c322e352c31652b313030
+concat_min_integer	ok	string:2d39323233333732303336383534373735383038
+concat_min_integer_pair	ok	string:2d39323233333732303336383534373735383038
 len_embedded_nul	ok	integer:3
 byte_high	ok	integer:255
 char_roundtrip	ok	integer:255

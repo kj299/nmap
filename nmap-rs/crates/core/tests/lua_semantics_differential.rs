@@ -26,10 +26,6 @@ use std::path::{Path, PathBuf};
 const KNOWN_DIVERGENCES: &[&str] = &[
     // Integer/float comparison at the extreme: `maxinteger + 0.0 == maxinteger`.
     "max_int_vs_float",
-    // Float formatting: Lua keeps the decimal marker, piccolo drops it, so
-    // `tostring(1.0)` is "1" and `1.0 .. ''` is "1".
-    "float_to_int_concat",
-    "tostring_float",
     // String-to-number coercion yields a float where Lua yields an integer.
     "coerce_add",
     "coerce_hex",
@@ -42,11 +38,12 @@ const KNOWN_DIVERGENCES: &[&str] = &[
 /// Render a value the way `oracle/m60_arith_driver.lua` does: floats as raw
 /// IEEE-754 bits rather than text.
 ///
-/// The arithmetic corpus deliberately does NOT compare float text. The VM has a
-/// known, ledgered `tostring` divergence, and comparing decimal here would
-/// report that one formatting bug a thousand times over and bury the arithmetic
-/// signal. Bits are exact, and they separate `+0.0` from `-0.0`, which `fmod`'s
-/// sign rules can turn on and text cannot show.
+/// The arithmetic corpus deliberately does NOT compare float text, and still
+/// should not now that the text is right: `%.14g` is lossy, so two doubles that
+/// differ in the last three significant digits print identically and a wrong
+/// result would pass. Bits are exact, and they separate `+0.0` from `-0.0`,
+/// which `fmod`'s sign rules can turn on and text cannot show. Formatting has
+/// its own corpus: `lua_float_format_differential.rs`.
 fn render_bits(v: Value) -> String {
     match v {
         Value::Integer(i) => format!("integer:{i}"),
@@ -106,18 +103,17 @@ fn unhex(s: &str) -> Vec<u8> {
 fn render(v: Value) -> String {
     match v {
         Value::Integer(i) => format!("integer:{i}"),
+        // NaN's printed sign is platform noise, and the driver canonicalizes
+        // it on the Lua side too. The infinities are NOT special-cased: the VM
+        // prints those itself now, and a case that reaches this arm should be
+        // exercising the conversion, not bypassing it.
         Value::Number(n) if n.is_nan() => "float:nan".to_string(),
-        Value::Number(n) if n.is_infinite() => {
-            format!("float:{}", if n > 0.0 { "inf" } else { "-inf" })
-        }
-        Value::Number(n) => {
-            let s = format!("{n:.14}");
-            let s = s.trim_end_matches('0').to_string();
-            format!(
-                "float:{}",
-                if s.ends_with('.') { format!("{s}0") } else { s }
-            )
-        }
+        // The VM's own conversion, not the harness's. Formatting the float
+        // here would have meant that every case returning a bare float tested
+        // this function rather than the interpreter -- which is how the
+        // `tostring` divergence stayed invisible to all but the two cases that
+        // happened to return a string.
+        Value::Number(_) => format!("float:{}", v.display()),
         Value::String(s) => format!("string:{}", hex(s.as_bytes())),
         Value::Nil => "nil:nil".to_string(),
         Value::Boolean(b) => format!("boolean:{b}"),
@@ -196,7 +192,7 @@ fn run_corpus() -> Vec<(String, bool)> {
 fn vm_matches_nmaps_own_lua_except_where_ledgered() {
     let results = run_corpus();
     assert!(
-        results.len() >= 68,
+        results.len() >= 78,
         "corpus shrank to {} cases — regenerate with regen_m60.sh",
         results.len()
     );

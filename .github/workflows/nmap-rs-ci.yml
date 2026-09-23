@@ -455,3 +455,30 @@ jobs:
       - run: bash tests/differential/m6/regen_m62.sh --check
       - run: cargo test -p nmap-core --test selection_differential
       - run: cargo test -p nmap-core --test selection_corpus
+
+      # M6.0 — the Lua VM itself. Same oracle as M6.1 and M6.2, used
+      # differently: those gate parsers this port wrote, this one gates an
+      # *interpreter* it vendors, so each case is a Lua chunk and the golden is
+      # what `liblua/` from this repository evaluates it to.
+      #
+      # `cargo test --all` above already runs these three test binaries. The
+      # --check step is what they cannot do for themselves: it re-derives the
+      # corpus AND the golden with nmap's own Lua and fails if either has moved,
+      # so a golden that stopped describing `liblua/` cannot go on being
+      # compared against. Without it the tests would keep passing against a
+      # stale answer key, which is the failure mode a differential exists to
+      # rule out.
+      #
+      # Three corpora, deliberately not one:
+      #   * semantics    — 78 chunks, evaluated end to end. Carries an exemption
+      #                    list; `DIVERGENCES.md` holds the same list, and the
+      #                    test fails if a listed defect is silently FIXED as
+      #                    well as if a new one appears.
+      #   * arithmetic   — 2,955 cases, floats compared as raw IEEE bits so that
+      #                    a lossy `%.14g` cannot hide a wrong low-order digit.
+      #   * float format — 7,917 doubles, compared as TEXT through both
+      #                    `tostring` and `..`. Neither of the last two has an
+      #                    exemption list: both match exactly.
+      - run: bash tests/differential/m6/regen_m60.sh --check
+      - run: cargo test -p nmap-core --test lua_semantics_differential
+      - run: cargo test -p nmap-core --test lua_float_format_differential

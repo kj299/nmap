@@ -2283,41 +2283,44 @@ removed: that one was theatre, this one is unobservable.
 ## Milestone 6.0 — known defects in the vendored Lua VM
 
 **These are not choices.** Every other entry in this file records a place the
-port deliberately differs from the C. This section is the opposite: nine cases
-where `crates/vendor/piccolo` disagrees with nmap's own Lua 5.4 and **should
-not**, listed here because a defect nobody has written down is a defect nobody
-closes. They are unticked (`- [ ]`) and stay that way until fixed.
+port deliberately differs from the C. This section is the opposite: cases where
+`crates/vendor/piccolo` disagrees with nmap's own Lua 5.4 and **should not**,
+listed here because a defect nobody has written down is a defect nobody closes.
+They are unticked (`- [ ]`) and stay that way until fixed.
 
 They are enforced, not merely recorded. `crates/core/tests/lua_semantics_differential.rs`
 holds the same list as `KNOWN_DIVERGENCES` and fails if a **new** divergence
 appears *or* if a listed one is silently fixed — so this section cannot drift
 from reality in either direction. Measured against
 [`m60_semantics_golden.txt`](tests/differential/m6/m60_semantics_golden.txt),
-68 cases evaluated by `liblua/` from this repository.
+78 cases evaluated by `liblua/` from this repository.
 
-Count at M6.0: **6 of 68**, down from 16 when the VM was vendored. **None of the
-six can abort the process** — the two that could are fixed. Entries the port has
-closed are removed rather than ticked, because they are simply correct now.
+Count at M6.0: **4 of 78**, down from 16 when the VM was vendored. **None of the
+four can abort the process** — the three that could are fixed. Entries the port
+has closed are removed rather than ticked, because they are simply correct now.
 
-A second corpus sits beside this one and carries **no exemptions at all**:
-[`m60_arith_cases.txt`](tests/differential/m6/m60_arith_cases.txt), 2,955 cases
-over the cross product of the operand values where 64-bit arithmetic actually
-goes wrong — the range edges, both signs, zero, the identity and its negation —
-for `% // + - * & | ~ << >>`, unary minus and bitwise not, plus float `% // /`
-over infinities, both zeroes and NaN. It matches nmap's own Lua **exactly**, and
-an arithmetic divergence is never something to carry, so it has no list to add
-to.
+Two further corpora sit beside this one and carry **no exemptions at all**:
+
+- [`m60_arith_cases.txt`](tests/differential/m6/m60_arith_cases.txt), 2,955
+  cases over the cross product of the operand values where 64-bit arithmetic
+  actually goes wrong — the range edges, both signs, zero, the identity and its
+  negation — for `% // + - * & | ~ << >>`, unary minus and bitwise not, plus
+  float `% // /` over infinities, both zeroes and NaN.
+- [`m60_floatfmt_cases.txt`](tests/differential/m6/m60_floatfmt_cases.txt),
+  7,917 doubles given as raw IEEE-754 bit patterns — every power of two, every
+  power of ten and its two nearest neighbours, the subnormal and `DBL_MAX`
+  boundaries, both zeroes, both NaN signs, and a 3,000-pattern pseudo-random
+  sweep — each compared through `tostring` **and** through `..`, which are
+  separate paths in the VM.
+
+Both match nmap's own Lua **exactly**. Neither an arithmetic nor a formatting
+divergence is something to carry, so neither has a list to add to.
 
 ### Wrong answers
 
 - [ ] `max_int_vs_float` — `math.maxinteger + 0.0 == math.maxinteger` is `true`
       here and `false` in Lua. The float cannot represent `maxinteger` exactly,
       and Lua's comparison accounts for that; piccolo's converts and compares.
-- [ ] `float_to_int_concat` — `1.0 .. ''` gives `"1"`, Lua gives `"1.0"`.
-- [ ] `tostring_float` — `tostring(1.0)` gives `"1"`, Lua gives `"1.0"`. Same
-      root cause as the previous entry: Lua's `%.14g` keeps a decimal marker so
-      a float never prints as an integer. Both close together. **This one
-      corrupts NSE report output**, since scripts print numbers they computed.
 - [ ] `coerce_add` — `'10' + 1` yields float `11.0`, Lua yields integer `11`.
 - [ ] `coerce_hex` — `'0x10' + 0` yields float `16.0`, Lua yields integer `16`.
       Same root cause: string-to-number coercion always produces a float, where

@@ -3,12 +3,12 @@
 -- Run as:  ./oracle/lua oracle/m60_arith_driver.lua m60_arith_cases.txt
 --
 -- Floats render as their raw IEEE-754 bit pattern, NOT as text. That is the
--- whole reason this driver exists separately from m60_driver.lua: the vendored
--- VM has a known, ledgered `tostring` divergence (Lua keeps the decimal marker,
--- it does not), so comparing decimal text here would report a formatting bug
--- 1,000 times over and bury the arithmetic signal this corpus is for. Bits are
+-- whole reason this driver exists separately from m60_driver.lua: `%.14g` is
+-- lossy, so two doubles differing in their last three significant digits print
+-- identically and a wrong arithmetic result would pass unnoticed. Bits are
 -- exact, and they also distinguish +0.0 from -0.0, which `tostring` does not
--- and which `fmod`'s sign rules can turn on.
+-- and which `fmod`'s sign rules can turn on. Formatting itself is gated by
+-- m60_floatfmt_cases.txt, where the text is the thing under test.
 --
 -- NaN is canonicalized to one pattern: the sign and payload of a produced NaN
 -- are not specified by IEEE and differ between an interpreter and a JIT-less

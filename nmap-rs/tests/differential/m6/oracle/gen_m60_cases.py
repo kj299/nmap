@@ -127,6 +127,34 @@ CASES: list[tuple[str, str, str]] = [
     ("tostring_int", "return tostring(1)", "1"),
     ("tostring_float", "return tostring(1.0)", "1.0"),
 
+    # --- float formatting ----------------------------------------------------
+    # Lua's is printf("%.14g") plus a ".0" when the result would read back as an
+    # integer. Rust's Display for f64 is shortest-round-trip and never uses an
+    # exponent, so it agrees with Lua on almost nothing. The exhaustive gate is
+    # m60_floatfmt_cases.txt; these are the end-to-end paths -- through the
+    # lexer, the VM and the concatenation opcodes -- that the bit-pattern corpus
+    # deliberately bypasses.
+    ("tostring_float_third", "return tostring(1/3)",
+     "0.33333333333333: fourteen significant digits, not Rust's sixteen"),
+    ("tostring_float_exp", "return tostring(1e100)",
+     "1e+100, not a hundred-and-one-digit numeral"),
+    ("tostring_float_style_f", "return tostring(1e13)",
+     "10000000000000.0: 14 digits still fits %g's fixed style"),
+    ("tostring_float_style_e", "return tostring(1e14)",
+     "1e+14: one digit more and %g switches styles"),
+    ("tostring_float_negzero", "return tostring(-0.0)",
+     "-0.0: the sign survives, and the .0 is appended after it"),
+    ("tostring_float_inf", "return tostring(1/0) .. ',' .. tostring(-1/0)",
+     "inf,-inf -- and NOT inf.0: the strspn test excludes them"),
+    ("concat_float_many", "return 1.0 .. '|' .. 2.5 .. '|' .. 1e100",
+     "three-operand concat is a different opcode from two-operand"),
+    ("table_concat_floats", "return table.concat({1.0, 2.5, 1e100}, ',')",
+     "table.concat has its own coercion path again"),
+    ("concat_min_integer", "return math.mininteger .. '' .. ''",
+     "i64::MIN.abs() overflows; the length estimate used to abort the process"),
+    ("concat_min_integer_pair", "return math.mininteger .. ''",
+     "the two-operand path, which does not take the length estimate"),
+
     # --- byte strings, not UTF-8 ---------------------------------------------
     ("len_embedded_nul", "return #'a\\0b'", "3: Lua strings are byte strings"),
     ("byte_high", "return ('\\xff'):byte(1)", "255 — a byte, not a replacement char"),

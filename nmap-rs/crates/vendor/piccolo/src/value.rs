@@ -43,8 +43,11 @@ impl<'gc> Value<'gc> {
 
     /// Returns a proxy object which can display any `Value`.
     ///
-    /// [`Value::Nil`] is printed as "nil", booleans, integers, and numbers are always printed as
-    /// directly as they would be from Rust.
+    /// [`Value::Nil`] is printed as "nil", and booleans and integers are printed directly as they
+    /// would be from Rust.
+    ///
+    /// [`Value::Number`] is NOT: it goes through [`crate::number_format::display_float`], which is
+    /// PUC-Lua's conversion rather than Rust's. `1.0` prints as "1.0", not "1".
     ///
     /// [`Value::String`] is printed using the [`String::display_lossy`] method, which displays
     /// strings in a lossy fashion if they are not UTF-8 internally.
@@ -61,7 +64,7 @@ impl<'gc> Value<'gc> {
                     Value::Nil => write!(fmt, "nil"),
                     Value::Boolean(b) => write!(fmt, "{}", b),
                     Value::Integer(i) => write!(fmt, "{}", i),
-                    Value::Number(f) => write!(fmt, "{}", f),
+                    Value::Number(f) => write!(fmt, "{}", crate::number_format::display_float(f)),
                     Value::String(s) => write!(fmt, "{}", s.display_lossy()),
                     Value::Table(t) => write!(fmt, "<table {:p}>", Gc::as_ptr(t.into_inner())),
                     Value::Function(Function::Closure(c)) => {
@@ -155,7 +158,13 @@ impl<'gc> Value<'gc> {
     pub fn into_string(self, ctx: crate::Context<'gc>) -> Option<String<'gc>> {
         match self {
             Value::Integer(i) => Some(ctx.intern(i.to_string().as_bytes())),
-            Value::Number(n) => Some(ctx.intern(n.to_string().as_bytes())),
+            Value::Number(n) => Some(
+                ctx.intern(
+                    crate::number_format::display_float(n)
+                        .to_string()
+                        .as_bytes(),
+                ),
+            ),
             Value::String(s) => Some(s),
             _ => None,
         }

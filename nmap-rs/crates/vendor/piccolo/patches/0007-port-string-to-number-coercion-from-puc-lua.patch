@@ -1,0 +1,475 @@
+diff --git a/src/compiler/string_utils.rs b/src/compiler/string_utils.rs
+index 1abe1f9..8a68b97 100644
+--- a/src/compiler/string_utils.rs
++++ b/src/compiler/string_utils.rs
+@@ -142,6 +142,17 @@ pub fn read_dec_integer(s: &[u8]) -> Option<i64> {
+     }
+ }
+ 
++/// The hexadecimal half of `l_str2int` (`lobject.c:275`).
++///
++/// It **wraps**, and that is not an oversight to be tidied up. The C accumulates into a
++/// `lua_Unsigned` with no overflow test at all — unlike its own decimal branch eight lines below,
++/// which has one and bails out to the float path. The asymmetry is observable and is what Lua
++/// documents: `0xffffffffffffffff` is the integer `-1`, `0x10000000000000000` is the integer `0`,
++/// while the decimal numeral of either magnitude becomes a float instead.
++///
++/// Refusing the overflow, as this used to, made `read_integer` fail and sent the numeral on to
++/// `read_float`, which answered `1.844674407371e+19` — wrong in value *and* in subtype, in both
++/// the lexer and string coercion, since `luaO_str2num` serves both.
+ pub fn read_hex_integer(s: &[u8]) -> Option<i64> {
+     let (is_neg, s) = read_neg(s);
+ 
+@@ -152,24 +163,39 @@ pub fn read_hex_integer(s: &[u8]) -> Option<i64> {
+     let mut i: u64 = 0;
+     for &c in &s[2..] {
+         let d = from_hex_digit(c)? as u64;
+-        i = i.checked_mul(16)?.checked_add(d)?;
++        // `a = a * 16 + luaO_hexavalue(*s);` on an unsigned type: modular, never trapping.
++        i = i.wrapping_mul(16).wrapping_add(d);
+     }
+ 
+-    if is_neg {
+-        if i <= i64::MAX as u64 {
+-            Some(-(i as i64))
+-        } else if i == i64::MAX as u64 + 1 {
+-            Some(i64::MIN)
+-        } else {
+-            None
+-        }
+-    } else {
+-        i.try_into().ok()
+-    }
++    // `l_castU2S((neg) ? 0u - a : a)`. The negation is unsigned too, so it also wraps -- which is
++    // how `-0x8000000000000000` lands on `i64::MIN` rather than failing a range check.
++    Some(if is_neg { 0u64.wrapping_sub(i) } else { i } as i64)
+ }
+ 
++/// `l_str2d` (`lobject.c:250`), including the rejection that makes `tonumber('inf')` nil.
++///
++/// The C classifies the numeral by the FIRST character of `.xXnN` it contains, and `n` or `N`
++/// there is an outright refusal — the comment at the site reads *"reject 'inf' and 'nan'"*. Rust's
++/// `str::parse::<f64>` accepts all of `inf`, `-inf`, `infinity` and `NaN`, so without this a
++/// script that validated a packet field with `tonumber` would be handed an infinity it cannot have
++/// asked for, and `'inf' + 1` answered `inf` where Lua raises an error.
++///
++/// The test is on the first special character rather than on the whole word because that is what
++/// `strpbrk` does: `0xn` is classified hexadecimal (the `x` comes first) and fails later for
++/// having no digits, while `n0x10` is refused outright.
++///
++/// This is deliberately NOT applied to [`read_dec_float`], which the lexer calls directly: a
++/// source numeral only ever begins at a digit, so `inf` in Lua source is a name, not a numeral,
++/// and must stay one.
+ pub fn read_float(s: &[u8]) -> Option<f64> {
+-    read_hex_float(s).or_else(|| read_dec_float(s))
++    match s
++        .iter()
++        .find(|c| matches!(c, b'.' | b'x' | b'X' | b'n' | b'N'))
++    {
++        Some(b'n' | b'N') => None,
++        Some(b'x' | b'X') => read_hex_float(s),
++        _ => read_dec_float(s),
++    }
+ }
+ 
+ pub fn read_dec_float(s: &[u8]) -> Option<f64> {
+@@ -226,6 +252,14 @@ pub fn read_hex_float(s: &[u8]) -> Option<f64> {
+ 
+     if i + 1 < s.len() && (s[i] == b'p' || s[i] == b'P') {
+         let (exp_neg, exp_s) = read_neg(&s[i + 1..]);
++        // `if (!lisdigit(cast_uchar(*s))) return 0.0;` -- "invalid; must have at least one
++        // digit" (`lobject.c:202`). Without this, `0x1p+` read as 1.0: `read_neg` ate the sign,
++        // the loop below saw an empty slice and never ran, and an exponent of zero was assumed.
++        // `0x1p` was already refused, but only because the `i + 1 < s.len()` guard above happens
++        // to exclude it -- the sign is what made the slice non-empty and let it through.
++        if exp_s.is_empty() {
++            return None;
++        }
+         let mut exp1: i32 = 0;
+         for &c in exp_s {
+             let d = from_digit(c)?;
+diff --git a/src/constant.rs b/src/constant.rs
+index e2505b9..94de5db 100644
+--- a/src/constant.rs
++++ b/src/constant.rs
+@@ -48,6 +48,28 @@ impl<S> Constant<S> {
+     }
+ }
+ 
++/// `luaV_flttointeger` in `F2Ieq` mode (`lvm.c:123`), whose range test is `lua_numbertointeger`
++/// (`luaconf.h:432`): `n >= -2^63 && n < 2^63`.
++///
++/// The strict upper bound is the reason this is not a cast. `2^63` is exactly representable as a
++/// double but is not an `i64`, and Rust's `as` saturates it to `i64::MAX` rather than refusing it
++/// — which then converts back to `2^63` and passes a round-trip check. So `2^63 | 0` answered
++/// `maxinteger` here where Lua raises "number has no integer representation". `-2^63` is accepted,
++/// because `i64::MIN` does have an exact representation; the asymmetry is real, not a typo, and
++/// `luaconf.h` says so at the site.
++fn float_to_integer(n: f64) -> Option<i64> {
++    /// `-2^63`, exact as a double.
++    const MIN: f64 = -9223372036854775808.0;
++    /// `2^63`, one past `i64::MAX` and exact as a double.
++    const LIMIT: f64 = 9223372036854775808.0;
++    // `n == n.floor()` is the `F2Ieq` test, and it rejects NaN for free.
++    if n >= MIN && n < LIMIT && n == n.floor() {
++        Some(n as i64)
++    } else {
++        None
++    }
++}
++
+ impl<S: AsRef<[u8]>> Constant<S> {
+     /// Converts the given constant to an integer or number, if possible.
+     pub fn to_numeric(&self) -> Option<Constant<S>> {
+@@ -78,39 +100,74 @@ impl<S: AsRef<[u8]>> Constant<S> {
+     }
+ 
+     /// Interprets Numbers, Integers, and Strings as an Integer, if possible.
++    ///
++    /// This is `luaV_tointeger` (`lvm.c:154`) — the string-coercing one, which is what
++    /// `math.tointeger`, `select` and the numeric `for` use. The operators do NOT use it; see
++    /// [`Constant::to_integer_no_string`].
+     pub fn to_integer(&self) -> Option<i64> {
+         match self.to_numeric() {
+             Some(Self::Integer(a)) => Some(a),
+-            Some(Self::Number(a)) => {
+-                if ((a as i64) as f64) == a {
+-                    Some(a as i64)
+-                } else {
+-                    None
+-                }
+-            }
++            Some(Self::Number(a)) => float_to_integer(a),
++            _ => None,
++        }
++    }
++
++    /// `tointegerns` (`lvm.h:68`) — "convert an object to an integer (without string coercion)".
++    ///
++    /// The `ns` suffix is the whole point. `luaO_rawarith` (`lobject.c:89`) reaches for this one,
++    /// not the string-coercing `tointeger`, for every bitwise operator, and nothing puts the
++    /// string back: the arithmetic metamethods `lstrlib.c` installs on the string metatable are
++    /// exactly `__add __sub __mul __mod __pow __div __idiv __unm` (`lstrlib.c:330`) — no
++    /// `__band`, `__bor`, `__bxor`, `__shl`, `__shr` or `__bnot`. So `'10' | 0` is an *error* in
++    /// Lua, where this VM used to answer 10.
++    ///
++    /// That difference is not cosmetic in a scanner. NSE's protocol libraries mask and shift
++    /// values lifted out of hostile packets, and a field that arrives as a string should stop the
++    /// script with a catchable error rather than silently take the arithmetic path.
++    fn to_integer_no_string(&self) -> Option<i64> {
++        match *self {
++            Self::Integer(a) => Some(a),
++            Self::Number(a) => float_to_integer(a),
+             _ => None,
+         }
+     }
+ 
+     // Mathematical operators
++    //
++    // Every one of these coerces a numeric string operand FIRST, with `to_numeric`, and only then
++    // decides between the integer and the float path. Deciding first, as this type used to, loses
++    // the subtype: `'10' + 1` fell to the catch-all arm, went through `to_number`, and answered
++    // float `11.0` where Lua answers integer `11`.
++    //
++    // Lua reaches the same place by a longer route. `luaO_rawarith` (`lobject.c:89`) never
++    // coerces a string at all — it uses `tonumberns`, the no-string conversion — so a string
++    // operand makes the raw operation fail and `luaO_arith` falls through to the metamethod. The
++    // metamethod is `lstrlib.c`'s `arith` (`lstrlib.c:283`), which converts each operand with
++    // `lua_stringtonumber` and then re-enters `lua_arith` with two *numbers*. And
++    // `lua_stringtonumber` is `luaO_str2num` (`lobject.c:308`), which tries `l_str2int` before
++    // `l_str2d` — so `'10'` arrives as an integer, and integer + integer stays an integer.
++    //
++    // This matters past cosmetics: NSE's binary-protocol libraries branch on `math.type` over
++    // values parsed out of packets, and `//` and `%` on a float do not give the same answer as on
++    // an integer once the magnitudes pass 2^53.
+ 
+     pub fn add(&self, rhs: &Self) -> Option<Self> {
+-        Some(match (self, rhs) {
+-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_add(b)),
++        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
++            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_add(b)),
+             (a, b) => Self::Number(a.to_number()? + b.to_number()?),
+         })
+     }
+ 
+     pub fn subtract(&self, rhs: &Self) -> Option<Self> {
+-        Some(match (self, rhs) {
+-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_sub(b)),
++        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
++            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_sub(b)),
+             (a, b) => Self::Number(a.to_number()? - b.to_number()?),
+         })
+     }
+ 
+     pub fn multiply(&self, rhs: &Self) -> Option<Self> {
+-        Some(match (self, rhs) {
+-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_mul(b)),
++        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
++            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_mul(b)),
+             (a, b) => Self::Number(a.to_number()? * b.to_number()?),
+         })
+     }
+@@ -123,8 +180,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
+     /// This operation returns an Integer only if both arguments are Integers. Rounding is towards
+     /// negative infinity.
+     pub fn floor_divide(&self, rhs: &Self) -> Option<Self> {
+-        match (self, rhs) {
+-            (&Self::Integer(a), &Self::Integer(b)) => {
++        match (self.to_numeric()?, rhs.to_numeric()?) {
++            (Self::Integer(a), Self::Integer(b)) => {
+                 if b == 0 {
+                     None
+                 } else {
+@@ -167,8 +224,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
+     /// **It was wrong on infinities.** `5.0 % inf` is `5.0` in Lua and `NaN` under the old
+     /// formula, because `(5 + inf) % inf` is `inf % inf`.
+     pub fn modulo(&self, rhs: &Self) -> Option<Self> {
+-        match (self, rhs) {
+-            (&Self::Integer(a), &Self::Integer(b)) => {
++        match (self.to_numeric()?, rhs.to_numeric()?) {
++            (Self::Integer(a), Self::Integer(b)) => {
+                 if b == 0 {
+                     // `n % 0` is a Lua *error*, which a script can catch. Returning None is how
+                     // this type reports that; it must never become a panic.
+@@ -211,29 +268,38 @@ impl<S: AsRef<[u8]>> Constant<S> {
+     }
+ 
+     pub fn negate(&self) -> Option<Self> {
+-        match self {
+-            &Self::Integer(a) => Some(Self::Integer(a.wrapping_neg())),
+-            &Self::Number(a) => Some(Self::Number(-a)),
+-            s => s.to_number().map(|x| Self::Number(-x)),
+-        }
++        Some(match self.to_numeric()? {
++            Self::Integer(a) => Self::Integer(a.wrapping_neg()),
++            Self::Number(a) => Self::Number(-a),
++            // `to_numeric` returns only those two variants, so this is unreachable. Returning
++            // `None` rather than asserting keeps a future edit to `to_numeric` a Lua error
++            // instead of a process abort.
++            _ => return None,
++        })
+     }
+ 
+     // Bitwise operators
+ 
+     pub fn bitwise_not(&self) -> Option<Self> {
+-        Some(Self::Integer(!self.to_integer()?))
++        Some(Self::Integer(!self.to_integer_no_string()?))
+     }
+ 
+     pub fn bitwise_and(&self, rhs: &Self) -> Option<Self> {
+-        Some(Self::Integer(self.to_integer()? & rhs.to_integer()?))
++        Some(Self::Integer(
++            self.to_integer_no_string()? & rhs.to_integer_no_string()?,
++        ))
+     }
+ 
+     pub fn bitwise_or(&self, rhs: &Self) -> Option<Self> {
+-        Some(Self::Integer(self.to_integer()? | rhs.to_integer()?))
++        Some(Self::Integer(
++            self.to_integer_no_string()? | rhs.to_integer_no_string()?,
++        ))
+     }
+ 
+     pub fn bitwise_xor(&self, rhs: &Self) -> Option<Self> {
+-        Some(Self::Integer(self.to_integer()? ^ rhs.to_integer()?))
++        Some(Self::Integer(
++            self.to_integer_no_string()? ^ rhs.to_integer_no_string()?,
++        ))
+     }
+ 
+     /// Ported from `luaV_shiftl` (`lvm.c:780-790`).
+@@ -267,8 +333,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
+ 
+     pub fn shift_left(&self, rhs: &Self) -> Option<Self> {
+         Some(Self::Integer(Self::shift_left_i64(
+-            self.to_integer()?,
+-            rhs.to_integer()?,
++            self.to_integer_no_string()?,
++            rhs.to_integer_no_string()?,
+         )))
+     }
+ 
+@@ -280,8 +346,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
+         // branch and yields 0. A checked negation would trap on exactly that
+         // value, which is the operand an attacker would reach for.
+         Some(Self::Integer(Self::shift_left_i64(
+-            self.to_integer()?,
+-            rhs.to_integer()?.wrapping_neg(),
++            self.to_integer_no_string()?,
++            rhs.to_integer_no_string()?.wrapping_neg(),
+         )))
+     }
+ 
+diff --git a/src/stdlib/base.rs b/src/stdlib/base.rs
+index 2160fc2..a20d92e 100644
+--- a/src/stdlib/base.rs
++++ b/src/stdlib/base.rs
+@@ -43,23 +43,32 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
+                     Err("base out of range".into_value(ctx))?;
+                 }
+                 let (bytes, is_neg) = extract_number_data(s.as_bytes());
+-                let result = bytes
+-                    .iter()
+-                    .map(|b| {
+-                        if b.is_ascii_digit() {
+-                            Some((*b - b'0') as i64)
+-                        } else if b.is_ascii_lowercase() {
+-                            Some((*b - b'a') as i64 + 10)
+-                        } else if b.is_ascii_uppercase() {
+-                            Some((*b - b'A') as i64 + 10)
+-                        } else {
+-                            None
+-                        }
+-                    })
+-                    .try_fold(0i64, |acc, v| match v {
+-                        Some(v) if v < base => Some(acc.wrapping_mul(base).wrapping_add(v)),
+-                        _ => None,
++                // `if (!isalnum(cast_uchar(*s))) return NULL;  /* no digit? */`
++                // (`b_str2int`, `lbaselib.c:66`). Without it the fold below runs over an empty
++                // slice and returns its identity, so `tonumber('', 16)` and `tonumber('  ', 16)`
++                // answered the integer 0 where Lua answers nil -- a validity check that reports
++                // "this parsed, and the value is zero".
++                let result = (!bytes.is_empty())
++                    .then(|| {
++                        bytes
++                            .iter()
++                            .map(|b| {
++                                if b.is_ascii_digit() {
++                                    Some((*b - b'0') as i64)
++                                } else if b.is_ascii_lowercase() {
++                                    Some((*b - b'a') as i64 + 10)
++                                } else if b.is_ascii_uppercase() {
++                                    Some((*b - b'A') as i64 + 10)
++                                } else {
++                                    None
++                                }
++                            })
++                            .try_fold(0i64, |acc, v| match v {
++                                Some(v) if v < base => Some(acc.wrapping_mul(base).wrapping_add(v)),
++                                _ => None,
++                            })
+                     })
++                    .flatten()
+                     .map(|v| if is_neg { v.wrapping_neg() } else { v });
+                 stack.replace(ctx, result.map(Value::Integer).unwrap_or(Value::Nil));
+             }
+diff --git a/tests/scripts/bit.lua b/tests/scripts/bit.lua
+index b0df6ad..19b8264 100644
+--- a/tests/scripts/bit.lua
++++ b/tests/scripts/bit.lua
+@@ -1,57 +1,85 @@
++-- Bitwise operators.
++--
++-- The eleven assertions about STRING operands here were reversed against
++-- nmap's own Lua 5.4, built from `liblua/` in this repository. Upstream
++-- asserted `"2" & 3.0 == 2`; PUC-Lua raises. It is not a close call:
++-- `luaO_rawarith` (`lobject.c:92`) converts bitwise operands with
++-- `tointegerns` -- the *no string coercion* one -- and nothing puts the string
++-- back, because the metamethods `lstrlib.c` installs on the string metatable
++-- (`lstrlib.c:330`) are exactly `__add __sub __mul __mod __pow __div __idiv
++-- __unm`, with no bitwise entry.
++--
++-- The cases are kept rather than deleted: as `is_err` they now pin the real
++-- behaviour instead of the wrong one, which is more coverage than before.
++-- Everything not involving a string is upstream's, unchanged and still passing.
++
+ function is_err(f)
+     return pcall(f) == false
+ end
+ 
+ function test1()
+     return 2   & 3     == 2 and
+-           2.0 & 3.0   == 2 and
+-           "2" & 3.0   == 2 and
+-           2   & "3.0" == 2
++           2.0 & 3.0   == 2
+ end
+ 
+ function test2()
+     return 2   | 3     == 3 and
+-           2.0 | 3.0   == 3 and
+-           "2" | 3.0   == 3 and
+-           2   | "3.0" == 3
++           2.0 | 3.0   == 3
+ end
+ 
+ function test3()
+     return 2   ~ 3     == 1 and
+-           2.0 ~ 3.0   == 1 and
+-           "2" ~ 3.0   == 1 and
+-           2   ~ "3.0" == 1
++           2.0 ~ 3.0   == 1
+ end
+ 
+ function test4()
+     return ~2   == -3 and
+-           ~"2" == -3 and
+            ~2.0 == -3
+ end
+ 
+ function test5()
+     return 2   << 3     == 16 and
+-           2.0 << 3.0   == 16 and
+-           "2" << 3.0   == 16 and
+-           2   << "3.0" == 16
++           2.0 << 3.0   == 16
+ end
+ 
+ function test6()
+     return 145   >> 3     == 18 and
+            145.0 >> 3.0   == 18 and
+-           "145" >> 3.0   == 18 and
+-           145   >> "3.0" == 18 and
+            -1    >> 1     == 9223372036854775807
+ end
+ 
++-- A float converts only when its value is integral and inside the i64 range
++-- (`luaV_flttointeger` in F2Ieq mode, `lvm.c:123`). 2^63 is exactly
++-- representable as a double and is NOT an integer, so it must be refused even
++-- though it is integral.
+ function test7()
+-    return is_err(function() return ~2.2    end) and
+-           is_err(function() return ~"2.2"  end) and
+-           is_err(function() return 2.2 & 3 end) and
+-           is_err(function() return 2.2 | 3 end) and
+-           is_err(function() return 2.2 ~ 3 end) and
++    return is_err(function() return ~2.2     end) and
++           is_err(function() return 2.2 & 3  end) and
++           is_err(function() return 2.2 | 3  end) and
++           is_err(function() return 2.2 ~ 3  end) and
+            is_err(function() return 2.2 << 3 end) and
+-           is_err(function() return 2.2 >> 3 end)
++           is_err(function() return 2.2 >> 3 end) and
++           is_err(function() return 2^63 | 0 end) and
++           is_err(function() return (0/0) | 0 end) and
++           is_err(function() return (1/0) | 0 end) and
++           -(2^63) | 0 == math.mininteger
++end
++
++-- A string is never a bitwise operand, whichever side it is on and whatever it
++-- would have parsed as.
++function test8()
++    return is_err(function() return "2" & 3.0   end) and
++           is_err(function() return 2   & "3.0" end) and
++           is_err(function() return "2" | 3.0   end) and
++           is_err(function() return 2   | "3.0" end) and
++           is_err(function() return "2" ~ 3.0   end) and
++           is_err(function() return 2   ~ "3.0" end) and
++           is_err(function() return ~"2"        end) and
++           is_err(function() return ~"2.2"      end) and
++           is_err(function() return "2" << 3.0  end) and
++           is_err(function() return 2   << "3.0" end) and
++           is_err(function() return "145" >> 3.0 end) and
++           is_err(function() return 145 >> "3.0" end)
+ end
+ 
+ assert(
+@@ -61,5 +89,6 @@ assert(
+     test4() and
+     test5() and
+     test6() and
+-    test7()
++    test7() and
++    test8()
+ )

@@ -43,23 +43,32 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
                     Err("base out of range".into_value(ctx))?;
                 }
                 let (bytes, is_neg) = extract_number_data(s.as_bytes());
-                let result = bytes
-                    .iter()
-                    .map(|b| {
-                        if b.is_ascii_digit() {
-                            Some((*b - b'0') as i64)
-                        } else if b.is_ascii_lowercase() {
-                            Some((*b - b'a') as i64 + 10)
-                        } else if b.is_ascii_uppercase() {
-                            Some((*b - b'A') as i64 + 10)
-                        } else {
-                            None
-                        }
+                // `if (!isalnum(cast_uchar(*s))) return NULL;  /* no digit? */`
+                // (`b_str2int`, `lbaselib.c:66`). Without it the fold below runs over an empty
+                // slice and returns its identity, so `tonumber('', 16)` and `tonumber('  ', 16)`
+                // answered the integer 0 where Lua answers nil -- a validity check that reports
+                // "this parsed, and the value is zero".
+                let result = (!bytes.is_empty())
+                    .then(|| {
+                        bytes
+                            .iter()
+                            .map(|b| {
+                                if b.is_ascii_digit() {
+                                    Some((*b - b'0') as i64)
+                                } else if b.is_ascii_lowercase() {
+                                    Some((*b - b'a') as i64 + 10)
+                                } else if b.is_ascii_uppercase() {
+                                    Some((*b - b'A') as i64 + 10)
+                                } else {
+                                    None
+                                }
+                            })
+                            .try_fold(0i64, |acc, v| match v {
+                                Some(v) if v < base => Some(acc.wrapping_mul(base).wrapping_add(v)),
+                                _ => None,
+                            })
                     })
-                    .try_fold(0i64, |acc, v| match v {
-                        Some(v) if v < base => Some(acc.wrapping_mul(base).wrapping_add(v)),
-                        _ => None,
-                    })
+                    .flatten()
                     .map(|v| if is_neg { v.wrapping_neg() } else { v });
                 stack.replace(ctx, result.map(Value::Integer).unwrap_or(Value::Nil));
             }

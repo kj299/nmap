@@ -18,6 +18,8 @@
 #   m60_arith_golden.txt      its verdicts, floats as raw IEEE bits
 #   m60_floatfmt_cases.txt    doubles as bit patterns
 #   m60_floatfmt_golden.txt   what Lua PRINTS for each, via tostring and via ..
+#   m60_coerce_cases.txt      numeral-ish strings x every operator
+#   m60_coerce_golden.txt     their value AND subtype, or that Lua refuses
 #
 # The golden is portable by construction: NaN's printed sign is canonicalized
 # (glibc prints "-nan"), pcall cases keep only the boolean rather than
@@ -34,7 +36,8 @@ CHECK=0
 
 NAMES=(m60_semantics_cases.txt m60_semantics_golden.txt
        m60_arith_cases.txt m60_arith_golden.txt
-       m60_floatfmt_cases.txt m60_floatfmt_golden.txt)
+       m60_floatfmt_cases.txt m60_floatfmt_golden.txt
+       m60_coerce_cases.txt m60_coerce_golden.txt)
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -60,6 +63,14 @@ python3 oracle/gen_m60_floatfmt.py > "$WORK/m60_floatfmt_cases.txt"
 ./oracle/lua oracle/m60_floatfmt_driver.lua "$WORK/m60_floatfmt_cases.txt" \
   > "$WORK/m60_floatfmt_golden.txt"
 
+# String-to-number coercion, over the cross product of numeral-ish strings and
+# every operator. Its driver is a third one again, and for a stated reason: half
+# these cases are expected to RAISE, so it records that an error happened and
+# not its wording.
+python3 oracle/gen_m60_coerce.py > "$WORK/m60_coerce_cases.txt"
+./oracle/lua oracle/m60_coerce_driver.lua "$WORK/m60_coerce_cases.txt" \
+  > "$WORK/m60_coerce_golden.txt"
+
 # Determinism is a property worth asserting rather than assuming: a golden that
 # differs run to run silently turns this gate into noise, and the failure mode
 # (a table iterated in hash order, an address in a tostring) is exactly the kind
@@ -70,8 +81,11 @@ python3 oracle/gen_m60_floatfmt.py > "$WORK/m60_floatfmt_cases.txt"
   >> "$WORK/second_run.txt"
 ./oracle/lua oracle/m60_floatfmt_driver.lua "$WORK/m60_floatfmt_cases.txt" \
   >> "$WORK/second_run.txt"
+./oracle/lua oracle/m60_coerce_driver.lua "$WORK/m60_coerce_cases.txt" \
+  >> "$WORK/second_run.txt"
 cat "$WORK/m60_semantics_golden.txt" "$WORK/m60_arith_golden.txt" \
-    "$WORK/m60_floatfmt_golden.txt" > "$WORK/first_run.txt"
+    "$WORK/m60_floatfmt_golden.txt" "$WORK/m60_coerce_golden.txt" \
+    > "$WORK/first_run.txt"
 if ! diff -q "$WORK/first_run.txt" "$WORK/second_run.txt" >/dev/null; then
   echo "FAIL: the oracle is not deterministic across two runs" >&2
   diff -u "$WORK/first_run.txt" "$WORK/second_run.txt" >&2 || true
@@ -93,9 +107,11 @@ done
 if (( CHECK )); then
   (( rc == 0 )) && echo "m60: cases and golden are current ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
     "$(grep -cv '^#' m60_arith_cases.txt) arithmetic," \
-    "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting)"
+    "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting," \
+    "$(grep -cv '^#' m60_coerce_cases.txt) coercion)"
   exit $rc
 fi
 echo "m60: regenerated ($(grep -cv '^#' m60_semantics_cases.txt) semantics," \
   "$(grep -cv '^#' m60_arith_cases.txt) arithmetic," \
-  "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting)"
+  "$(grep -cv '^#' m60_floatfmt_cases.txt) float-formatting," \
+  "$(grep -cv '^#' m60_coerce_cases.txt) coercion)"

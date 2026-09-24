@@ -26,9 +26,13 @@ use std::path::{Path, PathBuf};
 const KNOWN_DIVERGENCES: &[&str] = &[
     // Integer/float comparison at the extreme: `maxinteger + 0.0 == maxinteger`.
     "max_int_vs_float",
-    // String-to-number coercion yields a float where Lua yields an integer.
-    "coerce_add",
-    "coerce_hex",
+    // `error('boom')` comes back verbatim; Lua prepends "chunk:LINE: ". Found by
+    // running upstream piccolo's OWN test suite under nmap's Lua -- two of its
+    // 43 scripts assert the undecorated message, so the VM was being checked
+    // against a test that encodes the wrong semantics. The three neighbouring
+    // cases (level 0, a table message, no argument) already match, so the
+    // defect is exactly the missing `luaL_where`.
+    "error_string_gets_position",
     // `("ab"):rep(3)`. NOT a dispatch failure -- the `__index` lookup succeeds
     // and returns nil, because piccolo's string library is seven functions and
     // `rep` is not among them. Closes when the first-party stdlib lands.
@@ -192,7 +196,7 @@ fn run_corpus() -> Vec<(String, bool)> {
 fn vm_matches_nmaps_own_lua_except_where_ledgered() {
     let results = run_corpus();
     assert!(
-        results.len() >= 78,
+        results.len() >= 99,
         "corpus shrank to {} cases — regenerate with regen_m60.sh",
         results.len()
     );
@@ -307,6 +311,75 @@ fn arithmetic_matches_nmaps_own_lua_exactly() {
     assert!(
         mismatches.is_empty(),
         "{} of the arithmetic corpus diverge from nmap's own Lua:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// The string-to-number coercion corpus: 1,875 cases over numeral-ish strings
+/// crossed with every operator, plus `tonumber`, `math.type` and
+/// `math.tointeger`.
+///
+/// `'10' + 1` was the one ledgered case, and it was the visible corner of four
+/// separate defects in the same conversion — the subtype the arithmetic
+/// operators kept, which operators coerce a string at all, the float-to-integer
+/// range, and what counts as a numeral. No two of them show up in the same
+/// case, which is why this is a product rather than a list: 132 of a 238-case
+/// probe diverged before the fix, in two classes of exactly 66.
+///
+/// Both halves of each verdict are load-bearing. The value alone would have
+/// passed the original defect, because `'10' + 1` printed `11.0` and *was* 11 —
+/// it was the `math.type` that was wrong, and NSE's binary-protocol libraries
+/// branch on precisely that.
+///
+/// No exemption list. Roughly half these cases are expected to raise, and that
+/// they raise rather than answer is the property: `'10' | 0` used to answer 10,
+/// where Lua refuses — and in a scanner, a packet field that arrives as a
+/// string should stop a script rather than quietly take the arithmetic path.
+#[test]
+fn string_coercion_matches_nmaps_own_lua_exactly() {
+    let golden: std::collections::HashMap<_, _> = rows("m60_coerce_golden.txt")
+        .into_iter()
+        .map(|(n, s, v)| (n, (s, v)))
+        .collect();
+    let cases = rows("m60_coerce_cases.txt");
+    assert!(
+        cases.len() >= 1875,
+        "coercion corpus shrank to {} cases — regenerate with regen_m60.sh",
+        cases.len()
+    );
+
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mismatches: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, chunk_hex, note)| {
+            let (status, value) = eval(&unhex(&chunk_hex));
+            let want = golden
+                .get(&name)
+                .unwrap_or_else(|| panic!("{name}: in cases but not in golden"));
+            // As in the arithmetic corpus: the golden records that an error
+            // happened, not its wording, so compare the status alone there. A
+            // host-language panic still fails, because `eval` reports that as
+            // the distinct status "PANIC" rather than as an error.
+            let ok = if want.0 == "error" {
+                status == "error"
+            } else {
+                status == want.0 && value == want.1
+            };
+            (!ok).then(|| {
+                format!(
+                    "  {name} ({note}): lua={} {} piccolo={status} {value}",
+                    want.0, want.1
+                )
+            })
+        })
+        .collect();
+    std::panic::set_hook(prev);
+
+    assert!(
+        mismatches.is_empty(),
+        "{} of the coercion corpus diverge from nmap's own Lua:\n{}",
         mismatches.len(),
         mismatches.join("\n")
     );

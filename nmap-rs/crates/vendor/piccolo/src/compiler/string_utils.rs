@@ -142,6 +142,17 @@ pub fn read_dec_integer(s: &[u8]) -> Option<i64> {
     }
 }
 
+/// The hexadecimal half of `l_str2int` (`lobject.c:275`).
+///
+/// It **wraps**, and that is not an oversight to be tidied up. The C accumulates into a
+/// `lua_Unsigned` with no overflow test at all — unlike its own decimal branch eight lines below,
+/// which has one and bails out to the float path. The asymmetry is observable and is what Lua
+/// documents: `0xffffffffffffffff` is the integer `-1`, `0x10000000000000000` is the integer `0`,
+/// while the decimal numeral of either magnitude becomes a float instead.
+///
+/// Refusing the overflow, as this used to, made `read_integer` fail and sent the numeral on to
+/// `read_float`, which answered `1.844674407371e+19` — wrong in value *and* in subtype, in both
+/// the lexer and string coercion, since `luaO_str2num` serves both.
 pub fn read_hex_integer(s: &[u8]) -> Option<i64> {
     let (is_neg, s) = read_neg(s);
 
@@ -152,24 +163,39 @@ pub fn read_hex_integer(s: &[u8]) -> Option<i64> {
     let mut i: u64 = 0;
     for &c in &s[2..] {
         let d = from_hex_digit(c)? as u64;
-        i = i.checked_mul(16)?.checked_add(d)?;
+        // `a = a * 16 + luaO_hexavalue(*s);` on an unsigned type: modular, never trapping.
+        i = i.wrapping_mul(16).wrapping_add(d);
     }
 
-    if is_neg {
-        if i <= i64::MAX as u64 {
-            Some(-(i as i64))
-        } else if i == i64::MAX as u64 + 1 {
-            Some(i64::MIN)
-        } else {
-            None
-        }
-    } else {
-        i.try_into().ok()
-    }
+    // `l_castU2S((neg) ? 0u - a : a)`. The negation is unsigned too, so it also wraps -- which is
+    // how `-0x8000000000000000` lands on `i64::MIN` rather than failing a range check.
+    Some(if is_neg { 0u64.wrapping_sub(i) } else { i } as i64)
 }
 
+/// `l_str2d` (`lobject.c:250`), including the rejection that makes `tonumber('inf')` nil.
+///
+/// The C classifies the numeral by the FIRST character of `.xXnN` it contains, and `n` or `N`
+/// there is an outright refusal — the comment at the site reads *"reject 'inf' and 'nan'"*. Rust's
+/// `str::parse::<f64>` accepts all of `inf`, `-inf`, `infinity` and `NaN`, so without this a
+/// script that validated a packet field with `tonumber` would be handed an infinity it cannot have
+/// asked for, and `'inf' + 1` answered `inf` where Lua raises an error.
+///
+/// The test is on the first special character rather than on the whole word because that is what
+/// `strpbrk` does: `0xn` is classified hexadecimal (the `x` comes first) and fails later for
+/// having no digits, while `n0x10` is refused outright.
+///
+/// This is deliberately NOT applied to [`read_dec_float`], which the lexer calls directly: a
+/// source numeral only ever begins at a digit, so `inf` in Lua source is a name, not a numeral,
+/// and must stay one.
 pub fn read_float(s: &[u8]) -> Option<f64> {
-    read_hex_float(s).or_else(|| read_dec_float(s))
+    match s
+        .iter()
+        .find(|c| matches!(c, b'.' | b'x' | b'X' | b'n' | b'N'))
+    {
+        Some(b'n' | b'N') => None,
+        Some(b'x' | b'X') => read_hex_float(s),
+        _ => read_dec_float(s),
+    }
 }
 
 pub fn read_dec_float(s: &[u8]) -> Option<f64> {
@@ -226,6 +252,14 @@ pub fn read_hex_float(s: &[u8]) -> Option<f64> {
 
     if i + 1 < s.len() && (s[i] == b'p' || s[i] == b'P') {
         let (exp_neg, exp_s) = read_neg(&s[i + 1..]);
+        // `if (!lisdigit(cast_uchar(*s))) return 0.0;` -- "invalid; must have at least one
+        // digit" (`lobject.c:202`). Without this, `0x1p+` read as 1.0: `read_neg` ate the sign,
+        // the loop below saw an empty slice and never ran, and an exponent of zero was assumed.
+        // `0x1p` was already refused, but only because the `i + 1 < s.len()` guard above happens
+        // to exclude it -- the sign is what made the slice non-empty and let it through.
+        if exp_s.is_empty() {
+            return None;
+        }
         let mut exp1: i32 = 0;
         for &c in exp_s {
             let d = from_digit(c)?;

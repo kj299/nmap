@@ -48,6 +48,28 @@ impl<S> Constant<S> {
     }
 }
 
+/// `luaV_flttointeger` in `F2Ieq` mode (`lvm.c:123`), whose range test is `lua_numbertointeger`
+/// (`luaconf.h:432`): `n >= -2^63 && n < 2^63`.
+///
+/// The strict upper bound is the reason this is not a cast. `2^63` is exactly representable as a
+/// double but is not an `i64`, and Rust's `as` saturates it to `i64::MAX` rather than refusing it
+/// — which then converts back to `2^63` and passes a round-trip check. So `2^63 | 0` answered
+/// `maxinteger` here where Lua raises "number has no integer representation". `-2^63` is accepted,
+/// because `i64::MIN` does have an exact representation; the asymmetry is real, not a typo, and
+/// `luaconf.h` says so at the site.
+fn float_to_integer(n: f64) -> Option<i64> {
+    /// `-2^63`, exact as a double.
+    const MIN: f64 = -9223372036854775808.0;
+    /// `2^63`, one past `i64::MAX` and exact as a double.
+    const LIMIT: f64 = 9223372036854775808.0;
+    // `n == n.floor()` is the `F2Ieq` test, and it rejects NaN for free.
+    if n >= MIN && n < LIMIT && n == n.floor() {
+        Some(n as i64)
+    } else {
+        None
+    }
+}
+
 impl<S: AsRef<[u8]>> Constant<S> {
     /// Converts the given constant to an integer or number, if possible.
     pub fn to_numeric(&self) -> Option<Constant<S>> {
@@ -78,39 +100,74 @@ impl<S: AsRef<[u8]>> Constant<S> {
     }
 
     /// Interprets Numbers, Integers, and Strings as an Integer, if possible.
+    ///
+    /// This is `luaV_tointeger` (`lvm.c:154`) — the string-coercing one, which is what
+    /// `math.tointeger`, `select` and the numeric `for` use. The operators do NOT use it; see
+    /// [`Constant::to_integer_no_string`].
     pub fn to_integer(&self) -> Option<i64> {
         match self.to_numeric() {
             Some(Self::Integer(a)) => Some(a),
-            Some(Self::Number(a)) => {
-                if ((a as i64) as f64) == a {
-                    Some(a as i64)
-                } else {
-                    None
-                }
-            }
+            Some(Self::Number(a)) => float_to_integer(a),
+            _ => None,
+        }
+    }
+
+    /// `tointegerns` (`lvm.h:68`) — "convert an object to an integer (without string coercion)".
+    ///
+    /// The `ns` suffix is the whole point. `luaO_rawarith` (`lobject.c:89`) reaches for this one,
+    /// not the string-coercing `tointeger`, for every bitwise operator, and nothing puts the
+    /// string back: the arithmetic metamethods `lstrlib.c` installs on the string metatable are
+    /// exactly `__add __sub __mul __mod __pow __div __idiv __unm` (`lstrlib.c:330`) — no
+    /// `__band`, `__bor`, `__bxor`, `__shl`, `__shr` or `__bnot`. So `'10' | 0` is an *error* in
+    /// Lua, where this VM used to answer 10.
+    ///
+    /// That difference is not cosmetic in a scanner. NSE's protocol libraries mask and shift
+    /// values lifted out of hostile packets, and a field that arrives as a string should stop the
+    /// script with a catchable error rather than silently take the arithmetic path.
+    fn to_integer_no_string(&self) -> Option<i64> {
+        match *self {
+            Self::Integer(a) => Some(a),
+            Self::Number(a) => float_to_integer(a),
             _ => None,
         }
     }
 
     // Mathematical operators
+    //
+    // Every one of these coerces a numeric string operand FIRST, with `to_numeric`, and only then
+    // decides between the integer and the float path. Deciding first, as this type used to, loses
+    // the subtype: `'10' + 1` fell to the catch-all arm, went through `to_number`, and answered
+    // float `11.0` where Lua answers integer `11`.
+    //
+    // Lua reaches the same place by a longer route. `luaO_rawarith` (`lobject.c:89`) never
+    // coerces a string at all — it uses `tonumberns`, the no-string conversion — so a string
+    // operand makes the raw operation fail and `luaO_arith` falls through to the metamethod. The
+    // metamethod is `lstrlib.c`'s `arith` (`lstrlib.c:283`), which converts each operand with
+    // `lua_stringtonumber` and then re-enters `lua_arith` with two *numbers*. And
+    // `lua_stringtonumber` is `luaO_str2num` (`lobject.c:308`), which tries `l_str2int` before
+    // `l_str2d` — so `'10'` arrives as an integer, and integer + integer stays an integer.
+    //
+    // This matters past cosmetics: NSE's binary-protocol libraries branch on `math.type` over
+    // values parsed out of packets, and `//` and `%` on a float do not give the same answer as on
+    // an integer once the magnitudes pass 2^53.
 
     pub fn add(&self, rhs: &Self) -> Option<Self> {
-        Some(match (self, rhs) {
-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_add(b)),
+        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
+            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_add(b)),
             (a, b) => Self::Number(a.to_number()? + b.to_number()?),
         })
     }
 
     pub fn subtract(&self, rhs: &Self) -> Option<Self> {
-        Some(match (self, rhs) {
-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_sub(b)),
+        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
+            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_sub(b)),
             (a, b) => Self::Number(a.to_number()? - b.to_number()?),
         })
     }
 
     pub fn multiply(&self, rhs: &Self) -> Option<Self> {
-        Some(match (self, rhs) {
-            (&Self::Integer(a), &Self::Integer(b)) => Self::Integer(a.wrapping_mul(b)),
+        Some(match (self.to_numeric()?, rhs.to_numeric()?) {
+            (Self::Integer(a), Self::Integer(b)) => Self::Integer(a.wrapping_mul(b)),
             (a, b) => Self::Number(a.to_number()? * b.to_number()?),
         })
     }
@@ -123,8 +180,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
     /// This operation returns an Integer only if both arguments are Integers. Rounding is towards
     /// negative infinity.
     pub fn floor_divide(&self, rhs: &Self) -> Option<Self> {
-        match (self, rhs) {
-            (&Self::Integer(a), &Self::Integer(b)) => {
+        match (self.to_numeric()?, rhs.to_numeric()?) {
+            (Self::Integer(a), Self::Integer(b)) => {
                 if b == 0 {
                     None
                 } else {
@@ -167,8 +224,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
     /// **It was wrong on infinities.** `5.0 % inf` is `5.0` in Lua and `NaN` under the old
     /// formula, because `(5 + inf) % inf` is `inf % inf`.
     pub fn modulo(&self, rhs: &Self) -> Option<Self> {
-        match (self, rhs) {
-            (&Self::Integer(a), &Self::Integer(b)) => {
+        match (self.to_numeric()?, rhs.to_numeric()?) {
+            (Self::Integer(a), Self::Integer(b)) => {
                 if b == 0 {
                     // `n % 0` is a Lua *error*, which a script can catch. Returning None is how
                     // this type reports that; it must never become a panic.
@@ -211,29 +268,38 @@ impl<S: AsRef<[u8]>> Constant<S> {
     }
 
     pub fn negate(&self) -> Option<Self> {
-        match self {
-            &Self::Integer(a) => Some(Self::Integer(a.wrapping_neg())),
-            &Self::Number(a) => Some(Self::Number(-a)),
-            s => s.to_number().map(|x| Self::Number(-x)),
-        }
+        Some(match self.to_numeric()? {
+            Self::Integer(a) => Self::Integer(a.wrapping_neg()),
+            Self::Number(a) => Self::Number(-a),
+            // `to_numeric` returns only those two variants, so this is unreachable. Returning
+            // `None` rather than asserting keeps a future edit to `to_numeric` a Lua error
+            // instead of a process abort.
+            _ => return None,
+        })
     }
 
     // Bitwise operators
 
     pub fn bitwise_not(&self) -> Option<Self> {
-        Some(Self::Integer(!self.to_integer()?))
+        Some(Self::Integer(!self.to_integer_no_string()?))
     }
 
     pub fn bitwise_and(&self, rhs: &Self) -> Option<Self> {
-        Some(Self::Integer(self.to_integer()? & rhs.to_integer()?))
+        Some(Self::Integer(
+            self.to_integer_no_string()? & rhs.to_integer_no_string()?,
+        ))
     }
 
     pub fn bitwise_or(&self, rhs: &Self) -> Option<Self> {
-        Some(Self::Integer(self.to_integer()? | rhs.to_integer()?))
+        Some(Self::Integer(
+            self.to_integer_no_string()? | rhs.to_integer_no_string()?,
+        ))
     }
 
     pub fn bitwise_xor(&self, rhs: &Self) -> Option<Self> {
-        Some(Self::Integer(self.to_integer()? ^ rhs.to_integer()?))
+        Some(Self::Integer(
+            self.to_integer_no_string()? ^ rhs.to_integer_no_string()?,
+        ))
     }
 
     /// Ported from `luaV_shiftl` (`lvm.c:780-790`).
@@ -267,8 +333,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
 
     pub fn shift_left(&self, rhs: &Self) -> Option<Self> {
         Some(Self::Integer(Self::shift_left_i64(
-            self.to_integer()?,
-            rhs.to_integer()?,
+            self.to_integer_no_string()?,
+            rhs.to_integer_no_string()?,
         )))
     }
 
@@ -280,8 +346,8 @@ impl<S: AsRef<[u8]>> Constant<S> {
         // branch and yields 0. A checked negation would trap on exactly that
         // value, which is the operand an attacker would reach for.
         Some(Self::Integer(Self::shift_left_i64(
-            self.to_integer()?,
-            rhs.to_integer()?.wrapping_neg(),
+            self.to_integer_no_string()?,
+            rhs.to_integer_no_string()?.wrapping_neg(),
         )))
     }
 

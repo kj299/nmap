@@ -118,6 +118,61 @@ CASES: list[tuple[str, str, str]] = [
     # --- string <-> number coercion ------------------------------------------
     ("coerce_add", "return '10' + 1", "arithmetic coerces numeric strings"),
     ("coerce_hex", "return '0x10' + 0", "hex literals coerce too"),
+
+    # --- float-to-integer conversion at the range edge -----------------------
+    # `lua_numbertointeger` (luaconf.h:432) tests `n >= -2^63 && n < 2^63`. The
+    # upper bound is STRICT and the lower is not, which looks like a typo and is
+    # not: `-2^63` has an exact double representation and `2^63` is one past
+    # `i64::MAX`. Rust's `as` saturates rather than refusing, so a round-trip
+    # check accepts `2^63` -- these are the cases that catch it. The systematic
+    # corpus for string coercion is m60_coerce_cases.txt; these reach the same
+    # conversion through a FLOAT, which that corpus does not.
+    ("f2i_2p63_bor", "return (pcall(function() return 2^63 | 0 end))",
+     "2^63 is not an integer: a Lua error, catchable"),
+    ("f2i_neg_2p63_bor", "return -(2^63) | 0",
+     "-2^63 IS an integer -- exactly mininteger -- and must convert"),
+    ("f2i_2p62_bor", "return 2^62 | 0", "well inside the range"),
+    ("f2i_maxint_as_float_bor",
+     "return (pcall(function() return (math.maxinteger + 0.0) | 0 end))",
+     "maxinteger has no exact double, so its float rounds up to 2^63"),
+    ("f2i_fractional_bor", "return (pcall(function() return 2.5 | 0 end))",
+     "F2Ieq: a float converts only if it is integral"),
+    ("f2i_integral_float_bor", "return 2.0 | 0", "2.0 is integral, so it converts"),
+    ("f2i_nan_bor", "return (pcall(function() return (0/0) | 0 end))", "NaN never converts"),
+    ("f2i_inf_bor", "return (pcall(function() return (1/0) | 0 end))", "inf never converts"),
+    ("f2i_2p63_shl", "return (pcall(function() return 2^63 << 1 end))", "same test, via a shift"),
+    ("f2i_tointeger_2p63", "return math.tointeger(2^63)", "nil, not maxinteger"),
+    ("f2i_tointeger_neg_2p63", "return math.tointeger(-(2^63))", "mininteger"),
+
+    # --- string coercion: which operators do it, and to which subtype --------
+    ("coerce_bor_string", "return (pcall(function() return '10' | 0 end))",
+     "lstrlib.c installs no __bor: a string is a Lua ERROR for bitwise ops"),
+    ("coerce_unm_string", "return -'10'", "integer -10, not float -10.0"),
+    ("coerce_inf_word", "return tonumber('inf')", "nil: l_str2d rejects 'inf' and 'nan'"),
+    ("coerce_hex_wraps", "return tonumber('0xffffffffffffffff')",
+     "integer -1: the hex branch of l_str2int has no overflow check"),
+    ("coerce_dec_overflows_to_float", "return tonumber('9223372036854775808')",
+     "float: the DECIMAL branch does have one"),
+    ("coerce_tonumber_base_empty", "return tonumber('', 16)", "nil, not 0"),
+
+    # --- error() adds position information to a string message ---------------
+    # Found by running upstream piccolo's own test suite under nmap's Lua:
+    # tests/scripts/pcall.lua and coroutine.lua both assert the message comes
+    # back unchanged, which PUC-Lua does not do. `luaB_error` (lbaselib.c:39)
+    # calls luaL_where and prepends "chunk:LINE: " for a STRING message at
+    # level > 0. Level 0, and any non-string message, are left alone.
+    ("error_string_gets_position",
+     "return select(2, pcall(function() error('boom') end)) == 'boom'",
+     "false in Lua: the message comes back as 'chunk:1: boom'"),
+    ("error_level_zero_verbatim",
+     "return select(2, pcall(function() error('boom', 0) end)) == 'boom'",
+     "true: level 0 suppresses the position prefix"),
+    ("error_table_verbatim",
+     "return type(select(2, pcall(function() error({code = 1}) end)))",
+     "table: a non-string error value is never decorated"),
+    ("error_no_argument",
+     "return select(2, pcall(function() error() end))",
+     "nil"),
     ("tonumber_hex", "return tonumber('0x1f')", "31"),
     ("tonumber_exp", "return tonumber('1e2')", "100.0, a float"),
     ("tonumber_ws", "return tonumber('  12  ')", "surrounding whitespace is allowed"),

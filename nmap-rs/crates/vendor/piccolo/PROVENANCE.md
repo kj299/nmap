@@ -10,7 +10,7 @@ one the rest of this port lives by: **no silent drift.**
 | commit | `ce709eb1dae5c543cbc78e7e12bb80249d88c55f` (2025-07-10) |
 | upstream version | `0.3.3` (the tag; master carries 139 unreleased commits on top) |
 | license | MIT **or** CC0-1.0, at your option (`LICENSE-MIT`, `LICENSE-CC0`) |
-| local changes | six patches in `patches/`, listed below |
+| local changes | seven patches in `patches/`, listed below |
 | omitted | the `util/` workspace member (`piccolo-util`); unused here, and it carries 4 further `unsafe` blocks |
 
 `Cargo.toml` is **ours**, not upstream's: upstream's is a workspace root and
@@ -30,6 +30,27 @@ without reverse-engineering it from one combined diff.
 | `0004-string-metatable-dispatch.patch` | gives strings a metatable so `s:sub(1, 2)` dispatches; also corrects `getmetatable`, which errored for five of Lua's eight types |
 | `0005-port-modulo-and-shifts-from-puc-lua.patch` | `%` and the shifts, ported from `lvm.c` — the previous formula aborted the process on `i64::MIN % -1` |
 | `0006-port-float-formatting-from-puc-lua.patch` | `tostring` and `..` for floats, ported from `tostringbuff` in `lobject.c`; also fixes an `i64::MIN.abs()` abort in the concat length estimate |
+| `0007-port-string-to-number-coercion-from-puc-lua.patch` | `luaO_str2num` and which operators reach for it: the integer-before-float subtype, `tointegerns` for the bitwise operators, the float-to-integer range, and the `inf`/`nan` refusal. The first patch to touch `tests/` — see below |
+
+### The one patch that edits upstream's tests
+
+`0007` rewrites `tests/scripts/bit.lua`, and the reason is worth stating rather
+than burying in a diff. Upstream asserted `"2" & 3.0 == 2`; PUC-Lua **raises**,
+because `luaO_rawarith` converts bitwise operands with `tointegerns` — the
+no-string-coercion one — and `lstrlib.c` installs no bitwise metamethod on the
+string metatable. Eleven assertions in that file encoded semantics Lua 5.4 does
+not have, so the vendored suite was pinning the VM to the wrong answer.
+
+The cases were kept and inverted rather than deleted: as `is_err` they now pin
+the real behaviour, which is more coverage than before. The rewritten file is
+checked both ways — it passes under this VM **and** under `liblua/` built from
+this repository.
+
+Two further upstream scripts, `pcall.lua` and `coroutine.lua`, also fail under
+nmap's own Lua. Both assert that `error('msg')` comes back undecorated, where
+PUC-Lua prepends `chunk:LINE:`. That is a real VM defect rather than a test
+defect, so it is ledgered in `DIVERGENCES.md` as `error_string_gets_position`
+and those two scripts are left exactly as upstream wrote them.
 
 ## Why the fork exists
 

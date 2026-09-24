@@ -469,16 +469,19 @@ jobs:
       # stale answer key, which is the failure mode a differential exists to
       # rule out.
       #
-      # Three corpora, deliberately not one:
-      #   * semantics    — 78 chunks, evaluated end to end. Carries an exemption
+      # Four corpora, deliberately not one:
+      #   * semantics    — 99 chunks, evaluated end to end. Carries an exemption
       #                    list; `DIVERGENCES.md` holds the same list, and the
       #                    test fails if a listed defect is silently FIXED as
       #                    well as if a new one appears.
       #   * arithmetic   — 2,955 cases, floats compared as raw IEEE bits so that
       #                    a lossy `%.14g` cannot hide a wrong low-order digit.
       #   * float format — 7,917 doubles, compared as TEXT through both
-      #                    `tostring` and `..`. Neither of the last two has an
-      #                    exemption list: both match exactly.
+      #                    `tostring` and `..`.
+      #   * coercion     — 1,975 numeral-ish strings crossed with every
+      #                    operator, checking the value AND the `math.type`,
+      #                    because the defect it closed had the value right.
+      # Only the first has an exemption list; the other three match exactly.
       - run: bash tests/differential/m6/regen_m60.sh --check
       - run: cargo test -p nmap-core --test lua_semantics_differential
       - run: cargo test -p nmap-core --test lua_float_format_differential

@@ -2293,13 +2293,15 @@ holds the same list as `KNOWN_DIVERGENCES` and fails if a **new** divergence
 appears *or* if a listed one is silently fixed — so this section cannot drift
 from reality in either direction. Measured against
 [`m60_semantics_golden.txt`](tests/differential/m6/m60_semantics_golden.txt),
-78 cases evaluated by `liblua/` from this repository.
+99 cases evaluated by `liblua/` from this repository.
 
-Count at M6.0: **4 of 78**, down from 16 when the VM was vendored. **None of the
-four can abort the process** — the three that could are fixed. Entries the port
-has closed are removed rather than ticked, because they are simply correct now.
+Count at M6.0: **3 of 99**, down from 16 when the VM was vendored, and the
+corpus has grown by 31 cases over the same period rather than shrinking. **None
+of the three can abort the process**; every defect that could is fixed. Entries
+the port has closed are removed rather than ticked, because they are simply
+correct now.
 
-Two further corpora sit beside this one and carry **no exemptions at all**:
+Three further corpora sit beside this one and carry **no exemptions at all**:
 
 - [`m60_arith_cases.txt`](tests/differential/m6/m60_arith_cases.txt), 2,955
   cases over the cross product of the operand values where 64-bit arithmetic
@@ -2312,21 +2314,31 @@ Two further corpora sit beside this one and carry **no exemptions at all**:
   boundaries, both zeroes, both NaN signs, and a 3,000-pattern pseudo-random
   sweep — each compared through `tostring` **and** through `..`, which are
   separate paths in the VM.
+- [`m60_coerce_cases.txt`](tests/differential/m6/m60_coerce_cases.txt), 1,975
+  cases over numeral-ish strings crossed with every operator, plus `tonumber`,
+  `math.type` and `math.tointeger`. Both halves of each verdict are checked —
+  the value **and** the subtype — because the defect this closed was one where
+  the value was right and `math.type` was not.
 
-Both match nmap's own Lua **exactly**. Neither an arithmetic nor a formatting
-divergence is something to carry, so neither has a list to add to.
+All three match nmap's own Lua **exactly**. An arithmetic, formatting or
+coercion divergence is never something to carry, so none of them has a list to
+add to.
 
 ### Wrong answers
 
 - [ ] `max_int_vs_float` — `math.maxinteger + 0.0 == math.maxinteger` is `true`
       here and `false` in Lua. The float cannot represent `maxinteger` exactly,
       and Lua's comparison accounts for that; piccolo's converts and compares.
-- [ ] `coerce_add` — `'10' + 1` yields float `11.0`, Lua yields integer `11`.
-- [ ] `coerce_hex` — `'0x10' + 0` yields float `16.0`, Lua yields integer `16`.
-      Same root cause: string-to-number coercion always produces a float, where
-      Lua produces an integer when the string parses as one. NSE branches on
-      `math.type` in its binary-protocol libraries, and this is exactly the
-      coercion it uses to parse protocol fields.
+- [ ] `error_string_gets_position` — `error('boom')` comes back verbatim; Lua
+      prepends `chunk:LINE: ` (`luaB_error` calls `luaL_where`, `lbaselib.c:39`).
+      Level 0 and non-string error values are correct already, so the defect is
+      exactly the missing `luaL_where`. **Found by running upstream piccolo's own
+      43-script suite under nmap's Lua**: two of those scripts assert the
+      undecorated message, so the vendored suite was pinning the VM to the wrong
+      answer. Those two are left as upstream wrote them; a third,
+      `tests/scripts/bit.lua`, asserted eleven things about string operands that
+      Lua 5.4 also does not do, and *was* corrected — see
+      `crates/vendor/piccolo/PROVENANCE.md`.
 
 ### Blocked on a missing library function, not a missing mechanism
 

@@ -306,3 +306,9 @@ name = "logfile"
 path = "fuzz_targets/logfile.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_strpack"
+path = "fuzz_targets/nse_strpack.rs"
+test = false
+doc = false

@@ -43,18 +43,19 @@ fancy-regex = "0.13"
 # evidence, not something a routine update should perform silently.
 ed25519-dalek = { version = "2.1.1", default-features = false }
 
-# The vendored Lua VM, for `tests/lua_semantics_differential.rs` ONLY. That test
-# is what turns the 68-case M6.0 corpus from a scorer someone has to remember to
-# run into a gate CI enforces — the corpus already existed, but nothing was
-# checking it.
+# The vendored Lua VM. `core::nse::stdlib` is its first non-test user: the
+# parts of Lua's standard library the VM does not ship, bound into it through its
+# public API. That is what promoted this from a dev-dependency, where it sat
+# while the M6.0 corpus tests were its only users — a GC-backed interpreter in
+# the shipped library had to be earned by shipped code, not by a test.
 #
-# A dev-dependency rather than a dependency, deliberately: nothing in `core`
-# uses Lua yet (NSE's engine lands in M6.3+), so making it a real dependency
-# would put a GC-backed interpreter in the shipped library on the strength of a
-# test. `#![forbid(unsafe_code)]` on this crate is unaffected either way — it
-# governs this crate's own code, not its dependencies', which is exactly why the
-# VM is gated by audit_unsafe.py and clippy instead.
-[dev-dependencies]
+# Only the binding in `nse/stdlib/mod.rs` touches it. The byte-level work
+# (`nse/stdlib/strpack.rs`) is deliberately interpreter-free, so the fuzz
+# target and Miri reach it without pulling in the VM.
+#
+# `#![forbid(unsafe_code)]` on this crate is unaffected: it governs this crate's
+# own code, not its dependencies', which is exactly why the VM is gated by
+# audit_unsafe.py, clippy and check_vendor.sh instead.
 piccolo = { path = "../vendor/piccolo" }
 
 [lints]

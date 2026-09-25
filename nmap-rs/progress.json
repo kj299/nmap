@@ -12,6 +12,9 @@
     "core::macvendor": [
       "macvendor_parse"
     ],
+    "core::nse::stdlib::strpack": [
+      "nse_strpack"
+    ],
     "core::osdb::expr": [
       "osdb_expr"
     ],
@@ -84,6 +87,9 @@
     "core::log": {
       "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
     },
+    "core::nse::stdlib": {
+      "fuzzed": "Binding only: converts Lua values with the VM's own conversions and hands every byte of script- or packet-supplied data to core::nse::stdlib::strpack, which carries the nse_strpack target. Nothing here parses input; it is exercised end to end by the 4,804-case strpack differential."
+    },
     "core::trace": {
       "fuzzed": "A single enabled() predicate over a verbosity flag. Takes no input of any kind."
     },
@@ -147,6 +153,8 @@
     "core::ndp": "unsafe_audited",
     "core::nse::script": "unsafe_audited",
     "core::nse::selection": "unsafe_audited",
+    "core::nse::stdlib": "unsafe_audited",
+    "core::nse::stdlib::strpack": "unsafe_audited",
     "core::osdb::expr": "unsafe_audited",
     "core::osdb::model": "unsafe_audited",
     "core::osdb::parse": "unsafe_audited",

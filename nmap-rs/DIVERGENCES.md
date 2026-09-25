@@ -2347,3 +2347,84 @@ add to.
       piccolo's entire string library is `byte, char, len, lower, reverse, sub,
       upper` and `rep` is not among them. Closes when the first-party stdlib
       crate lands, not before, and needs no VM change.
+
+## Milestone 6 stdlib — `string.pack` / `unpack` / `packsize` (`core::nse::stdlib::strpack`)
+
+A port of `liblua/lstrlib.c:1385-1830`, gated by
+[`m6_strpack_cases.txt`](tests/differential/m6/m6_strpack_cases.txt): 4,804
+cases run end to end through the VM, compared with `liblua/` on every returned
+value and its subtype, **with no exemption list**. Everything below is either a
+C behaviour kept on purpose or a place the port is stricter than the C; none of
+it changes a value a script can compute.
+
+### Faithfully reproduced C quirks (deliberately *not* fixed)
+
+- [x] `strpack-format-is-a-c-string`: the format ends at its first NUL, so
+      `pack("i4\0junk", 1)` packs one integer and never looks at `junk`. The C
+      loops `while (*fmt != '\0')`; a script that builds a format by
+      concatenation can hit this, and "fixing" it would turn a silently-ignored
+      tail into an error.
+- [x] `strpack-x-consumes-its-operand`: `X` takes its alignment from the next
+      option and swallows it — `Xi4` packs nothing. This is documented Lua
+      ("which is otherwise ignored"), not an accident, but it reads like one.
+- [x] `strpack-count-spills-into-next-option`: `getnum` stops reading digits
+      once the count passes `(INT_MAX - 9) / 10`, and the remaining digits are
+      then parsed as the next option. `c99999999999` is therefore "invalid
+      format option '9'" rather than a size error.
+- [x] `strpack-native-sizes-are-the-host-abi`: `h`, `i`, `l`, `T` and `!`'s
+      default alignment are the host C ABI's, computed from `c_short`, `c_int`,
+      `c_long`, `usize` and a `repr(C)` layout probe rather than written down.
+      `l` is 8 bytes on LP64 Linux and 4 on LLP64 Windows, exactly as it is for
+      the C build of nmap on the same machine.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `strpack-z-is-a-bounded-search`: `unpack`'s `z` calls `strlen(data +
+      pos)`, which is safe in C only because every Lua string carries a hidden
+      NUL one past its end. Here it is a search of the slice; "no NUL before the
+      end" is exactly the case the C rejects, so the observable result is the
+      same and nothing depends on an invariant of another allocator.
+- [x] `strpack-allocation-failure-is-a-lua-error`: the output buffer grows with
+      `try_reserve`, so an allocation the system refuses —
+      `pack("c2000000000", "")` asks for two gigabytes — raises "not enough
+      memory", which a script can `pcall`, rather than aborting the process as a
+      plain `Vec` push would. That matches the class of error the C raises. It
+      is not a memory budget: under Linux overcommit the reservation usually
+      succeeds and the pages are touched later, and the interned result is
+      allocated by the VM's own collector, whose allocation failure is outside
+      this module. A per-script memory budget belongs to the NSE runtime.
+- [x] `strpack-checked-arithmetic`: every size, offset and running total is
+      computed with checked arithmetic. The C relies on arguments that each sum
+      cannot overflow — several of them sound — and under this workspace's
+      `overflow-checks = true` the Rust equivalent of a wrong argument would be a
+      process abort that `pcall` cannot contain.
+- [x] `strpack-f32-conversion-is-defined`: `pack("f", 1e300)` converts an
+      out-of-range double to `float`, which ISO C leaves undefined. Every IEEE
+      target nmap ships for yields infinity, and Rust's `as` defines exactly that,
+      so the bytes agree; the difference is only that this port's answer is
+      guaranteed.
+
+### Differences in error *messages* only
+
+The corpus compares whether a call raises, not what it says, for the reasons
+below. Every error is still raised in the same cases as the C.
+
+- [x] `strpack-result-limit-is-fixed`: the C checks `luaL_checkstack(L, 2,
+      "too many results")` per option, which fails once the Lua stack would pass
+      `LUAI_MAXSTACK` — a million slots **less whatever the caller already
+      holds**, so the exact point depends on call depth. This port raises the
+      same error at a fixed 1,000,000, the C's ceiling at an empty stack. Every
+      result consumes at least one format byte, so the count is bounded by the
+      format's length either way.
+- [x] `strpack-missing-argument-wording`: `str_pack` pushes a `nil` sentinel
+      and then a buffer placeholder onto the stack before reading its
+      arguments, so in PUC-Lua the first missing value is reported as "got nil"
+      and the second as "got light userdata". This port says "got no value",
+      which is what `luaL_typeerror` means to say.
+- [x] `strpack-method-call-argument-number`: `luaL_argerror` renumbers
+      arguments when the function was called as a method, so
+      `("i1"):pack(300)` reports "#1" in PUC-Lua and "#2" here. The VM does not
+      expose how a callback was invoked.
+- [x] `strpack-no-position-prefix`: PUC-Lua prefixes every error with the
+      caller's `chunk:LINE:`. That is the VM-wide defect ledgered above as
+      `error_string_gets_position`, not something this module can supply.

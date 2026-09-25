@@ -485,3 +485,17 @@ jobs:
       - run: bash tests/differential/m6/regen_m60.sh --check
       - run: cargo test -p nmap-core --test lua_semantics_differential
       - run: cargo test -p nmap-core --test lua_float_format_differential
+
+      # M6 stdlib — `string.pack` / `unpack` / `packsize`, the first of the
+      # standard-library functions the vendored VM does not ship, written in
+      # `core::nse::stdlib` so that these gates reach it. Same oracle as M6.0,
+      # `liblua/` built from this repository.
+      #
+      # 4,804 cases, every one run end to end through the VM, the string
+      # metatable, the binding's argument conversions and the pure module. No
+      # exemption list. `unpack` is how NSE's protocol libraries read packet
+      # fields (1,087 call sites), so the corpus leans on the data argument:
+      # truncated input, lengths that claim more than remains, `z` with no
+      # terminator, wide integers whose upper bytes do not fit.
+      - run: bash tests/differential/m6/regen_m6_strpack.sh --check
+      - run: cargo test -p nmap-core --test strpack_differential

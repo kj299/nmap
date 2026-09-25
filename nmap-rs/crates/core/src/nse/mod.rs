@@ -10,6 +10,11 @@
 //! given those two inputs, which scripts a run actually selects. Also pure,
 //! also fuzzable, and independent of the Lua-runtime decision still open for
 //! M6.0.
+//!
+//! [`stdlib`] is the first code here that touches the interpreter: the parts of
+//! Lua's standard library the vendored VM does not ship, written in this crate
+//! so that the port's own gates reach them.
 
 pub mod script;
 pub mod selection;
+pub mod stdlib;

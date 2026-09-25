@@ -900,12 +900,20 @@ mod tests {
 
     #[test]
     fn a_long_count_spills_into_the_next_option() {
-        let e = p("c99999999999", vec![V::S(vec![])]).unwrap_err();
+        // `getnum` stops after nine digits here, so this is `c999999999` followed
+        // by an invalid option `9`. Checked through `packsize`, not `pack`: the C
+        // (and so the port) pads the gigabyte-long `c` field BEFORE it reaches
+        // the `9`, which is faithful and far too expensive for a unit test --
+        // under Miri it does not finish. The end-to-end `pack` case is in the
+        // differential corpus, which runs natively.
+        let e = packsize(b"c99999999999").unwrap_err();
         assert_eq!(e.msg, "invalid format option '9'");
         assert_eq!(
-            p("c", vec![]).unwrap_err().msg,
+            packsize(b"c").unwrap_err().msg,
             "missing size for format option 'c'"
         );
+        // Nine digits that stay under the limit are read whole.
+        assert_eq!(packsize(b"c214748363").unwrap(), 214_748_363);
     }
 
     #[test]

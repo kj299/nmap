@@ -157,7 +157,7 @@
     "core::nse::script": "unsafe_audited",
     "core::nse::selection": "unsafe_audited",
     "core::nse::stdlib": "unsafe_audited",
-    "core::nse::stdlib::pattern": "fuzzed",
+    "core::nse::stdlib::pattern": "unsafe_audited",
     "core::nse::stdlib::strpack": "unsafe_audited",
     "core::osdb::expr": "unsafe_audited",
     "core::osdb::model": "unsafe_audited",

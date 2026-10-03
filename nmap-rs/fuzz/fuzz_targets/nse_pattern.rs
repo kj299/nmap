@@ -23,16 +23,17 @@
 // Input layout: byte 0 selects the initial position and the plain flag, byte 1
 // the pattern length, then the pattern, then the subject.
 //
-// One thing is NOT fuzzed: the matcher's running time. The C algorithm is
-// exponential in the number of quantified items, and the port keeps that
-// algorithm (DIVERGENCES.md, `pattern-worst-case-time-is-the-cs`), so an input
-// whose worst case is large would only ever report a libFuzzer timeout. Such
-// inputs are skipped, which leaves every input the matcher can finish quickly —
-// and that is every input whose correctness is in question.
+// Every input is also run twice, with the failure memo recording from the
+// first computation and with it never on, and the two transcripts must be
+// identical — answers, errors and "pattern too complex" alike
+// (DIVERGENCES.md, `pattern-worst-case-time-is-bounded`). The memo-off run is
+// the C's own algorithm, exponential in the number of quantified items, so an
+// input whose worst case for it is large is skipped; that leaves every input
+// the reference can finish, which is every input the comparison can judge.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nmap_core::nse::stdlib::pattern::{find, str_match, Capture, Gmatch, Gsub};
+use nmap_core::nse::stdlib::pattern::{find, set_memo_after, str_match, Capture, Gmatch, Gsub};
 
 /// Positions worth reaching from one selector: both ends, both signs, and the
 /// extremes that exercise `posrelatI`'s clipping.
@@ -80,7 +81,54 @@ fn in_subject(s: &[u8], c: &Capture<'_>) -> bool {
 
 const TEMPLATES: [&[u8]; 8] = [b"%0", b"x", b"%1", b"<%1|%2>", b"%%", b"", b"%", b"%9"];
 
+/// Everything the four functions answer for one input, as text, so that two
+/// runs can be compared whole.
+fn transcript(sel: u8, p: &[u8], s: &[u8]) -> Vec<String> {
+    let mut t = Vec::new();
+    let init = init_for(sel, s.len());
+    let plain = sel & 0x80 != 0;
+    t.push(format!("{:?}", find(s, p, init, plain)));
+    t.push(format!("{:?}", str_match(s, p, init)));
+    let mut g = Gmatch::new(s.len(), init);
+    for _ in 0..2 * (s.len() + 1) {
+        match g.next(s, p) {
+            Ok(Some(c)) => t.push(format!("{c:?}")),
+            other => {
+                t.push(format!("{other:?}"));
+                break;
+            }
+        }
+    }
+    let tpl = TEMPLATES[usize::from(sel >> 4) % TEMPLATES.len()];
+    let mut sub = Gsub::new(p, s.len() as i64 + 1);
+    let r = (|| {
+        while let Some(m) = sub.next(s, p)? {
+            sub.add_template(s, &m, tpl)?;
+        }
+        sub.finish(s)
+    })();
+    t.push(format!("{r:?}"));
+    t
+}
+
 fuzz_target!(|input: &[u8]| {
+    {
+        let [sel, plen, rest @ ..] = input else {
+            return;
+        };
+        let (p, s) = rest.split_at(usize::from(*plen).min(rest.len()));
+        if affordable(p, s.len()) {
+            // The failure memo must change nothing: every answer and every
+            // error, "pattern too complex" included, the same with it
+            // recording from the first computation as with it never on.
+            set_memo_after(Some(0));
+            let with = transcript(*sel, p, s);
+            set_memo_after(Some(u64::MAX));
+            let without = transcript(*sel, p, s);
+            set_memo_after(None);
+            assert_eq!(with, without, "the memo changed an outcome");
+        }
+    }
     let [sel, plen, rest @ ..] = input else {
         return;
     };

@@ -844,8 +844,8 @@ mod tests {
             ),
             "0x8000000000000000|0x1p+1|(0/0)|nil"
         );
-        let long = Box::leak(vec![b'x'; 120].into_boxed_slice());
-        assert_eq!(f("%5s", vec![A::S(long)]).len(), 120);
+        static LONG: [u8; 120] = [b'x'; 120];
+        assert_eq!(f("%5s", vec![A::S(&LONG)]).len(), 120);
     }
 
     #[test]

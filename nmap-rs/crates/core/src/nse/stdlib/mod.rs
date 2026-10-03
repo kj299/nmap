@@ -602,68 +602,72 @@ mod tests {
         assert!(e.contains("string expected, got nil"), "{e}");
     }
 
+    /// How `run` renders a string result.
+    fn bytes(s: &str) -> String {
+        format!("{:?}", s.as_bytes())
+    }
+
+    // Each VM costs seconds under Miri, so each of the next two tests asks
+    // everything of one VM, catching errors with `pcall` inside the chunk
+    // rather than starting a VM per error.
+
     #[test]
     fn find_match_gmatch_and_gsub_are_installed() {
+        let got = run("local f1, f2 = string.find('hello', 'l+') \
+             local k, v = ('key=val'):match('(%w+)=(%w+)') \
+             local t = {} for w in ('a b c'):gmatch('%a') do t[#t + 1] = w end \
+             local g, n = ('hello'):gsub('l', 'L') \
+             local miss = string.find('abc', 'x') \
+             local _, e1 = pcall(string.find, 'b', 'b[') \
+             local _, e2 = pcall(('ab'):gmatch('(a')) \
+             return f1, f2, k, v, #t, g, n, miss, e1, e2")
+        .unwrap();
         assert_eq!(
-            run("return string.find('hello', 'l+')").unwrap(),
-            ["number:3", "number:4"]
+            got,
+            [
+                "number:3".to_string(),
+                "number:4".to_string(),
+                bytes("key"),
+                bytes("val"),
+                "number:3".to_string(),
+                bytes("heLLo"),
+                "number:2".to_string(),
+                "nil:nil".to_string(),
+                // Matcher errors are ordinary Lua errors, with the C's text.
+                bytes("malformed pattern (missing ']')"),
+                bytes("unfinished capture"),
+            ]
         );
-        assert_eq!(
-            run("return ('key=val'):match('(%w+)=(%w+)')").unwrap(),
-            ["[107, 101, 121]", "[118, 97, 108]"]
-        );
-        assert_eq!(
-            run("local t = {} for w in ('a b c'):gmatch('%a') do t[#t+1] = w end return #t")
-                .unwrap(),
-            ["number:3"]
-        );
-        assert_eq!(
-            run("return ('hello'):gsub('l', 'L')").unwrap(),
-            ["[104, 101, 76, 76, 111]", "number:2"]
-        );
-        assert_eq!(run("return string.find('abc', 'x')").unwrap(), ["nil:nil"]);
     }
 
     #[test]
     fn gsub_calls_functions_and_tables_back_in_the_vm() {
+        let got = run(
+            "local a, an = ('abc'):gsub('%w', function(c) return c .. c end) \
+             local b = ('abc'):gsub('%w', function(c) if c == 'b' then return 1.5 end end) \
+             local t = setmetatable({}, {__index = function(_, k) return k:upper() end}) \
+             local c = ('ab'):gsub('%w', t) \
+             local _, e1 = pcall(string.gsub, 'ab', '%w', function() return {} end) \
+             local _, e2 = pcall(string.gsub, 'ab', '%w', function() error('boom', 0) end) \
+             local _, e3 = pcall(string.gsub, 'ab', '%w', true) \
+             return a, an, b, c, e1, e2, e3",
+        )
+        .unwrap();
         assert_eq!(
-            run("return ('abc'):gsub('%w', function(c) return c .. c end)").unwrap(),
-            ["[97, 97, 98, 98, 99, 99]", "number:3"]
+            got,
+            [
+                bytes("aabbcc"),
+                "number:3".to_string(),
+                // `nil` keeps the match; a number is rendered as `tostring` does.
+                bytes("a1.5c"),
+                // A table is indexed with metamethods, as `lua_gettable` does.
+                bytes("AB"),
+                bytes("invalid replacement value (a table)"),
+                // An error inside the callback propagates unchanged.
+                bytes("boom"),
+                bytes("bad argument #3 to 'gsub' (string/function/table expected, got boolean)"),
+            ]
         );
-        // `nil` and `false` keep the match; a number is rendered as `tostring` does.
-        assert_eq!(
-            run("return ('abc'):gsub('%w', function(c) if c == 'b' then return 1.5 end end)")
-                .unwrap(),
-            ["[97, 49, 46, 53, 99]", "number:3"]
-        );
-        // A table is indexed with metamethods, as `lua_gettable` does.
-        assert_eq!(
-            run(
-                "local t = setmetatable({}, {__index = function(_, k) return k:upper() end}) \
-                 return ('ab'):gsub('%w', t)"
-            )
-            .unwrap(),
-            ["[65, 66]", "number:2"]
-        );
-        let e = run("return ('ab'):gsub('%w', function() return {} end)").unwrap_err();
-        assert!(e.contains("invalid replacement value (a table)"), "{e}");
-        let e = run("return ('ab'):gsub('%w', function() error('boom', 0) end)").unwrap_err();
-        assert!(e.contains("boom"), "{e}");
-        let e = run("return ('ab'):gsub('%w', true)").unwrap_err();
-        assert!(
-            e.contains("bad argument #3 to 'gsub' (string/function/table expected, got boolean)"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn matcher_errors_are_catchable_lua_errors() {
-        assert_eq!(
-            run("return pcall(string.find, 'b', 'b[')").unwrap(),
-            ["boolean:false", "[109, 97, 108, 102, 111, 114, 109, 101, 100, 32, 112, 97, 116, 116, 101, 114, 110, 32, 40, 109, 105, 115, 115, 105, 110, 103, 32, 39, 93, 39, 41]"]
-        );
-        let e = run("local it = ('ab'):gmatch('(a'); return it()").unwrap_err();
-        assert!(e.contains("unfinished capture"), "{e}");
     }
 
     #[test]
@@ -675,7 +679,7 @@ mod tests {
         let mut lua = Lua::core();
         let ex = lua.enter(|ctx| {
             load_patterns(ctx).expect("Lua::core() has a string table");
-            let src = "local s = '' for i = 1, 40 do s = s .. 'ab' end \
+            let src = "local s = '' for i = 1, 12 do s = s .. 'ab' end \
                        return s:gsub('a', function(c) return c:upper() end)";
             let c = Closure::load(ctx, None, src.as_bytes()).expect("compiles");
             ctx.stash(Executor::start(ctx, c.into(), ()))
@@ -701,8 +705,8 @@ mod tests {
                 .expect("no error");
             (s.as_bytes().to_vec(), n)
         });
-        assert_eq!(out, b"Ab".repeat(40));
-        assert_eq!(n, 40);
-        assert!(steps > 40, "only {steps} steps: the sequence never yielded");
+        assert_eq!(out, b"Ab".repeat(12));
+        assert_eq!(n, 12);
+        assert!(steps > 12, "only {steps} steps: the sequence never yielded");
     }
 }

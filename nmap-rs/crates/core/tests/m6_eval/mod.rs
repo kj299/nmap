@@ -8,7 +8,7 @@
 #![allow(dead_code)] // each user takes a different subset
 
 use nmap_core::nse::stdlib::{load_patterns, load_strpack};
-use piccolo::{Closure, Error, Executor, Lua, Value, Variadic};
+use piccolo::{Closure, Error, Executor, Fuel, Lua, Value, Variadic};
 use std::path::Path;
 
 pub fn hex(b: &[u8]) -> String {
@@ -66,12 +66,22 @@ fn render_error(e: &Error) -> String {
     }
 }
 
+/// How much fuel one case may burn before it is reported as `TIMEOUT`. The
+/// heaviest case in the pattern corpus needs well under a hundredth of this.
+///
+/// Without a budget, a regression that loops — `gsub` repeating an empty
+/// match forever, say — would hang the gate until the CI job's timeout instead
+/// of failing it. `gsub` spends fuel per replacement, so that one becomes a
+/// mismatch in seconds; a loop inside a single match spends none, but the
+/// matcher has no unbounded loop to regress into.
+const FUEL_BUDGET: u64 = 50_000_000;
+
 /// Evaluate one chunk in a fresh VM with the ported functions installed, and
 /// return `(status, value)` as the driver would print them.
 ///
 /// A host-language panic is reported as its own status: it is not a Lua
 /// error, it escapes `pcall`, and in the scanner it would take the process
-/// down. No golden row says "PANIC", so any panic is a mismatch.
+/// down. No golden row says "PANIC" or "TIMEOUT", so either is a mismatch.
 pub fn eval(src: &[u8]) -> (String, String) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut lua = Lua::core();
@@ -84,8 +94,19 @@ pub fn eval(src: &[u8]) -> (String, String) {
             Ok(e) => e,
             Err(_) => return ("loaderror".to_string(), "-".to_string()),
         };
-        if let Err(e) = lua.finish(&ex) {
-            return ("error".to_string(), hex(e.to_string().as_bytes()));
+        const SLICE: i32 = 4096;
+        let mut spent: u64 = 0;
+        loop {
+            let mut fuel = Fuel::with(SLICE);
+            match lua.enter(|ctx| ctx.fetch(&ex).step(ctx, &mut fuel)) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => return ("error".to_string(), hex(e.to_string().as_bytes())),
+            }
+            spent = spent.saturating_add(SLICE.unsigned_abs().into());
+            if spent > FUEL_BUDGET {
+                return ("TIMEOUT".to_string(), format!("over {FUEL_BUDGET} fuel"));
+            }
         }
         lua.enter(
             |ctx| match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {

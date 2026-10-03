@@ -353,6 +353,15 @@ jobs:
       # Fixture listeners + both binaries + diff_run.py over the M1 matrix.
       # Fails on any UNLEDGERED divergence in port-state fidelity.
       - run: bash tests/differential/run_differential.sh
+      # M6.3: the `nmap` module's non-I/O half against this same nmap. The
+      # generator scans loopback fixtures in ten scenarios (options,
+      # --script-args, -sV with and without --allports, UDP, IPv6, selection by
+      # name and by category) and records what oracle/m63_probe.nse printed;
+      # the test runs the same probe through the port and requires the same
+      # output and log lines. Regenerated live here; the ordinary test job runs
+      # against the committed golden.
+      - run: sudo python3 tests/differential/m6/oracle/gen_m63_nmap.py "$RUNNER_TEMP"
+      - run: M63_GOLDEN="$RUNNER_TEMP/m63_nmap_golden.txt" cargo test -p nmap-core --test nmaplib_differential
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -526,3 +535,13 @@ jobs:
       # around `luaO_chunkid`'s limits, and reader functions.
       - run: bash tests/differential/m6/regen_m6_tail.sh --check
       - run: cargo test -p nmap-core --test tail_differential
+
+      # M6.3 — `--script-args` and the `nmap` module's non-I/O half. The args
+      # corpus is 20,517 inputs through nse_main.lua's own grammar on nmap's
+      # own LPeg (every documented example in scripts/ and nselib/, every
+      # string of up to four bytes over the grammar's alphabet, and nesting to
+      # past LPeg's stack). The module's differential runs against the
+      # committed golden here, and live against nmap in the differential job.
+      - run: bash tests/differential/m6/regen_m63.sh --check
+      - run: cargo test -p nmap-core --test scriptargs_differential
+      - run: cargo test -p nmap-core --test nmaplib_differential

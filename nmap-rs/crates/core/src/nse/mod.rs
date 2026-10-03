@@ -15,6 +15,8 @@
 //! Lua's standard library the vendored VM does not ship, written in this crate
 //! so that the port's own gates reach them.
 
+pub mod nmaplib;
 pub mod script;
+pub mod scriptargs;
 pub mod selection;
 pub mod stdlib;

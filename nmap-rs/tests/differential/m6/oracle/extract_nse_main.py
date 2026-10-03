@@ -114,6 +114,50 @@ LPEG_UTILITY_BLOCKS = {
 }
 
 
+#: M6.3's blocks, kept apart so that adding them does not change the digest
+#: earlier corpora record over `BLOCKS` and `LPEG_UTILITY_BLOCKS`.
+M63_BLOCKS = {
+    # ---- M6.3: `--script-args` / `--script-args-file` -> nmap.registry.args --
+    # The file's contents, with trailing commas stripped.
+    "script_args_file": (
+        "    args[#args+1] = assert(assert(open(path, 'r')):read \"*a\"):gsub(\",*$\", \"\");",
+        lambda l: True,
+    ),
+    # The command line's string, appended even when empty (NmapOps defaults it
+    # to "", which Lua treats as true).
+    "script_args_cli": (
+        "  if cnse.scriptargs then -- Load script arguments (--script-args)",
+        lambda l: l == "  end",
+    ),
+    # Joining, the grammar, and the match. Opens `if #args > 0 then`, which the
+    # driver closes.
+    "script_args_parse": (
+        "  args = concat(args, \",\");",
+        lambda l: l == "    nmap.registry.args = parser:match(\"{\"..args..\"}\");",
+    ),
+}
+
+M63_LPEG_UTILITY_BLOCKS = {
+    # M6.3: the quoted-string pattern the script-args grammar uses.
+    "escaped_quote": (
+        "function escaped_quote (quot, esc)",
+        lambda l: l == "end",
+    ),
+}
+
+
+def extract_m63(root):
+    """M6.3's blocks, in the shape `extract` returns."""
+    out = {}
+    lines = _lines(root)
+    for name, (start, end_pred) in M63_BLOCKS.items():
+        out[name] = _slice(lines, start, end_pred, name)
+    util = _lines(root, LPEG_UTILITY)
+    for name, (start, end_pred) in M63_LPEG_UTILITY_BLOCKS.items():
+        out[name] = _slice(util, start, end_pred, name)
+    return out
+
+
 def extract(root):
     """Return {name: (text, first_line, last_line)} plus a digest of the whole."""
     out = {}

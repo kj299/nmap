@@ -2776,3 +2776,122 @@ reader never stops, since a number is never the empty string.
       them, and `continue` resumes in the way `wrap-keeps-the-caller-frame`
       describes. They belong to the sandbox decision with `io`, `os` and
       `debug`.
+
+## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
+
+Two gates, both against nmap itself:
+
+- **`--script-args`**: [`m63_args_cases.txt`](tests/differential/m6/m63_args_cases.txt),
+  20,517 inputs run through `nse_main.lua:1245-1291` — the joining of
+  `--script-args-file` and `--script-args`, and the LPeg grammar — sliced
+  verbatim and run on nmap's own Lua and LPeg. It includes every
+  `--script-args` example in the shipped documentation and every string of up
+  to four bytes over the grammar's alphabet. A sample of 417 was also checked
+  against the nmap 7.94 binary. No exemption list.
+- **The module**: [`m63_nmap_golden.txt`](tests/differential/m6/m63_nmap_golden.txt),
+  written by running nmap 7.94 over loopback fixtures in ten scenarios
+  (options, script arguments, `-sV` with and without `--allports`, UDP, IPv6,
+  selection by name and by category). In each, the probe
+  [`m63_probe.nse`](tests/differential/m6/oracle/m63_probe.nse) prints about
+  190 lines: the host table, every port reached through `get_ports` and
+  `get_port_state`, and a battery of calls, mutations and error messages.
+  The port runs the same probe against the same host and must print the same
+  bytes and log the same lines. CI also regenerates the golden live. The oracle is the
+  distribution's nmap 7.94, whose `nse_nmaplib.cc` differs from this
+  repository's only inside `nmap.resolve`, an I/O function outside M6.3.
+
+### Faithfully reproduced C behaviour (deliberately *not* "improved")
+
+- [x] `nmaplib-get-ports-crosses-protocols`: `PortList::nextPort` falls through
+      from TCP to UDP to SCTP once the current port's list runs out, whatever
+      protocol was asked for. So a `get_ports(host, p, "tcp", "open")` loop
+      continues into the open UDP ports. The `udp` scenario's chains show it.
+- [x] `nmaplib-port-lookup-crosses-protocols`: `nseU_getport` walks the same
+      chain comparing only numbers. A port table naming an unscanned TCP port
+      therefore matches a scanned UDP port of the same number.
+- [x] `nmaplib-integers-are-truncated`: a port table's `number` is cast to
+      `int`, `port_is_excluded`'s port to `unsigned short`, and
+      `get_random_bytes`' length to `int`. So `2^32 + 80` names port 80, and
+      `2^32 + 3` random bytes is three.
+- [x] `nmaplib-checks-happen-in-the-cs-order`:
+      - `set_port_state` checks the new state only once the port is found, so a
+        bad state for an unscanned port is no error;
+      - `set_port_version` checks its probe state before anything else;
+      - `get_ports` checks the protocol and state before the port table.
+- [x] `nmaplib-strings-are-c-strings`: protocol names, log messages, new
+      targets and every version field end at their first NUL. The version
+      fields are then cut to the C's lengths (80, 256 or 32 bytes), with
+      unprintable bytes replaced by `.` (`cstringSanityCheck`). A hard match
+      never keeps a fingerprint.
+- [x] `nmaplib-version-intensity-is-cached`: the first call outside a
+      by-name selection fixes the answer for the rest of the run (a `static
+      int` in the C). A script-intensity outside 0-9 is used anyway, with the
+      C's warning.
+- [x] `nmaplib-name-confidence-is-a-float`: `lua_pushnumber`, so
+      `port.version.name_confidence` is `10.0`, not `10`.
+- [x] `nmaplib-os-classes-are-the-overall-ones`: every entry of `host.os`
+      carries the same `classes`, the overall classification, because that is
+      what the C passes for each match. `host.os` exists only for one to eight
+      perfect matches.
+- [x] `nmaplib-add-targets-counts-oddly`: an empty target "succeeds" exactly
+      when the queue is non-empty, because `NewTargets::push` returns the
+      queue's length. A target already seen counts as added. The first
+      failure stops the loop before later arguments are even type-checked.
+- [x] `script-args-grammar-quirks`: the grammar has no end anchor, so
+      `a=1},junk` is `{a="1"}`. An unquoted string can be empty, so `{}` is
+      `{""}` and `a,,b` has three elements. A `--script-args-file` without
+      `--script-args` gains a trailing `""`, because nmap defaults the
+      latter to the empty string and still joins it. A backslash in quotes
+      escapes only a backslash or the quote.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nmaplib-host-token-cannot-dangle`: the C stores a raw `Target *` in every
+      host table's `_Target` field and trusts it on the way back in. A host
+      table kept past its host group (in `nmap.registry`, say) and passed to
+      `get_port_state` later dereferences a `Target` that may have been freed.
+      Here `_Target` is an opaque userdata naming the host's group and index.
+      A stale one is ignored, and the lookup falls back to the table's `ip`
+      and `targetname`, as the C does when `_Target` is absent. Scripts see a
+      `userdata` in both.
+- [x] `nse-script-args-depth-ceiling`: as `nse-selection-depth-ceiling`, nmap
+      parses `--script-args` with LPeg on a 100-slot backtrack stack, and
+      refuses nesting past 10 (keyed values), 12 (list siblings) or 14 (bare
+      values) levels with "too many pending calls/choices". This port parses
+      up to [`MAX_DEPTH`] (128) levels. The corpus's `depth_*` probes pin
+      that direction, 30 of them past the C's ceiling, and any other case
+      the oracle refuses that way fails the gate.
+- [x] `script-args-whitespace-is-linear`: a long run of whitespace inside an
+      unquoted string makes the grammar's predicate rescan the run from every
+      position, which is quadratic in LPeg and in a literal port. Here the run
+      is consumed whole when no delimiter follows it, giving the same answer in
+      linear time.
+
+### Differences that belong to the harness or the VM
+
+- [x] `nmaplib-bad-argument-naming`: as `pattern-bad-argument-naming`, the
+      binding says `'get_ports'` where PUC-Lua names a function called by
+      `pcall` `'nmap.get_ports'`. The probe rewrites that one name and compares
+      the rest.
+- [x] `nmaplib-fields-read-raw`: host, port and version tables are read with
+      raw access, where `lua_getfield` would consult an `__index` metamethod.
+      This matters only for a proxy table passed in place of the tables NSE
+      builds, which are plain.
+- [x] `nmaplib-cpe-iteration-order`: `set_port_version` collects
+      `version.cpe` in the VM's traversal order. For a sequence that is index
+      order in both, while for other keys the two VMs may differ.
+- [x] `nmaplib-io-half-later`: `new_socket`, `new_dnet`, `get_interface_info`,
+      `mutex`, `condvar` and `resolve` exist but raise "not available before
+      M6.4". So do the `nmap.socket` and `nmap.dnet` tables, which are absent.
+      They need sockets or NSE's scheduler. This is staging, not a choice.
+
+### What the differential does not reach
+
+The loopback scenarios cannot produce OS results, traceroute hops or MAC
+addresses, a post-scan phase, or a host table from an earlier host group. These
+are covered by in-module tests that Miri runs. Some facts are compared by type
+only, being system facts that differ between hosts: the interface list, the
+DNS servers, `fetchfile`'s path, clocks and random bytes. A few host facts
+have no source in `-oX`, so the golden takes them from the probe itself and
+the comparison checks only how the port renders them: the interface and its
+MTU, the source address, `directly_connected` and the timing estimates.

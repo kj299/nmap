@@ -238,9 +238,14 @@ struct Memo {
     failed: std::collections::HashMap<(usize, usize), u8, BuildFx>,
 }
 
-/// Recording starts after this many computations: most matches finish in far
-/// fewer, and never pay for a table.
+/// Recording starts after this many computations plus [`MEMO_PER_BYTE`] per
+/// subject byte. A scan that never backtracks does a few computations per
+/// starting position and so never pays for a table; a search that is going
+/// super-linear crosses it while the work done is still linear.
 const MEMO_AFTER: u64 = 1 << 12;
+
+/// See [`MEMO_AFTER`].
+const MEMO_PER_BYTE: u64 = 16;
 
 /// The memo stops growing past this many entries (each failure is still
 /// correct without it; it is only slower).
@@ -260,10 +265,13 @@ pub fn set_memo_after(after: Option<u64>) {
     MEMO_AFTER_OVERRIDE.with(|c| c.set(after));
 }
 
-fn memo_after() -> u64 {
+fn memo_after(subject_len: usize) -> u64 {
     MEMO_AFTER_OVERRIDE
         .with(std::cell::Cell::get)
-        .unwrap_or(MEMO_AFTER)
+        .unwrap_or_else(|| {
+            let len = u64::try_from(subject_len).unwrap_or(u64::MAX);
+            MEMO_AFTER.saturating_add(len.saturating_mul(MEMO_PER_BYTE))
+        })
 }
 
 /// A multiply-rotate hash for `(usize, usize)` keys. The keys are offsets the
@@ -326,7 +334,7 @@ impl<'a> MatchState<'a> {
     /// Count one computation, and start the memo once there have been enough.
     fn tick(&mut self) {
         self.steps = self.steps.saturating_add(1);
-        if self.memo.is_none() && self.steps > memo_after() && memoisable(self.pat) {
+        if self.memo.is_none() && self.steps > memo_after(self.src.len()) && memoisable(self.pat) {
             self.memo = Some(Memo {
                 failed: std::collections::HashMap::default(),
             });
@@ -1429,19 +1437,25 @@ mod tests {
 
     /// The memo's one non-trivial claim: a failure reused at a different
     /// recursion depth is still a failure where the C's search would fit under
-    /// MAXCCALLS, and "pattern too complex" where it would not. `a?` adds a
-    /// frame only when it matches and `a*` always adds one, so `a?a*` pairs
-    /// reach the same `(s, p)` at different depths; the item counts straddle
-    /// the limit so that replays land on both sides of it. The subjects are
-    /// short enough for the plain search to enumerate every path.
+    /// MAXCCALLS, and "pattern too complex" where it would not.
+    ///
+    /// The first loop is a broad sweep: `a?a*` pairs reach the same `(s, p)`
+    /// along different paths. The second is the case that matters, built so
+    /// that a failure is first met shallow and then reused one frame deeper,
+    /// where only the reuse crosses the limit: `.*` tries its longest
+    /// repetition first, so `(j + 1, X)` is reached with `a?` unmatched and
+    /// then again, one frame deeper, with `a?` matched at `j`; `X` nests one
+    /// frame per `a*` that matches. A replay that ignored the depth, or a
+    /// height recorded one frame short, fails it.
     #[test]
-    #[ignore = "being sized: the plain search on the longer subjects is slow"]
+    #[cfg_attr(
+        miri,
+        ignore = "hundreds of thousands of matcher steps; the fuzz target and CI cover it natively"
+    )]
     fn the_memo_replays_the_recursion_limit_exactly() {
-        let mut compared = 0;
-        let mut errors = 0;
-        for pairs in [60usize, 95, 97, 98, 99, 100, 101, 102, 110] {
-            for tail in ["b", "", "$", "a", "(b)"] {
-                for subject in ["aaa", "aaab", "aaaa", "ab", "", "aaaaaaab"] {
+        for pairs in 197usize..=201 {
+            for tail in ["b", "(b)"] {
+                for subject in ["", "aab"] {
                     let pat = format!("{}{tail}", "a?a*".repeat(pairs));
                     let run = |after| {
                         set_memo_after(Some(after));
@@ -1460,21 +1474,35 @@ mod tests {
                         set_memo_after(None);
                         (format!("{f:?}"), format!("{m:?}"), format!("{r:?}"))
                     };
-                    let with = run(0);
-                    let without = run(u64::MAX);
                     assert_eq!(
-                        with, without,
+                        run(0),
+                        run(u64::MAX),
                         "{pairs} pairs, tail {tail:?}, subject {subject:?}"
                     );
-                    compared += 1;
-                    errors += usize::from(with.0.contains("too complex"));
                 }
+            }
+        }
+
+        let (mut crossed, mut tried) = (0, 0);
+        for stars in 195..=200 {
+            for subject in ["ab", "aab"] {
+                let pat = format!(".*a?{}c", "a*".repeat(stars));
+                let run = |after| {
+                    set_memo_after(Some(after));
+                    let r = format!("{:?}", find(subject.as_bytes(), pat.as_bytes(), 1, false));
+                    set_memo_after(None);
+                    r
+                };
+                let (with, without) = (run(0), run(u64::MAX));
+                assert_eq!(with, without, "{stars} stars, subject {subject:?}");
+                crossed += usize::from(with.contains("too complex"));
+                tried += 1;
             }
         }
         // Both sides of the limit were reached.
         assert!(
-            errors > 0 && errors < compared,
-            "{errors} of {compared} raised"
+            crossed > 0 && crossed < tried,
+            "{crossed} of {tried} raised"
         );
     }
 }

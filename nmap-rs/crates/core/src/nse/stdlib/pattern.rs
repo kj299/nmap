@@ -362,7 +362,12 @@ impl<'a> MatchState<'a> {
     }
 
     /// `min_expand` (`lstrlib.c:519`).
-    fn min_expand(&mut self, mut s: usize, p: usize, ep: usize) -> Result<Option<usize>, PatternError> {
+    fn min_expand(
+        &mut self,
+        mut s: usize,
+        p: usize,
+        ep: usize,
+    ) -> Result<Option<usize>, PatternError> {
         loop {
             if let Some(res) = self.do_match(s, ep + 1)? {
                 return Ok(Some(res));
@@ -376,7 +381,12 @@ impl<'a> MatchState<'a> {
     }
 
     /// `start_capture` (`lstrlib.c:532`).
-    fn start_capture(&mut self, s: usize, p: usize, what: CapLen) -> Result<Option<usize>, PatternError> {
+    fn start_capture(
+        &mut self,
+        s: usize,
+        p: usize,
+        what: CapLen,
+    ) -> Result<Option<usize>, PatternError> {
         let level = self.level;
         if level >= MAXCAPTURES {
             return Err(PatternError::new("too many captures"));
@@ -561,8 +571,16 @@ impl Match {
     /// `push_captures` (`lstrlib.c:734`). With `whole` (the C passes a
     /// non-NULL `s`), a pattern with no captures yields the whole match;
     /// without it (`find`), it yields nothing.
-    pub fn captures<'a>(&self, src: &'a [u8], whole: bool) -> Result<Vec<Capture<'a>>, PatternError> {
-        let n = if self.level == 0 && whole { 1 } else { self.level };
+    pub fn captures<'a>(
+        &self,
+        src: &'a [u8],
+        whole: bool,
+    ) -> Result<Vec<Capture<'a>>, PatternError> {
+        let n = if self.level == 0 && whole {
+            1
+        } else {
+            self.level
+        };
         (0..n).map(|i| self.capture(src, i)).collect()
     }
 }
@@ -625,7 +643,12 @@ fn first_match(s: &[u8], p: &[u8], init: usize) -> Result<Option<Match>, Pattern
 
 /// `string.find(s, pattern [, init [, plain]])` (`str_find_aux` with `find`
 /// set). `None` is Lua's `fail`.
-pub fn find<'a>(s: &'a [u8], p: &[u8], init: i64, plain: bool) -> Result<Option<Found<'a>>, PatternError> {
+pub fn find<'a>(
+    s: &'a [u8],
+    p: &[u8],
+    init: i64,
+    plain: bool,
+) -> Result<Option<Found<'a>>, PatternError> {
     let init = start_offset(init, s.len());
     let Some(init) = usize::try_from(init).ok().filter(|&i| i <= s.len()) else {
         return Ok(None); // start after the subject's end: cannot find anything
@@ -652,7 +675,11 @@ pub fn find<'a>(s: &'a [u8], p: &[u8], init: i64, plain: bool) -> Result<Option<
 
 /// `string.match(s, pattern [, init])` (`str_find_aux` with `find` clear):
 /// the captures, or the whole match for a pattern with none. `None` is `fail`.
-pub fn str_match<'a>(s: &'a [u8], p: &[u8], init: i64) -> Result<Option<Vec<Capture<'a>>>, PatternError> {
+pub fn str_match<'a>(
+    s: &'a [u8],
+    p: &[u8],
+    init: i64,
+) -> Result<Option<Vec<Capture<'a>>>, PatternError> {
     let init = start_offset(init, s.len());
     let Some(init) = usize::try_from(init).ok().filter(|&i| i <= s.len()) else {
         return Ok(None);
@@ -692,7 +719,11 @@ impl Gmatch {
     /// when there are no more. `s` and `p` must be the subject and pattern
     /// this iterator was created for. The pattern is used whole: `^` is not an
     /// anchor here.
-    pub fn next<'a>(&mut self, s: &'a [u8], p: &[u8]) -> Result<Option<Vec<Capture<'a>>>, PatternError> {
+    pub fn next<'a>(
+        &mut self,
+        s: &'a [u8],
+        p: &[u8],
+    ) -> Result<Option<Vec<Capture<'a>>>, PatternError> {
         let mut ms = MatchState::new(s, p);
         let mut src = self.src;
         while src <= s.len() {
@@ -810,7 +841,9 @@ impl Gsub {
                     Capture::Position(n) => put(&mut self.out, n.to_string().as_bytes())?,
                 }
             } else {
-                return Err(PatternError::new("invalid use of '%' in replacement string"));
+                return Err(PatternError::new(
+                    "invalid use of '%' in replacement string",
+                ));
             }
             // `c` was a real byte, so `i + 2 <= news.len()`.
             news = news.get(i.saturating_add(2)..).unwrap_or_default();
@@ -875,32 +908,37 @@ mod tests {
 
     fn gsub_s(s: &str, p: &str, repl: &str) -> Result<(String, i64), String> {
         let (s, p) = (s.as_bytes(), p.as_bytes());
-        let mut g = Gsub::new(p, i64::try_from(s.len()).unwrap() + 1);
+        let mut g = Gsub::new(p, i64::try_from(s.len()).unwrap().saturating_add(1));
         while let Some(m) = g.next(s, p).map_err(|e| e.msg)? {
             g.add_template(s, &m, repl.as_bytes()).map_err(|e| e.msg)?;
         }
         let (out, n) = g.finish(s).map_err(|e| e.msg)?;
-        Ok((String::from_utf8(out.unwrap_or_else(|| s.to_vec())).unwrap(), n))
+        Ok((
+            String::from_utf8(out.unwrap_or_else(|| s.to_vec())).unwrap(),
+            n,
+        ))
     }
 
     #[test]
     fn find_reports_positions_and_captures() {
         assert_eq!(find_s("hello world", "o w"), Some((5, 7, vec![])));
-        assert_eq!(find_s("hello world", "(o)%s(w)"), Some((5, 7, vec![b("o"), b("w")])));
+        assert_eq!(
+            find_s("hello world", "(o)%s(w)"),
+            Some((5, 7, vec![b("o"), b("w")]))
+        );
         assert_eq!(find_s("hello", "l+"), Some((3, 4, vec![])));
         assert_eq!(find_s("hello", "xyz"), None);
         // An empty match at the start is `start, start - 1`.
         assert_eq!(find_s("abc", ""), Some((1, 0, vec![])));
-        assert_eq!(find_s("abc", "()"), Some((1, 0, vec![Capture::Position(1)])));
+        assert_eq!(
+            find_s("abc", "()"),
+            Some((1, 0, vec![Capture::Position(1)]))
+        );
     }
 
     #[test]
     fn init_selects_the_start_and_past_the_end_is_fail() {
-        let at = |init| {
-            find(b"abcabc", b"b", init, false)
-                .unwrap()
-                .map(|f| f.start)
-        };
+        let at = |init| find(b"abcabc", b"b", init, false).unwrap().map(|f| f.start);
         assert_eq!(at(1), Some(2));
         assert_eq!(at(3), Some(5));
         assert_eq!(at(-2), Some(5));
@@ -908,15 +946,24 @@ mod tests {
         assert_eq!(at(7), None);
         assert_eq!(at(i64::MAX), None);
         // An empty pattern is found one past the end, but not two past.
-        assert_eq!(find(b"abc", b"", 4, false).unwrap().map(|f| f.start), Some(4));
+        assert_eq!(
+            find(b"abc", b"", 4, false).unwrap().map(|f| f.start),
+            Some(4)
+        );
         assert_eq!(find(b"abc", b"", 5, false).unwrap(), None);
     }
 
     #[test]
     fn match_returns_the_whole_match_without_captures() {
-        assert_eq!(match_s("key=value", "(%w+)=(%w+)"), Ok(Some(vec![b("key"), b("value")])));
+        assert_eq!(
+            match_s("key=value", "(%w+)=(%w+)"),
+            Ok(Some(vec![b("key"), b("value")]))
+        );
         assert_eq!(match_s("key=value", "%w+"), Ok(Some(vec![b("key")])));
-        assert_eq!(match_s("  x", "^%s*()"), Ok(Some(vec![Capture::Position(3)])));
+        assert_eq!(
+            match_s("  x", "^%s*()"),
+            Ok(Some(vec![Capture::Position(3)]))
+        );
     }
 
     #[test]
@@ -930,25 +977,43 @@ mod tests {
             Some(vec![Capture::Bytes(b"\xe9")])
         );
         // The deprecated `%z` still matches NUL.
-        assert_eq!(str_match(b"a\0b", b"%z", 1).unwrap(), Some(vec![Capture::Bytes(b"\0")]));
+        assert_eq!(
+            str_match(b"a\0b", b"%z", 1).unwrap(),
+            Some(vec![Capture::Bytes(b"\0")])
+        );
     }
 
     #[test]
     fn errors_are_lazy() {
         // `b` fails before `[` is ever parsed, so this is a plain miss.
         assert_eq!(match_s("a", "b["), Ok(None));
-        assert_eq!(match_s("b", "b[").unwrap_err(), "malformed pattern (missing ']')");
-        assert_eq!(match_s("a", "%").unwrap_err(), "malformed pattern (ends with '%')");
+        assert_eq!(
+            match_s("b", "b[").unwrap_err(),
+            "malformed pattern (missing ']')"
+        );
+        assert_eq!(
+            match_s("a", "%").unwrap_err(),
+            "malformed pattern (ends with '%')"
+        );
         assert_eq!(
             match_s("a", "%b(").unwrap_err(),
             "malformed pattern (missing arguments to '%b')"
         );
-        assert_eq!(match_s("a", "%fa").unwrap_err(), "missing '[' after '%f' in pattern");
-        assert_eq!(match_s("a", "(a)%2").unwrap_err(), "invalid capture index %2");
+        assert_eq!(
+            match_s("a", "%fa").unwrap_err(),
+            "missing '[' after '%f' in pattern"
+        );
+        assert_eq!(
+            match_s("a", "(a)%2").unwrap_err(),
+            "invalid capture index %2"
+        );
         assert_eq!(match_s("a", "%0").unwrap_err(), "invalid capture index %0");
         assert_eq!(match_s("a", "a)").unwrap_err(), "invalid pattern capture");
         assert_eq!(match_s("a", "(a").unwrap_err(), "unfinished capture");
-        assert_eq!(match_s("a", &"()".repeat(33)).unwrap_err(), "too many captures");
+        assert_eq!(
+            match_s("a", &"()".repeat(33)).unwrap_err(),
+            "too many captures"
+        );
     }
 
     #[test]
@@ -963,7 +1028,10 @@ mod tests {
     fn balance_and_back_references() {
         assert_eq!(match_s("x(a(b)c)y", "%b()"), Ok(Some(vec![b("(a(b)c)")])));
         assert_eq!(match_s("x(a(b", "%b()"), Ok(None));
-        assert_eq!(match_s("say 'hi' now", "(['\"])(.-)%1"), Ok(Some(vec![b("'"), b("hi")])));
+        assert_eq!(
+            match_s("say 'hi' now", "(['\"])(.-)%1"),
+            Ok(Some(vec![b("'"), b("hi")]))
+        );
         // A back-reference to a position capture never matches, and is not an error.
         assert_eq!(match_s("aa", "()%1"), Ok(None));
     }
@@ -976,7 +1044,10 @@ mod tests {
         while let Some(c) = g.next(s, p).unwrap() {
             got.push(c);
         }
-        assert_eq!(got, vec![vec![Capture::Bytes(b"^b")], vec![Capture::Bytes(b"^c")]]);
+        assert_eq!(
+            got,
+            vec![vec![Capture::Bytes(b"^b")], vec![Capture::Bytes(b"^c")]]
+        );
     }
 
     #[test]
@@ -993,14 +1064,29 @@ mod tests {
 
     #[test]
     fn gsub_templates() {
-        assert_eq!(gsub_s("hello world", "o", "0"), Ok(("hell0 w0rld".into(), 2)));
-        assert_eq!(gsub_s("hello", "(l)(l)", "%2%1%0%%"), Ok(("hellll%o".into(), 1)));
+        assert_eq!(
+            gsub_s("hello world", "o", "0"),
+            Ok(("hell0 w0rld".into(), 2))
+        );
+        assert_eq!(
+            gsub_s("hello", "(l)(l)", "%2%1%0%%"),
+            Ok(("hellll%o".into(), 1))
+        );
         assert_eq!(gsub_s("abc", "", "-"), Ok(("-a-b-c-".into(), 4)));
         assert_eq!(gsub_s("abc", "^", ">"), Ok((">abc".into(), 1)));
         assert_eq!(gsub_s("abc", "b()", "%1"), Ok(("a3c".into(), 1)));
-        assert_eq!(gsub_s("abc", "b", "%").unwrap_err(), "invalid use of '%' in replacement string");
-        assert_eq!(gsub_s("abc", "b", "%x").unwrap_err(), "invalid use of '%' in replacement string");
-        assert_eq!(gsub_s("abc", "b", "%2").unwrap_err(), "invalid capture index %2");
+        assert_eq!(
+            gsub_s("abc", "b", "%").unwrap_err(),
+            "invalid use of '%' in replacement string"
+        );
+        assert_eq!(
+            gsub_s("abc", "b", "%x").unwrap_err(),
+            "invalid use of '%' in replacement string"
+        );
+        assert_eq!(
+            gsub_s("abc", "b", "%2").unwrap_err(),
+            "invalid capture index %2"
+        );
         // An unfinished capture is only an error if the template reads it.
         assert_eq!(gsub_s("abc", "(b", "x"), Ok(("axc".into(), 1)));
         assert_eq!(gsub_s("abc", "(b", "%1").unwrap_err(), "unfinished capture");

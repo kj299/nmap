@@ -499,3 +499,12 @@ jobs:
       # terminator, wide integers whose upper bytes do not fit.
       - run: bash tests/differential/m6/regen_m6_strpack.sh --check
       - run: cargo test -p nmap-core --test strpack_differential
+
+      # M6 stdlib — Lua patterns: `string.find` / `match` / `gmatch` / `gsub`.
+      # 11,408 cases, compared on every value AND every error message (the
+      # matcher's errors are lazy, so "which message, or none" is the
+      # behaviour). Section J of the generator reads every pattern literal in
+      # nselib/ and scripts/ and runs it through all four functions, which is
+      # why --check also fails when those trees change. No exemption list.
+      - run: bash tests/differential/m6/regen_m6_pattern.sh --check
+      - run: cargo test -p nmap-core --test pattern_differential

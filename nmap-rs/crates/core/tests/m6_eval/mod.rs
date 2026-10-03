@@ -24,8 +24,7 @@ pub fn unhex(s: &str) -> Vec<u8> {
 
 /// The non-comment rows of a corpus file, as `(name, field 2, field 3)`.
 pub fn rows(path: &Path) -> Vec<(String, String, String)> {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     text.lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| {
@@ -88,8 +87,8 @@ pub fn eval(src: &[u8]) -> (String, String) {
         if let Err(e) = lua.finish(&ex) {
             return ("error".to_string(), hex(e.to_string().as_bytes()));
         }
-        lua.enter(|ctx| {
-            match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
+        lua.enter(
+            |ctx| match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
                 Ok(Ok(vs)) => (
                     "ok".to_string(),
                     vs.0.into_iter()
@@ -99,8 +98,8 @@ pub fn eval(src: &[u8]) -> (String, String) {
                 ),
                 Ok(Err(e)) => ("error".to_string(), render_error(&e)),
                 Err(_) => ("error".to_string(), "-".to_string()),
-            }
-        })
+            },
+        )
     }));
     r.unwrap_or_else(|_| ("PANIC".to_string(), "host-language panic".to_string()))
 }

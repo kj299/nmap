@@ -2428,3 +2428,111 @@ below. Every error is still raised in the same cases as the C.
 - [x] `strpack-no-position-prefix`: PUC-Lua prefixes every error with the
       caller's `chunk:LINE:`. That is the VM-wide defect ledgered above as
       `error_string_gets_position`, not something this module can supply.
+
+## Milestone 6 stdlib — Lua patterns: `string.find` / `match` / `gmatch` / `gsub` (`core::nse::stdlib::pattern`)
+
+A port of `liblua/lstrlib.c:347-947`, gated by
+[`m6_pattern_cases.txt`](tests/differential/m6/m6_pattern_cases.txt): 11,408
+cases run end to end through the VM, compared with `liblua/` on every returned
+value and its subtype **and on every error message**, with no exemption list.
+The corpus includes every pattern literal in the shipped `nselib/` and
+`scripts/` sources, run through all four functions against sixteen realistic
+subjects. Error messages are compared because for the matcher the message is
+the behaviour; the two kinds of message difference that remain are VM-wide and
+listed at the end.
+
+### Faithfully reproduced C quirks (deliberately *not* fixed)
+
+- [x] `pattern-errors-are-lazy`: a malformed piece of a pattern is diagnosed
+      only when the matcher reaches it. `("a"):find("b[")` is `nil`, not an
+      error, because `b` fails before `[` is parsed; `("b"):find("b[")` raises
+      "malformed pattern (missing ']')". Validating patterns up front would turn
+      working scripts into failing ones.
+- [x] `pattern-subject-reads-a-hidden-nul`: the C reads one byte past the
+      subject's end, where every Lua string keeps a NUL. A frontier there sees
+      `\0` as the next character — `%f[%z]` matches at the end, `%f[%A]` too —
+      and `%b` with a NUL opener compares against it. The port reads a `0` at
+      that offset instead of past the slice; the answers are the C's.
+- [x] `pattern-position-backreference-never-matches`: `()%1` compares against
+      the capture's length, which for a position capture is `CAP_POSITION`
+      (-2) read as `size_t` — longer than any subject. It never matches and is
+      not an error.
+- [x] `pattern-gmatch-caret-is-literal`: `^` anchors `find`, `match` and
+      `gsub`, but `gmatch` passes the pattern to the matcher whole, so there it
+      is an ordinary character: `("a^b"):gmatch("^b")` yields `"^b"`.
+- [x] `pattern-close-paren-is-not-special-to-find`: `find` searches literally
+      for a pattern containing none of `^$*+?.([%-`, and `)` is not in that set,
+      so `find("a)", ")")` is `2, 2` while `match("a)", ")")` raises "invalid
+      pattern capture".
+- [x] `pattern-classes-are-the-c-locale`: `%a`, `%w`, `%s` and the rest are
+      ASCII-only and no byte at or above `0x80` is in any of them, because nmap
+      runs in the C locale: `main.cc:120` only *queries* `setlocale`, and nothing
+      in nmap sets `LC_CTYPE`. `%s` includes the vertical tab, as C's `isspace`
+      does and Rust's `is_ascii_whitespace` does not.
+- [x] `pattern-deprecated-z-class`: `%z` (a NUL) is still accepted, as Lua 5.4
+      still accepts it; NSE scripts written for 5.1 use it.
+- [x] `pattern-recursion-limit-is-maxccalls`: the matcher recurses at most 200
+      levels (`MAXCCALLS`) and the 201st raises "pattern too complex", which a
+      script can `pcall`. 199 matching `a?` items succeed and 200 fail, in both.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `pattern-gmatch-depth-budget-leaks`: **a memory-safety defect in Lua
+      5.4.8, reproduced in nmap's own `liblua/` build.** `gmatch` keeps its
+      `MatchState`, recursion budget included, alive between calls of the
+      iterator. `match` decrements the budget on entry and restores it only on
+      a normal return, so an error raised mid-match — `pcall`-caught, so the
+      iterator can be called again — leaves it lowered for every later call.
+      After "pattern too complex" it is left at `-1`, where the `== 0` test
+      never fires again, and the next call recurses as deep as the pattern
+      allows. With a 2 MB pattern of `a?` and a 1 MB subject, the second
+      `pcall(it)` kills the oracle with **SIGSEGV** (exit 139, C stack
+      overflow); with 300 items it merely succeeds where the first call failed.
+      The port builds a fresh state for every call, so every call gets the full
+      budget and raises the same catchable error. Reaching it takes a pattern a
+      script chose, not a subject a host chose, so it is not remotely
+      triggerable through any shipped script; it is closed because the threat
+      model treats scripts as untrusted too.
+- [x] `pattern-gsub-allocation-failure-is-a-lua-error`: the `gsub` result grows
+      with `try_reserve`, so an allocation the system refuses raises "not
+      enough memory", which a script can `pcall`, rather than aborting the
+      process. As for `strpack-allocation-failure-is-a-lua-error`, this is not a
+      memory budget.
+- [x] `pattern-gsub-yields-to-the-host-between-matches`: `gsub` is a VM
+      sequence that spends one unit of fuel per replacement and returns to the
+      host when the fuel runs out, so a long substitution no longer holds the
+      interpreter for its whole duration. A single match still runs to
+      completion; see the next entry.
+- [ ] `pattern-worst-case-time-is-the-cs` — **open, and must close before
+      M6.4 gives scripts sockets.** The port keeps the C algorithm, a
+      backtracking matcher whose worst case is polynomial in the subject's
+      length with the number of quantified items as the exponent (and
+      exponential in `?` items). The subject is what a remote host controls; the
+      pattern is the script's. C nmap has exactly this exposure, and since a C
+      function cannot be interrupted, `--script-timeout` cannot stop a match in
+      progress there either. The fix designed for it is exact rather than a step
+      budget: memoise *failed* `(subject offset, pattern offset)` states, which
+      is sound because along any path the capture structure at a pattern offset
+      is fixed by the pattern, and record with each failure the recursion depth
+      it reached so that "pattern too complex" is raised in exactly the cases
+      the C raises it. Patterns with back-references, whose outcome depends on
+      capture contents, keep the plain algorithm. The fuzz target skips inputs
+      whose worst case is large until then.
+
+### Differences that belong to the VM, not to this module
+
+- [x] `pattern-gsub-callback-may-yield`: a `gsub` replacement function or
+      `__index` metamethod that calls `coroutine.yield` raises "attempt to yield
+      across a C-call boundary" in PUC-Lua; here the yield goes through, and the
+      substitution resumes when the coroutine does. The vendored VM is stackless,
+      so every Rust callback can be suspended. Nothing that works in the C
+      behaves differently: the only programs affected are ones the C rejects.
+- [x] `pattern-no-position-prefix`: `luaL_error` prefixes its message with the
+      calling Lua function's `chunk:LINE:`; a call made by `pcall` directly has
+      no such prefix in either. That is `error_string_gets_position` above. The
+      differential compares every message caught inside a case byte for byte,
+      and discounts only this prefix on an error that escapes one.
+- [x] `pattern-bad-argument-naming`: `luaL_argerror` names the function from
+      the call site — `'find'` for a direct call, `'string.find'` for a tail
+      call or a `pcall`, and a shifted argument number for a method call. The
+      binding always says `'find'`. Argument errors are compared by status.

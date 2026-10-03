@@ -67,8 +67,8 @@ pub fn load_patterns<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
         ctx,
         "gsub",
         Callback::from_fn(&ctx, |ctx, _, mut stack| {
-            let seq = gsub_start(ctx, &stack)
-                .map_err(|e| lua_error(ctx, &e.lua_message("gsub")))?;
+            let seq =
+                gsub_start(ctx, &stack).map_err(|e| lua_error(ctx, &e.lua_message("gsub")))?;
             stack.clear();
             Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, seq)))
         }),
@@ -100,11 +100,9 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
     table.set_field(
         ctx,
         name,
-        Callback::from_fn(&ctx, move |ctx, _, mut stack| {
-            match body(ctx, &mut stack) {
-                Ok(()) => Ok(CallbackReturn::Return),
-                Err(e) => Err(lua_error(ctx, &e.lua_message(name))),
-            }
+        Callback::from_fn(&ctx, move |ctx, _, mut stack| match body(ctx, &mut stack) {
+            Ok(()) => Ok(CallbackReturn::Return),
+            Err(e) => Err(lua_error(ctx, &e.lua_message(name))),
         }),
     );
 }
@@ -507,11 +505,12 @@ impl<'gc> Sequence<'gc> for GsubSeq<'gc> {
 #[cfg(test)]
 mod tests {
     //! End-to-end through the VM, in-module so that Miri runs them: the
-    //! 4,804-case differential reads its corpus from disk and so cannot. These
-    //! cover the binding's own decisions — argument conversion, the "no value"
-    //! versus `nil` distinction, results outliving the stack they came from.
-    use super::load_strpack;
-    use piccolo::{Closure, Executor, Lua, Value, Variadic};
+    //! differential corpora read from disk and so cannot. These cover the
+    //! binding's own decisions — argument conversion, the "no value" versus
+    //! `nil` distinction, results outliving the stack they came from, and the
+    //! `gsub` sequence's calls back into the VM across garbage collections.
+    use super::{load_patterns, load_strpack};
+    use piccolo::{Closure, Executor, Fuel, Lua, Value, Variadic};
 
     /// Run `src` and render its results, or `Err` with the Lua error message.
     fn run(src: &str) -> Result<Vec<String>, String> {
@@ -519,6 +518,7 @@ mod tests {
         let ex = lua
             .try_enter(|ctx| {
                 load_strpack(ctx).expect("Lua::core() has a string table");
+                load_patterns(ctx).expect("Lua::core() has a string table");
                 let c = Closure::load(ctx, None, src.as_bytes())?;
                 Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
             })
@@ -600,5 +600,109 @@ mod tests {
         assert!(e.contains("string expected, got no value"), "{e}");
         let e = run("return string.unpack('b', nil)").unwrap_err();
         assert!(e.contains("string expected, got nil"), "{e}");
+    }
+
+    #[test]
+    fn find_match_gmatch_and_gsub_are_installed() {
+        assert_eq!(
+            run("return string.find('hello', 'l+')").unwrap(),
+            ["number:3", "number:4"]
+        );
+        assert_eq!(
+            run("return ('key=val'):match('(%w+)=(%w+)')").unwrap(),
+            ["[107, 101, 121]", "[118, 97, 108]"]
+        );
+        assert_eq!(
+            run("local t = {} for w in ('a b c'):gmatch('%a') do t[#t+1] = w end return #t")
+                .unwrap(),
+            ["number:3"]
+        );
+        assert_eq!(
+            run("return ('hello'):gsub('l', 'L')").unwrap(),
+            ["[104, 101, 76, 76, 111]", "number:2"]
+        );
+        assert_eq!(run("return string.find('abc', 'x')").unwrap(), ["nil:nil"]);
+    }
+
+    #[test]
+    fn gsub_calls_functions_and_tables_back_in_the_vm() {
+        assert_eq!(
+            run("return ('abc'):gsub('%w', function(c) return c .. c end)").unwrap(),
+            ["[97, 97, 98, 98, 99, 99]", "number:3"]
+        );
+        // `nil` and `false` keep the match; a number is rendered as `tostring` does.
+        assert_eq!(
+            run("return ('abc'):gsub('%w', function(c) if c == 'b' then return 1.5 end end)")
+                .unwrap(),
+            ["[97, 49, 46, 53, 99]", "number:3"]
+        );
+        // A table is indexed with metamethods, as `lua_gettable` does.
+        assert_eq!(
+            run(
+                "local t = setmetatable({}, {__index = function(_, k) return k:upper() end}) \
+                 return ('ab'):gsub('%w', t)"
+            )
+            .unwrap(),
+            ["[65, 66]", "number:2"]
+        );
+        let e = run("return ('ab'):gsub('%w', function() return {} end)").unwrap_err();
+        assert!(e.contains("invalid replacement value (a table)"), "{e}");
+        let e = run("return ('ab'):gsub('%w', function() error('boom', 0) end)").unwrap_err();
+        assert!(e.contains("boom"), "{e}");
+        let e = run("return ('ab'):gsub('%w', true)").unwrap_err();
+        assert!(
+            e.contains("bad argument #3 to 'gsub' (string/function/table expected, got boolean)"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn matcher_errors_are_catchable_lua_errors() {
+        assert_eq!(
+            run("return pcall(string.find, 'b', 'b[')").unwrap(),
+            ["boolean:false", "[109, 97, 108, 102, 111, 114, 109, 101, 100, 32, 112, 97, 116, 116, 101, 114, 110, 32, 40, 109, 105, 115, 115, 105, 110, 103, 32, 39, 93, 39, 41]"]
+        );
+        let e = run("local it = ('ab'):gmatch('(a'); return it()").unwrap_err();
+        assert!(e.contains("unfinished capture"), "{e}");
+    }
+
+    #[test]
+    fn a_gsub_interrupted_by_fuel_resumes_where_it_stopped() {
+        // One unit of fuel per step: the sequence returns `Pending` between
+        // replacements, the arena is left — and fully collected — between
+        // steps, and the subject, built at run time so the sequence holds the
+        // only reference to it, must still be there when the sequence resumes.
+        let mut lua = Lua::core();
+        let ex = lua.enter(|ctx| {
+            load_patterns(ctx).expect("Lua::core() has a string table");
+            let src = "local s = '' for i = 1, 40 do s = s .. 'ab' end \
+                       return s:gsub('a', function(c) return c:upper() end)";
+            let c = Closure::load(ctx, None, src.as_bytes()).expect("compiles");
+            ctx.stash(Executor::start(ctx, c.into(), ()))
+        });
+        let mut steps = 0;
+        loop {
+            let mut fuel = Fuel::with(1);
+            if lua
+                .enter(|ctx| ctx.fetch(&ex).step(ctx, &mut fuel))
+                .expect("steps")
+            {
+                break;
+            }
+            lua.gc_collect();
+            steps += 1;
+            assert!(steps < 100_000, "the substitution never finished");
+        }
+        let (out, n) = lua.enter(|ctx| {
+            let (s, n) = ctx
+                .fetch(&ex)
+                .take_result::<(piccolo::String, i64)>(ctx)
+                .expect("finished")
+                .expect("no error");
+            (s.as_bytes().to_vec(), n)
+        });
+        assert_eq!(out, b"Ab".repeat(40));
+        assert_eq!(n, 40);
+        assert!(steps > 40, "only {steps} steps: the sequence never yielded");
     }
 }

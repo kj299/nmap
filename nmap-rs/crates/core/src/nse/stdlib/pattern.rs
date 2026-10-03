@@ -188,6 +188,115 @@ struct MatchState<'a> {
     matchdepth: u32,
     level: usize,
     cap: [Cap; MAXCAPTURES],
+    /// Failed computations, when memoisation applies. See [`Memo`].
+    memo: Option<Memo>,
+    /// Computations entered so far; the memo starts recording past a threshold.
+    steps: u64,
+    /// The deepest frame entered since the current computation began.
+    peak: u32,
+    /// The computations each active frame has run through, innermost last:
+    /// `(s, p, deepest frame entered while it was the current one)`.
+    chain: Vec<(usize, usize, u32)>,
+    /// The deepest frame entered under each child an expansion loop has tried.
+    tried: Vec<u32>,
+    /// Where the innermost frame's computations start in `chain`.
+    frame_base: usize,
+}
+
+/// Failed matcher computations, keyed by `(subject offset, pattern offset)`.
+///
+/// # Why this is exact
+///
+/// The C matcher is a backtracking search whose worst case is exponential in
+/// the number of quantified items; the subject is what a remote host controls.
+/// Recording which states have already *failed* turns that into work roughly
+/// linear in `subject × pattern`, and can be made to change nothing a script
+/// can observe:
+///
+/// * **A failure depends only on `(s, p)`.** Captures open and close at fixed
+///   pattern offsets (quantifiers apply to single characters, and there is no
+///   alternation), so the capture structure at `p` is the same on every path
+///   that reaches it. What differs between paths is *where* captures started,
+///   and that is read only on success — or by a back-reference, which is why a
+///   pattern containing `%0`-`%9` is never memoised.
+/// * **A failed computation saw no success and raised no error.** Any success
+///   inside it returns straight up the stack, and any error aborts the whole
+///   call. So repeating it would repeat the same failure — except for the one
+///   error whose outcome depends on *where* it runs: the recursion limit.
+/// * **The recursion limit is replayed, not skipped.** With each failure the
+///   memo records how many frames deeper than its own it went. Reused in a
+///   frame at depth `d`, a failure of height `h` is a failure if `d + h` is
+///   within `MAXCCALLS`, and "pattern too complex" otherwise — which is exactly
+///   what re-running it would have raised, since the re-run is the same search
+///   shifted by `d`.
+///
+/// The two expansion loops (`*`/`+` and `-`) extend this: a failed loop proves
+/// that every later start in the same run of matching characters fails too,
+/// and records those with their heights, so a long run is walked once rather
+/// than once per start.
+struct Memo {
+    failed: std::collections::HashMap<(usize, usize), u8, BuildFx>,
+}
+
+/// Recording starts after this many computations: most matches finish in far
+/// fewer, and never pay for a table.
+const MEMO_AFTER: u64 = 1 << 12;
+
+/// The memo stops growing past this many entries (each failure is still
+/// correct without it; it is only slower).
+const MEMO_MAX: usize = 1 << 22;
+
+thread_local! {
+    /// Test and fuzz override for [`MEMO_AFTER`]: `Some(0)` memoises from the
+    /// first computation, `Some(u64::MAX)` never.
+    static MEMO_AFTER_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Set (or with `None`, clear) the memoisation threshold for this thread.
+/// For the equivalence tests and the fuzz target, which run every input both
+/// ways; nothing else should call it.
+#[doc(hidden)]
+pub fn set_memo_after(after: Option<u64>) {
+    MEMO_AFTER_OVERRIDE.with(|c| c.set(after));
+}
+
+fn memo_after() -> u64 {
+    MEMO_AFTER_OVERRIDE
+        .with(std::cell::Cell::get)
+        .unwrap_or(MEMO_AFTER)
+}
+
+/// A multiply-rotate hash for `(usize, usize)` keys. The keys are offsets the
+/// matcher derives, not values an attacker chooses, so a keyed hash buys
+/// nothing here.
+#[derive(Default, Clone, Copy)]
+struct Fx(u64);
+
+impl std::hash::Hasher for Fx {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7cc1_b727_220a_95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type BuildFx = std::hash::BuildHasherDefault<Fx>;
+
+/// Whether a pattern may be memoised: it has no back-reference. Any `%`
+/// followed by a digit counts, even one that turns out to be inside a set,
+/// which only ever errs on the side of not memoising.
+fn memoisable(pat: &[u8]) -> bool {
+    !pat.windows(2)
+        .any(|w| w[0] == L_ESC && w[1].is_ascii_digit())
 }
 
 #[allow(clippy::arithmetic_side_effects)] // see "Arithmetic" on `MatchState`
@@ -200,7 +309,94 @@ impl<'a> MatchState<'a> {
             matchdepth: MAXCCALLS,
             level: 0,
             cap: [NO_CAP; MAXCAPTURES],
+            memo: None,
+            steps: 0,
+            peak: 0,
+            chain: Vec::new(),
+            tried: Vec::new(),
+            frame_base: 0,
         }
+    }
+
+    /// The depth of the innermost active frame (the top-level call is 1).
+    fn depth(&self) -> u32 {
+        MAXCCALLS - self.matchdepth
+    }
+
+    /// Count one computation, and start the memo once there have been enough.
+    fn tick(&mut self) {
+        self.steps = self.steps.saturating_add(1);
+        if self.memo.is_none() && self.steps > memo_after() && memoisable(self.pat) {
+            self.memo = Some(Memo {
+                failed: std::collections::HashMap::default(),
+            });
+        }
+    }
+
+    /// The recorded failure of computation `(s, p)`, if any: its height.
+    fn known_failure(&self, s: usize, p: usize) -> Option<u32> {
+        self.memo
+            .as_ref()?
+            .failed
+            .get(&(s, p))
+            .map(|&h| u32::from(h))
+    }
+
+    /// Record that computation `(s, p)` fails, reaching `height` frames below
+    /// the frame it runs in.
+    fn record_failure(&mut self, s: usize, p: usize, height: u32) {
+        let Some(memo) = self.memo.as_mut() else {
+            return;
+        };
+        if memo.failed.len() < MEMO_MAX && memo.failed.try_reserve(1).is_ok() {
+            // A height is at most MAXCCALLS (200).
+            memo.failed
+                .insert((s, p), u8::try_from(height).unwrap_or(u8::MAX));
+        }
+    }
+
+    /// Reuse a recorded failure of height `h` in the current frame: a plain
+    /// failure if it fits under the recursion limit here, and the limit's own
+    /// error if it does not — which is what running it again would raise.
+    fn replay_failure(&mut self, h: u32) -> Result<Option<usize>, PatternError> {
+        let reach = self.depth() + h;
+        if reach > MAXCCALLS {
+            return Err(PatternError::new("pattern too complex"));
+        }
+        self.peak = self.peak.max(reach);
+        Ok(None)
+    }
+
+    /// Begin computation `(s, p)` in the current frame (the C's `init:`).
+    /// Returns the replayed outcome if it is already known to fail.
+    fn enter(&mut self, s: usize, p: usize) -> Option<Result<Option<usize>, PatternError>> {
+        self.tick();
+        if let Some(h) = self.known_failure(s, p) {
+            return Some(self.replay_failure(h));
+        }
+        // Close the previous computation's segment — of this frame only.
+        if self.chain.len() > self.frame_base {
+            if let Some(last) = self.chain.last_mut() {
+                last.2 = self.peak;
+            }
+        }
+        let d = self.depth();
+        self.peak = d;
+        self.chain.push((s, p, u32::MAX));
+        None
+    }
+
+    /// Run `f` as a child call and report the deepest frame it entered.
+    fn child(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<Option<usize>, PatternError>,
+    ) -> (Result<Option<usize>, PatternError>, u32) {
+        let saved = self.peak;
+        self.peak = self.depth();
+        let res = f(self);
+        let reached = self.peak;
+        self.peak = saved.max(reached);
+        (res, reached)
     }
 
     /// `reprepstate` (`lstrlib.c:767`).
@@ -343,41 +539,110 @@ impl<'a> MatchState<'a> {
         }
     }
 
-    /// `max_expand` (`lstrlib.c:504`).
-    fn max_expand(&mut self, s: usize, p: usize, ep: usize) -> Result<Option<usize>, PatternError> {
-        let mut i = 0;
-        while self.singlematch(s + i, p, ep) {
-            i += 1;
-        }
-        // Keep trying with the maximum repetitions, then one fewer.
-        loop {
-            if let Some(res) = self.do_match(s + i, ep + 1)? {
-                return Ok(Some(res));
-            }
-            if i == 0 {
-                return Ok(None);
-            }
-            i -= 1;
-        }
-    }
-
-    /// `min_expand` (`lstrlib.c:519`).
-    fn min_expand(
+    /// `max_expand` (`lstrlib.c:504`) for the item at `p`..`ep` that computation
+    /// `(s0, p)` matched once at `s0`; `off` is 1 for `+` (that match is
+    /// consumed) and 0 for `*`. The C tries every repetition count from the
+    /// most down, each as a child call of the continuation at `ep + 1`.
+    fn max_expand(
         &mut self,
-        mut s: usize,
+        s0: usize,
+        off: usize,
         p: usize,
         ep: usize,
     ) -> Result<Option<usize>, PatternError> {
-        loop {
-            if let Some(res) = self.do_match(s, ep + 1)? {
-                return Ok(Some(res));
+        let base = s0 + off;
+        // If the computation one byte on is known to fail, so is every child
+        // it tried — all of ours but the last — and only that one is left.
+        if self.singlematch(s0 + 1, p, ep) {
+            if let Some(h) = self.known_failure(s0 + 1, p) {
+                self.replay_failure(h)?;
+                return self.child(|m| m.do_match(base, ep + 1)).0;
             }
+        }
+        let mut end = base;
+        while self.singlematch(end, p, ep) {
+            end += 1;
+        }
+        let mark = self.tried.len();
+        // Keep trying with the maximum repetitions, then one fewer.
+        let mut i = end;
+        loop {
+            let (res, reached) = self.child(|m| m.do_match(i, ep + 1));
+            if let Some(found) = res? {
+                self.tried.truncate(mark);
+                return Ok(Some(found));
+            }
+            self.tried.push(reached);
+            if i == base {
+                break;
+            }
+            i -= 1;
+        }
+        // All failed. Every start `x` strictly inside the run tries the
+        // children from `end` down to `x + off`: the first `end - x - off + 1`
+        // tried here.
+        let d = self.depth();
+        let mut deepest = d;
+        for k in 0..self.tried.len() - mark {
+            deepest = deepest.max(self.tried[mark + k]);
+            let child_pos = end - k;
+            if let Some(x) = child_pos.checked_sub(off).filter(|&x| x > s0 && x < end) {
+                self.record_failure(x, p, deepest - d);
+            }
+        }
+        self.tried.truncate(mark);
+        Ok(None)
+    }
+
+    /// `min_expand` (`lstrlib.c:519`) for the item at `p`..`ep` that computation
+    /// `(s0, p)` matched once at `s0`.
+    fn min_expand(
+        &mut self,
+        s0: usize,
+        p: usize,
+        ep: usize,
+    ) -> Result<Option<usize>, PatternError> {
+        let mark = self.tried.len();
+        let mut s = s0;
+        let outcome = loop {
+            // The rest of this loop is exactly computation `(s, p)`'s own.
+            if s > s0 && self.singlematch(s, p, ep) {
+                if let Some(h) = self.known_failure(s, p) {
+                    let r = self.replay_failure(h);
+                    if r.is_err() {
+                        self.tried.truncate(mark);
+                        return r;
+                    }
+                    self.tried.push(self.depth() + h);
+                    break None;
+                }
+            }
+            let (res, reached) = self.child(|m| m.do_match(s, ep + 1));
+            if let Some(found) = res? {
+                self.tried.truncate(mark);
+                return Ok(Some(found));
+            }
+            self.tried.push(reached);
             if self.singlematch(s, p, ep) {
                 s += 1; // try with one more repetition
             } else {
-                return Ok(None);
+                break None;
+            }
+        };
+        // All failed: every start after `s0` that still matched the item ran
+        // the tail of this loop from there.
+        let d = self.depth();
+        let mut deepest = d;
+        let tried = self.tried.len() - mark;
+        for k in (0..tried).rev() {
+            deepest = deepest.max(self.tried[mark + k]);
+            let x = s0 + k;
+            if k > 0 && self.singlematch(x, p, ep) {
+                self.record_failure(x, p, deepest - d);
             }
         }
+        self.tried.truncate(mark);
+        Ok(outcome)
     }
 
     /// `start_capture` (`lstrlib.c:532`).
@@ -436,7 +701,30 @@ impl<'a> MatchState<'a> {
             return Err(PatternError::new("pattern too complex"));
         }
         self.matchdepth -= 1;
+        let d = self.depth();
+        let saved_peak = self.peak;
+        self.peak = d;
+        let base = self.chain.len();
+        let saved_base = std::mem::replace(&mut self.frame_base, base);
         let res = self.match_body(s, p);
+        self.frame_base = saved_base;
+        // Close the frame's last segment, then walk its computations back to
+        // front: each one's height is the deepest any later one reached.
+        if self.chain.len() > base {
+            if let Some(last) = self.chain.last_mut() {
+                last.2 = self.peak;
+            }
+        }
+        let mut deepest = self.peak.max(d);
+        for i in (base..self.chain.len()).rev() {
+            let (cs, cp, seg) = self.chain[i];
+            deepest = deepest.max(seg);
+            if matches!(res, Ok(None)) {
+                self.record_failure(cs, cp, deepest - d);
+            }
+        }
+        self.chain.truncate(base);
+        self.peak = saved_peak.max(deepest);
         // The C restores the budget only on a normal return; it is restored
         // here on an error too. See the module documentation.
         self.matchdepth += 1;
@@ -445,6 +733,9 @@ impl<'a> MatchState<'a> {
 
     fn match_body(&mut self, mut s: usize, mut p: usize) -> Result<Option<usize>, PatternError> {
         loop {
+            if let Some(known) = self.enter(s, p) {
+                return known;
+            }
             if p == self.pat.len() {
                 return Ok(Some(s)); // end of pattern
             }
@@ -509,8 +800,8 @@ impl<'a> MatchState<'a> {
                                 }
                                 p = ep + 1;
                             }
-                            b'+' => return self.max_expand(s + 1, p, ep),
-                            b'*' => return self.max_expand(s, p, ep),
+                            b'+' => return self.max_expand(s, 1, p, ep),
+                            b'*' => return self.max_expand(s, 0, p, ep),
                             b'-' => return self.min_expand(s, p, ep),
                             _ => {
                                 s += 1;
@@ -1134,5 +1425,56 @@ mod tests {
                 "pattern too complex"
             );
         }
+    }
+
+    /// The memo's one non-trivial claim: a failure reused at a different
+    /// recursion depth is still a failure where the C's search would fit under
+    /// MAXCCALLS, and "pattern too complex" where it would not. `a?` adds a
+    /// frame only when it matches and `a*` always adds one, so `a?a*` pairs
+    /// reach the same `(s, p)` at different depths; the item counts straddle
+    /// the limit so that replays land on both sides of it. The subjects are
+    /// short enough for the plain search to enumerate every path.
+    #[test]
+    #[ignore = "being sized: the plain search on the longer subjects is slow"]
+    fn the_memo_replays_the_recursion_limit_exactly() {
+        let mut compared = 0;
+        let mut errors = 0;
+        for pairs in [60usize, 95, 97, 98, 99, 100, 101, 102, 110] {
+            for tail in ["b", "", "$", "a", "(b)"] {
+                for subject in ["aaa", "aaab", "aaaa", "ab", "", "aaaaaaab"] {
+                    let pat = format!("{}{tail}", "a?a*".repeat(pairs));
+                    let run = |after| {
+                        set_memo_after(Some(after));
+                        let f = find(subject.as_bytes(), pat.as_bytes(), 1, false)
+                            .map(|o| o.map(|f| (f.start, f.end)));
+                        let m = str_match(subject.as_bytes(), pat.as_bytes(), 1)
+                            .map(|o| o.map(|c| format!("{c:?}")));
+                        let (s, p) = (subject.as_bytes(), pat.as_bytes());
+                        let mut g = Gsub::new(p, 100);
+                        let r = (|| {
+                            while let Some(m) = g.next(s, p)? {
+                                g.add_template(s, &m, b"<%0>")?;
+                            }
+                            g.finish(s)
+                        })();
+                        set_memo_after(None);
+                        (format!("{f:?}"), format!("{m:?}"), format!("{r:?}"))
+                    };
+                    let with = run(0);
+                    let without = run(u64::MAX);
+                    assert_eq!(
+                        with, without,
+                        "{pairs} pairs, tail {tail:?}, subject {subject:?}"
+                    );
+                    compared += 1;
+                    errors += usize::from(with.0.contains("too complex"));
+                }
+            }
+        }
+        // Both sides of the limit were reached.
+        assert!(
+            errors > 0 && errors < compared,
+            "{errors} of {compared} raised"
+        );
     }
 }

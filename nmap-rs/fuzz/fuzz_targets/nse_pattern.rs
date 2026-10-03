@@ -32,7 +32,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nmap_core::nse::stdlib::pattern::{find, str_match, Capture, Gmatch, Gsub};
+use nmap_core::nse::stdlib::pattern::{find, set_memo_after, str_match, Capture, Gmatch, Gsub};
 
 /// Positions worth reaching from one selector: both ends, both signs, and the
 /// extremes that exercise `posrelatI`'s clipping.
@@ -80,7 +80,54 @@ fn in_subject(s: &[u8], c: &Capture<'_>) -> bool {
 
 const TEMPLATES: [&[u8]; 8] = [b"%0", b"x", b"%1", b"<%1|%2>", b"%%", b"", b"%", b"%9"];
 
+/// Everything the four functions answer for one input, as text, so that two
+/// runs can be compared whole.
+fn transcript(sel: u8, p: &[u8], s: &[u8]) -> Vec<String> {
+    let mut t = Vec::new();
+    let init = init_for(sel, s.len());
+    let plain = sel & 0x80 != 0;
+    t.push(format!("{:?}", find(s, p, init, plain)));
+    t.push(format!("{:?}", str_match(s, p, init)));
+    let mut g = Gmatch::new(s.len(), init);
+    for _ in 0..2 * (s.len() + 1) {
+        match g.next(s, p) {
+            Ok(Some(c)) => t.push(format!("{c:?}")),
+            other => {
+                t.push(format!("{other:?}"));
+                break;
+            }
+        }
+    }
+    let tpl = TEMPLATES[usize::from(sel >> 4) % TEMPLATES.len()];
+    let mut sub = Gsub::new(p, s.len() as i64 + 1);
+    let r = (|| {
+        while let Some(m) = sub.next(s, p)? {
+            sub.add_template(s, &m, tpl)?;
+        }
+        sub.finish(s)
+    })();
+    t.push(format!("{r:?}"));
+    t
+}
+
 fuzz_target!(|input: &[u8]| {
+    {
+        let [sel, plen, rest @ ..] = input else {
+            return;
+        };
+        let (p, s) = rest.split_at(usize::from(*plen).min(rest.len()));
+        if affordable(p, s.len()) {
+            // The failure memo must change nothing: every answer and every
+            // error, "pattern too complex" included, the same with it
+            // recording from the first computation as with it never on.
+            set_memo_after(Some(0));
+            let with = transcript(*sel, p, s);
+            set_memo_after(Some(u64::MAX));
+            let without = transcript(*sel, p, s);
+            set_memo_after(None);
+            assert_eq!(with, without, "the memo changed an outcome");
+        }
+    }
     let [sel, plen, rest @ ..] = input else {
         return;
     };

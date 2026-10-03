@@ -55,6 +55,21 @@ fn corpus(file: &str) -> PathBuf {
 
 #[test]
 fn patterns_match_nmaps_own_lua_exactly() {
+    run_corpus();
+}
+
+/// The same corpus with the failure memo recording from the very first
+/// computation, so that every case runs through it rather than only the slow
+/// ones. The memo is meant to change no answer and no error; this is where
+/// that is held to the oracle (`pattern-worst-case-time-is-the-cs`).
+#[test]
+fn patterns_match_nmaps_own_lua_exactly_with_the_memo_always_on() {
+    nmap_core::nse::stdlib::pattern::set_memo_after(Some(0));
+    run_corpus();
+    nmap_core::nse::stdlib::pattern::set_memo_after(None);
+}
+
+fn run_corpus() {
     let golden: HashMap<_, _> = rows(&corpus("m6_pattern_golden.txt"))
         .into_iter()
         .map(|(n, s, v)| (n, (s, v)))

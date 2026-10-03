@@ -38,9 +38,11 @@ record; edit it as milestones complete.
 > function there is gated by a differential against `liblua/` built from this
 > repository, with no exemption list.
 >
-> **Open before M6.4 gives scripts sockets:** the pattern matcher keeps the C's
-> worst-case running time, which a hostile subject can drive (DIVERGENCES.md,
-> `pattern-worst-case-time-is-the-cs`; the exact fix is designed there).
+> **Open before M6.4 gives scripts sockets:** the runtime needs a memory and
+> call-depth budget (DIVERGENCES.md, `vm-allocation-failure-aborts`,
+> `vm-no-c-call-depth-limit`). The pattern matcher's worst case, the other item
+> that was here, is closed: an exact failure memo bounds it
+> (`pattern-worst-case-time-is-bounded`).
 >
 > **Never skip the retrospective.** Each milestone is its own kit cycle:
 > `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop → audit →

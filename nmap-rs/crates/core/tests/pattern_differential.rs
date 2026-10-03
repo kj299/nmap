@@ -61,7 +61,7 @@ fn patterns_match_nmaps_own_lua_exactly() {
 /// The same corpus with the failure memo recording from the very first
 /// computation, so that every case runs through it rather than only the slow
 /// ones. The memo is meant to change no answer and no error; this is where
-/// that is held to the oracle (`pattern-worst-case-time-is-the-cs`).
+/// that is held to the oracle (`pattern-worst-case-time-is-bounded`).
 #[test]
 fn patterns_match_nmaps_own_lua_exactly_with_the_memo_always_on() {
     nmap_core::nse::stdlib::pattern::set_memo_after(Some(0));

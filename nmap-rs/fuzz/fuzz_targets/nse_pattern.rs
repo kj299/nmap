@@ -23,12 +23,13 @@
 // Input layout: byte 0 selects the initial position and the plain flag, byte 1
 // the pattern length, then the pattern, then the subject.
 //
-// One thing is NOT fuzzed: the matcher's running time. The C algorithm is
-// exponential in the number of quantified items, and the port keeps that
-// algorithm (DIVERGENCES.md, `pattern-worst-case-time-is-the-cs`), so an input
-// whose worst case is large would only ever report a libFuzzer timeout. Such
-// inputs are skipped, which leaves every input the matcher can finish quickly —
-// and that is every input whose correctness is in question.
+// Every input is also run twice, with the failure memo recording from the
+// first computation and with it never on, and the two transcripts must be
+// identical — answers, errors and "pattern too complex" alike
+// (DIVERGENCES.md, `pattern-worst-case-time-is-bounded`). The memo-off run is
+// the C's own algorithm, exponential in the number of quantified items, so an
+// input whose worst case for it is large is skipped; that leaves every input
+// the reference can finish, which is every input the comparison can judge.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

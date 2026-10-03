@@ -1505,4 +1505,31 @@ mod tests {
             "{crossed} of {tried} raised"
         );
     }
+
+    /// The memo's tables and bookkeeping, small enough for Miri: a handful of
+    /// backtracking cases, memo always on against memo never on.
+    #[test]
+    fn memo_on_and_off_agree_on_small_backtracking_cases() {
+        let cases: [(&str, &str); 6] = [
+            ("aaaaab", "a?a?a?a?aaaaa"),
+            ("xaxbxc", "(.-)a(.-)b(.-)c"),
+            ("<p>hi</p>", "(.*)</html>"),
+            ("aaab", ".*.*b"),
+            ("ab ab", "%f[%w]%w+ (%w*)$"),
+            ("aaa", "a*a*a*$"),
+        ];
+        for (subject, pat) in cases {
+            let run = |after| {
+                set_memo_after(Some(after));
+                let r = format!(
+                    "{:?} {:?}",
+                    find(subject.as_bytes(), pat.as_bytes(), 1, false),
+                    str_match(subject.as_bytes(), pat.as_bytes(), 1)
+                );
+                set_memo_after(None);
+                r
+            };
+            assert_eq!(run(0), run(u64::MAX), "{pat:?} on {subject:?}");
+        }
+    }
 }

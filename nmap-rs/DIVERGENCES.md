@@ -2505,21 +2505,37 @@ listed at the end.
       host when the fuel runs out, so a long substitution no longer holds the
       interpreter for its whole duration. A single match still runs to
       completion; see the next entry.
-- [ ] `pattern-worst-case-time-is-the-cs` — **open, and must close before
-      M6.4 gives scripts sockets.** The port keeps the C algorithm, a
-      backtracking matcher whose worst case is polynomial in the subject's
-      length with the number of quantified items as the exponent (and
-      exponential in `?` items). The subject is what a remote host controls; the
-      pattern is the script's. C nmap has exactly this exposure, and since a C
-      function cannot be interrupted, `--script-timeout` cannot stop a match in
-      progress there either. The fix designed for it is exact rather than a step
-      budget: memoise *failed* `(subject offset, pattern offset)` states, which
-      is sound because along any path the capture structure at a pattern offset
-      is fixed by the pattern, and record with each failure the recursion depth
-      it reached so that "pattern too complex" is raised in exactly the cases
-      the C raises it. Patterns with back-references, whose outcome depends on
-      capture contents, keep the plain algorithm. The fuzz target skips inputs
-      whose worst case is large until then.
+- [x] `pattern-worst-case-time-is-bounded` (was `pattern-worst-case-time-is-the-cs`,
+      open until this closed it). The C matcher is a backtracking search whose
+      worst case is exponential in the number of quantified items, over a
+      subject a remote host controls, and since a C function cannot be
+      interrupted, `--script-timeout` cannot stop a match in progress. The port
+      keeps the C's search and adds an **exact** failure memo: once a call has
+      done more than 4,096 + 16-per-subject-byte computations — which a scan
+      that never backtracks does not — it records every `(subject offset,
+      pattern offset)` state proven to fail, with how many frames deeper than
+      its own the failure went, and replays each later visit as the same
+      failure, or as "pattern too complex" where the visit is deep enough that
+      the C's re-run would cross `MAXCCALLS`. The expansion loops record every
+      later start in a run they prove fails. Patterns with back-references,
+      whose outcome depends on capture contents, are never memoised. Why this
+      changes no answer and no error is argued on `Memo` in `pattern.rs`; it is
+      held to that by the 11,408-case corpus run a second time with the memo
+      recording from the first computation, by the fuzz target comparing memo on
+      and off on every input, and by a test built so that only a reused failure
+      crosses the limit (a replay that ignored the depth, or a height recorded
+      one frame short, both fail it).
+
+      | input (nmap's Lua vs the port, same answers) | C | port |
+      |---|---|---|
+      | `a?`×26 `a`×26 on 25 `a`s | 72 s | 0.003 s |
+      | `(.-)a(.-)b(.-)c` over 64 KB of `a` | > 120 s | 0.15 s |
+      | `.*.*.*x` over 20 KB | > 120 s | 0.03 s |
+      | `(.*)</html>` over 72 KB without one | 57 s | 0.13 s |
+      | plain `find(s, "a%dx")` over 1 MB, ×3 | 0.05 s | 0.14 s |
+
+      The last row is the price: the bookkeeping the memo needs costs a plain
+      linear scan about three times the C's time.
 
 ### Differences that belong to the VM, not to this module
 

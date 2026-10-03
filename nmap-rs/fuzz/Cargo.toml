@@ -312,3 +312,9 @@ name = "nse_strpack"
 path = "fuzz_targets/nse_strpack.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_pattern"
+path = "fuzz_targets/nse_pattern.rs"
+test = false
+doc = false

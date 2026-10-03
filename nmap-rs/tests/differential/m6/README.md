@@ -156,3 +156,36 @@ cargo +nightly fuzz run nse_selection fuzz/corpus/nse_selection fuzz/seeds/nse_s
 CI does the same. The seeds directory is meant to stay small and hand-read:
 20 shapes chosen by hand, plus three inputs the fuzzer found that are kept
 because they are regression tests for specific performance bugs.
+
+# M6 stdlib differentials — the Lua standard library NSE needs
+
+The vendored VM ships seven string functions; the rest are written first-party
+in `core::nse::stdlib` and each is gated here against `liblua/` built from this
+repository (`oracle/build_lua_oracle.sh`). Every case is a Lua chunk the
+oracle's `lua` evaluates and the Rust harness evaluates through the VM with the
+port installed. Neither corpus has an exemption list.
+
+| corpus | gates | regenerate | cases |
+|---|---|---|---|
+| `m6_strpack_*` | `string.pack` / `unpack` / `packsize` | `regen_m6_strpack.sh` | 4,804 |
+| `m6_pattern_*` | `string.find` / `match` / `gmatch` / `gsub` | `regen_m6_pattern.sh` | 11,408 |
+
+The pattern corpus is the first to compare error **messages**
+(`oracle/m6_pattern_driver.lua` hex-encodes them), because the matcher's errors
+are lazy and "which message, or none" is the behaviour under test. Its section J
+reads every pattern literal in `nselib/` and `scripts/`, so a change to those
+trees changes the corpus and `--check` says so.
+
+To check a candidate case before adding it, run the same cases file through
+both sides and diff:
+
+```sh
+./oracle/lua oracle/m6_pattern_driver.lua my_cases.txt > lua.txt
+cargo run -p nmap-core --example m6_eval -- my_cases.txt > port.txt
+diff lua.txt port.txt
+```
+
+An error that escapes a chunk will differ by the `chunk:N: ` prefix nmap's Lua
+gives it and the vendored VM does not (DIVERGENCES.md,
+`error_string_gets_position`); the gate discounts exactly that prefix, and a
+plain `diff` does not.

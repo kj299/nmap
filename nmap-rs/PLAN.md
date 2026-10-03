@@ -19,40 +19,29 @@ record; edit it as milestones complete.
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ✅ **DONE** — Phase 0 pre-mortem + spike S1 (pcap-in-async) before any Rust; then `core::bytes` → `checksum` → the six `headers::*` → `packet_parser` → `build` → `recv_validate` → `classify` → `ipid`, and `sys::{netif,capture,rawio}`. All raw scans ship on **one** engine: `sys::group` scans a host group over a single demultiplexed capture, with `SynKind` (`-sS`), `UdpKind` (`-sU`) and `FlagKind` (`-sA/-sW/-sM/-sF/-sN/-sX`); `core::payload` derives UDP payloads from `nmap-service-probes`; `core::icmp_quote` gives all three the *filtered*-with-reason path. Retrospective merged (PRs #29–#57). |
 | 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ✅ **DONE** — both tracks. **IPv4:** `osdb::{expr,model,parse,score}` over the real 5.1 MB `nmap-os-db` (6,108 fingerprints), `macvendor` (52,085 prefixes), the full `osprobe` battery + 13 tests, `assemble`, `osscan` policy, `demux` + `sys::osscan`; `-O` is **feature-complete against the C's user-visible output** — normal, XML (`<os>`/`<uptime>`/`<tcpsequence>`…) and grepable, plus uptime, sequence-prediction difficulty and `--max-os-tries`. **IPv6:** `fpmodel` (liblinear **removed** — the one entry point reduces to a dot product), ICMPv6 + the four extension headers, `fp6::vectorize`, `build6`, `fp6_match`, `sys::fpengine`, `core::ndp` + `sys::ndp` + `route_for6` + `EthFramingSender` (Linux has no `IPV6_HDRINCL`, so the send path is L2), and CLI `-6 -O`. **Five genuine nmap defects found**, two of them NDP memory-safety bugs reachable by any on-link host, proved under ASAN. Retrospective merged; kit lessons #19–#25 (PRs #58–#83). ⚠️ **`os_scan_host6`'s live wiring is unvalidated on hardware** — see BACKLOG 12b-ii-b-3. |
 | S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | 🔶 **EVERY UNBLOCKED SLICE DONE** — the DB **parsers** landed with M3/M5; the missing maintenance loop is now built. `core::sigstore::{manifest,digest,verify}` (fail-closed manifest, in-tree SHA-256, minisign-style Ed25519 over a pinned key ring — gated by a 41-case OpenSSL differential and `verify_strict`, which is the only implementation of four that rejects small-order-key forgeries), `core::fingerprint_store` (consent-gated), `core::servicefp` (the one slice with a C counterpart, so the only true differential), `sys::sigstore` (atomic install). **S5 (`sys::update`) is blocked on three policy decisions**, not on engineering — see Next concrete steps. (PRs #84–#90.) |
-| 6 | NSE — Lua engine + bridges + scripts | full cycle | 🔶 **PHASE 0 DONE, awaiting port-order approval** — [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md). Measured: NSE is **8,303 lines of C++ glue**, not the 211,309 lines of Lua it looks like — the 133 `nselib/` libraries and 611 `scripts/` must *run* unmodified, which hands M6 a 611-program oracle. Leaf-first behind the `nmap` module (455 of 744 Lua files hard-require it; every other C module is already `pcall`-guarded). Three questions need answers first: which Lua binding, whether to sandbox (**the C does not** — `luaL_openlibs` gives every script `io` and `os`), and whether all 611 scripts must run. |
-| 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | ⬜ |
+| 6 | NSE — Lua engine + bridges + scripts | full cycle | 🔶 **IN PROGRESS** — Phase 0 and the four decisions in [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md) are done; **M6.1** (`.nse` metadata, `script.db`) and **M6.2** (`--script` selection) are merged (#96, #97). **M6.0, the Lua runtime:** `piccolo` vendored with the `gc-arena` pin resolved (#109); the string metatable (#110); VM defects fixed against nmap's own `liblua/` — arithmetic that could abort the process (#111), float formatting (#112), string-to-number coercion (#113) — leaving **3 of 99** semantics cases divergent; and the first-party stdlib in `core::nse::stdlib`: `string.pack`/`unpack`/`packsize` (#114) and **Lua patterns** — `find`/`match`/`gmatch`/`gsub` — (`claude/m6-stdlib-patterns`), each gated by a `liblua/` differential with no exemption list (4,804 and 11,408 cases), a fuzz target and Miri. Next in the approved order: `string.format`, then the tail (`string.rep`, `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal`). |
+| 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | 🔶 **IN PROGRESS** — [`docs/M7-ANALYSIS.md`](docs/M7-ANALYSIS.md), [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md). M7.0–M7.10 merged (#98–#108): unimplemented options fail closed; the `sys` coverage gap closed; the tracker reconciled; every unimplemented option triaged into MUST / SHOULD / REFUSE against a written capability profile; the evasion decisions settled (`--ttl`, `--badsum`, `-S` ported); and all five steps of the MUST tier landed — `--exclude`/`--excludefile`/`-iL`, `-sL`, the `-T` group, port selection, `-oA`/`--open`/`--reason`. **Three MUST options are still refused**, fail-closed, because the engine cannot yet honour them: `--host-timeout`, `--min-hostgroup`, `--max-hostgroup`. Release engineering and `ncat`/`nping` remain. |
 
-> **We are here:** Milestones 0-5 are complete and merged. `nmap-rs` runs `-sT`,
-> `-sS`, `-sU`, the six TCP flag scans, `-sV` and `-O` (IPv4 **and** IPv6), with
-> normal, XML and grepable output. The workspace holds **55 shipped modules**;
-> `core` is `#![forbid(unsafe_code)]` and `sys` is the only *first-party* crate with
-> `unsafe` (M6.0 added `crates/vendor/piccolo`, third-party and gated the same way), all
-> of it documented and gated by the unsafe-audit harness; miri is clean; CI is green
-> in ~14 minutes across 12 jobs (an `msrv` gate joined them).
+> **We are here:** Milestones 0-5 are complete and merged; Workstream S has every
+> unblocked slice merged; **M6 and M7 are both in progress**. M6 resumed once the
+> five steps of M7's MUST tier had landed (M6-ANALYSIS.md, Decision 3, sequences it
+> after that tier rather than competing with it). `nmap-rs` runs `-sT`, `-sS`, `-sU`, the six TCP flag scans, `-sV` and
+> `-O` (IPv4 **and** IPv6), `-sL`, the `-T` templates, port selection and all four
+> output formats; an option it cannot honour is refused rather than ignored.
 >
-> Workstream S then added what nmap has never had: signed, versioned signature
-> bundles with a verification path, plus an opt-in store for the unmatched
-> fingerprints the tool already computes. M6's Phase 0 is done and waiting on a
-> port-order decision.
+> M6 has the parts of NSE that need no running script — `.nse` metadata and
+> `--script` selection — and is building the Lua runtime underneath the rest. The
+> vendored VM now matches nmap's own Lua on all but 3 of 99 semantics cases, and the
+> standard library it lacks is being written first-party in `core::nse::stdlib`,
+> leaf-first by how many shipped files each function unblocks: `string.pack`/
+> `unpack`/`packsize`, then Lua patterns, are done; `string.format` is next. Every
+> function there is gated by a differential against `liblua/` built from this
+> repository, with no exemption list.
 >
-> M4 built the raw layer (send/capture, the header set, the packet walk) and
-> collapsed every raw scan onto **one** group engine. M5 built OS detection on top of
-> it and found **five genuine nmap defects** along the way - two of them NDP
-> memory-safety bugs reachable by any on-link host, proved under ASAN, fixed in the
-> port and ledgered. Its retrospective added kit lessons #19-#25, including three CI
-> fixes (fail the fuzz *build* fast; a per-target time-boxed gate grows without
-> anyone deciding to; `push` + `pull_request` without a branch filter runs everything
-> twice, forever, silently).
+> **Open before M6.4 gives scripts sockets:** the pattern matcher keeps the C's
+> worst-case running time, which a hostile subject can drive (DIVERGENCES.md,
+> `pattern-worst-case-time-is-the-cs`; the exact fix is designed there).
 >
-> **Next: Workstream S (signature DB maintenance).** The DB *parsers* already landed
-> with M3 and M5; what is missing is the loop around them, and it is missing in the C
-> too - nmap has no in-tool way to update `nmap-os-db`, `nmap-service-probes` or
-> `nmap-mac-prefixes`, and no way to collect the unmatched fingerprints it computes
-> and prints. This is therefore an **additive** workstream: most of it has no C to
-> differential against, so it is gated by golden + negative tests and every piece is
-> ledgered in `DIVERGENCES.md` as intentional new behavior. Because it introduces the
-> port's **first network-fetch and first signature-verification code**, its threat
-> model is the deliverable that matters most - see `THREAT-MODEL.md` (Workstream S).
 > **Never skip the retrospective.** Each milestone is its own kit cycle:
 > `kickoff → (cflaw-scan ∥ oracle) → per-module six-gate loop → audit →
 > retrospective-that-patches-the-kit`.
@@ -152,7 +141,7 @@ Harnesses: `unsafe-audit/audit_unsafe.py` (hard-fail on undocumented `unsafe`),
 
 ---
 
-## Milestone 1 — MVP: unprivileged TCP connect scan  ⬅ NEXT
+## Milestone 1 — MVP: unprivileged TCP connect scan
 
 **Goal:** the smallest end-to-end vertical slice that proves the kit on nmap:
 `-sT` connect scan + host discovery + normal/grepable/XML output. Needs **no
@@ -446,19 +435,17 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    - **The CLI surface** for `--export-fingerprints` and the collection opt-in —
      which is why `core::fingerprint_store` is still never handed a `Service`
      record.
-5. 🔶 **M6 (NSE) Phase 0 is done — see
-   [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md).** The measured headline: NSE is
-   **8,303 lines of C++ glue**, not the 211,309 lines of Lua it appears to be —
-   the 133 `nselib/` libraries and 611 `scripts/` must *run* unmodified, not be
-   ported, which also hands M6 a 611-program test corpus no earlier milestone had.
-   The port order is leaf-first behind the `nmap` module, which 455 of the 744
-   Lua files hard-require while every other C-provided module is already
-   `pcall`-guarded in the corpus's own idiom. **Stop for approval on the port
-   order before any Rust** (kit requirement), and three questions in that document
-   need answering first — which Lua binding, whether to sandbox (the C does not:
-   `luaL_openlibs` exposes `io` and `os` to every script), and whether all 611
-   scripts must run to call M6 done.
-6. After M6: **M7 (cutover + `ncat`/`nping`)**.
+5. 🔶 **M6 (NSE) is in progress.** Phase 0 and its decisions are in
+   [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md); M6.1 and M6.2 are merged. M6.0,
+   the runtime, follows the approved order — patterns, `string.format`,
+   `pack`/`unpack`, the tail — with `pack`/`unpack` taken early (#114) and patterns
+   in review. **Next: `string.format`**, then the tail; then M6.3, the `nmap`
+   module's non-I/O half. Before M6.4: bound the pattern matcher's worst case.
+6. 🔶 **M7 is in progress** in parallel: the cutover gate is the MUST tier of
+   [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md), of which `--host-timeout`
+   and `--min-hostgroup`/`--max-hostgroup` remain; then release engineering
+   (SBOM, auditable and reproducible builds, signing, `DIVERGENCES.md` as release
+   notes) and `ncat`/`nping`.
 
 > **Note on step 3.** This section, and the STATUS TRACKER above it, sat at "M1 Phase
 > 0 (next)" while M1 through M5 were designed, built, gated and merged. The

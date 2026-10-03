@@ -9,19 +9,38 @@
 //! (`docs/M6-ANALYSIS.md`, "What the fork is *for*").
 //!
 //! Each function is split in two. The byte-level work is a pure module that
-//! knows nothing about the interpreter — [`strpack`] — so that it can be fuzzed
-//! and run under Miri directly. What is left here is the binding: turning Lua
-//! values into the arguments those functions take, with the **VM's own**
-//! conversions, and turning the results back. Nothing in this file parses a
-//! byte of script-supplied data.
+//! knows nothing about the interpreter — [`strpack`], [`pattern`] — so that it
+//! can be fuzzed and run under Miri directly. What is left here is the binding:
+//! turning Lua values into the arguments those functions take, with the
+//! **VM's own** conversions, and turning the results back. Nothing in this file
+//! parses a byte of script-supplied data.
 
+pub mod pattern;
 pub mod strpack;
 
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::pin::Pin;
 
-use piccolo::{Callback, CallbackReturn, Context, Error, Stack, Table, Value};
+use gc_arena::Collect;
+use piccolo::meta_ops::{self, MetaResult};
+use piccolo::{
+    BoxSequence, Callback, CallbackReturn, Context, Error, Execution, Function, Sequence,
+    SequencePoll, Stack, String as LuaString, Table, Value,
+};
 
+use self::pattern::{Capture, Gmatch, Gsub, Match, PatternError};
 use self::strpack::{PackArgs, PackError, Unpacked};
+
+/// The `string` table of `ctx`'s globals: the one the string metatable's
+/// `__index` points at, so that what is installed into it also resolves as a
+/// method, `s:find(...)`.
+fn string_table<'gc>(ctx: Context<'gc>) -> Result<Table<'gc>, LoadError> {
+    match ctx.globals().get_value(ctx, "string") {
+        Value::Table(t) => Ok(t),
+        _ => Err(LoadError::NoStringTable),
+    }
+}
 
 /// Installs `string.pack`, `string.unpack` and `string.packsize` into the
 /// `string` table of `ctx`'s globals, replacing anything already there.
@@ -29,12 +48,31 @@ use self::strpack::{PackArgs, PackError, Unpacked};
 /// The `string` table is the one the string metatable's `__index` points at,
 /// so this also makes `fmt:pack(...)`-style method calls resolve.
 pub fn load_strpack<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
-    let Value::Table(string) = ctx.globals().get_value(ctx, "string") else {
-        return Err(LoadError::NoStringTable);
-    };
+    let string = string_table(ctx)?;
     install(ctx, string, "pack", str_pack);
     install(ctx, string, "unpack", str_unpack);
     install(ctx, string, "packsize", str_packsize);
+    Ok(())
+}
+
+/// Installs `string.find`, `string.match`, `string.gmatch` and `string.gsub`
+/// into the `string` table of `ctx`'s globals, replacing anything already
+/// there.
+pub fn load_patterns<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
+    let string = string_table(ctx)?;
+    install(ctx, string, "find", str_find);
+    install(ctx, string, "match", str_match);
+    install(ctx, string, "gmatch", str_gmatch);
+    string.set_field(
+        ctx,
+        "gsub",
+        Callback::from_fn(&ctx, |ctx, _, mut stack| {
+            let seq = gsub_start(ctx, &stack)
+                .map_err(|e| lua_error(ctx, &e.lua_message("gsub")))?;
+            stack.clear();
+            Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, seq)))
+        }),
+    );
     Ok(())
 }
 
@@ -65,14 +103,24 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
         Callback::from_fn(&ctx, move |ctx, _, mut stack| {
             match body(ctx, &mut stack) {
                 Ok(()) => Ok(CallbackReturn::Return),
-                // A Lua error carrying a string, which is what `luaL_error` and
-                // `luaL_argerror` raise: `pcall` returns it as the message.
-                Err(e) => Err(Error::from(Value::String(
-                    ctx.intern(e.lua_message(name).as_bytes()),
-                ))),
+                Err(e) => Err(lua_error(ctx, &e.lua_message(name))),
             }
         }),
     );
+}
+
+/// A Lua error carrying a string, which is what `luaL_error` and
+/// `luaL_argerror` raise: `pcall` returns it as the message.
+fn lua_error<'gc>(ctx: Context<'gc>, msg: &str) -> Error<'gc> {
+    Error::from(Value::String(ctx.intern(msg.as_bytes())))
+}
+
+/// A matcher error is a `luaL_error`: it names no argument.
+fn pattern_error(e: PatternError) -> PackError {
+    PackError {
+        arg: None,
+        msg: e.msg,
+    }
 }
 
 /// The Lua arguments of one call, read by 1-based argument number.
@@ -105,6 +153,18 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
             Some(v @ (Value::Integer(_) | Value::Number(_))) => v
                 .into_string(self.ctx)
                 .map(|s| Cow::Borrowed(s.as_bytes()))
+                .ok_or_else(|| self.type_error(arg, "string")),
+            _ => Err(self.type_error(arg, "string")),
+        }
+    }
+
+    /// `luaL_checklstring`, keeping the Lua string itself rather than its
+    /// bytes, for a caller that must hold it past this call.
+    fn string_value(&self, arg: usize) -> Result<LuaString<'gc>, PackError> {
+        match self.get(arg) {
+            Some(Value::String(s)) => Ok(s),
+            Some(v @ (Value::Integer(_) | Value::Number(_))) => v
+                .into_string(self.ctx)
                 .ok_or_else(|| self.type_error(arg, "string")),
             _ => Err(self.type_error(arg, "string")),
         }
@@ -197,6 +257,251 @@ fn str_unpack<'gc>(ctx: Context<'gc>, stack: &mut Stack<'gc, '_>) -> Result<(), 
         stack.push_back(v);
     }
     Ok(())
+}
+
+/// A capture as the Lua value `push_onecapture` pushes.
+fn capture_value<'gc>(ctx: Context<'gc>, c: Capture<'_>) -> Value<'gc> {
+    match c {
+        Capture::Bytes(b) => Value::String(ctx.intern(b)),
+        Capture::Position(n) => Value::Integer(n),
+    }
+}
+
+/// Replace the call's arguments with `values`.
+fn set_results<'gc>(stack: &mut Stack<'gc, '_>, values: Vec<Value<'gc>>) {
+    stack.clear();
+    for v in values {
+        stack.push_back(v);
+    }
+}
+
+/// `string.find(s, pattern [, init [, plain]])`.
+fn str_find<'gc>(ctx: Context<'gc>, stack: &mut Stack<'gc, '_>) -> Result<(), PackError> {
+    // The captures borrow from the subject, so they become Lua values before
+    // the stack holding it is overwritten.
+    let values: Vec<Value<'gc>> = {
+        let args = LuaArgs { ctx, stack };
+        let s = args.string(1)?;
+        let p = args.string(2)?;
+        let init = args.opt_integer(3, 1)?;
+        let plain = args.get(4).is_some_and(Value::to_bool);
+        match pattern::find(&s, &p, init, plain).map_err(pattern_error)? {
+            Some(found) => [Value::Integer(found.start), Value::Integer(found.end)]
+                .into_iter()
+                .chain(found.captures.into_iter().map(|c| capture_value(ctx, c)))
+                .collect(),
+            None => vec![Value::Nil],
+        }
+    };
+    set_results(stack, values);
+    Ok(())
+}
+
+/// `string.match(s, pattern [, init])`.
+fn str_match<'gc>(ctx: Context<'gc>, stack: &mut Stack<'gc, '_>) -> Result<(), PackError> {
+    let values: Vec<Value<'gc>> = {
+        let args = LuaArgs { ctx, stack };
+        let s = args.string(1)?;
+        let p = args.string(2)?;
+        let init = args.opt_integer(3, 1)?;
+        match pattern::str_match(&s, &p, init).map_err(pattern_error)? {
+            Some(caps) => caps.into_iter().map(|c| capture_value(ctx, c)).collect(),
+            None => vec![Value::Nil],
+        }
+    };
+    set_results(stack, values);
+    Ok(())
+}
+
+/// What a `gmatch` iterator closes over: the two strings (`lua_settop(L, 2)`
+/// keeps them alive in the C) and the iteration state.
+#[derive(Collect)]
+#[collect(no_drop)]
+struct GmatchRoot<'gc> {
+    s: LuaString<'gc>,
+    p: LuaString<'gc>,
+    state: Cell<Gmatch>,
+}
+
+/// `string.gmatch(s, pattern [, init])`: returns the iterator.
+fn str_gmatch<'gc>(ctx: Context<'gc>, stack: &mut Stack<'gc, '_>) -> Result<(), PackError> {
+    let root = {
+        let args = LuaArgs { ctx, stack };
+        let s = args.string_value(1)?;
+        let p = args.string_value(2)?;
+        let init = args.opt_integer(3, 1)?;
+        GmatchRoot {
+            s,
+            p,
+            state: Cell::new(Gmatch::new(s.as_bytes().len(), init)),
+        }
+    };
+    let iter = Callback::from_fn_with(&ctx, root, |root, ctx, _, mut stack| {
+        let mut state = root.state.get();
+        let found = state.next(root.s.as_bytes(), root.p.as_bytes());
+        // Whatever `next` advanced is kept even if reading the captures then
+        // failed, as the C keeps it.
+        root.state.set(state);
+        let values = match found.map_err(|e| lua_error(ctx, &e.msg))? {
+            Some(caps) => caps.into_iter().map(|c| capture_value(ctx, c)).collect(),
+            None => Vec::new(),
+        };
+        set_results(&mut stack, values);
+        Ok(CallbackReturn::Return)
+    });
+    stack.replace(ctx, iter);
+    Ok(())
+}
+
+/// `gsub`'s third argument, by `lua_type`.
+#[derive(Collect, Clone, Copy)]
+#[collect(no_drop)]
+enum Replacement<'gc> {
+    /// A string, or a number already converted to one, as `add_s`'s
+    /// `lua_tolstring` converts it.
+    Template(LuaString<'gc>),
+    Function(Function<'gc>),
+    Table(Table<'gc>),
+}
+
+/// `string.gsub(s, pattern, repl [, n])`, as a [`Sequence`]: a function or
+/// table replacement is a call back into the VM between one match and the
+/// next.
+#[derive(Collect)]
+#[collect(no_drop)]
+struct GsubSeq<'gc> {
+    s: LuaString<'gc>,
+    p: LuaString<'gc>,
+    repl: Replacement<'gc>,
+    #[collect(require_static)]
+    driver: Gsub,
+    /// The match whose replacement the VM is computing.
+    #[collect(require_static)]
+    pending: Option<Match>,
+}
+
+/// The argument checks of `str_gsub` (`lstrlib.c:928`), in the C's order: the
+/// count (argument 4) is read before the replacement's type (argument 3) is
+/// checked, so a bad count is the error reported when both are wrong.
+fn gsub_start<'gc>(ctx: Context<'gc>, stack: &Stack<'gc, '_>) -> Result<GsubSeq<'gc>, PackError> {
+    let args = LuaArgs { ctx, stack };
+    let s = args.string_value(1)?;
+    let p = args.string_value(2)?;
+    let tr = args.get(3);
+    let srcl = i64::try_from(s.as_bytes().len()).unwrap_or(i64::MAX);
+    let max_s = args.opt_integer(4, srcl.saturating_add(1))?;
+    let repl = match tr {
+        Some(Value::String(r)) => Replacement::Template(r),
+        Some(v @ (Value::Integer(_) | Value::Number(_))) => Replacement::Template(
+            v.into_string(ctx)
+                .ok_or_else(|| args.type_error(3, "string/function/table"))?,
+        ),
+        Some(Value::Function(f)) => Replacement::Function(f),
+        Some(Value::Table(t)) => Replacement::Table(t),
+        _ => return Err(args.type_error(3, "string/function/table")),
+    };
+    Ok(GsubSeq {
+        s,
+        p,
+        repl,
+        driver: Gsub::new(p.as_bytes(), max_s),
+        pending: None,
+    })
+}
+
+impl<'gc> GsubSeq<'gc> {
+    /// The tail of `add_value` (`lstrlib.c:899`): what a function returned or
+    /// a table held for this match.
+    fn apply(&mut self, ctx: Context<'gc>, m: &Match, v: Value<'gc>) -> Result<(), Error<'gc>> {
+        let s = self.s.as_bytes();
+        let res = if !v.to_bool() {
+            self.driver.keep(s, m) // nil or false: keep the original text
+        } else {
+            match v {
+                Value::String(r) => self.driver.add_value(m, r.as_bytes()),
+                Value::Integer(_) | Value::Number(_) => {
+                    let text = v.into_string(ctx).map_or(&[][..], |r| r.as_bytes());
+                    self.driver.add_value(m, text)
+                }
+                other => {
+                    return Err(lua_error(
+                        ctx,
+                        &format!("invalid replacement value (a {})", other.type_name()),
+                    ))
+                }
+            }
+        };
+        res.map_err(|e| lua_error(ctx, &e.msg))
+    }
+}
+
+impl<'gc> Sequence<'gc> for GsubSeq<'gc> {
+    fn poll(
+        self: Pin<&mut Self>,
+        ctx: Context<'gc>,
+        mut exec: Execution<'gc, '_>,
+        mut stack: Stack<'gc, '_>,
+    ) -> Result<SequencePoll<'gc>, Error<'gc>> {
+        let this = self.get_mut();
+        let (s, p) = (this.s.as_bytes(), this.p.as_bytes());
+        let err = |e: PatternError| lua_error(ctx, &e.msg);
+
+        // A call made on the previous poll has returned: its first result is
+        // the replacement (`lua_call(L, n, 1)`, `lua_gettable`).
+        if let Some(m) = this.pending.take() {
+            let v = stack.get(0);
+            stack.clear();
+            this.apply(ctx, &m, v)?;
+        }
+
+        loop {
+            let Some(m) = this.driver.next(s, p).map_err(err)? else {
+                let (out, n) = this.driver.finish(s).map_err(err)?;
+                let result = out.map_or(this.s, |b| ctx.intern(&b));
+                stack.replace(ctx, (Value::String(result), Value::Integer(n)));
+                return Ok(SequencePoll::Return);
+            };
+            match this.repl {
+                Replacement::Template(r) => {
+                    this.driver.add_template(s, &m, r.as_bytes()).map_err(err)?;
+                }
+                Replacement::Function(f) => {
+                    let caps = m.captures(s, true).map_err(err)?;
+                    stack.clear();
+                    for c in caps {
+                        stack.push_back(capture_value(ctx, c));
+                    }
+                    this.pending = Some(m);
+                    return Ok(SequencePoll::Call {
+                        bottom: 0,
+                        function: f,
+                    });
+                }
+                Replacement::Table(t) => {
+                    let key = capture_value(ctx, m.capture(s, 0).map_err(err)?);
+                    match meta_ops::index(ctx, Value::Table(t), key)? {
+                        MetaResult::Value(v) => this.apply(ctx, &m, v)?,
+                        MetaResult::Call(call) => {
+                            stack.clear();
+                            stack.extend(call.args);
+                            this.pending = Some(m);
+                            return Ok(SequencePoll::Call {
+                                bottom: 0,
+                                function: call.function,
+                            });
+                        }
+                    }
+                }
+            }
+            // One unit of fuel per replacement, so that a long substitution
+            // yields to the host between matches rather than holding the VM.
+            let fuel = exec.fuel();
+            fuel.consume(1);
+            if !fuel.should_continue() {
+                return Ok(SequencePoll::Pending);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

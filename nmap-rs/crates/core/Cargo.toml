@@ -58,5 +58,13 @@ ed25519-dalek = { version = "2.1.1", default-features = false }
 # audit_unsafe.py, clippy and check_vendor.sh instead.
 piccolo = { path = "../vendor/piccolo" }
 
+# The VM's garbage collector, for one thing only: `#[derive(Collect)]` on the
+# binding's own GC-traced state — the `gmatch` iterator's closure and the `gsub`
+# sequence that calls back into the VM between matches. The derive is the only
+# way to implement `Collect` without writing `unsafe impl` by hand, which this
+# crate forbids. Pinned to the exact version piccolo pins, so it adds nothing to
+# Cargo.lock and the two can never disagree about what a `Gc` is.
+gc-arena = "=0.5.3"
+
 [lints]
 workspace = true

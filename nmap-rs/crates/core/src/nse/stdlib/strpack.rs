@@ -637,7 +637,7 @@ fn unpackint(field: &[u8], little: bool, signed: bool) -> Result<i64, PackError>
 
 /// `posrelatI` (`lstrlib.c:71`): a 1-based, possibly negative position, clipped
 /// to `1` below. Not clipped above — the caller checks that.
-fn posrelat_i(pos: i64, len: usize) -> u64 {
+pub(super) fn posrelat_i(pos: i64, len: usize) -> u64 {
     let len = u64::try_from(len).unwrap_or(u64::MAX);
     let magnitude = pos.unsigned_abs();
     if pos > 0 {

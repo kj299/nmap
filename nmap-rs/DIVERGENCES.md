@@ -2493,11 +2493,13 @@ listed at the end.
       script chose, not a subject a host chose, so it is not remotely
       triggerable through any shipped script; it is closed because the threat
       model treats scripts as untrusted too.
-- [x] `pattern-gsub-allocation-failure-is-a-lua-error`: the `gsub` result grows
-      with `try_reserve`, so an allocation the system refuses raises "not
-      enough memory", which a script can `pcall`, rather than aborting the
-      process. As for `strpack-allocation-failure-is-a-lua-error`, this is not a
-      memory budget.
+- [x] `pattern-gsub-allocation-failure-is-a-lua-error` — **partial; see
+      `vm-allocation-failure-aborts` below.** The `gsub` result buffer grows
+      with `try_reserve`, so a buffer the system refuses raises "not enough
+      memory", which a script can `pcall`, rather than aborting. But the
+      finished buffer, and every capture `find`/`match`/`gmatch` return, then
+      becomes a Lua string through the VM's `intern`, which cannot fail softly.
+      This guard closes the one allocation this module owns, nothing more.
 - [x] `pattern-gsub-yields-to-the-host-between-matches`: `gsub` is a VM
       sequence that spends one unit of fuel per replacement and returns to the
       host when the fuel runs out, so a long substitution no longer holds the
@@ -2539,11 +2541,23 @@ listed at the end.
       self" there and "bad argument #1 to 'find'" here. The binding always says
       `'find'` and never shifts. Argument errors are compared by status.
 
-Four further differences were found by the adversarial hunt run against this
-port (433,000 probes over six areas: classes, quantifiers, captures, `%b`/`%f`,
-gsub and `gmatch`/`init`). Each is reachable *through* `gsub` but
-is a defect of the vendored VM, equally reachable from plain Lua code, so it is
-recorded here and not fixed in this module. They are open:
+Five further differences were found by the adversarial hunt run against this
+port: about 605,000 probes over nine areas (classes, quantifiers, captures,
+`%b`/`%f`, `gsub`, `gmatch`/`init`, error paths and the recursion limit,
+mutated real NSE patterns, and robustness under large inputs and memory caps),
+every finding re-checked against `lstrlib.c`. None is a wrong answer from the
+matcher. Each is reachable *through* these functions but is a defect of the
+vendored VM, equally reachable from plain Lua code, so it is recorded here and
+not fixed in this module. They are open:
+
+- [ ] `vm-allocation-failure-aborts` — PUC-Lua allocates every string through
+      `luaM_`, which raises a catchable "not enough memory" when the system
+      refuses. The VM's `Context::intern` aborts the process instead, so under a
+      memory cap `pcall(string.match, s, "^((.*).).")` on a 100 MB subject
+      returns `false, "not enough memory"` in C and kills the port with exit
+      134 — as do `string.upper` and `table.concat` on the same input. A remote
+      host controls subject sizes, so this is a scanner-killing path; the NSE
+      runtime needs a memory budget that refuses before the allocator does.
 
 - [ ] `vm-no-c-call-depth-limit` — PUC-Lua counts nested C-to-Lua calls and
       raises "C stack overflow" at `LUAI_MAXCCALLS` (200); a `gsub` callback

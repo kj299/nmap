@@ -318,3 +318,9 @@ name = "nse_pattern"
 path = "fuzz_targets/nse_pattern.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_format"
+path = "fuzz_targets/nse_format.rs"
+test = false
+doc = false

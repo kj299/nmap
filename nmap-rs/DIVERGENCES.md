@@ -2585,3 +2585,71 @@ The same hunt found one defect in this module, fixed before merge: `find`'s
 plain search compared a window at every offset rather than jumping to
 candidates as the C's `memchr` does — the same answers, 57 times slower on a
 10 MB body searched for `"\r\n\r\n"`. It is now `memchr::memmem::find`.
+
+## Milestone 6 stdlib — `string.format` (`core::nse::stdlib::strformat`)
+
+A port of `liblua/lstrlib.c:990-1376` — Lua's validation of each conversion
+specification — together with the `printf` behaviour behind it, gated by
+[`m6_format_cases.txt`](tests/differential/m6/m6_format_cases.txt): 6,037
+cases, compared on every value **and every error message**, with no exemption
+list, including every literal format string in `nselib/` and `scripts/`. The
+`nse_format` fuzz target adds a second oracle: for every specification Lua
+accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
+(7.3 million inputs in three minutes, clean).
+
+### Faithfully reproduced C behaviour (deliberately *not* "improved")
+
+- [x] `format-validation-is-luas`: what is accepted is Lua's rule, not
+      `printf`'s — flags in any order and repeated, width and precision of at
+      most two digits, a specification of 22 bytes or more is "invalid format
+      (too long)", and each conversion takes only its own flags, so `%#d`,
+      `%05s` and `%.2c` are errors although `printf` would take them.
+- [x] `format-check-order`: each conversion checks its argument and its
+      specification in the C's order — the integer first for `%d`, the
+      specification first for `%c` — so a call wrong in both ways reports the
+      same error.
+- [x] `format-s-keeps-long-strings-whole`: `%s` with no modifiers copies the
+      string whole, NUL bytes included; with modifiers it rejects NUL bytes
+      ("string contains zeros") and copies a string of 100 bytes or more whole,
+      ignoring the width, unless a precision is given.
+- [x] `format-q-writes-hex-floats`: `%q` writes every float in hexadecimal
+      (`2.0` is `0x1p+1`), `math.mininteger` as `0x8000000000000000`, the
+      infinities as `1e9999`/`-1e9999` and NaN as `(0/0)`, and escapes a
+      control byte as `\ddd` only when a digit follows it.
+- [x] `format-nan-has-a-sign`: `0/0` is a NaN with its sign bit set on x86,
+      and glibc prints `-nan` for it; so does the port.
+
+### Platform
+
+- [x] `format-printf-is-glibcs`: the oracle is nmap's Lua built on Linux,
+      where `%a` and every other conversion go through glibc's `printf`, and
+      the port reproduces that on every platform. A Windows build of C nmap
+      differs in two ways: `luaconf.h` defines `LUA_USE_C89` for Windows, so
+      `%a` uses Lua's own formatter, which raises "modifiers for format
+      '%a'/'%A' not implemented" for `%.3a` and prints a subnormal as `0x1p-1074`
+      rather than `0x0.0000000000001p-1022`; and the C runtime's `printf`
+      prints NaN in its own way. No shipped script uses `%a`.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `format-has-no-item-buffer`: the C formats each item into a fixed buffer
+      whose size it argues from the specification (`MAX_ITEM`, `MAX_ITEMF`).
+      Here each item is built in a `Vec` grown with `try_reserve`, so there is
+      no bound to argue and a refused allocation is the catchable "not enough
+      memory". The finished string still goes through the VM's `intern`
+      (`vm-allocation-failure-aborts`).
+
+### Differences that belong to the VM, not to this module
+
+- [x] `format-bad-argument-naming`: as `pattern-bad-argument-naming` — the
+      binding always says `'format'`, where PUC-Lua says `'string.format'`
+      for a call made by `pcall` or in tail position. The corpus rewrites that
+      one name inside its batches and compares the rest of each message.
+- [x] `format-tostring-of-references`: `%s` uses the VM's own `tostring`, so a
+      table prints as `<table 0x…>` where PUC-Lua prints `table: 0x…`, and a
+      metatable's `__name` is not consulted. Keeping `%s` and `tostring`
+      consistent within the port was preferred to matching one of them; the
+      address differs between runs in both.
+- [x] `format-tostring-may-yield`: a `__tostring` metamethod called by `%s`
+      runs as a VM call, so it may yield, where PUC-Lua raises "attempt to
+      yield across a C-call boundary" — as for `gsub` callbacks.

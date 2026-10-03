@@ -1,7 +1,7 @@
 //! The first-party half of NSE's Lua standard library.
 //!
 //! The vendored VM ships seven string functions. The rest of what the shipped
-//! scripts call — Lua patterns, `string.format`, `string.pack`/`unpack` — is
+//! scripts call — Lua patterns, `string.format`, `string.pack`/`unpack`, the tail — is
 //! written here, against the VM's public API, rather than patched into
 //! `crates/vendor/piccolo`. The reason is the gates: a function in this crate is
 //! reachable by the differential corpus, the fuzz targets and Miri, and a
@@ -9,15 +9,25 @@
 //! (`docs/M6-ANALYSIS.md`, "What the fork is *for*").
 //!
 //! Each function is split in two. The byte-level work is a pure module that
-//! knows nothing about the interpreter — [`strpack`], [`pattern`] — so that it
+//! knows nothing about the interpreter — [`strpack`], [`pattern`],
+//! [`strformat`], [`strrep`] — so that it
 //! can be fuzzed and run under Miri directly. What is left here is the binding:
 //! turning Lua values into the arguments those functions take, with the
 //! **VM's own** conversions, and turning the results back. Nothing in this file
 //! parses a byte of script-supplied data.
+//!
+//! [`base`] is the exception that proves the rule: `_G`, `rawequal`, `xpcall`,
+//! `load` and `coroutine.wrap` are about calling, resuming and compiling, which
+//! only the VM can do, so they are bindings with no pure half — save
+//! [`base::chunk_id`], which names a chunk in an error message.
 
+pub mod base;
 pub mod pattern;
 pub mod strformat;
 pub mod strpack;
+pub mod strrep;
+
+pub use self::base::load_tail;
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -107,18 +117,22 @@ pub fn load_patterns<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Why [`load_strpack`] could not install the functions.
+/// Why a `load_*` function could not install its functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
     /// The globals hold no `string` table — the VM was built without
     /// `load_string`. There is nothing sensible to install into.
     NoStringTable,
+    /// The globals hold no `coroutine` table — the VM was built without
+    /// `load_coroutine`, so there is nowhere to put `coroutine.wrap`.
+    NoCoroutineTable,
 }
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadError::NoStringTable => f.write_str("the Lua state has no `string` table"),
+            LoadError::NoCoroutineTable => f.write_str("the Lua state has no `coroutine` table"),
         }
     }
 }
@@ -769,17 +783,19 @@ mod tests {
     //! binding's own decisions — argument conversion, the "no value" versus
     //! `nil` distinction, results outliving the stack they came from, and the
     //! `gsub` sequence's calls back into the VM across garbage collections.
-    use super::{load_format, load_patterns, load_strpack};
+    use super::{load_format, load_patterns, load_strpack, load_tail};
     use piccolo::{Closure, Executor, Fuel, Lua, Value, Variadic};
 
     /// Run `src` and render its results, or `Err` with the Lua error message.
-    fn run(src: &str) -> Result<Vec<String>, String> {
+    /// Shared with the submodules' tests.
+    pub(super) fn run(src: &str) -> Result<Vec<String>, String> {
         let mut lua = Lua::core();
         let ex = lua
             .try_enter(|ctx| {
                 load_strpack(ctx).expect("Lua::core() has a string table");
                 load_patterns(ctx).expect("Lua::core() has a string table");
                 load_format(ctx).expect("Lua::core() has a string table");
+                load_tail(ctx).expect("Lua::core() has string and coroutine tables");
                 let c = Closure::load(ctx, None, src.as_bytes())?;
                 Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
             })

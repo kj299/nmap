@@ -7,7 +7,7 @@
 //! against the oracle before it is added to a corpus.
 #![allow(dead_code)] // each user takes a different subset
 
-use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack};
+use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{Closure, Error, Executor, Fuel, Lua, Value, Variadic};
 use std::path::Path;
 
@@ -89,6 +89,7 @@ pub fn eval(src: &[u8]) -> (String, String) {
             load_patterns(ctx).expect("Lua::core() has a string table");
             load_strpack(ctx).expect("Lua::core() has a string table");
             load_format(ctx).expect("Lua::core() has a string table");
+            load_tail(ctx).expect("Lua::core() has string and coroutine tables");
             let c = Closure::load(ctx, Some("=chunk"), src)?;
             Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
         }) {

@@ -2297,7 +2297,9 @@ from reality in either direction. Measured against
 
 Count at M6.0: **3 of 99**, down from 16 when the VM was vendored, and the
 corpus has grown by 31 cases over the same period rather than shrinking. **None
-of the three can abort the process**; every defect that could is fixed. Entries
+of the three can abort the process**; every defect that could is fixed. Now
+**2 of 99**: the corpus runs with the first-party stdlib installed, as NSE
+will, and `string.rep` closed `method_rep_literal`. Entries
 the port has closed are removed rather than ticked, because they are simply
 correct now.
 
@@ -2339,14 +2341,6 @@ add to.
       `tests/scripts/bit.lua`, asserted eleven things about string operands that
       Lua 5.4 also does not do, and *was* corrected — see
       `crates/vendor/piccolo/PROVENANCE.md`.
-
-### Blocked on a missing library function, not a missing mechanism
-
-- [ ] `method_rep_literal` — `("ab"):rep(3)` fails with *"could not call a nil
-      value"*. The `__index` lookup **succeeds**; it returns nil because
-      piccolo's entire string library is `byte, char, len, lower, reverse, sub,
-      upper` and `rep` is not among them. Closes when the first-party stdlib
-      crate lands, not before, and needs no VM change.
 
 ## Milestone 6 stdlib — `string.pack` / `unpack` / `packsize` (`core::nse::stdlib::strpack`)
 
@@ -2669,3 +2663,116 @@ accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
 - [x] `format-tostring-may-yield`: a `__tostring` metamethod called by `%s`
       runs as a VM call, so it may yield, where PUC-Lua raises "attempt to
       yield across a C-call boundary" — as for `gsub` callbacks.
+
+## Milestone 6 stdlib — the tail: `_G`, `rawequal`, `xpcall`, `load`, `coroutine.wrap`, `string.rep` (`core::nse::stdlib::base`, `::strrep`)
+
+The last of the approved standard-library functions: bindings to the VM's own
+call, resume and compile machinery, plus a port of `lstrlib.c`'s `str_rep`.
+Gated by [`m6_tail_cases.txt`](tests/differential/m6/m6_tail_cases.txt): 1,019
+cases compared with `liblua/` on every value **and every error message**, with
+no exemption list. The `nse_tail` fuzz target checks `string.rep` against a
+naive concatenation and the C's size bound, and `chunk_id` against a
+transliteration of `luaO_chunkid` into a 60-byte buffer (2.9 million inputs in
+three minutes, clean).
+
+The first probe of these bindings against the oracle found three defects in
+them, fixed before the corpus was written: a reader function's error escaped
+`load` instead of being returned as `nil, err`; a successful `load` returned a
+trailing `nil`; and a reader returning a number was refused, where
+`lua_isstring` accepts and converts it — and the C then reads forever if the
+reader never stops, since a number is never the empty string.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `load-never-loads-bytecode`: PUC-Lua's `load` accepts a precompiled chunk
+      by default (mode `"bt"`), and `lundump.c` does not verify bytecode: a
+      crafted binary chunk reads and writes outside the VM's own memory. This
+      port refuses every chunk whose first byte is `ESC`, whatever the mode,
+      returning `nil, "attempt to load a binary chunk (this VM loads only
+      text)"`; the vendored VM has no bytecode loader in any case. A mode that
+      excludes the chunk's kind gets the C's own message, byte for byte. No
+      shipped script loads bytecode — `load` appears in two, both on text.
+- [x] `strrep-empty-does-not-loop`: `string.rep("", math.maxinteger)` returns
+      `""` immediately here. The C runs its copy loop `n` times regardless of
+      the result's size — 2^63 iterations of copying nothing, a hang
+      (measured: killed after 20 s). Same answer, without the loop.
+- [x] `strrep-allocation-is-fallible`: the result buffer is reserved with
+      `try_reserve_exact` before it is filled, so a result under the C's
+      `MAXSIZE` bound that the system still refuses is the catchable "not
+      enough memory". The finished string still goes through the VM's
+      `intern` (`vm-allocation-failure-aborts`).
+
+### Faithfully reproduced C behaviour (deliberately *not* "improved")
+
+- [x] `strrep-size-bound-is-the-cs`: a result is refused with "resulting string
+      too large" exactly when `l + lsep > MAXSIZE / n` (`MAXSIZE` = `INT_MAX`),
+      which counts the separator once per copy — one more than the result
+      holds. Unit-tested on both sides of the bound without building it.
+- [x] `xpcall-handler-sees-its-own-errors`: an error raised *inside* the
+      message handler goes back through the handler, and the first value any
+      run of it returns is the message — so a handler that fails once and then
+      succeeds yields the second run's answer, as in the C.
+- [x] `load-chunk-names-are-the-cs`: a load error is named as `luaO_chunkid`
+      names it — `=name` as `name`, `@file` as `file` or `...` and its last 56
+      bytes, anything else as `[string "first line..."]` cut at 45 bytes — and
+      the name is read as a C string, ending at its first NUL.
+
+### Differences that belong to these bindings, observable only at the edges
+
+- [x] `xpcall-handler-run-count`: the C re-runs a failing handler until its C
+      stack overflows — 214 runs from a chunk called by `pcall`, fewer when
+      nested inside other `pcall`s — then reports "error in error handling".
+      This port counts runs up to the C's ceiling, `LUAI_MAXCCALLS / 10 * 11`
+      (220), at any depth. The result is the same; a handler that counts its
+      own runs sees a different number.
+- [x] `xpcall-handler-runs-after-unwind`: PUC-Lua calls the handler at the
+      point of the error, before the stack unwinds, which is what lets
+      `debug.traceback` in a handler show the failing frame. Here the handler
+      runs after the protected call has unwound. Observable only through the
+      `debug` library, which the vendored VM does not provide; no shipped
+      script calls `xpcall`.
+
+### Differences in error *messages* only
+
+- [x] `load-syntax-error-wording`: a syntax error has the C's shape and prefix,
+      `chunkid:line:`, compared exactly; the message after it is the vendored
+      compiler's ("unexpected end of token stream", where `llex.c` says
+      "unexpected symbol near <eof>"). The corpus compares the prefix.
+- [x] `tail-bad-argument-naming`: as `pattern-bad-argument-naming` — the
+      bindings say `'rep'` and `'wrap'` where PUC-Lua names a function called
+      by `pcall` `'string.rep'` and `'coroutine.wrap'`. The corpus rewrites
+      those two names inside its chunks and compares the rest.
+- [x] `tail-no-position-prefix`: `auxwrap` prefixes a string error leaving a
+      `coroutine.wrap` function with the caller's `chunk:LINE:`, and
+      `generic_reader`'s "reader function must return a string" carries the
+      same prefix; this port adds neither. That is `error_string_gets_position`.
+
+### Differences that belong to the VM, not to these bindings
+
+- [x] `wrap-keeps-the-caller-frame` — **avoided here, open in the VM.** When a
+      callback resumes a coroutine with nothing left to run in the caller, the
+      executor tail-calls the resume by dropping the caller's thread, and the
+      coroutine becomes the bottom of the thread stack. Inside it,
+      `coroutine.running()` then reports the main thread, and a `yield`
+      suspends the whole executor — which the NSE runtime would take for a
+      script waiting on I/O. `coroutine.wrap` always resumes with a
+      pass-through continuation so that this cannot happen (pinned by the
+      `wrap_tail_*` cases). The VM's own non-standard `coroutine.continue`
+      still resumes that way; see `vm-nonstandard-coroutine-functions`.
+- [ ] `vm-runtime-errors-are-not-strings` — an error the VM raises itself
+      ("attempt to index a nil value", "attempt to call", arithmetic on a
+      table, ...) reaches `pcall` and `xpcall` handlers as a **userdata**
+      wrapping the Rust error, whose `tostring` is a bare "operator error";
+      PUC-Lua gives the string `chunk:1: attempt to index a nil value (local
+      'x')`. Scripts routinely format, match or concatenate the message they
+      catch, and every such use fails or loses the message. The corpus keeps
+      these errors out (they are not the bindings' to fix). Must close before
+      M6.4.
+- [ ] `vm-vararg-outside-vararg-function` — `function f() return ... end`
+      compiles; PUC-Lua rejects it ("cannot use '...' outside a vararg
+      function"). The VM accepts a program the C refuses.
+- [ ] `vm-nonstandard-coroutine-functions` — the VM's `coroutine` table has
+      `continue` and `yieldto`, which Lua 5.4 does not. A script can reach
+      them, and `continue` resumes in the way `wrap-keeps-the-caller-frame`
+      describes. They belong to the sandbox decision with `io`, `os` and
+      `debug`.

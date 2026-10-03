@@ -1,0 +1,1023 @@
+# name	oracle_status	oracle_value
+# The verdict of nmap's OWN Lua 5.4, built from liblua/ by
+# oracle/build_lua_oracle.sh. Regenerate with ./regen_m6_pattern.sh.
+# An error renders as "error" and its message in hex.
+rep_empty_min_nosep	ok	integer:2 boolean:true string:
+rep_empty_min_nilsep	ok	integer:2 boolean:true string:
+rep_empty_min_emptysep	ok	integer:2 boolean:true string:
+rep_empty_min_comma	ok	integer:2 boolean:true string:
+rep_empty_min_nulsep	ok	integer:2 boolean:true string:
+rep_empty_min_numsep	ok	integer:2 boolean:true string:
+rep_empty_m1_nosep	ok	integer:2 boolean:true string:
+rep_empty_m1_nilsep	ok	integer:2 boolean:true string:
+rep_empty_m1_emptysep	ok	integer:2 boolean:true string:
+rep_empty_m1_comma	ok	integer:2 boolean:true string:
+rep_empty_m1_nulsep	ok	integer:2 boolean:true string:
+rep_empty_m1_numsep	ok	integer:2 boolean:true string:
+rep_empty_zero_nosep	ok	integer:2 boolean:true string:
+rep_empty_zero_nilsep	ok	integer:2 boolean:true string:
+rep_empty_zero_emptysep	ok	integer:2 boolean:true string:
+rep_empty_zero_comma	ok	integer:2 boolean:true string:
+rep_empty_zero_nulsep	ok	integer:2 boolean:true string:
+rep_empty_zero_numsep	ok	integer:2 boolean:true string:
+rep_empty_one_nosep	ok	integer:2 boolean:true string:
+rep_empty_one_nilsep	ok	integer:2 boolean:true string:
+rep_empty_one_emptysep	ok	integer:2 boolean:true string:
+rep_empty_one_comma	ok	integer:2 boolean:true string:
+rep_empty_one_nulsep	ok	integer:2 boolean:true string:
+rep_empty_one_numsep	ok	integer:2 boolean:true string:
+rep_empty_two_nosep	ok	integer:2 boolean:true string:
+rep_empty_two_nilsep	ok	integer:2 boolean:true string:
+rep_empty_two_emptysep	ok	integer:2 boolean:true string:
+rep_empty_two_comma	ok	integer:2 boolean:true string:2c20
+rep_empty_two_nulsep	ok	integer:2 boolean:true string:00
+rep_empty_two_numsep	ok	integer:2 boolean:true string:30
+rep_empty_three_nosep	ok	integer:2 boolean:true string:
+rep_empty_three_nilsep	ok	integer:2 boolean:true string:
+rep_empty_three_emptysep	ok	integer:2 boolean:true string:
+rep_empty_three_comma	ok	integer:2 boolean:true string:2c202c20
+rep_empty_three_nulsep	ok	integer:2 boolean:true string:0000
+rep_empty_three_numsep	ok	integer:2 boolean:true string:3030
+rep_empty_seventeen_nosep	ok	integer:2 boolean:true string:
+rep_empty_seventeen_nilsep	ok	integer:2 boolean:true string:
+rep_empty_seventeen_emptysep	ok	integer:2 boolean:true string:
+rep_empty_seventeen_comma	ok	integer:2 boolean:true string:2c202c202c202c202c202c202c202c202c202c202c202c202c202c202c202c20
+rep_empty_seventeen_nulsep	ok	integer:2 boolean:true string:00000000000000000000000000000000
+rep_empty_seventeen_numsep	ok	integer:2 boolean:true string:30303030303030303030303030303030
+rep_empty_f3_nosep	ok	integer:2 boolean:true string:
+rep_empty_f3_nilsep	ok	integer:2 boolean:true string:
+rep_empty_f3_emptysep	ok	integer:2 boolean:true string:
+rep_empty_f3_comma	ok	integer:2 boolean:true string:2c202c20
+rep_empty_f3_nulsep	ok	integer:2 boolean:true string:0000
+rep_empty_f3_numsep	ok	integer:2 boolean:true string:3030
+rep_empty_fneg_nosep	ok	integer:2 boolean:true string:
+rep_empty_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_empty_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_empty_fneg_comma	ok	integer:2 boolean:true string:
+rep_empty_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_empty_fneg_numsep	ok	integer:2 boolean:true string:
+rep_empty_s2_nosep	ok	integer:2 boolean:true string:
+rep_empty_s2_nilsep	ok	integer:2 boolean:true string:
+rep_empty_s2_emptysep	ok	integer:2 boolean:true string:
+rep_empty_s2_comma	ok	integer:2 boolean:true string:2c20
+rep_empty_s2_nulsep	ok	integer:2 boolean:true string:00
+rep_empty_s2_numsep	ok	integer:2 boolean:true string:30
+rep_empty_s_sp_nosep	ok	integer:2 boolean:true string:
+rep_empty_s_sp_nilsep	ok	integer:2 boolean:true string:
+rep_empty_s_sp_emptysep	ok	integer:2 boolean:true string:
+rep_empty_s_sp_comma	ok	integer:2 boolean:true string:2c202c20
+rep_empty_s_sp_nulsep	ok	integer:2 boolean:true string:0000
+rep_empty_s_sp_numsep	ok	integer:2 boolean:true string:3030
+rep_empty_shex_nosep	ok	integer:2 boolean:true string:
+rep_empty_shex_nilsep	ok	integer:2 boolean:true string:
+rep_empty_shex_emptysep	ok	integer:2 boolean:true string:
+rep_empty_shex_comma	ok	integer:2 boolean:true string:2c202c202c20
+rep_empty_shex_nulsep	ok	integer:2 boolean:true string:000000
+rep_empty_shex_numsep	ok	integer:2 boolean:true string:303030
+rep_empty_sfl_nosep	ok	integer:2 boolean:true string:
+rep_empty_sfl_nilsep	ok	integer:2 boolean:true string:
+rep_empty_sfl_emptysep	ok	integer:2 boolean:true string:
+rep_empty_sfl_comma	ok	integer:2 boolean:true string:2c20
+rep_empty_sfl_nulsep	ok	integer:2 boolean:true string:00
+rep_empty_sfl_numsep	ok	integer:2 boolean:true string:30
+rep_badcount_empty	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_x_min_nosep	ok	integer:2 boolean:true string:
+rep_x_min_nilsep	ok	integer:2 boolean:true string:
+rep_x_min_emptysep	ok	integer:2 boolean:true string:
+rep_x_min_comma	ok	integer:2 boolean:true string:
+rep_x_min_nulsep	ok	integer:2 boolean:true string:
+rep_x_min_numsep	ok	integer:2 boolean:true string:
+rep_x_m1_nosep	ok	integer:2 boolean:true string:
+rep_x_m1_nilsep	ok	integer:2 boolean:true string:
+rep_x_m1_emptysep	ok	integer:2 boolean:true string:
+rep_x_m1_comma	ok	integer:2 boolean:true string:
+rep_x_m1_nulsep	ok	integer:2 boolean:true string:
+rep_x_m1_numsep	ok	integer:2 boolean:true string:
+rep_x_zero_nosep	ok	integer:2 boolean:true string:
+rep_x_zero_nilsep	ok	integer:2 boolean:true string:
+rep_x_zero_emptysep	ok	integer:2 boolean:true string:
+rep_x_zero_comma	ok	integer:2 boolean:true string:
+rep_x_zero_nulsep	ok	integer:2 boolean:true string:
+rep_x_zero_numsep	ok	integer:2 boolean:true string:
+rep_x_one_nosep	ok	integer:2 boolean:true string:78
+rep_x_one_nilsep	ok	integer:2 boolean:true string:78
+rep_x_one_emptysep	ok	integer:2 boolean:true string:78
+rep_x_one_comma	ok	integer:2 boolean:true string:78
+rep_x_one_nulsep	ok	integer:2 boolean:true string:78
+rep_x_one_numsep	ok	integer:2 boolean:true string:78
+rep_x_two_nosep	ok	integer:2 boolean:true string:7878
+rep_x_two_nilsep	ok	integer:2 boolean:true string:7878
+rep_x_two_emptysep	ok	integer:2 boolean:true string:7878
+rep_x_two_comma	ok	integer:2 boolean:true string:782c2078
+rep_x_two_nulsep	ok	integer:2 boolean:true string:780078
+rep_x_two_numsep	ok	integer:2 boolean:true string:783078
+rep_x_three_nosep	ok	integer:2 boolean:true string:787878
+rep_x_three_nilsep	ok	integer:2 boolean:true string:787878
+rep_x_three_emptysep	ok	integer:2 boolean:true string:787878
+rep_x_three_comma	ok	integer:2 boolean:true string:782c20782c2078
+rep_x_three_nulsep	ok	integer:2 boolean:true string:7800780078
+rep_x_three_numsep	ok	integer:2 boolean:true string:7830783078
+rep_x_seventeen_nosep	ok	integer:2 boolean:true string:7878787878787878787878787878787878
+rep_x_seventeen_nilsep	ok	integer:2 boolean:true string:7878787878787878787878787878787878
+rep_x_seventeen_emptysep	ok	integer:2 boolean:true string:7878787878787878787878787878787878
+rep_x_seventeen_comma	ok	integer:2 boolean:true string:782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c20782c2078
+rep_x_seventeen_nulsep	ok	integer:2 boolean:true string:780078007800780078007800780078007800780078007800780078007800780078
+rep_x_seventeen_numsep	ok	integer:2 boolean:true string:783078307830783078307830783078307830783078307830783078307830783078
+rep_x_f3_nosep	ok	integer:2 boolean:true string:787878
+rep_x_f3_nilsep	ok	integer:2 boolean:true string:787878
+rep_x_f3_emptysep	ok	integer:2 boolean:true string:787878
+rep_x_f3_comma	ok	integer:2 boolean:true string:782c20782c2078
+rep_x_f3_nulsep	ok	integer:2 boolean:true string:7800780078
+rep_x_f3_numsep	ok	integer:2 boolean:true string:7830783078
+rep_x_fneg_nosep	ok	integer:2 boolean:true string:
+rep_x_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_x_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_x_fneg_comma	ok	integer:2 boolean:true string:
+rep_x_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_x_fneg_numsep	ok	integer:2 boolean:true string:
+rep_x_s2_nosep	ok	integer:2 boolean:true string:7878
+rep_x_s2_nilsep	ok	integer:2 boolean:true string:7878
+rep_x_s2_emptysep	ok	integer:2 boolean:true string:7878
+rep_x_s2_comma	ok	integer:2 boolean:true string:782c2078
+rep_x_s2_nulsep	ok	integer:2 boolean:true string:780078
+rep_x_s2_numsep	ok	integer:2 boolean:true string:783078
+rep_x_s_sp_nosep	ok	integer:2 boolean:true string:787878
+rep_x_s_sp_nilsep	ok	integer:2 boolean:true string:787878
+rep_x_s_sp_emptysep	ok	integer:2 boolean:true string:787878
+rep_x_s_sp_comma	ok	integer:2 boolean:true string:782c20782c2078
+rep_x_s_sp_nulsep	ok	integer:2 boolean:true string:7800780078
+rep_x_s_sp_numsep	ok	integer:2 boolean:true string:7830783078
+rep_x_shex_nosep	ok	integer:2 boolean:true string:78787878
+rep_x_shex_nilsep	ok	integer:2 boolean:true string:78787878
+rep_x_shex_emptysep	ok	integer:2 boolean:true string:78787878
+rep_x_shex_comma	ok	integer:2 boolean:true string:782c20782c20782c2078
+rep_x_shex_nulsep	ok	integer:2 boolean:true string:78007800780078
+rep_x_shex_numsep	ok	integer:2 boolean:true string:78307830783078
+rep_x_sfl_nosep	ok	integer:2 boolean:true string:7878
+rep_x_sfl_nilsep	ok	integer:2 boolean:true string:7878
+rep_x_sfl_emptysep	ok	integer:2 boolean:true string:7878
+rep_x_sfl_comma	ok	integer:2 boolean:true string:782c2078
+rep_x_sfl_nulsep	ok	integer:2 boolean:true string:780078
+rep_x_sfl_numsep	ok	integer:2 boolean:true string:783078
+rep_badcount_x	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_ab_min_nosep	ok	integer:2 boolean:true string:
+rep_ab_min_nilsep	ok	integer:2 boolean:true string:
+rep_ab_min_emptysep	ok	integer:2 boolean:true string:
+rep_ab_min_comma	ok	integer:2 boolean:true string:
+rep_ab_min_nulsep	ok	integer:2 boolean:true string:
+rep_ab_min_numsep	ok	integer:2 boolean:true string:
+rep_ab_m1_nosep	ok	integer:2 boolean:true string:
+rep_ab_m1_nilsep	ok	integer:2 boolean:true string:
+rep_ab_m1_emptysep	ok	integer:2 boolean:true string:
+rep_ab_m1_comma	ok	integer:2 boolean:true string:
+rep_ab_m1_nulsep	ok	integer:2 boolean:true string:
+rep_ab_m1_numsep	ok	integer:2 boolean:true string:
+rep_ab_zero_nosep	ok	integer:2 boolean:true string:
+rep_ab_zero_nilsep	ok	integer:2 boolean:true string:
+rep_ab_zero_emptysep	ok	integer:2 boolean:true string:
+rep_ab_zero_comma	ok	integer:2 boolean:true string:
+rep_ab_zero_nulsep	ok	integer:2 boolean:true string:
+rep_ab_zero_numsep	ok	integer:2 boolean:true string:
+rep_ab_one_nosep	ok	integer:2 boolean:true string:6162
+rep_ab_one_nilsep	ok	integer:2 boolean:true string:6162
+rep_ab_one_emptysep	ok	integer:2 boolean:true string:6162
+rep_ab_one_comma	ok	integer:2 boolean:true string:6162
+rep_ab_one_nulsep	ok	integer:2 boolean:true string:6162
+rep_ab_one_numsep	ok	integer:2 boolean:true string:6162
+rep_ab_two_nosep	ok	integer:2 boolean:true string:61626162
+rep_ab_two_nilsep	ok	integer:2 boolean:true string:61626162
+rep_ab_two_emptysep	ok	integer:2 boolean:true string:61626162
+rep_ab_two_comma	ok	integer:2 boolean:true string:61622c206162
+rep_ab_two_nulsep	ok	integer:2 boolean:true string:6162006162
+rep_ab_two_numsep	ok	integer:2 boolean:true string:6162306162
+rep_ab_three_nosep	ok	integer:2 boolean:true string:616261626162
+rep_ab_three_nilsep	ok	integer:2 boolean:true string:616261626162
+rep_ab_three_emptysep	ok	integer:2 boolean:true string:616261626162
+rep_ab_three_comma	ok	integer:2 boolean:true string:61622c2061622c206162
+rep_ab_three_nulsep	ok	integer:2 boolean:true string:6162006162006162
+rep_ab_three_numsep	ok	integer:2 boolean:true string:6162306162306162
+rep_ab_seventeen_nosep	ok	integer:2 boolean:true string:61626162616261626162616261626162616261626162616261626162616261626162
+rep_ab_seventeen_nilsep	ok	integer:2 boolean:true string:61626162616261626162616261626162616261626162616261626162616261626162
+rep_ab_seventeen_emptysep	ok	integer:2 boolean:true string:61626162616261626162616261626162616261626162616261626162616261626162
+rep_ab_seventeen_comma	ok	integer:2 boolean:true string:61622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c2061622c206162
+rep_ab_seventeen_nulsep	ok	integer:2 boolean:true string:6162006162006162006162006162006162006162006162006162006162006162006162006162006162006162006162006162
+rep_ab_seventeen_numsep	ok	integer:2 boolean:true string:6162306162306162306162306162306162306162306162306162306162306162306162306162306162306162306162306162
+rep_ab_f3_nosep	ok	integer:2 boolean:true string:616261626162
+rep_ab_f3_nilsep	ok	integer:2 boolean:true string:616261626162
+rep_ab_f3_emptysep	ok	integer:2 boolean:true string:616261626162
+rep_ab_f3_comma	ok	integer:2 boolean:true string:61622c2061622c206162
+rep_ab_f3_nulsep	ok	integer:2 boolean:true string:6162006162006162
+rep_ab_f3_numsep	ok	integer:2 boolean:true string:6162306162306162
+rep_ab_fneg_nosep	ok	integer:2 boolean:true string:
+rep_ab_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_ab_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_ab_fneg_comma	ok	integer:2 boolean:true string:
+rep_ab_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_ab_fneg_numsep	ok	integer:2 boolean:true string:
+rep_ab_s2_nosep	ok	integer:2 boolean:true string:61626162
+rep_ab_s2_nilsep	ok	integer:2 boolean:true string:61626162
+rep_ab_s2_emptysep	ok	integer:2 boolean:true string:61626162
+rep_ab_s2_comma	ok	integer:2 boolean:true string:61622c206162
+rep_ab_s2_nulsep	ok	integer:2 boolean:true string:6162006162
+rep_ab_s2_numsep	ok	integer:2 boolean:true string:6162306162
+rep_ab_s_sp_nosep	ok	integer:2 boolean:true string:616261626162
+rep_ab_s_sp_nilsep	ok	integer:2 boolean:true string:616261626162
+rep_ab_s_sp_emptysep	ok	integer:2 boolean:true string:616261626162
+rep_ab_s_sp_comma	ok	integer:2 boolean:true string:61622c2061622c206162
+rep_ab_s_sp_nulsep	ok	integer:2 boolean:true string:6162006162006162
+rep_ab_s_sp_numsep	ok	integer:2 boolean:true string:6162306162306162
+rep_ab_shex_nosep	ok	integer:2 boolean:true string:6162616261626162
+rep_ab_shex_nilsep	ok	integer:2 boolean:true string:6162616261626162
+rep_ab_shex_emptysep	ok	integer:2 boolean:true string:6162616261626162
+rep_ab_shex_comma	ok	integer:2 boolean:true string:61622c2061622c2061622c206162
+rep_ab_shex_nulsep	ok	integer:2 boolean:true string:6162006162006162006162
+rep_ab_shex_numsep	ok	integer:2 boolean:true string:6162306162306162306162
+rep_ab_sfl_nosep	ok	integer:2 boolean:true string:61626162
+rep_ab_sfl_nilsep	ok	integer:2 boolean:true string:61626162
+rep_ab_sfl_emptysep	ok	integer:2 boolean:true string:61626162
+rep_ab_sfl_comma	ok	integer:2 boolean:true string:61622c206162
+rep_ab_sfl_nulsep	ok	integer:2 boolean:true string:6162006162
+rep_ab_sfl_numsep	ok	integer:2 boolean:true string:6162306162
+rep_badcount_ab	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_nul_min_nosep	ok	integer:2 boolean:true string:
+rep_nul_min_nilsep	ok	integer:2 boolean:true string:
+rep_nul_min_emptysep	ok	integer:2 boolean:true string:
+rep_nul_min_comma	ok	integer:2 boolean:true string:
+rep_nul_min_nulsep	ok	integer:2 boolean:true string:
+rep_nul_min_numsep	ok	integer:2 boolean:true string:
+rep_nul_m1_nosep	ok	integer:2 boolean:true string:
+rep_nul_m1_nilsep	ok	integer:2 boolean:true string:
+rep_nul_m1_emptysep	ok	integer:2 boolean:true string:
+rep_nul_m1_comma	ok	integer:2 boolean:true string:
+rep_nul_m1_nulsep	ok	integer:2 boolean:true string:
+rep_nul_m1_numsep	ok	integer:2 boolean:true string:
+rep_nul_zero_nosep	ok	integer:2 boolean:true string:
+rep_nul_zero_nilsep	ok	integer:2 boolean:true string:
+rep_nul_zero_emptysep	ok	integer:2 boolean:true string:
+rep_nul_zero_comma	ok	integer:2 boolean:true string:
+rep_nul_zero_nulsep	ok	integer:2 boolean:true string:
+rep_nul_zero_numsep	ok	integer:2 boolean:true string:
+rep_nul_one_nosep	ok	integer:2 boolean:true string:610062
+rep_nul_one_nilsep	ok	integer:2 boolean:true string:610062
+rep_nul_one_emptysep	ok	integer:2 boolean:true string:610062
+rep_nul_one_comma	ok	integer:2 boolean:true string:610062
+rep_nul_one_nulsep	ok	integer:2 boolean:true string:610062
+rep_nul_one_numsep	ok	integer:2 boolean:true string:610062
+rep_nul_two_nosep	ok	integer:2 boolean:true string:610062610062
+rep_nul_two_nilsep	ok	integer:2 boolean:true string:610062610062
+rep_nul_two_emptysep	ok	integer:2 boolean:true string:610062610062
+rep_nul_two_comma	ok	integer:2 boolean:true string:6100622c20610062
+rep_nul_two_nulsep	ok	integer:2 boolean:true string:61006200610062
+rep_nul_two_numsep	ok	integer:2 boolean:true string:61006230610062
+rep_nul_three_nosep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_three_nilsep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_three_emptysep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_three_comma	ok	integer:2 boolean:true string:6100622c206100622c20610062
+rep_nul_three_nulsep	ok	integer:2 boolean:true string:6100620061006200610062
+rep_nul_three_numsep	ok	integer:2 boolean:true string:6100623061006230610062
+rep_nul_seventeen_nosep	ok	integer:2 boolean:true string:610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062
+rep_nul_seventeen_nilsep	ok	integer:2 boolean:true string:610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062
+rep_nul_seventeen_emptysep	ok	integer:2 boolean:true string:610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062610062
+rep_nul_seventeen_comma	ok	integer:2 boolean:true string:6100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c206100622c20610062
+rep_nul_seventeen_nulsep	ok	integer:2 boolean:true string:61006200610062006100620061006200610062006100620061006200610062006100620061006200610062006100620061006200610062006100620061006200610062
+rep_nul_seventeen_numsep	ok	integer:2 boolean:true string:61006230610062306100623061006230610062306100623061006230610062306100623061006230610062306100623061006230610062306100623061006230610062
+rep_nul_f3_nosep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_f3_nilsep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_f3_emptysep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_f3_comma	ok	integer:2 boolean:true string:6100622c206100622c20610062
+rep_nul_f3_nulsep	ok	integer:2 boolean:true string:6100620061006200610062
+rep_nul_f3_numsep	ok	integer:2 boolean:true string:6100623061006230610062
+rep_nul_fneg_nosep	ok	integer:2 boolean:true string:
+rep_nul_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_nul_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_nul_fneg_comma	ok	integer:2 boolean:true string:
+rep_nul_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_nul_fneg_numsep	ok	integer:2 boolean:true string:
+rep_nul_s2_nosep	ok	integer:2 boolean:true string:610062610062
+rep_nul_s2_nilsep	ok	integer:2 boolean:true string:610062610062
+rep_nul_s2_emptysep	ok	integer:2 boolean:true string:610062610062
+rep_nul_s2_comma	ok	integer:2 boolean:true string:6100622c20610062
+rep_nul_s2_nulsep	ok	integer:2 boolean:true string:61006200610062
+rep_nul_s2_numsep	ok	integer:2 boolean:true string:61006230610062
+rep_nul_s_sp_nosep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_s_sp_nilsep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_s_sp_emptysep	ok	integer:2 boolean:true string:610062610062610062
+rep_nul_s_sp_comma	ok	integer:2 boolean:true string:6100622c206100622c20610062
+rep_nul_s_sp_nulsep	ok	integer:2 boolean:true string:6100620061006200610062
+rep_nul_s_sp_numsep	ok	integer:2 boolean:true string:6100623061006230610062
+rep_nul_shex_nosep	ok	integer:2 boolean:true string:610062610062610062610062
+rep_nul_shex_nilsep	ok	integer:2 boolean:true string:610062610062610062610062
+rep_nul_shex_emptysep	ok	integer:2 boolean:true string:610062610062610062610062
+rep_nul_shex_comma	ok	integer:2 boolean:true string:6100622c206100622c206100622c20610062
+rep_nul_shex_nulsep	ok	integer:2 boolean:true string:610062006100620061006200610062
+rep_nul_shex_numsep	ok	integer:2 boolean:true string:610062306100623061006230610062
+rep_nul_sfl_nosep	ok	integer:2 boolean:true string:610062610062
+rep_nul_sfl_nilsep	ok	integer:2 boolean:true string:610062610062
+rep_nul_sfl_emptysep	ok	integer:2 boolean:true string:610062610062
+rep_nul_sfl_comma	ok	integer:2 boolean:true string:6100622c20610062
+rep_nul_sfl_nulsep	ok	integer:2 boolean:true string:61006200610062
+rep_nul_sfl_numsep	ok	integer:2 boolean:true string:61006230610062
+rep_badcount_nul	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_int_min_nosep	ok	integer:2 boolean:true string:
+rep_int_min_nilsep	ok	integer:2 boolean:true string:
+rep_int_min_emptysep	ok	integer:2 boolean:true string:
+rep_int_min_comma	ok	integer:2 boolean:true string:
+rep_int_min_nulsep	ok	integer:2 boolean:true string:
+rep_int_min_numsep	ok	integer:2 boolean:true string:
+rep_int_m1_nosep	ok	integer:2 boolean:true string:
+rep_int_m1_nilsep	ok	integer:2 boolean:true string:
+rep_int_m1_emptysep	ok	integer:2 boolean:true string:
+rep_int_m1_comma	ok	integer:2 boolean:true string:
+rep_int_m1_nulsep	ok	integer:2 boolean:true string:
+rep_int_m1_numsep	ok	integer:2 boolean:true string:
+rep_int_zero_nosep	ok	integer:2 boolean:true string:
+rep_int_zero_nilsep	ok	integer:2 boolean:true string:
+rep_int_zero_emptysep	ok	integer:2 boolean:true string:
+rep_int_zero_comma	ok	integer:2 boolean:true string:
+rep_int_zero_nulsep	ok	integer:2 boolean:true string:
+rep_int_zero_numsep	ok	integer:2 boolean:true string:
+rep_int_one_nosep	ok	integer:2 boolean:true string:3132
+rep_int_one_nilsep	ok	integer:2 boolean:true string:3132
+rep_int_one_emptysep	ok	integer:2 boolean:true string:3132
+rep_int_one_comma	ok	integer:2 boolean:true string:3132
+rep_int_one_nulsep	ok	integer:2 boolean:true string:3132
+rep_int_one_numsep	ok	integer:2 boolean:true string:3132
+rep_int_two_nosep	ok	integer:2 boolean:true string:31323132
+rep_int_two_nilsep	ok	integer:2 boolean:true string:31323132
+rep_int_two_emptysep	ok	integer:2 boolean:true string:31323132
+rep_int_two_comma	ok	integer:2 boolean:true string:31322c203132
+rep_int_two_nulsep	ok	integer:2 boolean:true string:3132003132
+rep_int_two_numsep	ok	integer:2 boolean:true string:3132303132
+rep_int_three_nosep	ok	integer:2 boolean:true string:313231323132
+rep_int_three_nilsep	ok	integer:2 boolean:true string:313231323132
+rep_int_three_emptysep	ok	integer:2 boolean:true string:313231323132
+rep_int_three_comma	ok	integer:2 boolean:true string:31322c2031322c203132
+rep_int_three_nulsep	ok	integer:2 boolean:true string:3132003132003132
+rep_int_three_numsep	ok	integer:2 boolean:true string:3132303132303132
+rep_int_seventeen_nosep	ok	integer:2 boolean:true string:31323132313231323132313231323132313231323132313231323132313231323132
+rep_int_seventeen_nilsep	ok	integer:2 boolean:true string:31323132313231323132313231323132313231323132313231323132313231323132
+rep_int_seventeen_emptysep	ok	integer:2 boolean:true string:31323132313231323132313231323132313231323132313231323132313231323132
+rep_int_seventeen_comma	ok	integer:2 boolean:true string:31322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c2031322c203132
+rep_int_seventeen_nulsep	ok	integer:2 boolean:true string:3132003132003132003132003132003132003132003132003132003132003132003132003132003132003132003132003132
+rep_int_seventeen_numsep	ok	integer:2 boolean:true string:3132303132303132303132303132303132303132303132303132303132303132303132303132303132303132303132303132
+rep_int_f3_nosep	ok	integer:2 boolean:true string:313231323132
+rep_int_f3_nilsep	ok	integer:2 boolean:true string:313231323132
+rep_int_f3_emptysep	ok	integer:2 boolean:true string:313231323132
+rep_int_f3_comma	ok	integer:2 boolean:true string:31322c2031322c203132
+rep_int_f3_nulsep	ok	integer:2 boolean:true string:3132003132003132
+rep_int_f3_numsep	ok	integer:2 boolean:true string:3132303132303132
+rep_int_fneg_nosep	ok	integer:2 boolean:true string:
+rep_int_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_int_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_int_fneg_comma	ok	integer:2 boolean:true string:
+rep_int_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_int_fneg_numsep	ok	integer:2 boolean:true string:
+rep_int_s2_nosep	ok	integer:2 boolean:true string:31323132
+rep_int_s2_nilsep	ok	integer:2 boolean:true string:31323132
+rep_int_s2_emptysep	ok	integer:2 boolean:true string:31323132
+rep_int_s2_comma	ok	integer:2 boolean:true string:31322c203132
+rep_int_s2_nulsep	ok	integer:2 boolean:true string:3132003132
+rep_int_s2_numsep	ok	integer:2 boolean:true string:3132303132
+rep_int_s_sp_nosep	ok	integer:2 boolean:true string:313231323132
+rep_int_s_sp_nilsep	ok	integer:2 boolean:true string:313231323132
+rep_int_s_sp_emptysep	ok	integer:2 boolean:true string:313231323132
+rep_int_s_sp_comma	ok	integer:2 boolean:true string:31322c2031322c203132
+rep_int_s_sp_nulsep	ok	integer:2 boolean:true string:3132003132003132
+rep_int_s_sp_numsep	ok	integer:2 boolean:true string:3132303132303132
+rep_int_shex_nosep	ok	integer:2 boolean:true string:3132313231323132
+rep_int_shex_nilsep	ok	integer:2 boolean:true string:3132313231323132
+rep_int_shex_emptysep	ok	integer:2 boolean:true string:3132313231323132
+rep_int_shex_comma	ok	integer:2 boolean:true string:31322c2031322c2031322c203132
+rep_int_shex_nulsep	ok	integer:2 boolean:true string:3132003132003132003132
+rep_int_shex_numsep	ok	integer:2 boolean:true string:3132303132303132303132
+rep_int_sfl_nosep	ok	integer:2 boolean:true string:31323132
+rep_int_sfl_nilsep	ok	integer:2 boolean:true string:31323132
+rep_int_sfl_emptysep	ok	integer:2 boolean:true string:31323132
+rep_int_sfl_comma	ok	integer:2 boolean:true string:31322c203132
+rep_int_sfl_nulsep	ok	integer:2 boolean:true string:3132003132
+rep_int_sfl_numsep	ok	integer:2 boolean:true string:3132303132
+rep_badcount_int	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_float_min_nosep	ok	integer:2 boolean:true string:
+rep_float_min_nilsep	ok	integer:2 boolean:true string:
+rep_float_min_emptysep	ok	integer:2 boolean:true string:
+rep_float_min_comma	ok	integer:2 boolean:true string:
+rep_float_min_nulsep	ok	integer:2 boolean:true string:
+rep_float_min_numsep	ok	integer:2 boolean:true string:
+rep_float_m1_nosep	ok	integer:2 boolean:true string:
+rep_float_m1_nilsep	ok	integer:2 boolean:true string:
+rep_float_m1_emptysep	ok	integer:2 boolean:true string:
+rep_float_m1_comma	ok	integer:2 boolean:true string:
+rep_float_m1_nulsep	ok	integer:2 boolean:true string:
+rep_float_m1_numsep	ok	integer:2 boolean:true string:
+rep_float_zero_nosep	ok	integer:2 boolean:true string:
+rep_float_zero_nilsep	ok	integer:2 boolean:true string:
+rep_float_zero_emptysep	ok	integer:2 boolean:true string:
+rep_float_zero_comma	ok	integer:2 boolean:true string:
+rep_float_zero_nulsep	ok	integer:2 boolean:true string:
+rep_float_zero_numsep	ok	integer:2 boolean:true string:
+rep_float_one_nosep	ok	integer:2 boolean:true string:312e35
+rep_float_one_nilsep	ok	integer:2 boolean:true string:312e35
+rep_float_one_emptysep	ok	integer:2 boolean:true string:312e35
+rep_float_one_comma	ok	integer:2 boolean:true string:312e35
+rep_float_one_nulsep	ok	integer:2 boolean:true string:312e35
+rep_float_one_numsep	ok	integer:2 boolean:true string:312e35
+rep_float_two_nosep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_two_nilsep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_two_emptysep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_two_comma	ok	integer:2 boolean:true string:312e352c20312e35
+rep_float_two_nulsep	ok	integer:2 boolean:true string:312e3500312e35
+rep_float_two_numsep	ok	integer:2 boolean:true string:312e3530312e35
+rep_float_three_nosep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_three_nilsep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_three_emptysep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_three_comma	ok	integer:2 boolean:true string:312e352c20312e352c20312e35
+rep_float_three_nulsep	ok	integer:2 boolean:true string:312e3500312e3500312e35
+rep_float_three_numsep	ok	integer:2 boolean:true string:312e3530312e3530312e35
+rep_float_seventeen_nosep	ok	integer:2 boolean:true string:312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35
+rep_float_seventeen_nilsep	ok	integer:2 boolean:true string:312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35
+rep_float_seventeen_emptysep	ok	integer:2 boolean:true string:312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35312e35
+rep_float_seventeen_comma	ok	integer:2 boolean:true string:312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e352c20312e35
+rep_float_seventeen_nulsep	ok	integer:2 boolean:true string:312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e3500312e35
+rep_float_seventeen_numsep	ok	integer:2 boolean:true string:312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e3530312e35
+rep_float_f3_nosep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_f3_nilsep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_f3_emptysep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_f3_comma	ok	integer:2 boolean:true string:312e352c20312e352c20312e35
+rep_float_f3_nulsep	ok	integer:2 boolean:true string:312e3500312e3500312e35
+rep_float_f3_numsep	ok	integer:2 boolean:true string:312e3530312e3530312e35
+rep_float_fneg_nosep	ok	integer:2 boolean:true string:
+rep_float_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_float_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_float_fneg_comma	ok	integer:2 boolean:true string:
+rep_float_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_float_fneg_numsep	ok	integer:2 boolean:true string:
+rep_float_s2_nosep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_s2_nilsep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_s2_emptysep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_s2_comma	ok	integer:2 boolean:true string:312e352c20312e35
+rep_float_s2_nulsep	ok	integer:2 boolean:true string:312e3500312e35
+rep_float_s2_numsep	ok	integer:2 boolean:true string:312e3530312e35
+rep_float_s_sp_nosep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_s_sp_nilsep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_s_sp_emptysep	ok	integer:2 boolean:true string:312e35312e35312e35
+rep_float_s_sp_comma	ok	integer:2 boolean:true string:312e352c20312e352c20312e35
+rep_float_s_sp_nulsep	ok	integer:2 boolean:true string:312e3500312e3500312e35
+rep_float_s_sp_numsep	ok	integer:2 boolean:true string:312e3530312e3530312e35
+rep_float_shex_nosep	ok	integer:2 boolean:true string:312e35312e35312e35312e35
+rep_float_shex_nilsep	ok	integer:2 boolean:true string:312e35312e35312e35312e35
+rep_float_shex_emptysep	ok	integer:2 boolean:true string:312e35312e35312e35312e35
+rep_float_shex_comma	ok	integer:2 boolean:true string:312e352c20312e352c20312e352c20312e35
+rep_float_shex_nulsep	ok	integer:2 boolean:true string:312e3500312e3500312e3500312e35
+rep_float_shex_numsep	ok	integer:2 boolean:true string:312e3530312e3530312e3530312e35
+rep_float_sfl_nosep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_sfl_nilsep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_sfl_emptysep	ok	integer:2 boolean:true string:312e35312e35
+rep_float_sfl_comma	ok	integer:2 boolean:true string:312e352c20312e35
+rep_float_sfl_nulsep	ok	integer:2 boolean:true string:312e3500312e35
+rep_float_sfl_numsep	ok	integer:2 boolean:true string:312e3530312e35
+rep_badcount_float	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_negzero_min_nosep	ok	integer:2 boolean:true string:
+rep_negzero_min_nilsep	ok	integer:2 boolean:true string:
+rep_negzero_min_emptysep	ok	integer:2 boolean:true string:
+rep_negzero_min_comma	ok	integer:2 boolean:true string:
+rep_negzero_min_nulsep	ok	integer:2 boolean:true string:
+rep_negzero_min_numsep	ok	integer:2 boolean:true string:
+rep_negzero_m1_nosep	ok	integer:2 boolean:true string:
+rep_negzero_m1_nilsep	ok	integer:2 boolean:true string:
+rep_negzero_m1_emptysep	ok	integer:2 boolean:true string:
+rep_negzero_m1_comma	ok	integer:2 boolean:true string:
+rep_negzero_m1_nulsep	ok	integer:2 boolean:true string:
+rep_negzero_m1_numsep	ok	integer:2 boolean:true string:
+rep_negzero_zero_nosep	ok	integer:2 boolean:true string:
+rep_negzero_zero_nilsep	ok	integer:2 boolean:true string:
+rep_negzero_zero_emptysep	ok	integer:2 boolean:true string:
+rep_negzero_zero_comma	ok	integer:2 boolean:true string:
+rep_negzero_zero_nulsep	ok	integer:2 boolean:true string:
+rep_negzero_zero_numsep	ok	integer:2 boolean:true string:
+rep_negzero_one_nosep	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_one_nilsep	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_one_emptysep	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_one_comma	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_one_nulsep	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_one_numsep	ok	integer:2 boolean:true string:2d302e30
+rep_negzero_two_nosep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_two_nilsep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_two_emptysep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_two_comma	ok	integer:2 boolean:true string:2d302e302c202d302e30
+rep_negzero_two_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30
+rep_negzero_two_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30
+rep_negzero_three_nosep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_three_nilsep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_three_emptysep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_three_comma	ok	integer:2 boolean:true string:2d302e302c202d302e302c202d302e30
+rep_negzero_three_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30002d302e30
+rep_negzero_three_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30302d302e30
+rep_negzero_seventeen_nosep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e30
+rep_negzero_seventeen_nilsep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e30
+rep_negzero_seventeen_emptysep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e302d302e30
+rep_negzero_seventeen_comma	ok	integer:2 boolean:true string:2d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e302c202d302e30
+rep_negzero_seventeen_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30002d302e30
+rep_negzero_seventeen_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30302d302e30
+rep_negzero_f3_nosep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_f3_nilsep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_f3_emptysep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_f3_comma	ok	integer:2 boolean:true string:2d302e302c202d302e302c202d302e30
+rep_negzero_f3_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30002d302e30
+rep_negzero_f3_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30302d302e30
+rep_negzero_fneg_nosep	ok	integer:2 boolean:true string:
+rep_negzero_fneg_nilsep	ok	integer:2 boolean:true string:
+rep_negzero_fneg_emptysep	ok	integer:2 boolean:true string:
+rep_negzero_fneg_comma	ok	integer:2 boolean:true string:
+rep_negzero_fneg_nulsep	ok	integer:2 boolean:true string:
+rep_negzero_fneg_numsep	ok	integer:2 boolean:true string:
+rep_negzero_s2_nosep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_s2_nilsep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_s2_emptysep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_s2_comma	ok	integer:2 boolean:true string:2d302e302c202d302e30
+rep_negzero_s2_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30
+rep_negzero_s2_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30
+rep_negzero_s_sp_nosep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_s_sp_nilsep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_s_sp_emptysep	ok	integer:2 boolean:true string:2d302e302d302e302d302e30
+rep_negzero_s_sp_comma	ok	integer:2 boolean:true string:2d302e302c202d302e302c202d302e30
+rep_negzero_s_sp_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30002d302e30
+rep_negzero_s_sp_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30302d302e30
+rep_negzero_shex_nosep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e30
+rep_negzero_shex_nilsep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e30
+rep_negzero_shex_emptysep	ok	integer:2 boolean:true string:2d302e302d302e302d302e302d302e30
+rep_negzero_shex_comma	ok	integer:2 boolean:true string:2d302e302c202d302e302c202d302e302c202d302e30
+rep_negzero_shex_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30002d302e30002d302e30
+rep_negzero_shex_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30302d302e30302d302e30
+rep_negzero_sfl_nosep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_sfl_nilsep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_sfl_emptysep	ok	integer:2 boolean:true string:2d302e302d302e30
+rep_negzero_sfl_comma	ok	integer:2 boolean:true string:2d302e302c202d302e30
+rep_negzero_sfl_nulsep	ok	integer:2 boolean:true string:2d302e30002d302e30
+rep_negzero_sfl_numsep	ok	integer:2 boolean:true string:2d302e30302d302e30
+rep_badcount_negzero	ok	string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420737472696e6729 string:62616420617267756d656e7420233220746f20277265702720286e756d62657220686173206e6f20696e746567657220726570726573656e746174696f6e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e696c29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74207461626c6529 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f7420626f6f6c65616e29 string:62616420617267756d656e7420233220746f20277265702720286e756d6265722065787065637465642c20676f74206e6f2076616c756529
+rep_s_nil	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726570272028737472696e672065787065637465642c20676f74206e696c29
+rep_s_tbl	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726570272028737472696e672065787065637465642c20676f74207461626c6529
+rep_s_bool	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726570272028737472696e672065787065637465642c20676f7420626f6f6c65616e29
+rep_s_none	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726570272028737472696e672065787065637465642c20676f74206e6f2076616c756529
+rep_sep_tbl	ok	integer:2 boolean:false string:62616420617267756d656e7420233320746f2027726570272028737472696e672065787065637465642c20676f74207461626c6529
+rep_sep_bool	ok	integer:2 boolean:false string:62616420617267756d656e7420233320746f2027726570272028737472696e672065787065637465642c20676f7420626f6f6c65616e29
+rep_sep_tbl_n0	ok	integer:2 boolean:false string:62616420617267756d656e7420233320746f2027726570272028737472696e672065787065637465642c20676f74207461626c6529
+rep_s_tbl_n0	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726570272028737472696e672065787065637465642c20676f74207461626c6529
+rep_method	ok	integer:1 string:61622d6162
+rep_limit_0_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_429496730	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_0_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_0_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_0_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_0_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_0_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_1073741824	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_357913942	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_1073741824	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_0_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_715827883	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_306783379	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_2_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_715827883	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_0_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_536870912	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_268435456	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_3_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_306783379	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_0_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_268435456	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_178956971	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_7_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_2147484	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_0_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_2145339	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_1_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_2136800	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_2147483647	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_2147483648	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_4294967296	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_4611686018427387904	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_limit_1000_5_9223372036854775807	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_emptyunit_1	ok	integer:0 integer:0
+rep_emptyunit_2	ok	integer:0 integer:0
+rep_emptyunit_1000	ok	integer:0 integer:0
+rep_emptyunit_1048576	ok	integer:0 integer:0
+rep_emptyunit_huge_sep	ok	boolean:false string:726573756c74696e6720737472696e6720746f6f206c61726765
+rep_content	ok	string:6162007c6162007c6162007c6162007c616200 integer:19
+rawequal_row_00	ok	boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_01	ok	boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_02	ok	boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_03	ok	boolean:false boolean:false boolean:false boolean:true boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_04	ok	boolean:false boolean:false boolean:false boolean:true boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_05	ok	boolean:false boolean:false boolean:false boolean:true boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_06	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_07	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_08	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_09	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_10	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_11	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_12	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_13	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_14	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_15	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_16	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_17	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_18	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_19	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_20	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_21	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_22	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_23	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_24	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_25	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_26	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_27	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false boolean:false
+rawequal_row_28	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false boolean:false
+rawequal_row_29	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false boolean:false
+rawequal_row_30	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false boolean:false
+rawequal_row_31	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true boolean:false
+rawequal_row_32	ok	boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:false boolean:true
+rawequal_self	ok	boolean:true boolean:true boolean:false boolean:true
+rawequal_strings_built	ok	boolean:true boolean:true
+rawequal_extra_args	ok	boolean:true boolean:false
+rawequal_args_none	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f2027726177657175616c27202876616c756520657870656374656429
+rawequal_args_one	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027726177657175616c27202876616c756520657870656374656429
+rawequal_args_one_nil	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027726177657175616c27202876616c756520657870656374656429
+rawequal_nil_nil	ok	boolean:true
+xpcall_ret_none_h_tag	ok	integer:1 boolean:true
+xpcall_ret_none_h_type	ok	integer:1 boolean:true
+xpcall_ret_none_h_many	ok	integer:1 boolean:true
+xpcall_ret_none_h_none	ok	integer:1 boolean:true
+xpcall_ret_none_h_ident	ok	integer:1 boolean:true
+xpcall_ret_none_h_raises	ok	integer:1 boolean:true
+xpcall_ret_none_h_raises_tbl	ok	integer:1 boolean:true
+xpcall_ret_none_h_nargs	ok	integer:1 boolean:true
+xpcall_ret_one_h_tag	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_type	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_many	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_none	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_ident	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_raises	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_raises_tbl	ok	integer:2 boolean:true integer:1
+xpcall_ret_one_h_nargs	ok	integer:2 boolean:true integer:1
+xpcall_ret_many_h_tag	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_type	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_many	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_none	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_ident	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_raises	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_raises_tbl	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_many_h_nargs	ok	integer:4 boolean:true integer:1 nil:nil string:7468726565
+xpcall_ret_args_h_tag	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_type	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_many	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_none	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_ident	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_raises	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_raises_tbl	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_ret_args_h_nargs	ok	integer:5 boolean:true integer:3 string:61 nil:nil integer:3
+xpcall_err_str_h_tag	ok	integer:2 boolean:false string:483a626f6f6d
+xpcall_err_str_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_err_str_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_str_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_str_h_ident	ok	integer:2 boolean:false string:626f6f6d
+xpcall_err_str_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_str_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_str_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_err_tbl_h_tag	ok	integer:2 boolean:false string:483a4554
+xpcall_err_tbl_h_type	ok	integer:2 boolean:false string:7461626c65
+xpcall_err_tbl_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_tbl_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_tbl_h_ident	ok	integer:2 boolean:false string:4554
+xpcall_err_tbl_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_tbl_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_tbl_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_err_nil_h_tag	ok	integer:2 boolean:false string:483a6e696c
+xpcall_err_nil_h_type	ok	integer:2 boolean:false string:6e696c
+xpcall_err_nil_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_nil_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_nil_h_ident	ok	integer:2 boolean:false nil:nil
+xpcall_err_nil_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_nil_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_nil_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_err_num_h_tag	ok	integer:2 boolean:false string:483a3432
+xpcall_err_num_h_type	ok	integer:2 boolean:false string:6e756d626572
+xpcall_err_num_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_num_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_num_h_ident	ok	integer:2 boolean:false integer:42
+xpcall_err_num_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_num_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_num_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_err_false_h_tag	ok	integer:2 boolean:false string:483a66616c7365
+xpcall_err_false_h_type	ok	integer:2 boolean:false string:626f6f6c65616e
+xpcall_err_false_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_false_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_false_h_ident	ok	integer:2 boolean:false boolean:false
+xpcall_err_false_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_false_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_false_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_err_after_pcall_h_tag	ok	integer:2 boolean:false string:483a6f75746572
+xpcall_err_after_pcall_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_err_after_pcall_h_many	ok	integer:2 boolean:false integer:1
+xpcall_err_after_pcall_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_err_after_pcall_h_ident	ok	integer:2 boolean:false string:6f75746572
+xpcall_err_after_pcall_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_after_pcall_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_err_after_pcall_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_nested_xpcall_h_tag	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_type	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_many	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_none	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_ident	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_raises	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_raises_tbl	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nested_xpcall_h_nargs	ok	integer:3 boolean:true boolean:false string:696e3a7a
+xpcall_nil_h_tag	ok	integer:2 boolean:false string:483a617474656d707420746f2063616c6c2061206e696c2076616c7565
+xpcall_nil_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_nil_h_many	ok	integer:2 boolean:false integer:1
+xpcall_nil_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_nil_h_ident	ok	integer:2 boolean:false string:617474656d707420746f2063616c6c2061206e696c2076616c7565
+xpcall_nil_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_nil_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_nil_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_number_h_tag	ok	integer:2 boolean:false string:483a617474656d707420746f2063616c6c2061206e756d6265722076616c7565
+xpcall_number_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_number_h_many	ok	integer:2 boolean:false integer:1
+xpcall_number_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_number_h_ident	ok	integer:2 boolean:false string:617474656d707420746f2063616c6c2061206e756d6265722076616c7565
+xpcall_number_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_number_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_number_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_string_h_tag	ok	integer:2 boolean:false string:483a617474656d707420746f2063616c6c206120737472696e672076616c7565
+xpcall_string_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_string_h_many	ok	integer:2 boolean:false integer:1
+xpcall_string_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_string_h_ident	ok	integer:2 boolean:false string:617474656d707420746f2063616c6c206120737472696e672076616c7565
+xpcall_string_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_string_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_string_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_plain_table_h_tag	ok	integer:2 boolean:false string:483a617474656d707420746f2063616c6c2061207461626c652076616c7565
+xpcall_plain_table_h_type	ok	integer:2 boolean:false string:737472696e67
+xpcall_plain_table_h_many	ok	integer:2 boolean:false integer:1
+xpcall_plain_table_h_none	ok	integer:2 boolean:false nil:nil
+xpcall_plain_table_h_ident	ok	integer:2 boolean:false string:617474656d707420746f2063616c6c2061207461626c652076616c7565
+xpcall_plain_table_h_raises	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_plain_table_h_raises_tbl	ok	integer:2 boolean:false string:6572726f7220696e206572726f722068616e646c696e67
+xpcall_plain_table_h_nargs	ok	integer:2 boolean:false integer:1
+xpcall_callable_h_tag	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_type	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_many	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_none	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_ident	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_raises	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_raises_tbl	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_callable_h_nargs	ok	integer:3 boolean:true string:63616c6c6564 integer:3
+xpcall_args_no_handler	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74206e6f2076616c756529
+xpcall_args_nil_handler	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74206e696c29
+xpcall_args_num_handler	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74206e756d62657229
+xpcall_args_tbl_handler	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74207461626c6529
+xpcall_args_callable_handler	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74207461626c6529
+xpcall_args_none	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f2027787063616c6c27202866756e6374696f6e2065787065637465642c20676f74206e6f2076616c756529
+xpcall_in_coroutine	ok	boolean:true integer:1 boolean:true boolean:false string:483a73656e74
+xpcall_deep	ok	boolean:false string:6465657021
+xpcall_handler_fails_1_times	ok	boolean:false string:48323a616761696e31
+xpcall_handler_fails_2_times	ok	boolean:false string:48333a616761696e32
+xpcall_handler_fails_3_times	ok	boolean:false string:48343a616761696e33
+xpcall_handler_fails_10_times	ok	boolean:false string:4831313a616761696e3130
+xpcall_handler_fails_100_times	ok	boolean:false string:483130313a616761696e313030
+xpcall_handler_fails_with_table	ok	boolean:false string:7461626c65
+xpcall_handler_always_fails	ok	boolean:false string:6572726f7220696e206572726f722068616e646c696e67 boolean:true
+xpcall_handler_sees_value	ok	boolean:false string:76
+wrap_gen	ok	integer:10 string:312c322c332c342c352c362c372c382c392c3130
+wrap_in_out	ok	integer:2 integer:20 string:78 string:79 string:656e64
+wrap_varargs	ok	integer:4 integer:3 integer:2 integer:3 integer:2 nil:nil nil:nil
+wrap_return_none	ok	integer:0
+wrap_yield_none	ok	integer:0 integer:1
+wrap_dead	ok	integer:2 boolean:false string:63616e6e6f7420726573756d65206465616420636f726f7574696e65
+wrap_dead_twice	ok	integer:2 boolean:false string:63616e6e6f7420726573756d65206465616420636f726f7574696e65
+wrap_err_str	ok	integer:2 boolean:false string:696e6e6572
+wrap_err_str_after_yield	ok	integer:1 integer:2 boolean:false string:6c617465
+wrap_err_tbl	ok	boolean:false boolean:true
+wrap_err_nil	ok	integer:2 boolean:false nil:nil
+wrap_err_num	ok	integer:2 boolean:false integer:7
+wrap_dead_after_err	ok	integer:2 boolean:false string:63616e6e6f7420726573756d65206465616420636f726f7574696e65
+wrap_running	ok	integer:2 boolean:false string:63616e6e6f7420726573756d65206e6f6e2d73757370656e64656420636f726f7574696e65
+wrap_nested	ok	string:6931 string:6932 string:6f
+wrap_yield_through	ok	integer:2 boolean:true string:77 integer:3 boolean:true string:6261636b string:77646f6e65
+wrap_status_inside	ok	string:72756e6e696e67 boolean:false
+wrap_type	ok	string:66756e6374696f6e
+wrap_tail_running	ok	boolean:false
+wrap_tail_yield	ok	string:79 string:72
+wrap_tail_yield_main	ok	string:6669727374
+wrap_callable_table	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f74207461626c6529
+wrap_many_values	error	6368756e6b3a31353a2063616e6e6f7420726573756d65206465616420636f726f7574696e65
+wrap_resume_after_return	ok	string:6f6e6c79 boolean:false string:63616e6e6f7420726573756d65206465616420636f726f7574696e65 boolean:false string:63616e6e6f7420726573756d65206465616420636f726f7574696e65
+wrap_create_vs_wrap	ok	integer:1 integer:1 integer:2 integer:2
+wrap_args_none	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f74206e6f2076616c756529
+wrap_args_nil	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f74206e696c29
+wrap_args_num	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f74206e756d62657229
+wrap_args_str	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f7420737472696e6729
+wrap_args_tbl	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20277772617027202866756e6374696f6e2065787065637465642c20676f74207461626c6529
+load_mode_00_text	ok	integer:7
+load_mode_00_binary	ok	nil:nil string:72656675736564
+load_mode_01_text	ok	integer:7
+load_mode_01_binary	ok	nil:nil string:72656675736564
+load_mode_02_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f646520697320272729
+load_mode_02_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f646520697320272729
+load_mode_03_text	ok	integer:7
+load_mode_03_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f64652069732027742729
+load_mode_04_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f64652069732027622729
+load_mode_04_binary	ok	nil:nil string:72656675736564
+load_mode_05_text	ok	integer:7
+load_mode_05_binary	ok	nil:nil string:72656675736564
+load_mode_06_text	ok	integer:7
+load_mode_06_binary	ok	nil:nil string:72656675736564
+load_mode_07_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f64652069732027782729
+load_mode_07_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f64652069732027782729
+load_mode_08_text	ok	integer:7
+load_mode_08_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f6465206973202774782729
+load_mode_09_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f646520697320276262622729
+load_mode_09_binary	ok	nil:nil string:72656675736564
+load_mode_10_text	ok	integer:7
+load_mode_10_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f64652069732027742729
+load_mode_11_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f64652069732027622729
+load_mode_11_binary	ok	nil:nil string:72656675736564
+load_mode_12_text	ok	nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f64652069732027312729
+load_mode_12_binary	ok	nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f64652069732027312729
+load_binary_empty_after_sig	ok	boolean:true string:737472696e67
+load_binary_like_later	ok	boolean:true string:5b737472696e672022201b225d3a313a
+load_env_absent_const	ok	integer:2 integer:1 nil:nil
+load_env_absent_varargs	ok	integer:2 string:61 nil:nil
+load_env_absent_global_x	ok	integer:1 string:676c6f62616c2078 nil:nil
+load_env_absent_set_global	ok	integer:1 integer:9 integer:9
+load_env_nil_const	ok	integer:2 integer:1 nil:nil
+load_env_nil_varargs	ok	integer:2 string:61 nil:nil
+load_env_table_const	ok	integer:2 integer:1 nil:nil
+load_env_table_varargs	ok	integer:2 string:61 nil:nil
+load_env_table_global_x	ok	integer:1 integer:5 nil:nil
+load_env_table_set_global	ok	integer:1 integer:9 nil:nil
+load_env_number_const	ok	integer:2 integer:1 nil:nil
+load_env_number_varargs	ok	integer:2 string:61 nil:nil
+load_env_globals_const	ok	integer:2 integer:1 nil:nil
+load_env_globals_varargs	ok	integer:2 string:61 nil:nil
+load_env_globals_global_x	ok	integer:1 string:676c6f62616c2078 nil:nil
+load_env_globals_set_global	ok	integer:1 integer:9 integer:9
+load_env_isolated	ok	integer:3 integer:3 nil:nil
+load_env_shared	ok	integer:2
+load_env_upvalue_only	ok	integer:1
+load_returns_one	ok	integer:1
+load_fresh_each_time	ok	boolean:false boolean:true
+load_g_inside	ok	boolean:true
+load_name_eq_empty	ok	string:3a313a
+load_name_eq_short	ok	string:6162633a313a
+load_name_eq_58	ok	string:797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979793a313a
+load_name_eq_59	ok	string:79797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979793a313a
+load_name_eq_60	ok	string:79797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979793a313a
+load_name_eq_200	ok	string:79797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979797979793a313a
+load_name_eq_nul	ok	string:61623a313a
+load_name_eq_nl	ok	string:61620a63643a313a
+load_name_at_empty	ok	string:3a313a
+load_name_at_short	ok	string:66696c652e6c75613a313a
+load_name_at_58	ok	string:6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615a3a313a
+load_name_at_59	ok	string:616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615a3a313a
+load_name_at_60	ok	string:2e2e2e616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615a3a313a
+load_name_at_61	ok	string:2e2e2e616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615a3a313a
+load_name_at_200	ok	string:2e2e2e34353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393a313a
+load_name_at_nul	ok	string:61623a313a
+load_name_str_empty	ok	string:5b737472696e672022225d3a313a
+load_name_str_short	ok	string:5b737472696e672022737263225d3a313a
+load_name_str_43	ok	string:5b737472696e67202273737373737373737373737373737373737373737373737373737373737373737373737373737373737373225d3a313a
+load_name_str_44	ok	string:5b737472696e6720227373737373737373737373737373737373737373737373737373737373737373737373737373737373737373225d3a313a
+load_name_str_45	ok	string:5b737472696e6720227373737373737373737373737373737373737373737373737373737373737373737373737373737373737373732e2e2e225d3a313a
+load_name_str_46	ok	string:5b737472696e6720227373737373737373737373737373737373737373737373737373737373737373737373737373737373737373732e2e2e225d3a313a
+load_name_str_200	ok	string:5b737472696e6720227373737373737373737373737373737373737373737373737373737373737373737373737373737373737373732e2e2e225d3a313a
+load_name_str_nl	ok	string:5b737472696e67202261622e2e2e225d3a313a
+load_name_str_nl_first	ok	string:5b737472696e6720222e2e2e225d3a313a
+load_name_str_long_nl	ok	string:5b737472696e6720227373737373737373737373737373737373737373737373737373737373737373737373737373737373737373732e2e2e225d3a313a
+load_name_str_cr	ok	string:5b737472696e67202261620d6364225d3a313a
+load_name_str_nul	ok	string:5b737472696e6720226162225d3a313a
+load_name_str_nul_nl	ok	string:5b737472696e6720226162225d3a313a
+load_name_str_quote	ok	string:5b737472696e672022612262225d3a313a
+load_name_num	ok	string:5b737472696e6720223432225d3a313a
+load_name_float	ok	string:5b737472696e672022312e35225d3a313a
+load_name_default_short	ok	string:5b737472696e67202272657475726e202b225d3a313a
+load_name_default_long	ok	string:5b737472696e67202272657475726e2031202b20202020202020202020202020202020202020202020202020202020202020202020202e2e2e225d3a313a
+load_name_default_nl	ok	string:5b737472696e6720226c6f63616c2061203d20312e2e2e225d3a323a
+load_name_bad	ok	integer:2 boolean:false string:62616420617267756d656e7420233220746f20276c6f6164272028737472696e672065787065637465642c20676f74207461626c6529
+load_mode_bad_type	ok	integer:2 boolean:false string:62616420617267756d656e7420233320746f20276c6f6164272028737472696e672065787065637465642c20676f74207461626c6529
+load_syntax_eof	ok	string:5b737472696e67202272657475726e2031202b225d3a313a
+load_syntax_paren	ok	string:5b737472696e67202228225d3a313a
+load_syntax_line3	ok	string:5b737472696e6720226c6f63616c2061203d20312e2e2e225d3a333a
+load_syntax_line5_token	ok	string:5b737472696e67202278203d202e2e2e225d3a353a
+load_syntax_unfinished_str	ok	string:5b737472696e67202272657475726e2027616263225d3a313a
+load_syntax_unfinished_long	ok	string:5b737472696e67202272657475726e205b5b6162632e2e2e225d3a333a
+load_syntax_bad_escape	ok	string:5b737472696e67202272657475726e20275c7127225d3a313a
+load_syntax_bad_number	ok	string:5b737472696e67202272657475726e203378225d3a313a
+load_syntax_goto	ok	string:5b737472696e672022676f746f206e6f7768657265225d3a313a
+load_syntax_break_outside	ok	string:5b737472696e672022627265616b225d3a313a
+load_syntax_assign_call	ok	string:5b737472696e672022662829203d2031225d3a313a
+load_syntax_crlf	ok	string:5b737472696e67202261203d20310d2e2e2e225d3a333a
+load_syntax_blank_lines	ok	string:5b737472696e6720222e2e2e225d3a31303a
+load_syntax_comment_then	ok	string:5b737472696e6720222d2d20632e2e2e225d3a343a
+load_syntax_end_missing	ok	string:5b737472696e67202269662074727565207468656e2e2e2e225d3a333a
+load_syntax_dup_label	ok	string:5b737472696e6720223a3a613a3a203a3a613a3a225d3a313a
+load_syntax_big_line	ok	string:5b737472696e6720222e2e2e225d3a3330313a
+load_valid_closure	ok	integer:2 integer:3
+load_valid_loop	ok	integer:55
+load_valid_goto_ok	ok	string:65
+load_valid_shebang_text	ok	string:2321
+load_valid_long_string	ok	string:615d5d62
+load_valid_int_div	ok	integer:3 float:3.0 float:4.0
+load_numeric_chunk	ok	string:5b737472696e6720223432225d3a313a
+load_numeric_ok	ok	boolean:true
+load_reader_pieces	ok	string:66 integer:4 integer:42
+load_reader_numbers	ok	string:66 integer:4 float:42.5
+load_reader_empty_stops	ok	string:66 integer:2 integer:1
+load_reader_nil_first	ok	string:66 integer:1
+load_reader_one_byte_each	ok	string:66 integer:9 integer:7
+load_reader_syntax	ok	nil:nil string:286c6f6164293a313a integer:3
+load_reader_multiline	ok	string:66 integer:4 integer:3
+load_reader_bad_table	ok	nil:nil string:7265616465722066756e6374696f6e206d7573742072657475726e206120737472696e67
+load_reader_bad_bool	ok	nil:nil string:7265616465722066756e6374696f6e206d7573742072657475726e206120737472696e67
+load_reader_bad_func	ok	nil:nil string:7265616465722066756e6374696f6e206d7573742072657475726e206120737472696e67
+load_reader_err_str	ok	integer:2 nil:nil string:72
+load_reader_err_tbl	ok	nil:nil boolean:true
+load_reader_err_late	ok	integer:2 nil:nil string:6c617465
+load_reader_binary_mode_t	ok	integer:2 nil:nil string:617474656d707420746f206c6f616420612062696e617279206368756e6b20286d6f64652069732027742729
+load_reader_binary	ok	nil:nil string:72656675736564
+load_reader_name	ok	string:6c6f61646564
+load_reader_default_name	ok	string:286c6f6164293a313a
+load_reader_mode	ok	integer:2 nil:nil string:617474656d707420746f206c6f616420612074657874206368756e6b20286d6f64652069732027622729
+load_reader_env	ok	string:656e762078
+load_args_none	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20276c6f616427202866756e6374696f6e2065787065637465642c20676f74206e6f2076616c756529
+load_args_nil	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20276c6f616427202866756e6374696f6e2065787065637465642c20676f74206e696c29
+load_args_table	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20276c6f616427202866756e6374696f6e2065787065637465642c20676f74207461626c6529
+load_args_bool	ok	integer:2 boolean:false string:62616420617267756d656e7420233120746f20276c6f616427202866756e6374696f6e2065787065637465642c20676f7420626f6f6c65616e29
+g_self	ok	boolean:true boolean:true string:7461626c65 boolean:true
+g_assign	ok	integer:5
+g_lookup	ok	boolean:true boolean:true boolean:true boolean:true
+g_rebind	ok	integer:1 boolean:true

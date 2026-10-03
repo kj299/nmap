@@ -16,6 +16,7 @@
 //! parses a byte of script-supplied data.
 
 pub mod pattern;
+pub mod strformat;
 pub mod strpack;
 
 use std::borrow::Cow;
@@ -30,6 +31,7 @@ use piccolo::{
 };
 
 use self::pattern::{Capture, Gmatch, Gsub, Match, PatternError};
+use self::strformat::{format_step, FormatArgs, Formatter, Literal, Step};
 use self::strpack::{PackArgs, PackError, Unpacked};
 
 /// The `string` table of `ctx`'s globals: the one the string metatable's
@@ -52,6 +54,35 @@ pub fn load_strpack<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
     install(ctx, string, "pack", str_pack);
     install(ctx, string, "unpack", str_unpack);
     install(ctx, string, "packsize", str_packsize);
+    Ok(())
+}
+
+/// Installs `string.format` into the `string` table of `ctx`'s globals,
+/// replacing anything already there.
+pub fn load_format<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
+    let string = string_table(ctx)?;
+    string.set_field(
+        ctx,
+        "format",
+        Callback::from_fn(&ctx, |ctx, _, mut stack| {
+            let mut seq = FormatSeq {
+                args: stack.drain(..).collect(),
+                resolved: Vec::new(),
+                need: None,
+                awaiting: None,
+                f: Formatter::default(),
+            };
+            // Most formats need no `__tostring` call and finish here; one that
+            // does continues as a sequence from where it stopped.
+            match seq.run(ctx)? {
+                Some(result) => {
+                    stack.push_back(Value::String(result));
+                    Ok(CallbackReturn::Return)
+                }
+                None => Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, seq))),
+            }
+        }),
+    );
     Ok(())
 }
 
@@ -110,7 +141,13 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
 /// A Lua error carrying a string, which is what `luaL_error` and
 /// `luaL_argerror` raise: `pcall` returns it as the message.
 fn lua_error<'gc>(ctx: Context<'gc>, msg: &str) -> Error<'gc> {
-    Error::from(Value::String(ctx.intern(msg.as_bytes())))
+    lua_error_bytes(ctx, msg.as_bytes())
+}
+
+/// [`lua_error`] for a message that is not UTF-8: Lua strings are bytes, and
+/// a message quoting part of a script's input carries its bytes unchanged.
+fn lua_error_bytes<'gc>(ctx: Context<'gc>, msg: &[u8]) -> Error<'gc> {
+    Error::from(Value::String(ctx.intern(msg)))
 }
 
 /// A matcher error is a `luaL_error`: it names no argument.
@@ -137,8 +174,7 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     }
 
     fn type_error(&self, arg: usize, expected: &str) -> PackError {
-        let got = self.get(arg).map_or("no value", |v| v.type_name());
-        PackError::bad_argument(arg, format!("{expected} expected, got {got}"))
+        type_error(self.get(arg), arg, expected)
     }
 
     /// `luaL_checklstring` for an argument that must be present.
@@ -180,16 +216,36 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     /// that *is* a number but not an integral one says so, and anything else is
     /// a type error.
     fn check_integer(&self, arg: usize) -> Result<i64, PackError> {
-        let v = self.get(arg).unwrap_or(Value::Nil);
-        match v.to_integer() {
-            Some(i) => Ok(i),
-            None if v.to_number().is_some() => Err(PackError::bad_argument(
-                arg,
-                "number has no integer representation",
-            )),
-            None => Err(self.type_error(arg, "number")),
-        }
+        check_integer(self.get(arg), arg)
     }
+}
+
+/// `luaL_typeerror`'s message for argument `arg`, which is `v` (`None` if the
+/// call passed fewer arguments).
+fn type_error(v: Option<Value<'_>>, arg: usize, expected: &str) -> PackError {
+    let got = v.map_or("no value", |v| v.type_name());
+    PackError::bad_argument(arg, format!("{expected} expected, got {got}"))
+}
+
+/// `luaL_checkinteger`. The two failure messages are the C's: a value that
+/// *is* a number but not an integral one says so, and anything else is a type
+/// error.
+fn check_integer(v: Option<Value<'_>>, arg: usize) -> Result<i64, PackError> {
+    let val = v.unwrap_or(Value::Nil);
+    match val.to_integer() {
+        Some(i) => Ok(i),
+        None if val.to_number().is_some() => Err(PackError::bad_argument(
+            arg,
+            "number has no integer representation",
+        )),
+        None => Err(type_error(v, arg, "number")),
+    }
+}
+
+/// `luaL_checknumber`.
+fn check_number(v: Option<Value<'_>>, arg: usize) -> Result<f64, PackError> {
+    v.and_then(Value::to_number)
+        .ok_or_else(|| type_error(v, arg, "number"))
 }
 
 impl PackArgs for LuaArgs<'_, '_, '_> {
@@ -198,9 +254,7 @@ impl PackArgs for LuaArgs<'_, '_, '_> {
     }
 
     fn number(&mut self, arg: usize) -> Result<f64, PackError> {
-        self.get(arg)
-            .and_then(Value::to_number)
-            .ok_or_else(|| self.type_error(arg, "number"))
+        check_number(self.get(arg), arg)
     }
 
     fn bytes(&mut self, arg: usize) -> Result<Cow<'_, [u8]>, PackError> {
@@ -502,6 +556,212 @@ impl<'gc> Sequence<'gc> for GsubSeq<'gc> {
     }
 }
 
+/// `string.format`, as a [`Sequence`] for the one case that needs it: a `%s`
+/// whose argument has a `__tostring` metamethod, which is a call into the VM.
+#[derive(Collect)]
+#[collect(no_drop)]
+struct FormatSeq<'gc> {
+    /// The call's arguments; the format is the first.
+    args: Vec<Value<'gc>>,
+    /// `__tostring` results already obtained, by argument index (0-based).
+    resolved: Vec<Option<LuaString<'gc>>>,
+    /// An argument whose `__tostring` must be called before formatting can
+    /// continue.
+    #[collect(require_static)]
+    need: Option<usize>,
+    /// The argument whose `__tostring` the VM is running now.
+    #[collect(require_static)]
+    awaiting: Option<usize>,
+    #[collect(require_static)]
+    f: Formatter,
+}
+
+/// The arguments of a `string.format` call as [`FormatArgs`].
+struct VmArgs<'s, 'gc> {
+    ctx: Context<'gc>,
+    args: &'s [Value<'gc>],
+    resolved: &'s [Option<LuaString<'gc>>],
+}
+
+impl<'gc> VmArgs<'_, 'gc> {
+    fn get(&self, arg: usize) -> Option<Value<'gc>> {
+        arg.checked_sub(1).and_then(|i| self.args.get(i)).copied()
+    }
+}
+
+impl FormatArgs for VmArgs<'_, '_> {
+    fn count(&self) -> usize {
+        self.args.len()
+    }
+
+    fn integer(&mut self, arg: usize) -> Result<i64, PackError> {
+        check_integer(self.get(arg), arg)
+    }
+
+    fn number(&mut self, arg: usize) -> Result<f64, PackError> {
+        check_number(self.get(arg), arg)
+    }
+
+    /// `luaL_tolstring`: the VM's own `tostring`, so that `%s` and `tostring`
+    /// agree on every value. A `__tostring` metamethod is a call the binding
+    /// must make, so that answers "not yet" until it has.
+    fn tostring(&mut self, arg: usize) -> Result<Option<Cow<'_, [u8]>>, PackError> {
+        let i = arg.saturating_sub(1);
+        if let Some(Some(s)) = self.resolved.get(i) {
+            return Ok(Some(Cow::Borrowed(s.as_bytes())));
+        }
+        let v = self.get(arg).unwrap_or(Value::Nil);
+        match meta_ops::tostring(self.ctx, v) {
+            Ok(MetaResult::Value(Value::String(s))) => Ok(Some(Cow::Borrowed(s.as_bytes()))),
+            Ok(MetaResult::Value(other)) => {
+                Ok(Some(Cow::Owned(other.display().to_string().into_bytes())))
+            }
+            Ok(MetaResult::Call(_)) => Ok(None),
+            // `luaL_callmeta` calls whatever `__tostring` holds, and calling a
+            // value that is not callable raises the VM's call error.
+            Err(_) => {
+                let mm = match v {
+                    Value::Table(t) => t.metatable(),
+                    Value::UserData(u) => u.metatable(),
+                    _ => None,
+                }
+                .map_or(Value::Nil, |mt| mt.get_value(self.ctx, "__tostring"));
+                Err(PackError {
+                    arg: None,
+                    msg: format!("attempt to call a {} value", mm.type_name()),
+                })
+            }
+        }
+    }
+
+    fn literal(&mut self, arg: usize) -> Result<Literal<'_>, PackError> {
+        match self.get(arg) {
+            Some(Value::String(s)) => Ok(Literal::Str(Cow::Borrowed(s.as_bytes()))),
+            Some(Value::Integer(n)) => Ok(Literal::Integer(n)),
+            Some(Value::Number(x)) => Ok(Literal::Float(x)),
+            Some(Value::Nil) => Ok(Literal::Text("nil")),
+            Some(Value::Boolean(true)) => Ok(Literal::Text("true")),
+            Some(Value::Boolean(false)) => Ok(Literal::Text("false")),
+            _ => Err(PackError::bad_argument(arg, "value has no literal form")),
+        }
+    }
+
+    /// `lua_topointer`: the object's address for anything the collector owns,
+    /// `None` for numbers, booleans and `nil`.
+    fn pointer(&mut self, arg: usize) -> Option<usize> {
+        use gc_arena::Gc;
+        use piccolo::Function as F;
+        Some(match self.get(arg)? {
+            Value::String(s) => Gc::as_ptr(s.into_inner()) as *const () as usize,
+            Value::Table(t) => Gc::as_ptr(t.into_inner()) as *const () as usize,
+            Value::Function(F::Closure(c)) => Gc::as_ptr(c.into_inner()) as *const () as usize,
+            Value::Function(F::Callback(c)) => Gc::as_ptr(c.into_inner()) as *const () as usize,
+            Value::Thread(t) => Gc::as_ptr(t.into_inner()) as *const () as usize,
+            Value::UserData(u) => Gc::as_ptr(u.into_inner()) as *const () as usize,
+            _ => return None,
+        })
+    }
+}
+
+impl<'gc> FormatSeq<'gc> {
+    /// Format until done (the result) or until a `__tostring` call is needed
+    /// (`None`, with the call recorded in `pending`).
+    fn run(&mut self, ctx: Context<'gc>) -> Result<Option<LuaString<'gc>>, Error<'gc>> {
+        let fmt = match self.args.first() {
+            Some(Value::String(s)) => s.as_bytes(),
+            v => {
+                let s = v
+                    .copied()
+                    .filter(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
+                    .and_then(|v| v.into_string(ctx))
+                    .ok_or_else(|| {
+                        lua_error(
+                            ctx,
+                            &type_error(v.copied(), 1, "string").lua_message("format"),
+                        )
+                    })?;
+                self.args[0] = Value::String(s);
+                s.as_bytes()
+            }
+        };
+        let mut args = VmArgs {
+            ctx,
+            args: &self.args,
+            resolved: &self.resolved,
+        };
+        match format_step(fmt, &mut self.f, &mut args) {
+            Ok(Step::Done(out)) => Ok(Some(ctx.intern(&out))),
+            Ok(Step::NeedsToString(arg)) => {
+                self.need = Some(arg);
+                Ok(None)
+            }
+            Err(e) => Err(lua_error_bytes(ctx, &e.lua_message("format"))),
+        }
+    }
+}
+
+impl<'gc> Sequence<'gc> for FormatSeq<'gc> {
+    fn poll(
+        self: Pin<&mut Self>,
+        ctx: Context<'gc>,
+        _exec: Execution<'gc, '_>,
+        mut stack: Stack<'gc, '_>,
+    ) -> Result<SequencePoll<'gc>, Error<'gc>> {
+        let this = self.get_mut();
+        if let Some(arg) = this.awaiting.take() {
+            // `luaL_tolstring`: the metamethod's first result, which must be a
+            // string or a number (converted as `lua_tolstring` converts it).
+            let v = stack.get(0);
+            stack.clear();
+            let s = match v {
+                Value::String(s) => s,
+                Value::Integer(_) | Value::Number(_) => v
+                    .into_string(ctx)
+                    .ok_or_else(|| lua_error(ctx, "'__tostring' must return a string"))?,
+                _ => return Err(lua_error(ctx, "'__tostring' must return a string")),
+            };
+            let i = arg.saturating_sub(1);
+            if this.resolved.len() <= i {
+                this.resolved.resize(i.saturating_add(1), None);
+            }
+            this.resolved[i] = Some(s);
+        }
+        loop {
+            if let Some(arg) = this.need.take() {
+                let v = this
+                    .args
+                    .get(arg.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(Value::Nil);
+                match meta_ops::tostring(ctx, v)? {
+                    MetaResult::Call(call) => {
+                        stack.clear();
+                        stack.extend(call.args);
+                        this.awaiting = Some(arg);
+                        return Ok(SequencePoll::Call {
+                            bottom: 0,
+                            function: call.function,
+                        });
+                    }
+                    // Not reachable — `need` is only set for a metamethod —
+                    // but harmless: record the value and carry on.
+                    MetaResult::Value(v) => {
+                        let i = arg.saturating_sub(1);
+                        if this.resolved.len() <= i {
+                            this.resolved.resize(i.saturating_add(1), None);
+                        }
+                        this.resolved[i] = v.into_string(ctx);
+                    }
+                }
+            }
+            if let Some(result) = this.run(ctx)? {
+                stack.replace(ctx, Value::String(result));
+                return Ok(SequencePoll::Return);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! End-to-end through the VM, in-module so that Miri runs them: the
@@ -509,7 +769,7 @@ mod tests {
     //! binding's own decisions — argument conversion, the "no value" versus
     //! `nil` distinction, results outliving the stack they came from, and the
     //! `gsub` sequence's calls back into the VM across garbage collections.
-    use super::{load_patterns, load_strpack};
+    use super::{load_format, load_patterns, load_strpack};
     use piccolo::{Closure, Executor, Fuel, Lua, Value, Variadic};
 
     /// Run `src` and render its results, or `Err` with the Lua error message.
@@ -519,6 +779,7 @@ mod tests {
             .try_enter(|ctx| {
                 load_strpack(ctx).expect("Lua::core() has a string table");
                 load_patterns(ctx).expect("Lua::core() has a string table");
+                load_format(ctx).expect("Lua::core() has a string table");
                 let c = Closure::load(ctx, None, src.as_bytes())?;
                 Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
             })
@@ -708,5 +969,29 @@ mod tests {
         assert_eq!(out, b"Ab".repeat(12));
         assert_eq!(n, 12);
         assert!(steps > 12, "only {steps} steps: the sequence never yielded");
+    }
+
+    #[test]
+    fn format_is_installed_and_calls_tostring_back_in_the_vm() {
+        let got = run("local t = setmetatable({}, {__tostring = function() return 'obj' end}) \
+             local n = setmetatable({}, {__tostring = function() return 7 end}) \
+             local _, e1 = pcall(string.format, '%s', setmetatable({}, {__tostring = function() return {} end})) \
+             local _, e2 = pcall(string.format, '%d %s', 'x', t) \
+             local _, e3 = pcall(string.format, '%y', 1) \
+             return string.format('%5.1f|%-4d|%x|%q', 3.14159, 42, 255, 'a\\n'), \
+                    ('%s and %s'):format(t, n), string.format('[%5s]', t), e1, e2, e3")
+        .unwrap();
+        assert_eq!(
+            got,
+            [
+                bytes("  3.1|42  |ff|\"a\\\n\""),
+                bytes("obj and 7"),
+                bytes("[  obj]"),
+                bytes("'__tostring' must return a string"),
+                // The integer is checked before `__tostring` is ever called.
+                bytes("bad argument #2 to 'format' (number expected, got string)"),
+                bytes("invalid conversion '%y' to 'format'"),
+            ]
+        );
     }
 }

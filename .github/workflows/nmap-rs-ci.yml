@@ -508,3 +508,12 @@ jobs:
       # why --check also fails when those trees change. No exemption list.
       - run: bash tests/differential/m6/regen_m6_pattern.sh --check
       - run: cargo test -p nmap-core --test pattern_differential
+
+      # M6 stdlib — `string.format`: Lua's validation of each conversion
+      # specification in front of glibc's `printf`, which is what the Linux
+      # oracle runs. 6,037 cases, every integer and float conversion under
+      # every flag set, width and precision shape, compared on every value and
+      # every error message. Section I reads every literal format string in
+      # nselib/ and scripts/. No exemption list.
+      - run: bash tests/differential/m6/regen_m6_format.sh --check
+      - run: cargo test -p nmap-core --test format_differential

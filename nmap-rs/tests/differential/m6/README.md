@@ -163,12 +163,13 @@ The vendored VM ships seven string functions; the rest are written first-party
 in `core::nse::stdlib` and each is gated here against `liblua/` built from this
 repository (`oracle/build_lua_oracle.sh`). Every case is a Lua chunk the
 oracle's `lua` evaluates and the Rust harness evaluates through the VM with the
-port installed. Neither corpus has an exemption list.
+port installed. None of these corpora has an exemption list.
 
 | corpus | gates | regenerate | cases |
 |---|---|---|---|
 | `m6_strpack_*` | `string.pack` / `unpack` / `packsize` | `regen_m6_strpack.sh` | 4,804 |
 | `m6_pattern_*` | `string.find` / `match` / `gmatch` / `gsub` | `regen_m6_pattern.sh` | 11,408 |
+| `m6_format_*` | `string.format` | `regen_m6_format.sh` | 6,037 |
 
 The pattern corpus is the first to compare error **messages**
 (`oracle/m6_pattern_driver.lua` hex-encodes them), because the matcher's errors

@@ -330,3 +330,9 @@ name = "nse_tail"
 path = "fuzz_targets/nse_tail.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_scriptargs"
+path = "fuzz_targets/nse_scriptargs.rs"
+test = false
+doc = false

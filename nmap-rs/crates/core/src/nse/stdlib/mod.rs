@@ -154,13 +154,13 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
 
 /// A Lua error carrying a string, which is what `luaL_error` and
 /// `luaL_argerror` raise: `pcall` returns it as the message.
-fn lua_error<'gc>(ctx: Context<'gc>, msg: &str) -> Error<'gc> {
+pub(crate) fn lua_error<'gc>(ctx: Context<'gc>, msg: &str) -> Error<'gc> {
     lua_error_bytes(ctx, msg.as_bytes())
 }
 
 /// [`lua_error`] for a message that is not UTF-8: Lua strings are bytes, and
 /// a message quoting part of a script's input carries its bytes unchanged.
-fn lua_error_bytes<'gc>(ctx: Context<'gc>, msg: &[u8]) -> Error<'gc> {
+pub(crate) fn lua_error_bytes<'gc>(ctx: Context<'gc>, msg: &[u8]) -> Error<'gc> {
     Error::from(Value::String(ctx.intern(msg)))
 }
 
@@ -173,15 +173,15 @@ fn pattern_error(e: PatternError) -> PackError {
 }
 
 /// The Lua arguments of one call, read by 1-based argument number.
-struct LuaArgs<'s, 'gc, 'a> {
-    ctx: Context<'gc>,
-    stack: &'s Stack<'gc, 'a>,
+pub(crate) struct LuaArgs<'s, 'gc, 'a> {
+    pub(crate) ctx: Context<'gc>,
+    pub(crate) stack: &'s Stack<'gc, 'a>,
 }
 
 impl<'gc> LuaArgs<'_, 'gc, '_> {
     /// The argument, or `None` if the call passed fewer — which the C words
     /// differently from an explicit `nil` ("got no value").
-    fn get(&self, arg: usize) -> Option<Value<'gc>> {
+    pub(crate) fn get(&self, arg: usize) -> Option<Value<'gc>> {
         arg.checked_sub(1)
             .filter(|&i| i < self.stack.len())
             .map(|i| self.stack.get(i))
@@ -192,7 +192,7 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     }
 
     /// `luaL_checklstring` for an argument that must be present.
-    fn string(&self, arg: usize) -> Result<Cow<'gc, [u8]>, PackError> {
+    pub(crate) fn string(&self, arg: usize) -> Result<Cow<'gc, [u8]>, PackError> {
         match self.get(arg) {
             Some(Value::String(s)) => Ok(Cow::Borrowed(s.as_bytes())),
             // `lua_tolstring` converts a number in place. `into_string` is the
@@ -229,14 +229,14 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     /// `luaL_checkinteger`. The two failure messages are the C's: a value
     /// that *is* a number but not an integral one says so, and anything else is
     /// a type error.
-    fn check_integer(&self, arg: usize) -> Result<i64, PackError> {
+    pub(crate) fn check_integer(&self, arg: usize) -> Result<i64, PackError> {
         check_integer(self.get(arg), arg)
     }
 }
 
 /// `luaL_typeerror`'s message for argument `arg`, which is `v` (`None` if the
 /// call passed fewer arguments).
-fn type_error(v: Option<Value<'_>>, arg: usize, expected: &str) -> PackError {
+pub(crate) fn type_error(v: Option<Value<'_>>, arg: usize, expected: &str) -> PackError {
     let got = v.map_or("no value", |v| v.type_name());
     PackError::bad_argument(arg, format!("{expected} expected, got {got}"))
 }

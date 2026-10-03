@@ -97,6 +97,24 @@ BLOCKS = {
         "    local escaped_basename = match(filename, \"([^/\\\\]-)%.nse$\") or match(filename, \"([^/\\\\]-)$\");",
         lambda l: l == "    local T = P(pre_T)",
     ),
+    # ---- M6.3: `--script-args` / `--script-args-file` -> nmap.registry.args --
+    # The file's contents, with trailing commas stripped.
+    "script_args_file": (
+        "    args[#args+1] = assert(assert(open(path, 'r')):read \"*a\"):gsub(\",*$\", \"\");",
+        lambda l: True,
+    ),
+    # The command line's string, appended even when empty (NmapOps defaults it
+    # to "", which Lua treats as true).
+    "script_args_cli": (
+        "  if cnse.scriptargs then -- Load script arguments (--script-args)",
+        lambda l: l == "  end",
+    ),
+    # Joining, the grammar, and the match. Opens `if #args > 0 then`, which the
+    # driver closes.
+    "script_args_parse": (
+        "  args = concat(args, \",\");",
+        lambda l: l == "    nmap.registry.args = parser:match(\"{\"..args..\"}\");",
+    ),
 }
 
 #: blocks that live in `nselib/lpeg-utility.lua` rather than `nse_main.lua`
@@ -109,6 +127,11 @@ LPEG_UTILITY_BLOCKS = {
     ),
     "caseless": (
         "function caseless (literal)",
+        lambda l: l == "end",
+    ),
+    # M6.3: the quoted-string pattern the script-args grammar uses.
+    "escaped_quote": (
+        "function escaped_quote (quot, esc)",
         lambda l: l == "end",
     ),
 }

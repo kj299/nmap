@@ -15,6 +15,7 @@
 //! which is the one section of that file recording defects rather than choices.
 #![cfg(not(miri))] // reads the corpus from disk; Miri has no filesystem
 
+use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{Closure, Executor, Lua, Value};
 use std::path::{Path, PathBuf};
 
@@ -33,10 +34,6 @@ const KNOWN_DIVERGENCES: &[&str] = &[
     // cases (level 0, a table message, no argument) already match, so the
     // defect is exactly the missing `luaL_where`.
     "error_string_gets_position",
-    // `("ab"):rep(3)`. NOT a dispatch failure -- the `__index` lookup succeeds
-    // and returns nil, because piccolo's string library is seven functions and
-    // `rep` is not among them. Closes when the first-party stdlib lands.
-    "method_rep_literal",
 ];
 
 /// Render a value the way `oracle/m60_arith_driver.lua` does: floats as raw
@@ -138,6 +135,12 @@ fn eval_with(src: &[u8], render: fn(Value) -> String) -> (String, String) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut lua = Lua::core();
         let ex = match lua.try_enter(|ctx| {
+            // The VM as NSE runs it: with the first-party standard library,
+            // which supplies what piccolo's own lacks (`string.rep`, ...).
+            load_patterns(ctx).expect("Lua::core() has a string table");
+            load_strpack(ctx).expect("Lua::core() has a string table");
+            load_format(ctx).expect("Lua::core() has a string table");
+            load_tail(ctx).expect("Lua::core() has string and coroutine tables");
             let c = Closure::load(ctx, None, src)?;
             Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
         }) {

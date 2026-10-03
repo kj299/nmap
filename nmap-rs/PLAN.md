@@ -19,7 +19,7 @@ record; edit it as milestones complete.
 | 4 | **Raw-packet infrastructure + all raw scans** (privileged) | full cycle | ✅ **DONE** — Phase 0 pre-mortem + spike S1 (pcap-in-async) before any Rust; then `core::bytes` → `checksum` → the six `headers::*` → `packet_parser` → `build` → `recv_validate` → `classify` → `ipid`, and `sys::{netif,capture,rawio}`. All raw scans ship on **one** engine: `sys::group` scans a host group over a single demultiplexed capture, with `SynKind` (`-sS`), `UdpKind` (`-sU`) and `FlagKind` (`-sA/-sW/-sM/-sF/-sN/-sX`); `core::payload` derives UDP payloads from `nmap-service-probes`; `core::icmp_quote` gives all three the *filtered*-with-reason path. Retrospective merged (PRs #29–#57). |
 | 5 | OS detection (IPv4 `osscan2` + IPv6 `FPEngine`) | full cycle | ✅ **DONE** — both tracks. **IPv4:** `osdb::{expr,model,parse,score}` over the real 5.1 MB `nmap-os-db` (6,108 fingerprints), `macvendor` (52,085 prefixes), the full `osprobe` battery + 13 tests, `assemble`, `osscan` policy, `demux` + `sys::osscan`; `-O` is **feature-complete against the C's user-visible output** — normal, XML (`<os>`/`<uptime>`/`<tcpsequence>`…) and grepable, plus uptime, sequence-prediction difficulty and `--max-os-tries`. **IPv6:** `fpmodel` (liblinear **removed** — the one entry point reduces to a dot product), ICMPv6 + the four extension headers, `fp6::vectorize`, `build6`, `fp6_match`, `sys::fpengine`, `core::ndp` + `sys::ndp` + `route_for6` + `EthFramingSender` (Linux has no `IPV6_HDRINCL`, so the send path is L2), and CLI `-6 -O`. **Five genuine nmap defects found**, two of them NDP memory-safety bugs reachable by any on-link host, proved under ASAN. Retrospective merged; kit lessons #19–#25 (PRs #58–#83). ⚠️ **`os_scan_host6`'s live wiring is unvalidated on hardware** — see BACKLOG 12b-ii-b-3. |
 | S | **Signature DB maintenance mechanism** (OS/service/MAC) | cross-cutting | 🔶 **EVERY UNBLOCKED SLICE DONE** — the DB **parsers** landed with M3/M5; the missing maintenance loop is now built. `core::sigstore::{manifest,digest,verify}` (fail-closed manifest, in-tree SHA-256, minisign-style Ed25519 over a pinned key ring — gated by a 41-case OpenSSL differential and `verify_strict`, which is the only implementation of four that rejects small-order-key forgeries), `core::fingerprint_store` (consent-gated), `core::servicefp` (the one slice with a C counterpart, so the only true differential), `sys::sigstore` (atomic install). **S5 (`sys::update`) is blocked on three policy decisions**, not on engineering — see Next concrete steps. (PRs #84–#90.) |
-| 6 | NSE — Lua engine + bridges + scripts | full cycle | 🔶 **IN PROGRESS** — Phase 0 and the four decisions in [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md) are done; **M6.1** (`.nse` metadata, `script.db`) and **M6.2** (`--script` selection) are merged (#96, #97). **M6.0, the Lua runtime:** `piccolo` vendored with the `gc-arena` pin resolved (#109); the string metatable (#110); VM defects fixed against nmap's own `liblua/` — arithmetic that could abort the process (#111), float formatting (#112), string-to-number coercion (#113) — leaving **3 of 99** semantics cases divergent; and the first-party stdlib in `core::nse::stdlib`: `string.pack`/`unpack`/`packsize` (#114), **Lua patterns** — `find`/`match`/`gmatch`/`gsub` — (#115) and **`string.format`** (`claude/m6-stdlib-format`), each gated by a `liblua/` differential with no exemption list (4,804, 11,408 and 6,037 cases), a fuzz target and Miri; `string.format`'s fuzz target also checks every accepted specification against glibc's own `snprintf`. Next: the tail (`string.rep`, `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal`). |
+| 6 | NSE — Lua engine + bridges + scripts | full cycle | 🔶 **IN PROGRESS** — Phase 0 and the four decisions in [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md) are done; **M6.1** (`.nse` metadata, `script.db`) and **M6.2** (`--script` selection) are merged (#96, #97). **M6.0, the Lua runtime:** `piccolo` vendored with the `gc-arena` pin resolved (#109); the string metatable (#110); VM defects fixed against nmap's own `liblua/` — arithmetic that could abort the process (#111), float formatting (#112), string-to-number coercion (#113) — leaving **2 of 99** semantics cases divergent; and the first-party stdlib in `core::nse::stdlib`: `string.pack`/`unpack`/`packsize` (#114), **Lua patterns** — `find`/`match`/`gmatch`/`gsub` — (#115, worst case bounded in #117), **`string.format`** (#116) and **the tail** — `string.rep`, `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal` — (`claude/m6-stdlib-tail`), each gated by a `liblua/` differential with no exemption list (4,804, 11,408, 6,037 and 1,019 cases), a fuzz target and Miri; `string.format`'s fuzz target also checks every accepted specification against glibc's own `snprintf`. That completes the approved stdlib list. Next: M6.3, the `nmap` module's non-I/O half. |
 | 7 | Cutover + subprojects (`ncat`/`nping`) | Phase 5 | 🔶 **IN PROGRESS** — [`docs/M7-ANALYSIS.md`](docs/M7-ANALYSIS.md), [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md). M7.0–M7.10 merged (#98–#108): unimplemented options fail closed; the `sys` coverage gap closed; the tracker reconciled; every unimplemented option triaged into MUST / SHOULD / REFUSE against a written capability profile; the evasion decisions settled (`--ttl`, `--badsum`, `-S` ported); and all five steps of the MUST tier landed — `--exclude`/`--excludefile`/`-iL`, `-sL`, the `-T` group, port selection, `-oA`/`--open`/`--reason`. **Three MUST options are still refused**, fail-closed, because the engine cannot yet honour them: `--host-timeout`, `--min-hostgroup`, `--max-hostgroup`. Release engineering and `ncat`/`nping` remain. |
 
 > **We are here:** Milestones 0-5 are complete and merged; Workstream S has every
@@ -31,16 +31,20 @@ record; edit it as milestones complete.
 >
 > M6 has the parts of NSE that need no running script — `.nse` metadata and
 > `--script` selection — and is building the Lua runtime underneath the rest. The
-> vendored VM now matches nmap's own Lua on all but 3 of 99 semantics cases, and the
-> standard library it lacks is being written first-party in `core::nse::stdlib`,
+> vendored VM now matches nmap's own Lua on all but 2 of 99 semantics cases, and the
+> standard library it lacks has been written first-party in `core::nse::stdlib`,
 > leaf-first by how many shipped files each function unblocks: `string.pack`/
-> `unpack`/`packsize`, Lua patterns and `string.format` are done; the tail is next. Every
-> function there is gated by a differential against `liblua/` built from this
-> repository, with no exemption list.
+> `unpack`/`packsize`, Lua patterns, `string.format` and the tail (`string.rep`,
+> `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal`). Every function there is
+> gated by a differential against `liblua/` built from this repository, with no
+> exemption list. `require` is M6.3's loader, and `io`/`os`/`print`/`loadfile`/
+> `debug` wait on the sandbox decision.
 >
 > **Open before M6.4 gives scripts sockets:** the runtime needs a memory and
 > call-depth budget (DIVERGENCES.md, `vm-allocation-failure-aborts`,
-> `vm-no-c-call-depth-limit`). The pattern matcher's worst case, the other item
+> `vm-no-c-call-depth-limit`), and the VM's own runtime errors must reach `pcall`
+> as strings, not userdata (`vm-runtime-errors-are-not-strings`) — scripts
+> routinely format or match the message they catch. The pattern matcher's worst case, the other item
 > that was here, is closed: an exact failure memo bounds it
 > (`pattern-worst-case-time-is-bounded`).
 >
@@ -441,10 +445,11 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md); M6.1 and M6.2 are merged. M6.0,
    the runtime, follows the approved order — patterns, `string.format`,
    `pack`/`unpack`, the tail — with `pack`/`unpack` taken early (#114), patterns
-   merged (#115) and `string.format` in review. **Next: the tail**; then M6.3,
-   the `nmap` module's non-I/O half. Before M6.4: bound the pattern matcher's
-   worst case, and give the runtime a memory and call-depth budget
-   (`vm-allocation-failure-aborts`, `vm-no-c-call-depth-limit`).
+   (#115, #117) and `string.format` (#116) merged, and the tail in review
+   (`claude/m6-stdlib-tail`). **Next: M6.3**, the `nmap` module's non-I/O half.
+   Before M6.4: give the runtime a memory and call-depth budget
+   (`vm-allocation-failure-aborts`, `vm-no-c-call-depth-limit`) and make its
+   runtime errors strings (`vm-runtime-errors-are-not-strings`).
 6. 🔶 **M7 is in progress** in parallel: the cutover gate is the MUST tier of
    [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md), of which `--host-timeout`
    and `--min-hostgroup`/`--max-hostgroup` remain; then release engineering

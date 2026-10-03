@@ -517,3 +517,12 @@ jobs:
       # nselib/ and scripts/. No exemption list.
       - run: bash tests/differential/m6/regen_m6_format.sh --check
       - run: cargo test -p nmap-core --test format_differential
+
+      # M6 stdlib — the tail: `string.rep`, `_G`, `rawequal`, `xpcall`, `load`
+      # and `coroutine.wrap`. 1,019 cases, compared on every value and every
+      # error message, no exemption list: the size bound of `string.rep`, raw
+      # equality across the integer/float edges, handlers that fail, coroutines
+      # resumed dead or from tail position, every mode string, chunk names
+      # around `luaO_chunkid`'s limits, and reader functions.
+      - run: bash tests/differential/m6/regen_m6_tail.sh --check
+      - run: cargo test -p nmap-core --test tail_differential

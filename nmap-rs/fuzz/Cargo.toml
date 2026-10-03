@@ -324,3 +324,9 @@ name = "nse_format"
 path = "fuzz_targets/nse_format.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_tail"
+path = "fuzz_targets/nse_tail.rs"
+test = false
+doc = false

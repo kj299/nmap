@@ -129,6 +129,9 @@ FLOAT_VALUES = [
     "2^-1022", "1.7976931348623157e308", "1/0", "-1/0", "0/0", "-(0/0)",
     "0.5", "1.5", "2.5", "9.9999995", "0.000123456789", "3", "'2.5'",
     "1.96875", "0x1.fffffffffffffp+0", "'x'",
+    # Exact ties in %a where the kept digit is even, so round-half-to-even and
+    # round-half-up disagree (0x1.08, 0x1.28, and the subnormal 0x0.8p-1022).
+    "1.03125", "1.15625", "2^-1023",
 ]
 F_FLAGSETS = ["", "-", "+", " ", "#", "0", "-0", "+ ", "#0", "+-0 #"]
 F_WIDTHS = ["", "12", "99"]

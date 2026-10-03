@@ -2534,5 +2534,40 @@ listed at the end.
       and discounts only this prefix on an error that escapes one.
 - [x] `pattern-bad-argument-naming`: `luaL_argerror` names the function from
       the call site — `'find'` for a direct call, `'string.find'` for a tail
-      call or a `pcall`, and a shifted argument number for a method call. The
-      binding always says `'find'`. Argument errors are compared by status.
+      call or a `pcall`, and a shifted argument number for a method call — so a
+      method call on a receiver of the wrong type reads "calling 'find' on bad
+      self" there and "bad argument #1 to 'find'" here. The binding always says
+      `'find'` and never shifts. Argument errors are compared by status.
+
+Four further differences were found by the adversarial hunt run against this
+port (433,000 probes over six areas: classes, quantifiers, captures, `%b`/`%f`,
+gsub and `gmatch`/`init`). Each is reachable *through* `gsub` but
+is a defect of the vendored VM, equally reachable from plain Lua code, so it is
+recorded here and not fixed in this module. They are open:
+
+- [ ] `vm-no-c-call-depth-limit` — PUC-Lua counts nested C-to-Lua calls and
+      raises "C stack overflow" at `LUAI_MAXCCALLS` (200); a `gsub` callback
+      that calls `gsub` again fails at depth 196. The stackless VM counts
+      nothing, so the recursion succeeds at any depth, and a runaway one —
+      `local function f(c) return (c:gsub(".", f)) end` — grows the heap
+      until something else stops it (about 1.4 GB in 1.6 s before the eval
+      harness's fuel budget did). Plain Lua recursion is unbounded the same way.
+      This is a memory-exhaustion vector a script controls; the NSE runtime
+      needs a call-depth or memory budget before M6.4.
+- [ ] `vm-index-chain-unbounded` — `luaV_finishget` stops an `__index` chain
+      after `MAXTAGLOOP` (2,000) hops with "'__index' chain too long; possible
+      loop"; `meta_ops::index` counts no hops, so a cyclic chain hangs (fuel
+      still bounds it) and a 2,500-table chain succeeds.
+- [ ] `vm-index-non-table-is-called` — an `__index` that is neither a function
+      nor a table (a string, say) is *indexed* by PUC-Lua, through that value's
+      own metatable; `meta_ops::index` tries to *call* it and raises.
+- [ ] `vm-hex-float-double-rounding` — `read_hex_float` rounds after every
+      digit, so `"0x3.00000000000011"` converts to exactly 3 and is accepted as
+      an integer argument (`find`'s `init`, `gsub`'s count) where `l_str2d`
+      rounds once and rejects it. A string-to-number coercion defect the M6.0
+      coercion corpus did not reach.
+
+The same hunt found one defect in this module, fixed before merge: `find`'s
+plain search compared a window at every offset rather than jumping to
+candidates as the C's `memchr` does — the same answers, 57 times slower on a
+10 MB body searched for `"\r\n\r\n"`. It is now `memchr::memmem::find`.

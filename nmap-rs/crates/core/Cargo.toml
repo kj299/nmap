@@ -58,6 +58,10 @@ ed25519-dalek = { version = "2.1.1", default-features = false }
 # audit_unsafe.py, clippy and check_vendor.sh instead.
 piccolo = { path = "../vendor/piccolo" }
 
+# `core::nse::stdlib::pattern` — `find`'s plain substring search. Already in
+# Cargo.lock through `regex`, so this adds no crate; it only names the edge.
+memchr = "2"
+
 # The VM's garbage collector, for one thing only: `#[derive(Collect)]` on the
 # binding's own GC-traced state — the `gmatch` iterator's closure and the `gsub`
 # sequence that calls back into the VM between matches. The derive is the only

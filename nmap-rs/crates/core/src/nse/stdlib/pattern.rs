@@ -594,11 +594,13 @@ fn nospecials(p: &[u8]) -> bool {
 
 /// `lmemfind` (`lstrlib.c:668`): the offset of the first occurrence of `needle`
 /// in `hay`. An empty needle is found at 0.
+///
+/// The C finds candidate positions with `memchr` and compares only there; a
+/// window comparison at every offset gave the same answers 57 times slower on
+/// a 10 MB body searched for `"\r\n\r\n"`, which is how NSE's HTTP code uses
+/// it. `memmem::find` is a vectorised substring search with the same contract.
 fn lmemfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    hay.windows(needle.len()).position(|w| w == needle)
+    memchr::memmem::find(hay, needle)
 }
 
 /// Strip the anchor `find`, `match` and `gsub` honour.

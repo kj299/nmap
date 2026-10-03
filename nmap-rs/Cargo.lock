@@ -539,6 +539,7 @@ dependencies = [
  "ed25519-dalek",
  "fancy-regex",
  "gc-arena",
+ "memchr",
  "piccolo",
  "regex",
 ]

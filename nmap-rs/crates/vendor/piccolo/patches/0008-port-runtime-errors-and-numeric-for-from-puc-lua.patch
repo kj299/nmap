@@ -1,0 +1,1135 @@
+diff --git a/src/chunk_id.rs b/src/chunk_id.rs
+new file mode 100644
+index 0000000..fd33a02
+--- /dev/null
++++ b/src/chunk_id.rs
+@@ -0,0 +1,54 @@
++//! `luaO_chunkid` (`lobject.c`): how an error message names a chunk.
++//!
++//! Runtime errors (`chunk:3: attempt to index a nil value`), syntax errors and
++//! `error()`'s position prefix all name the chunk this way, so it lives here,
++//! beside the executor that raises them.
++
++/// The bytes of `s` before its first NUL: what C sees of a Lua string.
++fn until_nul(s: &[u8]) -> &[u8] {
++    s.iter().position(|&b| b == 0).map_or(s, |i| &s[..i])
++}
++
++/// `LUA_IDSIZE`: the size of `luaO_chunkid`'s buffer, NUL included.
++const LUA_IDSIZE: usize = 60;
++
++/// `luaO_chunkid` (`lobject.c:543`): how an error message names a chunk.
++/// `=name` is `name`, `@file` is `file` (its tail if long), and anything else
++/// is source text, quoted as `[string "first line..."]`.
++pub fn chunk_id(source: &[u8]) -> Vec<u8> {
++    const RETS: &[u8] = b"...";
++    const PRE: &[u8] = b"[string \"";
++    const POS: &[u8] = b"\"]";
++    // `bufflen` after "..." is 57 bytes, and the C's copy of them ends with
++    // the source's terminating NUL: 56 characters of a long `@file`.
++    const AT_KEEP: usize = LUA_IDSIZE - RETS.len() - 1;
++    // Room for source text: the buffer less prefix, "...", suffix and NUL.
++    const ROOM: usize = LUA_IDSIZE - (PRE.len() + RETS.len() + POS.len()) - 1;
++    // `luaL_loadbufferx` takes the name as a C string.
++    let source = until_nul(source);
++    match source.split_first() {
++        Some((b'=', rest)) => rest[..rest.len().min(LUA_IDSIZE - 1)].to_vec(),
++        Some((b'@', rest)) => {
++            if source.len() <= LUA_IDSIZE {
++                rest.to_vec()
++            } else {
++                let mut out = RETS.to_vec();
++                out.extend_from_slice(&rest[rest.len().saturating_sub(AT_KEEP)..]);
++                out
++            }
++        }
++        _ => {
++            let nl = source.iter().position(|&b| b == b'\n');
++            let mut out = PRE.to_vec();
++            if source.len() < ROOM && nl.is_none() {
++                out.extend_from_slice(source);
++            } else {
++                let len = nl.unwrap_or(source.len()).min(ROOM);
++                out.extend_from_slice(&source[..len]);
++                out.extend_from_slice(RETS);
++            }
++            out.extend_from_slice(POS);
++            out
++        }
++    }
++}
+diff --git a/src/compiler/compiler.rs b/src/compiler/compiler.rs
+index 29a2b79..5e180b6 100644
+--- a/src/compiler/compiler.rs
++++ b/src/compiler/compiler.rs
+@@ -1702,6 +1702,13 @@ impl<S: StringInterner> Compiler<S> {
+                 self.current_function
+                     .operations
+                     .push(Operation::TailCall { func, args });
++                // As in Lua, a return follows: a tail call to a Rust function
++                // runs as an ordinary call, keeping this frame (as C keeps it
++                // for a C function), and this hands its results up.
++                self.current_function.operations.push(Operation::Return {
++                    start: func,
++                    count: VarCount::variable(),
++                });
+             }
+         }
+ 
+@@ -1761,6 +1768,10 @@ impl<S: StringInterner> Compiler<S> {
+                 self.current_function
+                     .operations
+                     .push(Operation::TailCall { func: base, args });
++                self.current_function.operations.push(Operation::Return {
++                    start: base,
++                    count: VarCount::variable(),
++                });
+             }
+         }
+ 
+diff --git a/src/error.rs b/src/error.rs
+index 6633c69..90f308e 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -1,12 +1,9 @@
+ use std::{error::Error as StdError, fmt, string::String as StdString, sync::Arc};
+ 
+-use gc_arena::{Collect, Gc, Rootable};
++use gc_arena::{Collect, Gc};
+ use thiserror::Error;
+ 
+-use crate::{
+-    Callback, CallbackReturn, Context, FromValue, Function, IntoValue, MetaMethod, Singleton,
+-    Table, UserData, Value,
+-};
++use crate::{Context, FromValue, Function, IntoValue, Value};
+ 
+ #[derive(Debug, Clone, Copy, Error)]
+ #[error("type error, expected {expected}, found {found}")]
+@@ -220,34 +217,11 @@ impl<'gc> Error<'gc> {
+     pub fn to_value(&self, ctx: Context<'gc>) -> Value<'gc> {
+         match self {
+             Error::Lua(err) => err.0,
+-            Error::Runtime(err) => {
+-                #[derive(Copy, Clone, Collect)]
+-                #[collect(no_drop)]
+-                struct UDMeta<'gc>(Table<'gc>);
+-
+-                impl<'gc> Singleton<'gc> for UDMeta<'gc> {
+-                    fn create(ctx: Context<'gc>) -> Self {
+-                        let table = Table::new(&ctx);
+-                        table
+-                            .set(
+-                                ctx,
+-                                MetaMethod::ToString,
+-                                Callback::from_fn(&ctx, |ctx, _, mut stack| {
+-                                    let ud = stack.consume::<UserData>(ctx)?;
+-                                    let error = ud.downcast_static::<RuntimeError>()?;
+-                                    stack.replace(ctx, error.to_string());
+-                                    Ok(CallbackReturn::Return)
+-                                }),
+-                            )
+-                            .unwrap();
+-                        Self(table)
+-                    }
+-                }
+-
+-                let ud = UserData::new_static(&ctx, err.clone());
+-                ud.set_metatable(&ctx, Some(ctx.singleton::<Rootable![UDMeta<'_>]>().0));
+-                ud.into()
+-            }
++            // What the C would have raised from a C function: a string. The
++            // VM's own errors already arrive as Lua strings, positioned; this
++            // is the rest (a Rust callback's error), unpositioned, as a C
++            // function's `luaG_runerror` would be.
++            Error::Runtime(err) => Value::String(ctx.intern(err.to_string().as_bytes())),
+         }
+     }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 0daa83c..2529c7f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,7 @@
+ pub mod any;
+ pub mod async_callback;
+ pub mod callback;
++pub mod chunk_id;
+ pub mod closure;
+ pub mod compiler;
+ pub mod constant;
+diff --git a/src/meta_ops.rs b/src/meta_ops.rs
+index aa3759c..3e75708 100644
+--- a/src/meta_ops.rs
++++ b/src/meta_ops.rs
+@@ -7,8 +7,8 @@ use crate::async_callback::{AsyncSequence, Locals};
+ use crate::number_format;
+ use crate::{async_sequence, SequenceReturn, Stack};
+ use crate::{
+-    table::InvalidTableKey, Callback, CallbackReturn, Context, Function, IntoValue, Singleton,
+-    Table, Value,
++    table::InvalidTableKey, Callback, CallbackReturn, Constant, Context, Function, IntoValue,
++    Singleton, Table, Value,
+ };
+ 
+ /// An enum of every possible Lua metamethod.
+@@ -145,23 +145,200 @@ impl<'gc, const N: usize> From<MetaCall<'gc, N>> for MetaResult<'gc, N> {
+     }
+ }
+ 
++/// An operator that could not be applied. Every message is PUC-Lua 5.4's,
++/// word for word, without the `chunk:line:` position the executor adds when
++/// the operator ran in a Lua function.
+ #[derive(Debug, Clone, Error)]
+ pub enum MetaOperatorError {
+-    #[error("could not call metamethod {}: {}", .0.name(), .1)]
++    /// The metamethod found is not callable: its call's error.
++    #[error("{1}")]
+     Call(MetaMethod, #[source] MetaCallError),
+-    #[error("could not {} a {} value", .0.verb(), .1)]
+-    Unary(MetaMethod, &'static str),
+-    #[error("could not {} values of type {} and {}", .0.verb(), .1, .2)]
+-    Binary(MetaMethod, &'static str, &'static str),
+-    #[error("invalid table key")]
++    /// The operands are wrong, in PUC-Lua's words (`ldebug.c`, `lstrlib.c`).
++    #[error("{0}")]
++    Message(std::string::String),
++    /// As `Message`, but raised by `luaG_runerror` inside a C function (the
++    /// string metatable's arithmetic), which gives no position.
++    #[error("{0}")]
++    MessageFromC(std::string::String),
++    #[error("{0}")]
+     IndexKeyError(#[from] InvalidTableKey),
+-    #[error("concatenation result is too long")]
++    /// `luaV_concat`'s "string length overflow".
++    #[error("string length overflow")]
+     ConcatOverflow,
+ }
+ 
+-#[derive(Debug, Copy, Clone, Error)]
+-#[error("could not call a {} value", .0)]
+-pub struct MetaCallError(&'static str);
++/// A value that cannot be called: "attempt to call a X value".
++#[derive(Debug, Clone, Error)]
++#[error("attempt to call a {0} value")]
++pub struct MetaCallError(std::string::String);
++
++impl MetaCallError {
++    /// The error for calling `v`, named as `luaT_objtypename` names it.
++    pub fn for_value<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Self {
++        Self(objtypename(ctx, v))
++    }
++}
++
++/// `luaT_objtypename`: a table's or userdata's `__name`, when its metatable
++/// has a string there, else the basic type name.
++pub fn objtypename<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> std::string::String {
++    let mt = match v {
++        Value::Table(t) => t.metatable(),
++        Value::UserData(u) => u.metatable(),
++        _ => None,
++    };
++    if let Some(mt) = mt {
++        if let Value::String(name) = mt.get_value(ctx, "__name") {
++            return std::string::String::from_utf8_lossy(name.as_bytes()).into_owned();
++        }
++    }
++    v.type_name().to_owned()
++}
++
++/// `ttisnumber`: an integer or a float, not a numeric string.
++fn is_number(v: Value<'_>) -> bool {
++    matches!(v, Value::Integer(_) | Value::Number(_))
++}
++
++/// The `__add`-style name `lstrlib.c`'s `trymt` prints, less its `__`.
++fn arith_name(method: MetaMethod) -> &'static str {
++    match method {
++        MetaMethod::Add => "add",
++        MetaMethod::Sub => "sub",
++        MetaMethod::Mul => "mul",
++        MetaMethod::Mod => "mod",
++        MetaMethod::Pow => "pow",
++        MetaMethod::Div => "div",
++        MetaMethod::IDiv => "idiv",
++        _ => "unm",
++    }
++}
++
++/// The error for a binary operator `method` on `lhs` and `rhs`, which no
++/// metamethod and no primitive operation could handle.
++fn binary_error<'gc>(
++    ctx: Context<'gc>,
++    method: MetaMethod,
++    lhs: Value<'gc>,
++    rhs: Value<'gc>,
++) -> MetaOperatorError {
++    let msg = match method {
++        // `luaG_concaterror`: the first operand that is not a string or number.
++        MetaMethod::Concat => {
++            let culprit = if lhs.is_implicit_string() { rhs } else { lhs };
++            format!(
++                "attempt to concatenate a {} value",
++                objtypename(ctx, culprit)
++            )
++        }
++        // `luaG_ordererror`.
++        MetaMethod::Lt | MetaMethod::Le => {
++            let (t1, t2) = (objtypename(ctx, lhs), objtypename(ctx, rhs));
++            if t1 == t2 {
++                format!("attempt to compare two {t1} values")
++            } else {
++                format!("attempt to compare {t1} with {t2}")
++            }
++        }
++        // `luaT_trybinTM` for the bitwise events: two numbers that are not
++        // integers, else the first operand that is not a number.
++        MetaMethod::BAnd
++        | MetaMethod::BOr
++        | MetaMethod::BXor
++        | MetaMethod::Shl
++        | MetaMethod::Shr => {
++            if is_number(lhs) && is_number(rhs) {
++                "number has no integer representation".to_owned()
++            } else {
++                let culprit = if is_number(lhs) { rhs } else { lhs };
++                format!(
++                    "attempt to perform bitwise operation on a {} value",
++                    objtypename(ctx, culprit)
++                )
++            }
++        }
++        _ => {
++            // A string operand: the string metatable's arithmetic metamethod
++            // ran and gave up (`lstrlib.c`'s `trymt`).
++            let numeric = |v: Value<'gc>| v.to_constant().and_then(|c| c.to_numeric());
++            if let (
++                Value::String(_) | Value::Integer(_),
++                Value::String(_) | Value::Integer(_),
++                Some(Constant::Integer(_)),
++                Some(Constant::Integer(0)),
++            ) = (lhs, rhs, numeric(lhs), numeric(rhs))
++            {
++                // Numeric strings: `lstrlib.c`'s `arith` converted them and
++                // `lua_arith` divided by zero, inside that C function.
++                if matches!(method, MetaMethod::Mod | MetaMethod::IDiv)
++                    && (matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)))
++                {
++                    return MetaOperatorError::MessageFromC(if method == MetaMethod::Mod {
++                        "attempt to perform 'n%0'".to_owned()
++                    } else {
++                        "attempt to divide by zero".to_owned()
++                    });
++                }
++            }
++            if matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)) {
++                format!(
++                    "attempt to {} a '{}' with a '{}'",
++                    arith_name(method),
++                    lhs.type_name(),
++                    rhs.type_name()
++                )
++            } else if let (Value::Integer(_), Value::Integer(0)) = (lhs, rhs) {
++                // `luaV_idiv` and `luaV_mod`.
++                if method == MetaMethod::Mod {
++                    "attempt to perform 'n%0'".to_owned()
++                } else {
++                    "attempt to divide by zero".to_owned()
++                }
++            } else {
++                // `luaG_opinterror`: the first operand that is not a number.
++                let culprit = if is_number(lhs) { rhs } else { lhs };
++                format!(
++                    "attempt to perform arithmetic on a {} value",
++                    objtypename(ctx, culprit)
++                )
++            }
++        }
++    };
++    MetaOperatorError::Message(msg)
++}
++
++/// The error for a unary operator `method` on `v`.
++fn unary_error<'gc>(ctx: Context<'gc>, method: MetaMethod, v: Value<'gc>) -> MetaOperatorError {
++    let msg = match method {
++        MetaMethod::Index | MetaMethod::NewIndex => {
++            format!("attempt to index a {} value", objtypename(ctx, v))
++        }
++        MetaMethod::Len => format!("attempt to get length of a {} value", objtypename(ctx, v)),
++        MetaMethod::Call => format!("attempt to call a {} value", objtypename(ctx, v)),
++        // Unary operators are binary in PUC-Lua, with the operand twice.
++        MetaMethod::Unm | MetaMethod::BNot => {
++            let MetaOperatorError::Message(m) = binary_error(
++                ctx,
++                if method == MetaMethod::Unm {
++                    MetaMethod::Unm
++                } else {
++                    MetaMethod::BAnd
++                },
++                v,
++                v,
++            ) else {
++                unreachable!("binary_error builds a message")
++            };
++            m
++        }
++        _ => format!(
++            "attempt to {} a {} value",
++            method.verb(),
++            objtypename(ctx, v)
++        ),
++    };
++    MetaOperatorError::Message(msg)
++}
+ 
+ /// The metatable shared by every Lua string value.
+ ///
+@@ -244,10 +421,7 @@ pub fn index<'gc>(
+             };
+ 
+             if idx.is_nil() {
+-                return Err(MetaOperatorError::Unary(
+-                    MetaMethod::Index,
+-                    table.type_name(),
+-                ));
++                return Err(unary_error(ctx, MetaMethod::Index, table));
+             }
+ 
+             idx
+@@ -261,20 +435,12 @@ pub fn index<'gc>(
+             let idx = string_metatable(ctx).get_value(ctx, MetaMethod::Index);
+ 
+             if idx.is_nil() {
+-                return Err(MetaOperatorError::Unary(
+-                    MetaMethod::Index,
+-                    table.type_name(),
+-                ));
++                return Err(unary_error(ctx, MetaMethod::Index, table));
+             }
+ 
+             idx
+         }
+-        _ => {
+-            return Err(MetaOperatorError::Unary(
+-                MetaMethod::Index,
+-                table.type_name(),
+-            ))
+-        }
++        _ => return Err(unary_error(ctx, MetaMethod::Index, table)),
+     };
+ 
+     // NOTE: The __index metamethod (and others) can easily infinite loop or enter arbitrarily long
+@@ -367,15 +533,13 @@ pub fn new_index<'gc>(
+             };
+ 
+             if idx.is_nil() {
+-                return Err(
+-                    MetaOperatorError::Unary(MetaMethod::NewIndex, table.type_name()).into(),
+-                );
++                return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
+             }
+ 
+             idx
+         }
+         _ => {
+-            return Err(MetaOperatorError::Unary(MetaMethod::NewIndex, table.type_name()).into());
++            return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
+         }
+     };
+ 
+@@ -412,7 +576,7 @@ pub fn call<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<Function<'gc>, Meta
+         Value::UserData(ud) => ud.metatable(),
+         _ => None,
+     }
+-    .ok_or(MetaCallError(v.type_name()))?;
++    .ok_or_else(|| MetaCallError::for_value(ctx, v))?;
+ 
+     match metatable.get_value(ctx, MetaMethod::Call) {
+         f @ (Value::Function(_) | Value::Table(_) | Value::UserData(_)) => Ok(
+@@ -428,7 +592,9 @@ pub fn call<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<Function<'gc>, Meta
+             })
+             .into(),
+         ),
+-        f => Err(MetaCallError(f.type_name())),
++        // No `__call`: the error names the value called (`luaG_callerror`).
++        Value::Nil => Err(MetaCallError::for_value(ctx, v)),
++        f => Err(MetaCallError::for_value(ctx, f)),
+     }
+ }
+ 
+@@ -451,7 +617,7 @@ pub fn len<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<MetaResult<'gc, 1>,
+     match v {
+         Value::String(s) => Ok(MetaResult::Value(s.len().into())),
+         Value::Table(t) => Ok(MetaResult::Value(t.length().into())),
+-        f => Err(MetaOperatorError::Unary(MetaMethod::Len, f.type_name())),
++        f => Err(unary_error(ctx, MetaMethod::Len, f)),
+     }
+ }
+ 
+@@ -571,11 +737,7 @@ fn meta_metaop<'gc>(
+                     args: [lhs, rhs],
+                 })
+             } else {
+-                return Err(MetaOperatorError::Binary(
+-                    method,
+-                    lhs.type_name(),
+-                    rhs.type_name(),
+-                ));
++                return Err(binary_error(ctx, method, lhs, rhs));
+             }
+         }
+         (Value::Table(_) | Value::UserData(_), _) => {
+@@ -585,11 +747,7 @@ fn meta_metaop<'gc>(
+                     args: [lhs, rhs],
+                 })
+             } else {
+-                return Err(MetaOperatorError::Binary(
+-                    method,
+-                    lhs.type_name(),
+-                    rhs.type_name(),
+-                ));
++                return Err(binary_error(ctx, method, lhs, rhs));
+             }
+         }
+         (_, Value::Table(_) | Value::UserData(_)) => {
+@@ -599,15 +757,11 @@ fn meta_metaop<'gc>(
+                     args: [lhs, rhs],
+                 })
+             } else {
+-                return Err(MetaOperatorError::Binary(
+-                    method,
+-                    lhs.type_name(),
+-                    rhs.type_name(),
+-                ));
++                return Err(binary_error(ctx, method, lhs, rhs));
+             }
+         }
+         (a, b) => const_op(ctx, a, b)
+-            .ok_or_else(|| MetaOperatorError::Binary(method, lhs.type_name(), rhs.type_name()))?
++            .ok_or_else(|| binary_error(ctx, method, lhs, rhs))?
+             .into(),
+     })
+ }
+@@ -626,11 +780,11 @@ fn meta_unary_metaop<'gc>(
+                     args: [arg],
+                 })
+             } else {
+-                return Err(MetaOperatorError::Unary(method, arg.type_name()));
++                return Err(unary_error(ctx, method, arg));
+             }
+         }
+         val => const_op(val)
+-            .ok_or_else(|| MetaOperatorError::Unary(method, arg.type_name()))?
++            .ok_or_else(|| unary_error(ctx, method, arg))?
+             .into(),
+     })
+ }
+@@ -885,6 +1039,37 @@ pub fn concat_many<'gc>(
+         return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(&bytes))));
+     }
+ 
++    // Without a `__concat` anywhere the operation cannot succeed: raise
++    // `luaV_concat`'s error here, from the Lua frame, rather than from inside
++    // the fallback's callback, where it would lose its position. Lua
++    // concatenates from the right, so the first pair to fail is the
++    // rightmost one with a value that is not a string or number.
++    let has_concat_mm = values.iter().any(|v| {
++        match v {
++            Value::Table(t) => t.metatable(),
++            Value::UserData(u) => u.metatable(),
++            _ => None,
++        }
++        .is_some_and(|mt| !mt.get_value(ctx, MetaMethod::Concat).is_nil())
++    });
++    if !has_concat_mm {
++        if let Some(i) = values.iter().rposition(|v| !v.is_implicit_string()) {
++            // The last value is the first right-hand side; after it, the
++            // right-hand side is the string built so far. `luaG_concaterror`
++            // blames the left value unless it is a string or number.
++            let n = values.len();
++            let culprit = if i + 1 == n && n >= 2 && !values[n - 2].is_implicit_string() {
++                values[n - 2]
++            } else {
++                values[i]
++            };
++            return Err(MetaOperatorError::Message(format!(
++                "attempt to concatenate a {} value",
++                objtypename(ctx, culprit)
++            )));
++        }
++    }
++
+     // Fall back to a sequence-based implemenation to handle metamethods
+     let func = Callback::from_fn(&ctx, |ctx, _, stack| {
+         let args = stack.len();
+@@ -965,6 +1150,41 @@ pub fn concat_separated<'gc>(
+         return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(&bytes))));
+     }
+ 
++    // Without a `__concat` anywhere the operation cannot succeed: raise
++    // `luaV_concat`'s error here, from the Lua frame, rather than from inside
++    // the fallback's callback, where it would lose its position. Lua
++    // concatenates from the right, so the first pair to fail is the
++    // rightmost one with a value that is not a string or number.
++    let has_concat_mm = values.iter().any(|v| {
++        match v {
++            Value::Table(t) => t.metatable(),
++            Value::UserData(u) => u.metatable(),
++            _ => None,
++        }
++        .is_some_and(|mt| !mt.get_value(ctx, MetaMethod::Concat).is_nil())
++    });
++    if !has_concat_mm {
++        if let Some(i) = values.iter().rposition(|v| !v.is_implicit_string()) {
++            let (lhs, rhs) = if i + 1 == values.len() && i > 0 {
++                (values[i - 1], values[i])
++            } else {
++                (values[i], Value::Nil)
++            };
++            let culprit = if i + 1 == values.len() && i > 0 && !lhs.is_implicit_string() {
++                lhs
++            } else if i + 1 == values.len() && i > 0 {
++                rhs
++            } else {
++                values[i]
++            };
++            let _ = (lhs, rhs);
++            return Err(MetaOperatorError::Message(format!(
++                "attempt to concatenate a {} value",
++                objtypename(ctx, culprit)
++            )));
++        }
++    }
++
+     // Fall back to a sequence-based implemenation to handle metamethods
+     let func = Callback::from_fn_with(&ctx, separator, move |&sep, ctx, _, stack| {
+         let args = stack.len();
+diff --git a/src/stdlib/base.rs b/src/stdlib/base.rs
+index a20d92e..ea8bf87 100644
+--- a/src/stdlib/base.rs
++++ b/src/stdlib/base.rs
+@@ -101,18 +101,44 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
+         }),
+     );
+ 
++    // `luaB_error`: a string message gets the position of the function
++    // `level` calls up (1, the caller of `error`, by default; 0, none).
+     ctx.set_global(
+         "error",
+-        Callback::from_fn(&ctx, |_, _, stack| Err(stack.get(0).into())),
++        Callback::from_fn(&ctx, |ctx, exec, stack| {
++            let msg = stack.get(0);
++            let level = match stack.get(1) {
++                Value::Nil => Some(1),
++                v => v.to_integer(),
++            };
++            if let (Value::String(s), Some(level)) = (msg, level) {
++                if level > 0 {
++                    let mut out = exec.where_at(level as usize);
++                    if !out.is_empty() {
++                        out.extend_from_slice(s.as_bytes());
++                        return Err(Value::String(ctx.intern(&out)).into());
++                    }
++                }
++            }
++            Err(msg.into())
++        }),
+     );
+ 
+     ctx.set_global(
+         "assert",
+-        Callback::from_fn(&ctx, |ctx, _, stack| {
++        Callback::from_fn(&ctx, |ctx, exec, stack| {
+             if stack.get(0).to_bool() {
+                 Ok(CallbackReturn::Return)
+             } else if stack.get(1).is_nil() {
+-                Err("assertion failed!".into_value(ctx).into())
++                // `luaL_error(L, "%s", msg)`: positioned.
++                let mut out = exec.where_at(1);
++                out.extend_from_slice(b"assertion failed!");
++                Err(Value::String(ctx.intern(&out)).into())
++            } else if let Value::String(m) = stack.get(1) {
++                // `luaB_assert` hands the message to `luaB_error`, level 1.
++                let mut out = exec.where_at(1);
++                out.extend_from_slice(m.as_bytes());
++                Err(Value::String(ctx.intern(&out)).into())
+             } else {
+                 Err(stack.get(1).into())
+             }
+diff --git a/src/table/raw.rs b/src/table/raw.rs
+index 08e8a3f..a26ae66 100644
+--- a/src/table/raw.rs
++++ b/src/table/raw.rs
+@@ -9,9 +9,9 @@ use crate::{Callback, Closure, Function, String, Table, Thread, UserData, Value}
+ 
+ #[derive(Debug, Copy, Clone, Error)]
+ pub enum InvalidTableKey {
+-    #[error("table key is NaN")]
++    #[error("table index is NaN")]
+     IsNaN,
+-    #[error("table key is Nil")]
++    #[error("table index is nil")]
+     IsNil,
+ }
+ 
+diff --git a/src/thread/executor.rs b/src/thread/executor.rs
+index 4f4630b..5e89ac6 100644
+--- a/src/thread/executor.rs
++++ b/src/thread/executor.rs
+@@ -458,7 +458,22 @@ impl<'gc> Executor<'gc> {
+                         };
+                         match run_vm(ctx, lua_frame, Self::VM_GRANULARITY) {
+                             Err(err) => {
+-                                top_state.frames.push(Frame::Error(err.into()));
++                                // `luaG_runerror` from a Lua function: the
++                                // message, as a string, after the position of
++                                // the instruction that raised it.
++                                let err = match top_state.frames.last() {
++                                    Some(Frame::Lua { closure, pc, .. }) if err.is_lua_error() => {
++                                        let mut msg = if err.is_positioned() {
++                                            lua_where(*closure, pc.saturating_sub(1))
++                                        } else {
++                                            std::vec::Vec::new()
++                                        };
++                                        msg.extend_from_slice(err.to_string().as_bytes());
++                                        Error::from(crate::Value::String(ctx.intern(&msg)))
++                                    }
++                                    _ => err.into(),
++                                };
++                                top_state.frames.push(Frame::Error(err));
+                             }
+                             Ok(instructions_run) => {
+                                 fuel.consume(instructions_run.try_into().unwrap());
+@@ -631,6 +646,31 @@ impl<'gc, 'a> Execution<'gc, 'a> {
+         self.executor
+     }
+ 
++    /// `luaL_where(L, level)`: `chunk:line: ` for the function `level` calls
++    /// up from the running callback — 1 is its caller — when that function is
++    /// Lua, and nothing when it is a Rust function or there is no such level.
++    pub fn where_at(&self, level: usize) -> std::vec::Vec<u8> {
++        let mut seen = 0;
++        for frame in self.upper_frames.iter().rev() {
++            match frame {
++                Frame::Lua { closure, pc, .. } => {
++                    seen += 1;
++                    if seen == level {
++                        return lua_where(*closure, pc.saturating_sub(1));
++                    }
++                }
++                Frame::Sequence { .. } | Frame::Callback { .. } => {
++                    seen += 1;
++                    if seen == level {
++                        return std::vec::Vec::new();
++                    }
++                }
++                _ => {}
++            }
++        }
++        std::vec::Vec::new()
++    }
++
+     /// If the function we are returning to is Lua, returns information about the Lua frame we are
+     /// returning to.
+     pub fn upper_lua_frame(&self) -> Option<UpperLuaFrame<'gc>> {
+@@ -656,6 +696,22 @@ impl<'gc, 'a> Execution<'gc, 'a> {
+     }
+ }
+ 
++/// `luaG_addinfo`'s prefix, `chunk:line: `, for instruction `op` of `closure`.
++fn lua_where(closure: crate::Closure<'_>, op: usize) -> std::vec::Vec<u8> {
++    let proto = closure.prototype();
++    let line = match proto
++        .opcode_line_numbers
++        .binary_search_by_key(&op, |(opi, _)| *opi)
++    {
++        Ok(i) => proto.opcode_line_numbers[i].1,
++        Err(0) => LineNumber(0),
++        Err(i) => proto.opcode_line_numbers[i - 1].1,
++    };
++    let mut out = crate::chunk_id::chunk_id(proto.chunk_name.as_bytes());
++    out.extend_from_slice(format!(":{line}: ").as_bytes());
++    out
++}
++
+ pub struct CurrentThread<'gc> {
+     pub thread: Thread<'gc>,
+     pub is_main: bool,
+diff --git a/src/thread/mod.rs b/src/thread/mod.rs
+index 8e6a059..ae186ff 100644
+--- a/src/thread/mod.rs
++++ b/src/thread/mod.rs
+@@ -24,10 +24,14 @@ pub enum VMError {
+     ExpectedVariableStack(bool),
+     #[error("Bad types for SetList op, expected table, integer, found {0}, {1}")]
+     BadSetList(&'static str, &'static str),
+-    #[error("bad call")]
++    #[error("{0}")]
+     BadCall(#[from] MetaCallError),
+-    #[error("operator error")]
++    #[error("{0}")]
+     OperatorError(#[from] MetaOperatorError),
++    /// A runtime error in PUC-Lua's words (`luaG_runerror`), e.g. a bad
++    /// `for` loop.
++    #[error("{0}")]
++    Lua(std::string::String),
+     #[error("_ENV upvalue is only allowed on top-level closure")]
+     BadEnvUpValue,
+     #[error("Invalid types in for loop; expected numbers, found {0}, {1}, and {2}")]
+@@ -35,3 +39,24 @@ pub enum VMError {
+     #[error("Invalid types in for loop; expected numbers, found {0} and {1}")]
+     BadForLoopPrep(&'static str, &'static str),
+ }
++
++impl VMError {
++    /// Whether this is an error PUC-Lua raises with `luaG_runerror` from the
++    /// running Lua function, and so gives that function's position. The rest
++    /// are the VM's own invariants, which a correct program never meets.
++    pub fn is_lua_error(&self) -> bool {
++        matches!(
++            self,
++            VMError::BadCall(_) | VMError::OperatorError(_) | VMError::Lua(_)
++        )
++    }
++
++    /// Whether PUC-Lua would prefix this error with the position of the Lua
++    /// function running: not for one it raises from inside a C function.
++    pub fn is_positioned(&self) -> bool {
++        !matches!(
++            self,
++            VMError::OperatorError(MetaOperatorError::MessageFromC(_))
++        )
++    }
++}
+diff --git a/src/thread/vm.rs b/src/thread/vm.rs
+index 51e42b6..d2963f3 100644
+--- a/src/thread/vm.rs
++++ b/src/thread/vm.rs
+@@ -169,7 +169,17 @@ pub(super) fn run_vm<'gc>(
+             }
+ 
+             Operation::TailCall { func, args } => {
+-                lua_frame.tail_call_function(ctx, func, args)?;
++                // A Rust function is called, not tail-called: its frame does
++                // not replace this one, so `error` levels and positions count
++                // this function as C counts a Lua caller of a C function. The
++                // `Return` the compiler places next hands its results up.
++                if let Value::Function(Function::Callback(_)) =
++                    registers.stack_frame[func.0 as usize]
++                {
++                    lua_frame.call_function(ctx, func, args, VarCount::variable())?;
++                } else {
++                    lua_frame.tail_call_function(ctx, func, args)?;
++                }
+                 break;
+             }
+ 
+@@ -236,87 +246,104 @@ pub(super) fn run_vm<'gc>(
+             }
+ 
+             Operation::NumericForPrep { base, jump } => {
+-                registers.stack_frame[base.0 as usize] = raw_subtract(
+-                    registers.stack_frame[base.0 as usize],
+-                    registers.stack_frame[base.0 as usize + 2],
+-                )
+-                .ok_or_else(|| {
+-                    VMError::BadForLoopPrep(
+-                        registers.stack_frame[base.0 as usize].type_name(),
+-                        registers.stack_frame[base.0 as usize + 2].type_name(),
+-                    )
+-                })?;
+-                *registers.pc = add_offset(*registers.pc, jump);
+-            }
+-
+-            Operation::NumericForLoop { base, jump } => {
+-                match (
+-                    registers.stack_frame[base.0 as usize],
+-                    registers.stack_frame[base.0 as usize + 1],
+-                    registers.stack_frame[base.0 as usize + 2],
+-                ) {
+-                    (Value::Integer(index), Value::Integer(limit), Value::Integer(step)) => {
+-                        let (index, overflow) = index.overflowing_add(step);
+-                        registers.stack_frame[base.0 as usize] = Value::Integer(index);
+-
+-                        let past_end = overflow
+-                            || if step < 0 {
+-                                index < limit
+-                            } else {
+-                                index > limit
+-                            };
+-                        if !past_end {
+-                            *registers.pc = add_offset(*registers.pc, jump);
+-                            registers.stack_frame[base.0 as usize + 3] = Value::Integer(index);
++                // `forprep` (`lvm.c`, Lua 5.4): validate, then either skip the
++                // loop or enter its body with the control variable set.
++                let b = base.0 as usize;
++                let frame = &mut registers.stack_frame;
++                let (init, limit, step) = (frame[b], frame[b + 1], frame[b + 2]);
++                let skip = match (init, step) {
++                    (Value::Integer(init), Value::Integer(step)) => {
++                        if step == 0 {
++                            return Err(VMError::Lua("'for' step is zero".to_owned()));
+                         }
+-                    }
+-                    (Value::Integer(index), limit, Value::Integer(step)) => {
+-                        if let Some(limit) = limit.to_number() {
+-                            let (index, overflow) = index.overflowing_add(step);
+-                            registers.stack_frame[base.0 as usize] = Value::Integer(index);
+-
+-                            let past_end = overflow
+-                                || if step < 0 {
+-                                    !(index as f64 >= limit)
++                        frame[b + 3] = Value::Integer(init);
++                        match for_limit(ctx, init, limit, step)? {
++                            None => true,
++                            Some(limit) => {
++                                // The iteration count replaces the limit.
++                                let count = if step > 0 {
++                                    let c = (limit as u64).wrapping_sub(init as u64);
++                                    if step != 1 {
++                                        c / step as u64
++                                    } else {
++                                        c
++                                    }
+                                 } else {
+-                                    !(index as f64 <= limit)
++                                    let c = (init as u64).wrapping_sub(limit as u64);
++                                    c / ((-(step + 1)) as u64 + 1)
+                                 };
+-                            if !past_end {
+-                                *registers.pc = add_offset(*registers.pc, jump);
+-                                registers.stack_frame[base.0 as usize + 3] = Value::Integer(index);
++                                frame[b + 1] = Value::Integer(count as i64);
++                                false
+                             }
+-                        } else {
+-                            return Err(VMError::BadForLoop(
+-                                "integer",
+-                                limit.type_name(),
+-                                "integer",
+-                            ));
+                         }
+                     }
+-                    (index, limit, step) => {
+-                        if let (Some(index), Some(limit), Some(step)) =
+-                            (index.to_number(), limit.to_number(), step.to_number())
+-                        {
+-                            let index = index + step;
+-                            registers.stack_frame[base.0 as usize] = Value::Number(index);
+-
+-                            let past_end = if step < 0.0 {
+-                                !(index >= limit)
+-                            } else {
+-                                !(index <= limit)
+-                            };
+-                            if !past_end {
+-                                *registers.pc = add_offset(*registers.pc, jump);
+-                                registers.stack_frame[base.0 as usize + 3] = Value::Number(index);
+-                            }
++                    _ => {
++                        let Some(flimit) = limit.to_number() else {
++                            return Err(for_error(ctx, limit, "limit"));
++                        };
++                        let Some(fstep) = step.to_number() else {
++                            return Err(for_error(ctx, step, "step"));
++                        };
++                        let Some(finit) = init.to_number() else {
++                            return Err(for_error(ctx, init, "initial value"));
++                        };
++                        if fstep == 0.0 {
++                            return Err(VMError::Lua("'for' step is zero".to_owned()));
++                        }
++                        if if 0.0 < fstep {
++                            flimit < finit
++                        } else {
++                            finit < flimit
++                        } {
++                            true
+                         } else {
+-                            return Err(VMError::BadForLoop(
+-                                index.type_name(),
+-                                limit.type_name(),
+-                                step.type_name(),
+-                            ));
++                            frame[b] = Value::Number(finit);
++                            frame[b + 1] = Value::Number(flimit);
++                            frame[b + 2] = Value::Number(fstep);
++                            frame[b + 3] = Value::Number(finit);
++                            false
+                         }
+                     }
++                };
++                if skip {
++                    // Past the loop instruction the prep jumps to.
++                    *registers.pc = add_offset(*registers.pc, jump) + 1;
++                }
++            }
++
++            Operation::NumericForLoop { base, jump } => {
++                // `OP_FORLOOP`: an integer loop counts down the iterations
++                // left; a float loop compares against the limit.
++                let b = base.0 as usize;
++                let frame = &mut registers.stack_frame;
++                if let Value::Integer(step) = frame[b + 2] {
++                    let count = match frame[b + 1] {
++                        Value::Integer(c) => c as u64,
++                        _ => 0,
++                    };
++                    if count > 0 {
++                        frame[b + 1] = Value::Integer((count - 1) as i64);
++                        let idx = match frame[b] {
++                            Value::Integer(i) => i.wrapping_add(step),
++                            _ => 0,
++                        };
++                        frame[b] = Value::Integer(idx);
++                        frame[b + 3] = Value::Integer(idx);
++                        *registers.pc = add_offset(*registers.pc, jump);
++                    }
++                } else if let (Value::Number(idx), Value::Number(limit), Value::Number(step)) =
++                    (frame[b], frame[b + 1], frame[b + 2])
++                {
++                    let idx = idx + step;
++                    if if 0.0 < step {
++                        idx <= limit
++                    } else {
++                        limit <= idx
++                    } {
++                        frame[b] = Value::Number(idx);
++                        frame[b + 3] = Value::Number(idx);
++                        *registers.pc = add_offset(*registers.pc, jump);
++                    }
+                 }
+             }
+ 
+@@ -745,6 +772,52 @@ fn add_offset(pc: usize, offset: i16) -> usize {
+     }
+ }
+ 
+-fn raw_subtract<'gc>(lhs: Value<'gc>, rhs: Value<'gc>) -> Option<Value<'gc>> {
+-    Some(lhs.to_constant()?.subtract(&rhs.to_constant()?)?.into())
++/// `luaG_forerror`.
++fn for_error<'gc>(ctx: Context<'gc>, v: Value<'gc>, what: &str) -> VMError {
++    VMError::Lua(format!(
++        "bad 'for' {what} (number expected, got {})",
++        crate::meta_ops::objtypename(ctx, v)
++    ))
++}
++
++/// `forlimit` (`lvm.c`): the loop's integer limit, or `None` when the loop
++/// does not run at all.
++fn for_limit<'gc>(
++    ctx: Context<'gc>,
++    init: i64,
++    lim: Value<'gc>,
++    step: i64,
++) -> Result<Option<i64>, VMError> {
++    // `luaV_tointegerns(lim, p, step < 0 ? F2Iceil : F2Ifloor)`
++    let as_integer = match lim.to_constant().and_then(|c| c.to_numeric()) {
++        Some(Constant::Integer(i)) => Some(i),
++        Some(Constant::Number(f)) => {
++            let r = if step < 0 { f.ceil() } else { f.floor() };
++            (r >= -9_223_372_036_854_775_808.0 && r < 9_223_372_036_854_775_808.0)
++                .then_some(r as i64)
++        }
++        _ => None,
++    };
++    let limit = match as_integer {
++        Some(l) => l,
++        None => {
++            let Some(flim) = lim.to_number() else {
++                return Err(for_error(ctx, lim, "limit"));
++            };
++            // A float beyond the integers (or NaN): clip, or skip the loop.
++            if 0.0 < flim {
++                if step < 0 {
++                    return Ok(None);
++                }
++                i64::MAX
++            } else {
++                if step > 0 {
++                    return Ok(None);
++                }
++                i64::MIN
++            }
++        }
++    };
++    let skip = if step > 0 { init > limit } else { init < limit };
++    Ok((!skip).then_some(limit))
+ }
+diff --git a/tests/error.rs b/tests/error.rs
+index 46360df..6e0039f 100644
+--- a/tests/error.rs
++++ b/tests/error.rs
+@@ -23,7 +23,10 @@ fn error_unwind() -> Result<(), ExternError> {
+     lua.finish(&executor).unwrap();
+     lua.try_enter(|ctx| {
+         match ctx.fetch(&executor).take_result::<()>(ctx)? {
+-            Err(Error::Lua(LuaError(Value::String(s)))) => assert!(s == "test error"),
++            // `error` prepends its caller's position, as PUC-Lua's does.
++            Err(Error::Lua(LuaError(Value::String(s)))) => {
++                assert!(s.as_bytes().ends_with(b":3: test error"), "{s:?}")
++            }
+             _ => panic!("wrong error returned"),
+         }
+         Ok(())
+diff --git a/tests/scripts/coroutine.lua b/tests/scripts/coroutine.lua
+index dfdc707..506ed29 100644
+--- a/tests/scripts/coroutine.lua
++++ b/tests/scripts/coroutine.lua
+@@ -43,7 +43,8 @@ do
+ 
+     assert(
+         e1 == true and r1 == 1 and s1 == "suspended" and
+-        e2 == false and r2 == 'test error' and s2 == "dead")
++        -- `error` prepends the position of its caller (Lua 5.4's luaB_error).
++        e2 == false and r2:sub(-15) == ":34: test error" and s2 == "dead")
+ end
+ 
+ do
+diff --git a/tests/scripts/pcall.lua b/tests/scripts/pcall.lua
+index 12f123b..6467047 100644
+--- a/tests/scripts/pcall.lua
++++ b/tests/scripts/pcall.lua
+@@ -6,11 +6,12 @@ do
+         return "good"
+     end
+ 
++    -- `error` prepends the position of its caller (Lua 5.4's luaB_error).
+     local r1, e1 = pcall(error_func, "test error")
+-    assert(r1 == false and e1 == "test error")
++    assert(r1 == false and e1:sub(-14) == ":3: test error")
+ 
+     local r2, e2 = pcall(error_func, "test error 2")
+-    assert(r2 == false and e2 == "test error 2")
++    assert(r2 == false and e2:sub(-16) == ":3: test error 2")
+ 
+     local r3, e3 = pcall(good_func)
+     assert(r3 == true and e3 == "good")
+diff --git a/tests/tail_call_stack_panic.rs b/tests/tail_call_stack_panic.rs
+index d64356f..3ea5711 100644
+--- a/tests/tail_call_stack_panic.rs
++++ b/tests/tail_call_stack_panic.rs
+@@ -1,6 +1,6 @@
+ use std::string::String as StdString;
+ 
+-use piccolo::{meta_ops::MetaCallError, Closure, Executor, Lua};
++use piccolo::{Closure, Executor, Lua};
+ 
+ const SOURCE: &str = r#"
+     -- Purposeful typo of 'tostring'
+@@ -20,8 +20,11 @@ fn tail_call_stack_panic() {
+     })
+     .expect("load closure");
+ 
+-    assert!(matches!(
+-        lua.execute::<StdString>(&exec),
+-        Err(err) if err.root_cause().downcast_ref::<MetaCallError>().is_some()
+-    ));
++    // Calling a nil global is a Lua error carrying PUC-Lua's message, as a
++    // string, after the call's position.
++    let err = lua.execute::<StdString>(&exec).unwrap_err();
++    assert!(
++        err.to_string().ends_with(":3: attempt to call a nil value"),
++        "{err}"
++    );
+ }

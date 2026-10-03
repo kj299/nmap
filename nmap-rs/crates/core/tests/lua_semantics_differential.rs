@@ -27,13 +27,6 @@ use std::path::{Path, PathBuf};
 const KNOWN_DIVERGENCES: &[&str] = &[
     // Integer/float comparison at the extreme: `maxinteger + 0.0 == maxinteger`.
     "max_int_vs_float",
-    // `error('boom')` comes back verbatim; Lua prepends "chunk:LINE: ". Found by
-    // running upstream piccolo's OWN test suite under nmap's Lua -- two of its
-    // 43 scripts assert the undecorated message, so the VM was being checked
-    // against a test that encodes the wrong semantics. The three neighbouring
-    // cases (level 0, a table message, no argument) already match, so the
-    // defect is exactly the missing `luaL_where`.
-    "error_string_gets_position",
 ];
 
 /// Render a value the way `oracle/m60_arith_driver.lua` does: floats as raw

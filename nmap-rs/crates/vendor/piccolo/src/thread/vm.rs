@@ -169,7 +169,17 @@ pub(super) fn run_vm<'gc>(
             }
 
             Operation::TailCall { func, args } => {
-                lua_frame.tail_call_function(ctx, func, args)?;
+                // A Rust function is called, not tail-called: its frame does
+                // not replace this one, so `error` levels and positions count
+                // this function as C counts a Lua caller of a C function. The
+                // `Return` the compiler places next hands its results up.
+                if let Value::Function(Function::Callback(_)) =
+                    registers.stack_frame[func.0 as usize]
+                {
+                    lua_frame.call_function(ctx, func, args, VarCount::variable())?;
+                } else {
+                    lua_frame.tail_call_function(ctx, func, args)?;
+                }
                 break;
             }
 
@@ -236,86 +246,103 @@ pub(super) fn run_vm<'gc>(
             }
 
             Operation::NumericForPrep { base, jump } => {
-                registers.stack_frame[base.0 as usize] = raw_subtract(
-                    registers.stack_frame[base.0 as usize],
-                    registers.stack_frame[base.0 as usize + 2],
-                )
-                .ok_or_else(|| {
-                    VMError::BadForLoopPrep(
-                        registers.stack_frame[base.0 as usize].type_name(),
-                        registers.stack_frame[base.0 as usize + 2].type_name(),
-                    )
-                })?;
-                *registers.pc = add_offset(*registers.pc, jump);
+                // `forprep` (`lvm.c`, Lua 5.4): validate, then either skip the
+                // loop or enter its body with the control variable set.
+                let b = base.0 as usize;
+                let frame = &mut registers.stack_frame;
+                let (init, limit, step) = (frame[b], frame[b + 1], frame[b + 2]);
+                let skip = match (init, step) {
+                    (Value::Integer(init), Value::Integer(step)) => {
+                        if step == 0 {
+                            return Err(VMError::Lua("'for' step is zero".to_owned()));
+                        }
+                        frame[b + 3] = Value::Integer(init);
+                        match for_limit(ctx, init, limit, step)? {
+                            None => true,
+                            Some(limit) => {
+                                // The iteration count replaces the limit.
+                                let count = if step > 0 {
+                                    let c = (limit as u64).wrapping_sub(init as u64);
+                                    if step != 1 {
+                                        c / step as u64
+                                    } else {
+                                        c
+                                    }
+                                } else {
+                                    let c = (init as u64).wrapping_sub(limit as u64);
+                                    c / ((-(step + 1)) as u64 + 1)
+                                };
+                                frame[b + 1] = Value::Integer(count as i64);
+                                false
+                            }
+                        }
+                    }
+                    _ => {
+                        let Some(flimit) = limit.to_number() else {
+                            return Err(for_error(ctx, limit, "limit"));
+                        };
+                        let Some(fstep) = step.to_number() else {
+                            return Err(for_error(ctx, step, "step"));
+                        };
+                        let Some(finit) = init.to_number() else {
+                            return Err(for_error(ctx, init, "initial value"));
+                        };
+                        if fstep == 0.0 {
+                            return Err(VMError::Lua("'for' step is zero".to_owned()));
+                        }
+                        if if 0.0 < fstep {
+                            flimit < finit
+                        } else {
+                            finit < flimit
+                        } {
+                            true
+                        } else {
+                            frame[b] = Value::Number(finit);
+                            frame[b + 1] = Value::Number(flimit);
+                            frame[b + 2] = Value::Number(fstep);
+                            frame[b + 3] = Value::Number(finit);
+                            false
+                        }
+                    }
+                };
+                if skip {
+                    // Past the loop instruction the prep jumps to.
+                    *registers.pc = add_offset(*registers.pc, jump) + 1;
+                }
             }
 
             Operation::NumericForLoop { base, jump } => {
-                match (
-                    registers.stack_frame[base.0 as usize],
-                    registers.stack_frame[base.0 as usize + 1],
-                    registers.stack_frame[base.0 as usize + 2],
-                ) {
-                    (Value::Integer(index), Value::Integer(limit), Value::Integer(step)) => {
-                        let (index, overflow) = index.overflowing_add(step);
-                        registers.stack_frame[base.0 as usize] = Value::Integer(index);
-
-                        let past_end = overflow
-                            || if step < 0 {
-                                index < limit
-                            } else {
-                                index > limit
-                            };
-                        if !past_end {
-                            *registers.pc = add_offset(*registers.pc, jump);
-                            registers.stack_frame[base.0 as usize + 3] = Value::Integer(index);
-                        }
+                // `OP_FORLOOP`: an integer loop counts down the iterations
+                // left; a float loop compares against the limit.
+                let b = base.0 as usize;
+                let frame = &mut registers.stack_frame;
+                if let Value::Integer(step) = frame[b + 2] {
+                    let count = match frame[b + 1] {
+                        Value::Integer(c) => c as u64,
+                        _ => 0,
+                    };
+                    if count > 0 {
+                        frame[b + 1] = Value::Integer((count - 1) as i64);
+                        let idx = match frame[b] {
+                            Value::Integer(i) => i.wrapping_add(step),
+                            _ => 0,
+                        };
+                        frame[b] = Value::Integer(idx);
+                        frame[b + 3] = Value::Integer(idx);
+                        *registers.pc = add_offset(*registers.pc, jump);
                     }
-                    (Value::Integer(index), limit, Value::Integer(step)) => {
-                        if let Some(limit) = limit.to_number() {
-                            let (index, overflow) = index.overflowing_add(step);
-                            registers.stack_frame[base.0 as usize] = Value::Integer(index);
-
-                            let past_end = overflow
-                                || if step < 0 {
-                                    !(index as f64 >= limit)
-                                } else {
-                                    !(index as f64 <= limit)
-                                };
-                            if !past_end {
-                                *registers.pc = add_offset(*registers.pc, jump);
-                                registers.stack_frame[base.0 as usize + 3] = Value::Integer(index);
-                            }
-                        } else {
-                            return Err(VMError::BadForLoop(
-                                "integer",
-                                limit.type_name(),
-                                "integer",
-                            ));
-                        }
-                    }
-                    (index, limit, step) => {
-                        if let (Some(index), Some(limit), Some(step)) =
-                            (index.to_number(), limit.to_number(), step.to_number())
-                        {
-                            let index = index + step;
-                            registers.stack_frame[base.0 as usize] = Value::Number(index);
-
-                            let past_end = if step < 0.0 {
-                                !(index >= limit)
-                            } else {
-                                !(index <= limit)
-                            };
-                            if !past_end {
-                                *registers.pc = add_offset(*registers.pc, jump);
-                                registers.stack_frame[base.0 as usize + 3] = Value::Number(index);
-                            }
-                        } else {
-                            return Err(VMError::BadForLoop(
-                                index.type_name(),
-                                limit.type_name(),
-                                step.type_name(),
-                            ));
-                        }
+                } else if let (Value::Number(idx), Value::Number(limit), Value::Number(step)) =
+                    (frame[b], frame[b + 1], frame[b + 2])
+                {
+                    let idx = idx + step;
+                    if if 0.0 < step {
+                        idx <= limit
+                    } else {
+                        limit <= idx
+                    } {
+                        frame[b] = Value::Number(idx);
+                        frame[b + 3] = Value::Number(idx);
+                        *registers.pc = add_offset(*registers.pc, jump);
                     }
                 }
             }
@@ -745,6 +772,52 @@ fn add_offset(pc: usize, offset: i16) -> usize {
     }
 }
 
-fn raw_subtract<'gc>(lhs: Value<'gc>, rhs: Value<'gc>) -> Option<Value<'gc>> {
-    Some(lhs.to_constant()?.subtract(&rhs.to_constant()?)?.into())
+/// `luaG_forerror`.
+fn for_error<'gc>(ctx: Context<'gc>, v: Value<'gc>, what: &str) -> VMError {
+    VMError::Lua(format!(
+        "bad 'for' {what} (number expected, got {})",
+        crate::meta_ops::objtypename(ctx, v)
+    ))
+}
+
+/// `forlimit` (`lvm.c`): the loop's integer limit, or `None` when the loop
+/// does not run at all.
+fn for_limit<'gc>(
+    ctx: Context<'gc>,
+    init: i64,
+    lim: Value<'gc>,
+    step: i64,
+) -> Result<Option<i64>, VMError> {
+    // `luaV_tointegerns(lim, p, step < 0 ? F2Iceil : F2Ifloor)`
+    let as_integer = match lim.to_constant().and_then(|c| c.to_numeric()) {
+        Some(Constant::Integer(i)) => Some(i),
+        Some(Constant::Number(f)) => {
+            let r = if step < 0 { f.ceil() } else { f.floor() };
+            (r >= -9_223_372_036_854_775_808.0 && r < 9_223_372_036_854_775_808.0)
+                .then_some(r as i64)
+        }
+        _ => None,
+    };
+    let limit = match as_integer {
+        Some(l) => l,
+        None => {
+            let Some(flim) = lim.to_number() else {
+                return Err(for_error(ctx, lim, "limit"));
+            };
+            // A float beyond the integers (or NaN): clip, or skip the loop.
+            if 0.0 < flim {
+                if step < 0 {
+                    return Ok(None);
+                }
+                i64::MAX
+            } else {
+                if step > 0 {
+                    return Ok(None);
+                }
+                i64::MIN
+            }
+        }
+    };
+    let skip = if step > 0 { init > limit } else { init < limit };
+    Ok((!skip).then_some(limit))
 }

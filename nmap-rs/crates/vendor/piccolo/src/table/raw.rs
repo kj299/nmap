@@ -9,9 +9,9 @@ use crate::{Callback, Closure, Function, String, Table, Thread, UserData, Value}
 
 #[derive(Debug, Copy, Clone, Error)]
 pub enum InvalidTableKey {
-    #[error("table key is NaN")]
+    #[error("table index is NaN")]
     IsNaN,
-    #[error("table key is Nil")]
+    #[error("table index is nil")]
     IsNil,
 }
 

@@ -101,18 +101,44 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
         }),
     );
 
+    // `luaB_error`: a string message gets the position of the function
+    // `level` calls up (1, the caller of `error`, by default; 0, none).
     ctx.set_global(
         "error",
-        Callback::from_fn(&ctx, |_, _, stack| Err(stack.get(0).into())),
+        Callback::from_fn(&ctx, |ctx, exec, stack| {
+            let msg = stack.get(0);
+            let level = match stack.get(1) {
+                Value::Nil => Some(1),
+                v => v.to_integer(),
+            };
+            if let (Value::String(s), Some(level)) = (msg, level) {
+                if level > 0 {
+                    let mut out = exec.where_at(level as usize);
+                    if !out.is_empty() {
+                        out.extend_from_slice(s.as_bytes());
+                        return Err(Value::String(ctx.intern(&out)).into());
+                    }
+                }
+            }
+            Err(msg.into())
+        }),
     );
 
     ctx.set_global(
         "assert",
-        Callback::from_fn(&ctx, |ctx, _, stack| {
+        Callback::from_fn(&ctx, |ctx, exec, stack| {
             if stack.get(0).to_bool() {
                 Ok(CallbackReturn::Return)
             } else if stack.get(1).is_nil() {
-                Err("assertion failed!".into_value(ctx).into())
+                // `luaL_error(L, "%s", msg)`: positioned.
+                let mut out = exec.where_at(1);
+                out.extend_from_slice(b"assertion failed!");
+                Err(Value::String(ctx.intern(&out)).into())
+            } else if let Value::String(m) = stack.get(1) {
+                // `luaB_assert` hands the message to `luaB_error`, level 1.
+                let mut out = exec.where_at(1);
+                out.extend_from_slice(m.as_bytes());
+                Err(Value::String(ctx.intern(&out)).into())
             } else {
                 Err(stack.get(1).into())
             }

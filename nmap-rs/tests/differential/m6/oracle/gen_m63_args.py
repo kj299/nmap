@@ -43,7 +43,7 @@ LUA = os.path.join(HERE, "lua")
 
 
 def build_driver():
-    blocks = ex.extract(ROOT)
+    blocks = ex.extract_m63(ROOT)
     digest = ex.provenance(blocks)
 
     def text(name):
@@ -51,7 +51,7 @@ def build_driver():
 
     def where(name):
         _, first, last = blocks[name]
-        src = ex.LPEG_UTILITY if name in ex.LPEG_UTILITY_BLOCKS else ex.NSE_MAIN
+        src = ex.LPEG_UTILITY if name in ex.M63_LPEG_UTILITY_BLOCKS else ex.NSE_MAIN
         return f"{src}:{first}-{last}"
 
     return "".join([

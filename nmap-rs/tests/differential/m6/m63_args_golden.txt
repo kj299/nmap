@@ -1,5 +1,5 @@
 # name	verdict
-# nmap's own Lua + LPeg over nse_main.lua's grammar (digest a8aa6dc6714108b788d1bf0da2fb0e87d8f55669762e2a94b502c1dafb0ff88b).
+# nmap's own Lua + LPeg over nse_main.lua's grammar (digest 5bc53f839727f13c692cc4f6ee29637e72a857ecfd1a4d49b8c5387b67af96f4).
 corner_empty	ok	{}
 corner_blank	ok	{s}
 corner_comma	ok	{s,s}

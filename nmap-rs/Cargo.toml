@@ -1,6 +1,5 @@
-# Architecture skeleton for a safety-first C-to-Rust port. Copy this directory to
-# your new project root and rename the crates. The layering (see
-# ../ARCHITECTURE-TEMPLATE.md) makes safety STRUCTURAL:
+# nmap-rs workspace, laid out from the Porting Kit's architecture skeleton
+# (../porting-kit/ARCHITECTURE-TEMPLATE.md). The layering makes safety STRUCTURAL:
 #   core   : #![forbid(unsafe_code)]  — all pure logic lives here, testable anywhere
 #   sys    : the only FIRST-PARTY crate allowed unsafe — FFI wrapped in audited
 #            safe fns + RAII

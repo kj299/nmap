@@ -25,7 +25,7 @@ without reverse-engineering it from one combined diff.
 | patch | what it does |
 |---|---|
 | `0001-backport-gc-arena-0.5.3.patch` | moves off the `gc-arena` git-rev pin onto the published `=0.5.3`, so `cargo deny check sources` passes |
-| `0002-document-unsafe-for-the-audit-gate.patch` | `SAFETY:` comments on all 41 `unsafe` blocks, for `audit_unsafe.py` |
+| `0002-document-unsafe-for-the-audit-gate.patch` | `SAFETY:` comments on all 30 of piccolo's `unsafe` blocks, for `audit_unsafe.py` |
 | `0003-skip-filesystem-tests-under-miri.patch` | upstream's suite walks `tests/scripts/` with `read_dir`, which Miri's isolation refuses |
 | `0004-string-metatable-dispatch.patch` | gives strings a metatable so `s:sub(1, 2)` dispatches; also corrects `getmetatable`, which errored for five of Lua's eight types |
 | `0005-port-modulo-and-shifts-from-puc-lua.patch` | `%` and the shifts, ported from `lvm.c` — the previous formula aborted the process on `i64::MIN % -1` |

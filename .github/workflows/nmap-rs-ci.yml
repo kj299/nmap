@@ -71,7 +71,7 @@ jobs:
       # to hard errors. Explicit -D flags are belt-and-suspenders (LESSONS #3).
       #
       # --all-features is NOT decoration here, it is what makes the two unsafe lints
-      # mean anything. Every `unsafe` block in this project — all 11 of them — lives in
+      # mean anything. Every FIRST-PARTY `unsafe` block — all 11 of them — lives in
       # crates/sys/src/netif/ffi.rs, behind `#[cfg(all(feature = "raw-ffi", unix))]`,
       # and `raw-ffi` is off by default. Without the flag clippy never compiles that
       # file, so `-D clippy::undocumented_unsafe_blocks` was a hard error that could
@@ -83,7 +83,7 @@ jobs:
           -D clippy::missing_safety_doc
           -D clippy::undocumented_unsafe_blocks
       # Same reason, and the effect is countable: `cargo test -p nmap-sys --lib` runs
-      # 93 tests, `--features raw-ffi` runs 94. That 94th —
+      # 96 tests, `--features raw-ffi` runs 97 (as of M6.4c1). That extra one —
       # netif::tests::ffi_backend_agrees_with_netdev_on_names_and_v4 — is the ONLY test
       # in the project that executes any `unsafe`, and until M7.1 no CI job ran it.
       - run: cargo test --all --all-features
@@ -149,7 +149,7 @@ jobs:
       # The harness itself was also under-counting: it only read `lib.rs`, so all 25
       # sub-modules declared in a `mod.rs` — every headers::*, osdb::*, osprobe::*,
       # nse::*, sigstore::* — were outside its walk. It reported "56 shipped, 0
-      # untracked" and was wrong twice over. Fixed in M7.2; it now sees 81.
+      # untracked" and was wrong twice over. Fixed in M7.2, when it saw 81.
       - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json drift --src nmap-rs/crates
         working-directory: .
       # Fails on a gate exemption without a real recorded reason, and on a coverage
@@ -183,15 +183,15 @@ jobs:
         with: { components: miri }
       - run: cargo +nightly miri test
 
-  # ASan over the one crate that holds `unsafe`. This job exists because the gate it
+  # ASan over the crates that hold `unsafe`. This job exists because the gate it
   # replaces was vacuous, and the way it was vacuous is worth writing down.
   #
-  # All 11 `unsafe` blocks in this project are in crates/sys/src/netif/ffi.rs — a
+  # At M7.1, all 11 `unsafe` blocks in this project were in crates/sys/src/netif/ffi.rs — a
   # getifaddrs(3) linked-list walk — behind `#[cfg(all(feature = "raw-ffi", unix))]`,
   # and `raw-ffi` is NOT a default feature. Follow that through every job that claimed
   # to cover it and none of them did:
   #
-  #   * `cargo test --all`      — compiled the file out. 93 tests ran; the FFI test is
+  #   * `cargo test --all`      — compiled the file out. 93 tests ran; the FFI test was
   #                               the 94th and never ran.
   #   * `cargo clippy`          — mentioned ffi.rs 0 times, so the `-D
   #                               clippy::undocumented_unsafe_blocks` escalation above
@@ -228,7 +228,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       # --all-features is the whole point: without it this job would compile the same
-      # 93 tests every other job already runs and report green having sanitized no
+      # tests every other job already runs and report green having sanitized no
       # `unsafe` at all.
       #
       # --target is REQUIRED, not stylistic. Without an explicit target, cargo builds
@@ -257,7 +257,7 @@ jobs:
       # link the ASan runtime, so piccolo's one doctest fails with
       # `undefined symbol: __asan_report_load4` before it runs a line. Everything that
       # actually exercises unsafe is a real test binary and is still covered — measured
-      # at 21 binaries, including the 43 Lua programs in piccolo's golden-script suite,
+      # at 21 binaries, including the 43 Lua programs in piccolo's script suite (`tests/scripts/`),
       # which is what drives the VM hard enough for this job to mean anything.
       - run: cargo +nightly test -p nmap-sys -p piccolo --all-features --lib --tests --target x86_64-unknown-linux-gnu
         env:

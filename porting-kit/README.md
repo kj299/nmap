@@ -56,7 +56,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/sanitizers/run_sanitizers.sh` | Miri / ASan / LSan / TSan over the unsafe layer (no UBSan — rustc has none) | CI |
 | `harnesses/supply-chain/run_supply_chain.sh` | `cargo audit` + `cargo deny` | CI |
 | `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
-| `harnesses/progress/progress.py` | per-module status table incl. safety gates; `drift` fails on an untracked shipped module | tracking + **CI** |
+| `harnesses/progress/progress.py` | per-module status table incl. safety gates (`init`, `set`, `show`, `ingest`); `drift` fails on an untracked shipped module; `exempt` records a reasoned gate exemption, `cover` maps modules to fuzz targets, and `audit` fails on an unreasoned exemption or a coverage claim naming a missing target | tracking + **CI** |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 
 ```

@@ -2756,8 +2756,10 @@ reader never stops, since a number is never the empty string.
 - [ ] `vm-nonstandard-coroutine-functions` — the VM's `coroutine` table has
       `continue` and `yieldto`, which Lua 5.4 does not. A script can reach
       them, and `continue` resumes in the way `wrap-keeps-the-caller-frame`
-      describes. They belong to the sandbox decision with `io`, `os` and
-      `debug`.
+      describes. Decision 2 settled `io`, `os` and `debug` (M6.4c1) but not
+      these, and the NSE state still has them. They are to be removed from
+      it in M6.4c2, before the scheduler runs scripts. A script that resumes
+      with `continue` would suspend the executor the scheduler drives.
 
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 
@@ -3114,8 +3116,14 @@ Gated by three things:
       link, so only an outside actor could race it.
 - [x] `os-is-the-clock` — `os` has `clock`, `date`, `time` and `difftime`
       only. `execute`, `exit`, `getenv`, `remove`, `rename`, `tmpname` and
-      `setlocale` do not exist: no shipped script or library calls them on a
-      path a scan reaches (Decision 2).
+      `setlocale` do not exist (Decision 2). None but `getenv` is called on a
+      path a scan reaches.
+- [ ] `os-getenv-home-pending` — `getenv` is reached in one place:
+      `ssh1.parse_known_hosts_file`, which reads `$HOME/.ssh/config` and
+      `$HOME/.ssh/known_hosts`. It runs when `ssh-hostkey` is given
+      `known-hosts` without `known-hosts-path`. Until the host resolves `HOME`
+      in Rust and hands the paths in, as Decision 2 plans, that call raises
+      "attempt to call a nil value". Passing `known-hosts-path` avoids it.
 - [x] `io-no-process-or-stdin` — `io.popen`, `io.tmpfile`, `io.input`,
       `io.read` and `io.stdin`/`io.stderr` do not exist. `io.lines()` with no
       file name raises, rather than reading nmap's standard input.

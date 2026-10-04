@@ -347,12 +347,10 @@ retrospective rather than quietly picking a convention per module.
   evidence it was green). Accepted trade-off: a `claude/**` branch pushed with no open
   PR is not built until a PR is opened. Promoted to the kit as LESSONS #025 — its
   template had the same bug with no branch filter at all.
-- **CI never runs `--features pcap` or `--all-features`** — only the default config, so
-  the local three-config clippy/test sweep is stricter than the gate. An import used
-  only under `#[cfg(feature = "pcap")]`, or a lint that only fires with the feature on,
-  would pass CI and fail a contributor's local check. Closing this means a small feature
-  matrix on the build-test job (and, for the `pcap` config, libpcap installed on the
-  runner).
+- ~~**CI never runs `--features pcap` or `--all-features`**~~ — **done** (M7.1).
+  build-test runs clippy and the test suite with `--all-features` (libpcap installed
+  on the runner), and so do the MSRV and ASan jobs. That made the `raw-ffi` `unsafe`
+  visible to the lints and tests for the first time (see the workflow's comments).
 - ~~**Fail the fuzz *build* fast, in its own CI step.**~~ — **done**. The "fuzz crate is
   not in the workspace lint sweep" lesson had bitten **three times** (#69, and twice
   while completing `-O` — both a field added to `SeqReport`). The fuzz job now runs a
@@ -463,43 +461,6 @@ retrospective rather than quietly picking a convention per module.
   `legacy_compatibility` remains outside `default`. The 41-case OpenSSL differential
   passes unchanged, `small_order_r` included — the case only `verify_strict`
   refuses. No new transitive dependencies; `cargo deny` clean on all four gates.
-- **Raising the declared MSRV UNLOCKS clippy lints, so it is never a metadata-only
-  change.** Clippy suppresses any suggestion whose replacement API postdates the
-  declared `rust-version`. Correcting 1.74 -> 1.88 therefore turned on
-  `manual_is_multiple_of` (1.87) and `manual_repeat_n` (1.82) and produced 10 new
-  findings across `build`, `build6`, `engine`, `fp6`, `osprobe::demux` and five
-  differential tests — which CI would have failed under `-D warnings`. All ten were
-  mechanical and behaviour-preserving (`x % n == 0` -> `x.is_multiple_of(n)` with a
-  non-zero literal divisor is exact, and it removes a `%` operator, which suits the
-  `arithmetic_side_effects` posture; `repeat().take()` -> `repeat_n` is identical).
-  Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Worth a
-  LESSONS entry: an MSRV bump must be validated with the full clippy sweep, not just
-  a build.
-- **RESOLVED (seed pollution): 979 fuzzer-generated files pruned, recurrence
-  gated.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory as a
-  *corpus* and writes discovered inputs into it, so local smoke runs silently
-  dropped SHA1-named blobs into the tree that were then committed by the feature
-  PRs introducing each target (e.g. #73). Repo-wide it had reached 979 generated
-  against 367 curated, 5.6 MB of seeds. Pruned to 387 curated files, 1.8 MB.
-  `fuzz/check-seeds.sh` now fails on any 40-hex-named file under `fuzz/seeds/`,
-  and each of its three failure modes was verified to actually fire before the
-  check was wired in. The fix for the mechanism itself is in the script's header:
-  pass a scratch corpus dir FIRST and the seed dir second.
-  Note `ndp_advert` had **93 generated seeds and zero curated ones**, so pruning it
-  alone would have emptied the directory; it now carries 20 hand-written seeds
-  covering the truncated-advertisement read that the target exists to guard, and
-  they reach cov 67 / ft 72 against the 93 blobs' 69 / 74.
-- **DECIDE: relax the `ed25519-dalek` pin now that MSRV no longer forces it.** The
-  `=2.1.1` pin was chosen solely because 2.2.0 needs rustc 1.81 and 3.0.0 needs
-  1.85, both above the then-declared 1.74. With MSRV corrected to 1.88 that reason
-  is gone, and the pin's cost is now unmitigated: `=` leaves no room for a patch
-  release, so a RUSTSEC advisory against 2.1.1 must be answered by editing the
-  manifest under time pressure, and `yanked = "deny"` means a yank of 2.1.1 breaks
-  the build outright. `Cargo.lock` is what makes builds reproducible, so relaxing to
-  a caret would restore headroom without changing the version actually built until
-  someone runs `cargo update`. Left pinned for now because it changes which code
-  verifies signatures — a decision to take deliberately, with the S2 differential
-  and Miri re-run, not as a side effect of an MSRV correction.
 - **`verify_strict` is not a style preference, and the measurement says so.** For a
   small-order public key, OpenSSL, python-cryptography, RFC 8032's own reference
   implementation and `ed25519-dalek`'s non-strict `verify` all accept forged

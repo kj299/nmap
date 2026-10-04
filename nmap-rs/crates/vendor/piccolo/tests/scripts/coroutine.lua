@@ -43,7 +43,8 @@ do
 
     assert(
         e1 == true and r1 == 1 and s1 == "suspended" and
-        e2 == false and r2 == 'test error' and s2 == "dead")
+        -- `error` prepends the position of its caller (Lua 5.4's luaB_error).
+        e2 == false and r2:sub(-15) == ":34: test error" and s2 == "dead")
 end
 
 do

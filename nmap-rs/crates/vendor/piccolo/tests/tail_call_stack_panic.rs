@@ -1,6 +1,6 @@
 use std::string::String as StdString;
 
-use piccolo::{meta_ops::MetaCallError, Closure, Executor, Lua};
+use piccolo::{Closure, Executor, Lua};
 
 const SOURCE: &str = r#"
     -- Purposeful typo of 'tostring'
@@ -20,8 +20,11 @@ fn tail_call_stack_panic() {
     })
     .expect("load closure");
 
-    assert!(matches!(
-        lua.execute::<StdString>(&exec),
-        Err(err) if err.root_cause().downcast_ref::<MetaCallError>().is_some()
-    ));
+    // Calling a nil global is a Lua error carrying PUC-Lua's message, as a
+    // string, after the call's position.
+    let err = lua.execute::<StdString>(&exec).unwrap_err();
+    assert!(
+        err.to_string().ends_with(":3: attempt to call a nil value"),
+        "{err}"
+    );
 }

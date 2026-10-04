@@ -1,6 +1,7 @@
 pub mod any;
 pub mod async_callback;
 pub mod callback;
+pub mod chunk_id;
 pub mod closure;
 pub mod compiler;
 pub mod constant;

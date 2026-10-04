@@ -458,7 +458,22 @@ impl<'gc> Executor<'gc> {
                         };
                         match run_vm(ctx, lua_frame, Self::VM_GRANULARITY) {
                             Err(err) => {
-                                top_state.frames.push(Frame::Error(err.into()));
+                                // `luaG_runerror` from a Lua function: the
+                                // message, as a string, after the position of
+                                // the instruction that raised it.
+                                let err = match top_state.frames.last() {
+                                    Some(Frame::Lua { closure, pc, .. }) if err.is_lua_error() => {
+                                        let mut msg = if err.is_positioned() {
+                                            lua_where(*closure, pc.saturating_sub(1))
+                                        } else {
+                                            std::vec::Vec::new()
+                                        };
+                                        msg.extend_from_slice(err.to_string().as_bytes());
+                                        Error::from(crate::Value::String(ctx.intern(&msg)))
+                                    }
+                                    _ => err.into(),
+                                };
+                                top_state.frames.push(Frame::Error(err));
                             }
                             Ok(instructions_run) => {
                                 fuel.consume(instructions_run.try_into().unwrap());
@@ -631,6 +646,31 @@ impl<'gc, 'a> Execution<'gc, 'a> {
         self.executor
     }
 
+    /// `luaL_where(L, level)`: `chunk:line: ` for the function `level` calls
+    /// up from the running callback — 1 is its caller — when that function is
+    /// Lua, and nothing when it is a Rust function or there is no such level.
+    pub fn where_at(&self, level: usize) -> std::vec::Vec<u8> {
+        let mut seen = 0;
+        for frame in self.upper_frames.iter().rev() {
+            match frame {
+                Frame::Lua { closure, pc, .. } => {
+                    seen += 1;
+                    if seen == level {
+                        return lua_where(*closure, pc.saturating_sub(1));
+                    }
+                }
+                Frame::Sequence { .. } | Frame::Callback { .. } => {
+                    seen += 1;
+                    if seen == level {
+                        return std::vec::Vec::new();
+                    }
+                }
+                _ => {}
+            }
+        }
+        std::vec::Vec::new()
+    }
+
     /// If the function we are returning to is Lua, returns information about the Lua frame we are
     /// returning to.
     pub fn upper_lua_frame(&self) -> Option<UpperLuaFrame<'gc>> {
@@ -654,6 +694,22 @@ impl<'gc, 'a> Execution<'gc, 'a> {
             },
         })
     }
+}
+
+/// `luaG_addinfo`'s prefix, `chunk:line: `, for instruction `op` of `closure`.
+fn lua_where(closure: crate::Closure<'_>, op: usize) -> std::vec::Vec<u8> {
+    let proto = closure.prototype();
+    let line = match proto
+        .opcode_line_numbers
+        .binary_search_by_key(&op, |(opi, _)| *opi)
+    {
+        Ok(i) => proto.opcode_line_numbers[i].1,
+        Err(0) => LineNumber(0),
+        Err(i) => proto.opcode_line_numbers[i - 1].1,
+    };
+    let mut out = crate::chunk_id::chunk_id(proto.chunk_name.as_bytes());
+    out.extend_from_slice(format!(":{line}: ").as_bytes());
+    out
 }
 
 pub struct CurrentThread<'gc> {

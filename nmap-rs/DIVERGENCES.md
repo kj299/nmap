@@ -2299,7 +2299,9 @@ Count at M6.0: **3 of 99**, down from 16 when the VM was vendored, and the
 corpus has grown by 31 cases over the same period rather than shrinking. **None
 of the three can abort the process**; every defect that could is fixed. Now
 **2 of 99**: the corpus runs with the first-party stdlib installed, as NSE
-will, and `string.rep` closed `method_rep_literal`. Entries
+will, and `string.rep` closed `method_rep_literal`. Now **1 of 99**: M6.4a's
+VM patch (`0008`) gave `error` its position and closed
+`error_string_gets_position`. Entries
 the port has closed are removed rather than ticked, because they are simply
 correct now.
 
@@ -2331,17 +2333,6 @@ add to.
 - [ ] `max_int_vs_float` — `math.maxinteger + 0.0 == math.maxinteger` is `true`
       here and `false` in Lua. The float cannot represent `maxinteger` exactly,
       and Lua's comparison accounts for that; piccolo's converts and compares.
-- [ ] `error_string_gets_position` — `error('boom')` comes back verbatim; Lua
-      prepends `chunk:LINE: ` (`luaB_error` calls `luaL_where`, `lbaselib.c:39`).
-      Level 0 and non-string error values are correct already, so the defect is
-      exactly the missing `luaL_where`. **Found by running upstream piccolo's own
-      43-script suite under nmap's Lua**: two of those scripts assert the
-      undecorated message, so the vendored suite was pinning the VM to the wrong
-      answer. Those two are left as upstream wrote them; a third,
-      `tests/scripts/bit.lua`, asserted eleven things about string operands that
-      Lua 5.4 also does not do, and *was* corrected — see
-      `crates/vendor/piccolo/PROVENANCE.md`.
-
 ## Milestone 6 stdlib — `string.pack` / `unpack` / `packsize` (`core::nse::stdlib::strpack`)
 
 A port of `liblua/lstrlib.c:1385-1830`, gated by
@@ -2421,7 +2412,7 @@ below. Every error is still raised in the same cases as the C.
       expose how a callback was invoked.
 - [x] `strpack-no-position-prefix`: PUC-Lua prefixes every error with the
       caller's `chunk:LINE:`. That is the VM-wide defect ledgered above as
-      `error_string_gets_position`, not something this module can supply.
+      `stdlib-errors-have-no-position`, not something this module can supply.
 
 ## Milestone 6 stdlib — Lua patterns: `string.find` / `match` / `gmatch` / `gsub` (`core::nse::stdlib::pattern`)
 
@@ -2541,7 +2532,7 @@ listed at the end.
       behaves differently: the only programs affected are ones the C rejects.
 - [x] `pattern-no-position-prefix`: `luaL_error` prefixes its message with the
       calling Lua function's `chunk:LINE:`; a call made by `pcall` directly has
-      no such prefix in either. That is `error_string_gets_position` above. The
+      no such prefix in either. That is `stdlib-errors-have-no-position`. The
       differential compares every message caught inside a case byte for byte,
       and discounts only this prefix on an error that escapes one.
 - [x] `pattern-bad-argument-naming`: `luaL_argerror` names the function from
@@ -2745,7 +2736,7 @@ reader never stops, since a number is never the empty string.
 - [x] `tail-no-position-prefix`: `auxwrap` prefixes a string error leaving a
       `coroutine.wrap` function with the caller's `chunk:LINE:`, and
       `generic_reader`'s "reader function must return a string" carries the
-      same prefix; this port adds neither. That is `error_string_gets_position`.
+      same prefix; this port adds neither. That is `stdlib-errors-have-no-position`.
 
 ### Differences that belong to the VM, not to these bindings
 
@@ -2759,15 +2750,6 @@ reader never stops, since a number is never the empty string.
       pass-through continuation so that this cannot happen (pinned by the
       `wrap_tail_*` cases). The VM's own non-standard `coroutine.continue`
       still resumes that way; see `vm-nonstandard-coroutine-functions`.
-- [ ] `vm-runtime-errors-are-not-strings` — an error the VM raises itself
-      ("attempt to index a nil value", "attempt to call", arithmetic on a
-      table, ...) reaches `pcall` and `xpcall` handlers as a **userdata**
-      wrapping the Rust error, whose `tostring` is a bare "operator error";
-      PUC-Lua gives the string `chunk:1: attempt to index a nil value (local
-      'x')`. Scripts routinely format, match or concatenate the message they
-      catch, and every such use fails or loses the message. The corpus keeps
-      these errors out (they are not the bindings' to fix). Must close before
-      M6.4.
 - [ ] `vm-vararg-outside-vararg-function` — `function f() return ... end`
       compiles; PUC-Lua rejects it ("cannot use '...' outside a vararg
       function"). The VM accepts a program the C refuses.
@@ -2895,3 +2877,62 @@ DNS servers, `fetchfile`'s path, clocks and random bytes. A few host facts
 have no source in `-oX`, so the golden takes them from the probe itself and
 the comparison checks only how the port renders them: the interface and its
 MTU, the source address, `directly_connected` and the timing estimates.
+
+## Milestone 6.4a — errors the VM raises, and the numeric `for` (vendored VM patch `0008`)
+
+Before scripts get sockets, the errors they catch have to be what nmap's Lua
+gives them. They were not: an error the VM raised itself reached `pcall` as a
+userdata whose text was "operator error", and `error('x')` came back without
+its position. Patch `0008` (`crates/vendor/piccolo/patches/`) raises every
+such error as a Lua string, in PUC-Lua's words. That covers `ldebug.c`'s type,
+concatenation, operand and order errors, `lstrlib.c`'s string arithmetic,
+`__name` type names, division by zero and table keys. Each carries the
+failing instruction's `chunk:LINE:`. The patch also gives `error` its levels
+and `assert` its position. The numeric `for` is rewritten to Lua 5.4's
+`forprep`/`forloop`.
+
+Gated by [`m64_errors_cases.txt`](tests/differential/m6/m64_errors_cases.txt):
+12,438 chunks against `liblua/`, compared **with** positions. They are every
+operator over operands of every type, `error` at every level, `assert`,
+9,000-odd `for` loops over the integer extremes, floats, numeric strings and
+wrong types, and errors on later lines. Two VM defects closed:
+
+- `vm-runtime-errors-are-not-strings` (M6 tail), and
+  `error_string_gets_position` (M6.0): above.
+- **A hang**: `for i = 1, 2, 0` looped forever (piccolo's loop was Lua 5.3's
+  subtract-then-add scheme, which has no zero-step check); Lua 5.4 raises
+  "'for' step is zero". Found by the first probe of this corpus.
+
+### Open, and pinned
+
+- [ ] `vm-error-varinfo` — PUC-Lua describes an error's culprit: `attempt to
+      index a nil value (local 'x')`, `(global 'f')`, `(field 'k')`,
+      `(method 'm')`, `(upvalue 'u')`, `(constant 's')`. It finds them with
+      `getobjname`, a backwards walk of the bytecode against the function's
+      local-variable debug information. The VM keeps no such information, so
+      its messages end before the parenthesis. The corpus removes the
+      description from nmap's message before comparing; 1,685 of its cases
+      have one.
+- [ ] `vm-error-line-is-the-statements` — the compiler records a line per
+      statement, not per instruction, so an error inside a statement that
+      spans lines is placed on the statement's first line where PUC-Lua names
+      the line of the failing instruction. Two corpus cases pin it
+      (`line_multi_call`, `line_multi_table`) and fail if it changes.
+- [ ] `stdlib-errors-have-no-position` — `luaL_error` and `luaL_argerror`
+      prefix their message with the position of the Lua function that called
+      the C function (`luaL_where(L, 1)`), as `coroutine.wrap` does for an
+      error it propagates. The first-party stdlib and the `nmap` module raise
+      without it. A call made by `pcall` directly has no Lua caller and no
+      prefix in either, which is how the corpora compare those messages
+      exactly; an escaped one is compared without nmap's prefix.
+
+### Behaviour now matched that the corpus pins
+
+- [x] `vm-tail-call-to-rust-keeps-the-frame`: a tail call to a Rust function
+      runs as an ordinary call, as C runs a tail-called C function in a new
+      frame above its Lua caller, so `error`'s levels and positions count that
+      caller (`return error('x')` is positioned at the caller's line).
+- [x] `vm-string-arith-errors-are-lstrlibs`: arithmetic on a non-numeric
+      string fails in the string metatable's metamethod, with its message,
+      `attempt to add a 'string' with a 'number'`. Integer division of numeric
+      strings by zero fails inside that C function, unpositioned.

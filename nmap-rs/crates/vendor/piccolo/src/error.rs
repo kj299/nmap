@@ -1,12 +1,9 @@
 use std::{error::Error as StdError, fmt, string::String as StdString, sync::Arc};
 
-use gc_arena::{Collect, Gc, Rootable};
+use gc_arena::{Collect, Gc};
 use thiserror::Error;
 
-use crate::{
-    Callback, CallbackReturn, Context, FromValue, Function, IntoValue, MetaMethod, Singleton,
-    Table, UserData, Value,
-};
+use crate::{Context, FromValue, Function, IntoValue, Value};
 
 #[derive(Debug, Clone, Copy, Error)]
 #[error("type error, expected {expected}, found {found}")]
@@ -220,34 +217,11 @@ impl<'gc> Error<'gc> {
     pub fn to_value(&self, ctx: Context<'gc>) -> Value<'gc> {
         match self {
             Error::Lua(err) => err.0,
-            Error::Runtime(err) => {
-                #[derive(Copy, Clone, Collect)]
-                #[collect(no_drop)]
-                struct UDMeta<'gc>(Table<'gc>);
-
-                impl<'gc> Singleton<'gc> for UDMeta<'gc> {
-                    fn create(ctx: Context<'gc>) -> Self {
-                        let table = Table::new(&ctx);
-                        table
-                            .set(
-                                ctx,
-                                MetaMethod::ToString,
-                                Callback::from_fn(&ctx, |ctx, _, mut stack| {
-                                    let ud = stack.consume::<UserData>(ctx)?;
-                                    let error = ud.downcast_static::<RuntimeError>()?;
-                                    stack.replace(ctx, error.to_string());
-                                    Ok(CallbackReturn::Return)
-                                }),
-                            )
-                            .unwrap();
-                        Self(table)
-                    }
-                }
-
-                let ud = UserData::new_static(&ctx, err.clone());
-                ud.set_metatable(&ctx, Some(ctx.singleton::<Rootable![UDMeta<'_>]>().0));
-                ud.into()
-            }
+            // What the C would have raised from a C function: a string. The
+            // VM's own errors already arrive as Lua strings, positioned; this
+            // is the rest (a Rust callback's error), unpositioned, as a C
+            // function's `luaG_runerror` would be.
+            Error::Runtime(err) => Value::String(ctx.intern(err.to_string().as_bytes())),
         }
     }
 

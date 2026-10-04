@@ -1702,6 +1702,13 @@ impl<S: StringInterner> Compiler<S> {
                 self.current_function
                     .operations
                     .push(Operation::TailCall { func, args });
+                // As in Lua, a return follows: a tail call to a Rust function
+                // runs as an ordinary call, keeping this frame (as C keeps it
+                // for a C function), and this hands its results up.
+                self.current_function.operations.push(Operation::Return {
+                    start: func,
+                    count: VarCount::variable(),
+                });
             }
         }
 
@@ -1761,6 +1768,10 @@ impl<S: StringInterner> Compiler<S> {
                 self.current_function
                     .operations
                     .push(Operation::TailCall { func: base, args });
+                self.current_function.operations.push(Operation::Return {
+                    start: base,
+                    count: VarCount::variable(),
+                });
             }
         }
 

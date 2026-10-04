@@ -75,11 +75,13 @@ done
 # the crate's lib unit tests are 11 assertions, which would make the ASan job over
 # it very nearly vacuous. So it is checked for drift exactly like src/.
 #
-# One patch does edit it. 0007 rewrites tests/scripts/bit.lua, which asserted
-# eleven things Lua 5.4 does not do (`"2" & 3.0 == 2`; PUC-Lua raises). A
-# vendored test that encodes the wrong semantics pins the VM to them, so it was
-# corrected rather than removed, and the rewritten file is checked under
-# liblua/ as well. PROVENANCE.md records it.
+# Two patches edit it. 0007 rewrites tests/scripts/bit.lua, which asserted
+# eleven things Lua 5.4 does not do (`"2" & 3.0 == 2`; PUC-Lua raises). 0008
+# corrects pcall.lua and coroutine.lua, which asserted that `error` adds no
+# position, and two Rust tests that matched the error's Rust type. A vendored
+# test that encodes the wrong semantics pins the VM to them, so each was
+# corrected rather than removed, and checked under liblua/ where it can run.
+# PROVENANCE.md records them.
 ok=0
 if diff -ru --exclude='*.orig' --exclude='*.rej' "$WORK/up/src" "$HERE/src" > "$WORK/drift.diff" \
    && diff -ru --exclude='*.orig' --exclude='*.rej' \

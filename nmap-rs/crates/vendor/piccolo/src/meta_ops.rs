@@ -7,8 +7,8 @@ use crate::async_callback::{AsyncSequence, Locals};
 use crate::number_format;
 use crate::{async_sequence, SequenceReturn, Stack};
 use crate::{
-    table::InvalidTableKey, Callback, CallbackReturn, Context, Function, IntoValue, Singleton,
-    Table, Value,
+    table::InvalidTableKey, Callback, CallbackReturn, Constant, Context, Function, IntoValue,
+    Singleton, Table, Value,
 };
 
 /// An enum of every possible Lua metamethod.
@@ -145,23 +145,200 @@ impl<'gc, const N: usize> From<MetaCall<'gc, N>> for MetaResult<'gc, N> {
     }
 }
 
+/// An operator that could not be applied. Every message is PUC-Lua 5.4's,
+/// word for word, without the `chunk:line:` position the executor adds when
+/// the operator ran in a Lua function.
 #[derive(Debug, Clone, Error)]
 pub enum MetaOperatorError {
-    #[error("could not call metamethod {}: {}", .0.name(), .1)]
+    /// The metamethod found is not callable: its call's error.
+    #[error("{1}")]
     Call(MetaMethod, #[source] MetaCallError),
-    #[error("could not {} a {} value", .0.verb(), .1)]
-    Unary(MetaMethod, &'static str),
-    #[error("could not {} values of type {} and {}", .0.verb(), .1, .2)]
-    Binary(MetaMethod, &'static str, &'static str),
-    #[error("invalid table key")]
+    /// The operands are wrong, in PUC-Lua's words (`ldebug.c`, `lstrlib.c`).
+    #[error("{0}")]
+    Message(std::string::String),
+    /// As `Message`, but raised by `luaG_runerror` inside a C function (the
+    /// string metatable's arithmetic), which gives no position.
+    #[error("{0}")]
+    MessageFromC(std::string::String),
+    #[error("{0}")]
     IndexKeyError(#[from] InvalidTableKey),
-    #[error("concatenation result is too long")]
+    /// `luaV_concat`'s "string length overflow".
+    #[error("string length overflow")]
     ConcatOverflow,
 }
 
-#[derive(Debug, Copy, Clone, Error)]
-#[error("could not call a {} value", .0)]
-pub struct MetaCallError(&'static str);
+/// A value that cannot be called: "attempt to call a X value".
+#[derive(Debug, Clone, Error)]
+#[error("attempt to call a {0} value")]
+pub struct MetaCallError(std::string::String);
+
+impl MetaCallError {
+    /// The error for calling `v`, named as `luaT_objtypename` names it.
+    pub fn for_value<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Self {
+        Self(objtypename(ctx, v))
+    }
+}
+
+/// `luaT_objtypename`: a table's or userdata's `__name`, when its metatable
+/// has a string there, else the basic type name.
+pub fn objtypename<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> std::string::String {
+    let mt = match v {
+        Value::Table(t) => t.metatable(),
+        Value::UserData(u) => u.metatable(),
+        _ => None,
+    };
+    if let Some(mt) = mt {
+        if let Value::String(name) = mt.get_value(ctx, "__name") {
+            return std::string::String::from_utf8_lossy(name.as_bytes()).into_owned();
+        }
+    }
+    v.type_name().to_owned()
+}
+
+/// `ttisnumber`: an integer or a float, not a numeric string.
+fn is_number(v: Value<'_>) -> bool {
+    matches!(v, Value::Integer(_) | Value::Number(_))
+}
+
+/// The `__add`-style name `lstrlib.c`'s `trymt` prints, less its `__`.
+fn arith_name(method: MetaMethod) -> &'static str {
+    match method {
+        MetaMethod::Add => "add",
+        MetaMethod::Sub => "sub",
+        MetaMethod::Mul => "mul",
+        MetaMethod::Mod => "mod",
+        MetaMethod::Pow => "pow",
+        MetaMethod::Div => "div",
+        MetaMethod::IDiv => "idiv",
+        _ => "unm",
+    }
+}
+
+/// The error for a binary operator `method` on `lhs` and `rhs`, which no
+/// metamethod and no primitive operation could handle.
+fn binary_error<'gc>(
+    ctx: Context<'gc>,
+    method: MetaMethod,
+    lhs: Value<'gc>,
+    rhs: Value<'gc>,
+) -> MetaOperatorError {
+    let msg = match method {
+        // `luaG_concaterror`: the first operand that is not a string or number.
+        MetaMethod::Concat => {
+            let culprit = if lhs.is_implicit_string() { rhs } else { lhs };
+            format!(
+                "attempt to concatenate a {} value",
+                objtypename(ctx, culprit)
+            )
+        }
+        // `luaG_ordererror`.
+        MetaMethod::Lt | MetaMethod::Le => {
+            let (t1, t2) = (objtypename(ctx, lhs), objtypename(ctx, rhs));
+            if t1 == t2 {
+                format!("attempt to compare two {t1} values")
+            } else {
+                format!("attempt to compare {t1} with {t2}")
+            }
+        }
+        // `luaT_trybinTM` for the bitwise events: two numbers that are not
+        // integers, else the first operand that is not a number.
+        MetaMethod::BAnd
+        | MetaMethod::BOr
+        | MetaMethod::BXor
+        | MetaMethod::Shl
+        | MetaMethod::Shr => {
+            if is_number(lhs) && is_number(rhs) {
+                "number has no integer representation".to_owned()
+            } else {
+                let culprit = if is_number(lhs) { rhs } else { lhs };
+                format!(
+                    "attempt to perform bitwise operation on a {} value",
+                    objtypename(ctx, culprit)
+                )
+            }
+        }
+        _ => {
+            // A string operand: the string metatable's arithmetic metamethod
+            // ran and gave up (`lstrlib.c`'s `trymt`).
+            let numeric = |v: Value<'gc>| v.to_constant().and_then(|c| c.to_numeric());
+            if let (
+                Value::String(_) | Value::Integer(_),
+                Value::String(_) | Value::Integer(_),
+                Some(Constant::Integer(_)),
+                Some(Constant::Integer(0)),
+            ) = (lhs, rhs, numeric(lhs), numeric(rhs))
+            {
+                // Numeric strings: `lstrlib.c`'s `arith` converted them and
+                // `lua_arith` divided by zero, inside that C function.
+                if matches!(method, MetaMethod::Mod | MetaMethod::IDiv)
+                    && (matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)))
+                {
+                    return MetaOperatorError::MessageFromC(if method == MetaMethod::Mod {
+                        "attempt to perform 'n%0'".to_owned()
+                    } else {
+                        "attempt to divide by zero".to_owned()
+                    });
+                }
+            }
+            if matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)) {
+                format!(
+                    "attempt to {} a '{}' with a '{}'",
+                    arith_name(method),
+                    lhs.type_name(),
+                    rhs.type_name()
+                )
+            } else if let (Value::Integer(_), Value::Integer(0)) = (lhs, rhs) {
+                // `luaV_idiv` and `luaV_mod`.
+                if method == MetaMethod::Mod {
+                    "attempt to perform 'n%0'".to_owned()
+                } else {
+                    "attempt to divide by zero".to_owned()
+                }
+            } else {
+                // `luaG_opinterror`: the first operand that is not a number.
+                let culprit = if is_number(lhs) { rhs } else { lhs };
+                format!(
+                    "attempt to perform arithmetic on a {} value",
+                    objtypename(ctx, culprit)
+                )
+            }
+        }
+    };
+    MetaOperatorError::Message(msg)
+}
+
+/// The error for a unary operator `method` on `v`.
+fn unary_error<'gc>(ctx: Context<'gc>, method: MetaMethod, v: Value<'gc>) -> MetaOperatorError {
+    let msg = match method {
+        MetaMethod::Index | MetaMethod::NewIndex => {
+            format!("attempt to index a {} value", objtypename(ctx, v))
+        }
+        MetaMethod::Len => format!("attempt to get length of a {} value", objtypename(ctx, v)),
+        MetaMethod::Call => format!("attempt to call a {} value", objtypename(ctx, v)),
+        // Unary operators are binary in PUC-Lua, with the operand twice.
+        MetaMethod::Unm | MetaMethod::BNot => {
+            let MetaOperatorError::Message(m) = binary_error(
+                ctx,
+                if method == MetaMethod::Unm {
+                    MetaMethod::Unm
+                } else {
+                    MetaMethod::BAnd
+                },
+                v,
+                v,
+            ) else {
+                unreachable!("binary_error builds a message")
+            };
+            m
+        }
+        _ => format!(
+            "attempt to {} a {} value",
+            method.verb(),
+            objtypename(ctx, v)
+        ),
+    };
+    MetaOperatorError::Message(msg)
+}
 
 /// The metatable shared by every Lua string value.
 ///
@@ -244,10 +421,7 @@ pub fn index<'gc>(
             };
 
             if idx.is_nil() {
-                return Err(MetaOperatorError::Unary(
-                    MetaMethod::Index,
-                    table.type_name(),
-                ));
+                return Err(unary_error(ctx, MetaMethod::Index, table));
             }
 
             idx
@@ -261,20 +435,12 @@ pub fn index<'gc>(
             let idx = string_metatable(ctx).get_value(ctx, MetaMethod::Index);
 
             if idx.is_nil() {
-                return Err(MetaOperatorError::Unary(
-                    MetaMethod::Index,
-                    table.type_name(),
-                ));
+                return Err(unary_error(ctx, MetaMethod::Index, table));
             }
 
             idx
         }
-        _ => {
-            return Err(MetaOperatorError::Unary(
-                MetaMethod::Index,
-                table.type_name(),
-            ))
-        }
+        _ => return Err(unary_error(ctx, MetaMethod::Index, table)),
     };
 
     // NOTE: The __index metamethod (and others) can easily infinite loop or enter arbitrarily long
@@ -367,15 +533,13 @@ pub fn new_index<'gc>(
             };
 
             if idx.is_nil() {
-                return Err(
-                    MetaOperatorError::Unary(MetaMethod::NewIndex, table.type_name()).into(),
-                );
+                return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
             }
 
             idx
         }
         _ => {
-            return Err(MetaOperatorError::Unary(MetaMethod::NewIndex, table.type_name()).into());
+            return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
         }
     };
 
@@ -412,7 +576,7 @@ pub fn call<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<Function<'gc>, Meta
         Value::UserData(ud) => ud.metatable(),
         _ => None,
     }
-    .ok_or(MetaCallError(v.type_name()))?;
+    .ok_or_else(|| MetaCallError::for_value(ctx, v))?;
 
     match metatable.get_value(ctx, MetaMethod::Call) {
         f @ (Value::Function(_) | Value::Table(_) | Value::UserData(_)) => Ok(
@@ -428,7 +592,9 @@ pub fn call<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<Function<'gc>, Meta
             })
             .into(),
         ),
-        f => Err(MetaCallError(f.type_name())),
+        // No `__call`: the error names the value called (`luaG_callerror`).
+        Value::Nil => Err(MetaCallError::for_value(ctx, v)),
+        f => Err(MetaCallError::for_value(ctx, f)),
     }
 }
 
@@ -451,7 +617,7 @@ pub fn len<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<MetaResult<'gc, 1>, 
     match v {
         Value::String(s) => Ok(MetaResult::Value(s.len().into())),
         Value::Table(t) => Ok(MetaResult::Value(t.length().into())),
-        f => Err(MetaOperatorError::Unary(MetaMethod::Len, f.type_name())),
+        f => Err(unary_error(ctx, MetaMethod::Len, f)),
     }
 }
 
@@ -571,11 +737,7 @@ fn meta_metaop<'gc>(
                     args: [lhs, rhs],
                 })
             } else {
-                return Err(MetaOperatorError::Binary(
-                    method,
-                    lhs.type_name(),
-                    rhs.type_name(),
-                ));
+                return Err(binary_error(ctx, method, lhs, rhs));
             }
         }
         (Value::Table(_) | Value::UserData(_), _) => {
@@ -585,11 +747,7 @@ fn meta_metaop<'gc>(
                     args: [lhs, rhs],
                 })
             } else {
-                return Err(MetaOperatorError::Binary(
-                    method,
-                    lhs.type_name(),
-                    rhs.type_name(),
-                ));
+                return Err(binary_error(ctx, method, lhs, rhs));
             }
         }
         (_, Value::Table(_) | Value::UserData(_)) => {
@@ -599,15 +757,11 @@ fn meta_metaop<'gc>(
                     args: [lhs, rhs],
                 })
             } else {
-                return Err(MetaOperatorError::Binary(
-                    method,
-                    lhs.type_name(),
-                    rhs.type_name(),
-                ));
+                return Err(binary_error(ctx, method, lhs, rhs));
             }
         }
         (a, b) => const_op(ctx, a, b)
-            .ok_or_else(|| MetaOperatorError::Binary(method, lhs.type_name(), rhs.type_name()))?
+            .ok_or_else(|| binary_error(ctx, method, lhs, rhs))?
             .into(),
     })
 }
@@ -626,11 +780,11 @@ fn meta_unary_metaop<'gc>(
                     args: [arg],
                 })
             } else {
-                return Err(MetaOperatorError::Unary(method, arg.type_name()));
+                return Err(unary_error(ctx, method, arg));
             }
         }
         val => const_op(val)
-            .ok_or_else(|| MetaOperatorError::Unary(method, arg.type_name()))?
+            .ok_or_else(|| unary_error(ctx, method, arg))?
             .into(),
     })
 }
@@ -885,6 +1039,37 @@ pub fn concat_many<'gc>(
         return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(&bytes))));
     }
 
+    // Without a `__concat` anywhere the operation cannot succeed: raise
+    // `luaV_concat`'s error here, from the Lua frame, rather than from inside
+    // the fallback's callback, where it would lose its position. Lua
+    // concatenates from the right, so the first pair to fail is the
+    // rightmost one with a value that is not a string or number.
+    let has_concat_mm = values.iter().any(|v| {
+        match v {
+            Value::Table(t) => t.metatable(),
+            Value::UserData(u) => u.metatable(),
+            _ => None,
+        }
+        .is_some_and(|mt| !mt.get_value(ctx, MetaMethod::Concat).is_nil())
+    });
+    if !has_concat_mm {
+        if let Some(i) = values.iter().rposition(|v| !v.is_implicit_string()) {
+            // The last value is the first right-hand side; after it, the
+            // right-hand side is the string built so far. `luaG_concaterror`
+            // blames the left value unless it is a string or number.
+            let n = values.len();
+            let culprit = if i + 1 == n && n >= 2 && !values[n - 2].is_implicit_string() {
+                values[n - 2]
+            } else {
+                values[i]
+            };
+            return Err(MetaOperatorError::Message(format!(
+                "attempt to concatenate a {} value",
+                objtypename(ctx, culprit)
+            )));
+        }
+    }
+
     // Fall back to a sequence-based implemenation to handle metamethods
     let func = Callback::from_fn(&ctx, |ctx, _, stack| {
         let args = stack.len();
@@ -963,6 +1148,41 @@ pub fn concat_separated<'gc>(
         drop(iter);
 
         return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(&bytes))));
+    }
+
+    // Without a `__concat` anywhere the operation cannot succeed: raise
+    // `luaV_concat`'s error here, from the Lua frame, rather than from inside
+    // the fallback's callback, where it would lose its position. Lua
+    // concatenates from the right, so the first pair to fail is the
+    // rightmost one with a value that is not a string or number.
+    let has_concat_mm = values.iter().any(|v| {
+        match v {
+            Value::Table(t) => t.metatable(),
+            Value::UserData(u) => u.metatable(),
+            _ => None,
+        }
+        .is_some_and(|mt| !mt.get_value(ctx, MetaMethod::Concat).is_nil())
+    });
+    if !has_concat_mm {
+        if let Some(i) = values.iter().rposition(|v| !v.is_implicit_string()) {
+            let (lhs, rhs) = if i + 1 == values.len() && i > 0 {
+                (values[i - 1], values[i])
+            } else {
+                (values[i], Value::Nil)
+            };
+            let culprit = if i + 1 == values.len() && i > 0 && !lhs.is_implicit_string() {
+                lhs
+            } else if i + 1 == values.len() && i > 0 {
+                rhs
+            } else {
+                values[i]
+            };
+            let _ = (lhs, rhs);
+            return Err(MetaOperatorError::Message(format!(
+                "attempt to concatenate a {} value",
+                objtypename(ctx, culprit)
+            )));
+        }
     }
 
     // Fall back to a sequence-based implemenation to handle metamethods

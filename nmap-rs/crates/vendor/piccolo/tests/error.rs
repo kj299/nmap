@@ -23,7 +23,10 @@ fn error_unwind() -> Result<(), ExternError> {
     lua.finish(&executor).unwrap();
     lua.try_enter(|ctx| {
         match ctx.fetch(&executor).take_result::<()>(ctx)? {
-            Err(Error::Lua(LuaError(Value::String(s)))) => assert!(s == "test error"),
+            // `error` prepends its caller's position, as PUC-Lua's does.
+            Err(Error::Lua(LuaError(Value::String(s)))) => {
+                assert!(s.as_bytes().ends_with(b":3: test error"), "{s:?}")
+            }
             _ => panic!("wrong error returned"),
         }
         Ok(())

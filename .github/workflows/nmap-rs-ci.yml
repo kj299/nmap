@@ -545,3 +545,12 @@ jobs:
       - run: bash tests/differential/m6/regen_m63.sh --check
       - run: cargo test -p nmap-core --test scriptargs_differential
       - run: cargo test -p nmap-core --test nmaplib_differential
+
+      # M6.4a — errors the VM raises, and the numeric `for`. 12,438 chunks:
+      # every operator over operands of every type, `error` at every level,
+      # `assert`, a 9,000-case `for` grid, and errors on later lines, compared
+      # WITH their `chunk:LINE:` position. Culprit descriptions -- `(local
+      # 'x')` -- are removed from nmap's side (`vm-error-varinfo`); two
+      # multi-line cases are pinned (`vm-error-line-is-the-statements`).
+      - run: bash tests/differential/m6/regen_m64_errors.sh --check
+      - run: cargo test -p nmap-core --test errors_differential

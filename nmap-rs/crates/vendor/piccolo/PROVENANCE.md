@@ -10,7 +10,7 @@ one the rest of this port lives by: **no silent drift.**
 | commit | `ce709eb1dae5c543cbc78e7e12bb80249d88c55f` (2025-07-10) |
 | upstream version | `0.3.3` (the tag; master carries 139 unreleased commits on top) |
 | license | MIT **or** CC0-1.0, at your option (`LICENSE-MIT`, `LICENSE-CC0`) |
-| local changes | seven patches in `patches/`, listed below |
+| local changes | eight patches in `patches/`, listed below |
 | omitted | the `util/` workspace member (`piccolo-util`); unused here, and it carries 4 further `unsafe` blocks |
 
 `Cargo.toml` is **ours**, not upstream's: upstream's is a workspace root and
@@ -31,6 +31,7 @@ without reverse-engineering it from one combined diff.
 | `0005-port-modulo-and-shifts-from-puc-lua.patch` | `%` and the shifts, ported from `lvm.c` — the previous formula aborted the process on `i64::MIN % -1` |
 | `0006-port-float-formatting-from-puc-lua.patch` | `tostring` and `..` for floats, ported from `tostringbuff` in `lobject.c`; also fixes an `i64::MIN.abs()` abort in the concat length estimate |
 | `0007-port-string-to-number-coercion-from-puc-lua.patch` | `luaO_str2num` and which operators reach for it: the integer-before-float subtype, `tointegerns` for the bitwise operators, the float-to-integer range, and the `inf`/`nan` refusal. The first patch to touch `tests/` — see below |
+| `0008-port-runtime-errors-and-numeric-for-from-puc-lua.patch` | runtime errors as PUC-Lua raises them: Lua strings, in its words (`ldebug.c`'s `typeerror`, `concaterror`, `opinterror`, `ordererror`; `lstrlib.c`'s `trymt`; `__name`), prefixed `chunk:LINE:` from the failing instruction (`luaO_chunkid`, now `src/chunk_id.rs`); `error` levels and `assert` positions (`luaL_where`), counting a tail-called Rust function's caller as C does; and the numeric `for` rewritten to Lua 5.4's `forprep`/`forloop`, which closes a hang on a zero step. Also corrects `tests/scripts/pcall.lua` and `coroutine.lua` — see below |
 
 ### The one patch that edits upstream's tests
 
@@ -46,11 +47,16 @@ the real behaviour, which is more coverage than before. The rewritten file is
 checked both ways — it passes under this VM **and** under `liblua/` built from
 this repository.
 
-Two further upstream scripts, `pcall.lua` and `coroutine.lua`, also fail under
-nmap's own Lua. Both assert that `error('msg')` comes back undecorated, where
-PUC-Lua prepends `chunk:LINE:`. That is a real VM defect rather than a test
-defect, so it is ledgered in `DIVERGENCES.md` as `error_string_gets_position`
-and those two scripts are left exactly as upstream wrote them.
+Two further upstream scripts, `pcall.lua` and `coroutine.lua`, asserted that
+`error('msg')` comes back undecorated, where PUC-Lua prepends `chunk:LINE:`.
+That was a VM defect, ledgered as `error_string_gets_position` until `0008`
+fixed it; `0008` also corrects the two assertions, which now check the
+position's line and the message. `pcall.lua` passes under `liblua/` too.
+`coroutine.lua` gets further than before under `liblua/`, then stops at line 74,
+which calls piccolo's non-standard `coroutine.continue`; that is upstream's
+test of an upstream extension, left as it is. Two other tests that inspected
+the error's Rust type now inspect its message: `tests/error.rs` and
+`tests/tail_call_stack_panic.rs`.
 
 ## Why the fork exists
 

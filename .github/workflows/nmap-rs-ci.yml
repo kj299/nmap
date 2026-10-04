@@ -160,7 +160,10 @@ jobs:
       # name; one real one was missed because an inherent impl need not live in the
       # module its type is declared in. So the mapping is written down, and this step
       # is what keeps it true.
-      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json audit --fuzz-manifest nmap-rs/fuzz/Cargo.toml
+      # --require-done: every module merges fully gated, or with its reason
+      # written down. core::output sat below DONE from M1 to M6 while every
+      # check passed (LESSONS #035).
+      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json audit --fuzz-manifest nmap-rs/fuzz/Cargo.toml --require-done
         working-directory: .
 
   supply-chain:

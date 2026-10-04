@@ -3409,8 +3409,8 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
       was already the VM's (`nse-chosen-order`).
 - [ ] `nse-resolve-via-std` — `resolve` uses the standard library's
       `getaddrinfo` (`AF_UNSPEC`, stream sockets) and keeps the asked
-      family's addresses, without duplicates. `resolve_all` asks for the
-      family directly, with `AI_IDN`, and keeps duplicates. When none of
+      family's addresses, duplicates included, as nmap does. `resolve_all`
+      asks for the family directly, with `AI_IDN`. When none of
       the family remain, nmap returns `true, {}` and the port returns
       `false, "Failed to resolve"`. Names in a script are ASCII in practice.
 - [ ] `nse-closed-socket-ops-dropped` — closing a socket aborts its pending

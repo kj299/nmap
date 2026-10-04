@@ -383,7 +383,9 @@ impl ScriptNet for TokioNet {
                 Family::Inet6 => ip.is_ipv6(),
                 Family::Unspec => true,
             };
-            if keep && !list.contains(&ip) {
+            // Duplicates are kept, as `resolve_all` keeps them: a name listed
+            // twice in /etc/hosts resolves to its address twice.
+            if keep {
                 list.push(ip);
             }
         }

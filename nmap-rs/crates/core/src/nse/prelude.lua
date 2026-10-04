@@ -286,10 +286,11 @@ function NSOCK_SOCKET.receive_buf (self, delimiter, keeppattern)
       if l > r or r > #buf then
         error("invalid indices for match", 2);
       end
+      -- The C copies l-1 (or r) bytes as a size_t, and keeps buf+r: an
+      -- index before the buffer is an out-of-bounds read there
+      -- (nse-receive-buf-negative-index). Here it is the buffer's start.
+      r = max(r, 0);
       net.set_buffer(self, sub(buf, r + 1));
-      -- The C copies l-1 bytes as a size_t: a start before the buffer is
-      -- an out-of-bounds read there (nse-receive-buf-negative-index), and
-      -- nothing here.
       if keeppattern then
         return true, sub(buf, 1, r);
       else

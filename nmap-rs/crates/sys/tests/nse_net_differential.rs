@@ -119,3 +119,77 @@ fn sockets_behave_as_under_nmap() {
         failures.join("\n")
     );
 }
+
+/// `receive_buf` with a delimiter function whose indices fall before the
+/// buffer. nmap copies `l-1` (or `r`) bytes as a `size_t` and keeps `buf+r`,
+/// reading out of bounds, so this has no oracle. Here an index before the
+/// buffer is its start (`nse-receive-buf-negative-index`).
+#[test]
+fn receive_buf_clamps_indices_before_the_buffer() {
+    use nmap_core::nse::engine::ChosenScript;
+    use nmap_core::nse::nmaplib::{NmapLib, Phase};
+    use nmap_core::nse::runtime::{new_state, StateConfig};
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = l.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            thread::spawn(move || echo(c));
+        }
+    });
+    let tmp = std::env::temp_dir().join(format!("m64d-rbuf-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("tmp");
+    let script = tmp.join("rbuf.nse");
+    std::fs::write(
+        &script,
+        format!(
+            "local nmap = require 'nmap'\n\
+             categories = {{}}\n\
+             prerule = function() return true end\n\
+             action = function()\n\
+               local s = nmap.new_socket()\n\
+               s:connect('127.0.0.1', {port})\n\
+               s:send('abcdef')\n\
+               local out = {{}}\n\
+               local function rb(need, l, r, keep)\n\
+                 local ok, v = s:receive_buf(function(b) if #b >= need then return l, r end end, keep)\n\
+                 out[#out+1] = tostring(ok) .. ':' .. v\n\
+               end\n\
+               rb(6, -3, -1, false)\n\
+               rb(6, 1, 2, true)\n\
+               rb(4, -2, -1, true)\n\
+               rb(4, 4, 4, false)\n\
+               return table.concat(out, ',')\n\
+             end\n"
+        ),
+    )
+    .expect("script");
+    let dir = nse_host::repo_root();
+    let mut st = new_state(&StateConfig {
+        lib: NmapLib::new(nse_host::env(dir.clone())),
+        args: Default::default(),
+        source: Rc::new(nse_host::Dir(dir)),
+        fs: Rc::new(nse_host::ReadOnlyFs),
+        os: Rc::new(nse_host::os_env()),
+        memory_limit: Some(256 << 20),
+        engine: Default::default(),
+        net: Rc::new(RefCell::new(
+            nmap_sys::nsenet::TokioNet::new().expect("tokio"),
+        )),
+    })
+    .expect("state");
+    st.load_scripts(
+        &[ChosenScript {
+            path: script.display().to_string().into_bytes(),
+            selection: "file path",
+            verbosity: true,
+            forced: false,
+        }],
+        None,
+    )
+    .expect("load");
+    let r = st.run_phase(Phase::PreScan, vec![], None);
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(r.aborted, None);
+    let got: Vec<_> = r.run.iter().map(|o| o.output.clone()).collect();
+    assert_eq!(got, [Some(b"true:,true:ab,true:,true:cde".to_vec())]);
+}

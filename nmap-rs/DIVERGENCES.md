@@ -2838,6 +2838,16 @@ Two gates, both against nmap itself:
       A stale one is ignored, and the lookup falls back to the table's `ip`
       and `targetname`, as the C does when `_Target` is absent. Scripts see a
       `userdata` in both.
+- [x] `nmaplib-set-port-version-option-overread` (found by the M6.4d
+      retrospective): `l_set_port_version`'s probe-state list
+      (`nse_nmaplib.cc:556`) has no terminating `NULL`, so for an unknown
+      state `luaL_checkoption` reads past it. The index it returns then reads
+      past the parallel `opversion` array (CWE-125). The port raises `invalid
+      option`, as the list would if it ended properly. The M6.3 probe passed
+      nmap an unknown state, so the golden recorded what that undefined
+      behaviour happened to do. That case is gone from the probe, and a unit
+      test (`an_unknown_probe_state_is_an_invalid_option`) pins the port's
+      error instead.
 - [x] `nse-script-args-depth-ceiling`: as `nse-selection-depth-ceiling`, nmap
       parses `--script-args` with LPeg on a 100-slot backtrack stack, and
       refuses nesting past 10 (keyed values), 12 (list siblings) or 14 (bare
@@ -3168,6 +3178,13 @@ Gated by three things:
       `lfs`, `libssh2` and `zlib` are not preloaded yet. The 19 libraries and 4
       suites above fail to load where they need them, and are pinned so that
       each failure must be exactly "module not found".
+
+      Two of these modules carry the unterminated option list behind
+      `nse-condvar-option-overread` and
+      `nmaplib-set-port-version-option-overread`: `nmapdb.getservbyport`'s
+      protocol list (`nse_db.cc:49`), and `zlib`'s stream `flush` modes
+      (`nse_zlib.cc:685`). Each indexes a parallel array with the result. The
+      port of each must use a terminated list.
 - [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
       `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
       Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered

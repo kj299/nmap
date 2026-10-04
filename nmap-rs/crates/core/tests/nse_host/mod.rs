@@ -154,6 +154,7 @@ pub fn state(dir: &Path) -> Result<NseState, String> {
         fs: Rc::new(ReadOnlyFs),
         os: Rc::new(os_env()),
         memory_limit: Some(256 << 20),
+        engine: Default::default(),
     })
 }
 

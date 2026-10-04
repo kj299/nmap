@@ -395,31 +395,31 @@ struct HostToken {
 
 #[derive(Collect)]
 #[collect(require_static)]
-struct Handle(Shared);
+pub(crate) struct Handle(pub(crate) Shared);
 
 /// A failure, as `luaL_argerror` (`arg` set) or `luaL_error` would raise it.
 /// Messages are bytes: they quote script data.
-struct Fail {
+pub(crate) struct Fail {
     arg: Option<usize>,
     msg: Vec<u8>,
 }
 
 impl Fail {
-    fn err(msg: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn err(msg: impl Into<Vec<u8>>) -> Self {
         Self {
             arg: None,
             msg: msg.into(),
         }
     }
 
-    fn arg(arg: usize, msg: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn arg(arg: usize, msg: impl Into<Vec<u8>>) -> Self {
         Self {
             arg: Some(arg),
             msg: msg.into(),
         }
     }
 
-    fn raise<'gc>(&self, ctx: Context<'gc>, fname: &str) -> Error<'gc> {
+    pub(crate) fn raise<'gc>(&self, ctx: Context<'gc>, fname: &str) -> Error<'gc> {
         match self.arg {
             Some(n) => {
                 let mut m = format!("bad argument #{n} to '{fname}' (").into_bytes();
@@ -487,7 +487,7 @@ const PROTOCOLS: [&str; 3] = ["tcp", "udp", "sctp"];
 const PROTOCOL_VALUES: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Sctp];
 
 /// `nseU_gettarget(L, 1)`: the host a host table names.
-fn get_target(lib: &NmapLib, args: &LuaArgs<'_, '_, '_>, idx: usize) -> Result<usize, Fail> {
+pub(crate) fn get_target(lib: &NmapLib, args: &LuaArgs<'_, '_, '_>, idx: usize) -> Result<usize, Fail> {
     let Some(Value::Table(t)) = args.get(idx) else {
         return Err(type_error(args.get(idx), idx, "table").into());
     };
@@ -567,7 +567,7 @@ fn next_port(
 }
 
 /// `nseU_getport(L, target, &port, idx)`: the scanned port a port table names.
-fn get_port(
+pub(crate) fn get_port(
     lib: &NmapLib,
     host: usize,
     args: &LuaArgs<'_, '_, '_>,
@@ -804,9 +804,15 @@ fn arg_table<'gc>(ctx: Context<'gc>, a: &ArgTable) -> Table<'gc> {
     t
 }
 
-type Body = for<'gc, 'a> fn(&Shared, Context<'gc>, &mut Stack<'gc, 'a>) -> Result<(), Fail>;
+pub(crate) type Body = for<'gc, 'a> fn(&Shared, Context<'gc>, &mut Stack<'gc, 'a>) -> Result<(), Fail>;
 
-fn install<'gc>(ctx: Context<'gc>, t: Table<'gc>, lib: &Shared, name: &'static str, body: Body) {
+pub(crate) fn install<'gc>(
+    ctx: Context<'gc>,
+    t: Table<'gc>,
+    lib: &Shared,
+    name: &'static str,
+    body: Body,
+) {
     t.set_field(
         ctx,
         name,
@@ -905,9 +911,17 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
     // `nmap.socket` and `nmap.dnet`, with `new_socket`, `new_dnet` and
     // `get_interface_info` taken out of them. Their functions do I/O (M6.4d);
     // until then each raises, but the tables are there for libraries to load.
+    // `loop` is the exception: with no socket it has nothing to do.
     let socket = Table::new(&ctx);
     let socket_fns: [(&'static str, Body); 5] = [
-        ("loop", |_, _, _| Err(not_yet("socket.loop"))),
+        // `l_loop` runs nsock's event loop for up to the given milliseconds;
+        // with no socket open it has no event to wait for, and returns at
+        // once. The engine calls it once per pass of its scheduler.
+        ("loop", |_, ctx, s| {
+            LuaArgs { ctx, stack: s }.check_integer(1)?;
+            s.clear();
+            Ok(())
+        }),
         ("new", |_, _, _| Err(not_yet("socket.new"))),
         ("sleep", |_, _, _| Err(not_yet("socket.sleep"))),
         ("parse_ssl_certificate", |_, _, _| {

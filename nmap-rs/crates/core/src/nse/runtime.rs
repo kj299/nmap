@@ -8,9 +8,12 @@
 //! `package.loaded` and as a global, as `luaL_requiref(L, name, open, 1)`
 //! leaves them.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, StashedTable, Value, Variadic};
+
+use super::engine::{load_cnse, EngineOptions, Store};
 
 use super::nmaplib::{load_nmap, Shared};
 use super::package::{load_package, preload_module, LibrarySource};
@@ -35,28 +38,37 @@ pub struct StateConfig {
     pub os: Rc<OsEnv>,
     /// The VM's memory budget, in bytes ([`Lua::set_memory_limit`]).
     pub memory_limit: Option<usize>,
+    /// What the engine reads of the run's options.
+    pub engine: EngineOptions,
 }
 
 /// The engine's Lua, from `nse_main.lua` (see the file).
 pub const PRELUDE: &str = include_str!("prelude.lua");
 
-/// The fuel the prelude may use: it loads `stdnse` and `strict`, a few
-/// thousand instructions.
+/// The fuel the prelude may use: it loads `stdnse`, `strict` and
+/// `tableaux`, and defines the engine; a few thousand instructions.
 const PRELUDE_FUEL: u64 = 50_000_000;
 
 /// A built NSE state.
 pub struct NseState {
     pub lua: Lua,
     /// What the prelude returned: the engine's own values (`NSE_YIELD_VALUE`,
-    /// `REQUIRE_ERROR`, `print_debug`, ...).
+    /// `REQUIRE_ERROR`, `print_debug`, ...) and its entry points (`main`,
+    /// `load_scripts`, `render`).
     pub engine: StashedTable,
+    /// The `nmap` module's state, which the engine shares.
+    pub(crate) lib: super::nmaplib::Shared,
+    /// Results the scripts stored, until a phase renders them.
+    pub(crate) store: Rc<RefCell<Store>>,
 }
 
 /// Build NSE's Lua state and run the prelude in it; the prelude's error if it
 /// fails, which means `nselib/` is missing or broken.
 pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
     let mut lua = build(config);
-    let engine = run_to_completion(&mut lua, "=nse_main", PRELUDE.as_bytes(), PRELUDE_FUEL)
+    let store = Rc::new(RefCell::new(Store::default()));
+    let cnse = lua.enter(|ctx| ctx.stash(load_cnse(ctx, &config.lib, &store, config.engine)));
+    let engine = run_with(&mut lua, "=nse_main", PRELUDE.as_bytes(), PRELUDE_FUEL, Some(&cnse))
         .and_then(|ex| {
             lua.try_enter(|ctx| {
                 let t: piccolo::Table = ctx.fetch(&ex).take_result::<piccolo::Table>(ctx)??;
@@ -64,7 +76,12 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
             })
             .map_err(|e| format!("{e:#}"))
         })?;
-    Ok(NseState { lua, engine })
+    Ok(NseState {
+        lua,
+        engine,
+        lib: config.lib.clone(),
+        store,
+    })
 }
 
 /// The state, before the prelude has run.
@@ -78,6 +95,14 @@ fn build(config: &StateConfig) -> Lua {
         load_strpack(ctx).expect("Lua::core() has a string table");
         load_format(ctx).expect("Lua::core() has a string table");
         load_tail(ctx).expect("Lua::core() has string and coroutine tables");
+        // The VM's own `coroutine.continue` and `yieldto`, which Lua 5.4 does
+        // not have: `continue` resumes a coroutine without returning to its
+        // resumer, which would suspend the scheduler that drives every script
+        // (`vm-nonstandard-coroutine-functions`).
+        if let Ok(Value::Table(co)) = ctx.get_global::<Value>("coroutine") {
+            co.set_field(ctx, "continue", Value::Nil);
+            co.set_field(ctx, "yieldto", Value::Nil);
+        }
         // `LUA_VERSION`, which `nse_main.lua` checks before anything else.
         ctx.set_global("_VERSION", "Lua 5.4");
         load_io(ctx, config.fs.clone());
@@ -129,10 +154,25 @@ fn run_to_completion(
     src: &[u8],
     fuel: u64,
 ) -> Result<StashedExecutor, String> {
+    run_with(lua, name, src, fuel, None)
+}
+
+/// [`run_to_completion`], the chunk called with `arg` when there is one.
+fn run_with(
+    lua: &mut Lua,
+    name: &str,
+    src: &[u8],
+    fuel: u64,
+    arg: Option<&StashedTable>,
+) -> Result<StashedExecutor, String> {
     let ex: StashedExecutor = lua
         .try_enter(|ctx| {
             let f = Closure::load(ctx, Some(name), src)?;
-            Ok(ctx.stash(Executor::start(ctx, f.into(), ())))
+            let ex = match arg {
+                Some(a) => Executor::start(ctx, f.into(), ctx.fetch(a)),
+                None => Executor::start(ctx, f.into(), ()),
+            };
+            Ok(ctx.stash(ex))
         })
         .map_err(|e| format!("{e:#}"))?;
     const SLICE: i32 = 4096;
@@ -197,6 +237,6 @@ mod tests {
             blocks += 1;
             rest = &body[end..];
         }
-        assert_eq!(blocks, 5, "the prelude's blocks");
+        assert_eq!(blocks, 14, "the prelude's blocks");
     }
 }

@@ -377,6 +377,15 @@ jobs:
       # committed golden.
       - run: python3 tests/differential/m6/oracle/gen_m64_scripts.py "$RUNNER_TEMP"
       - run: M64_SCRIPTS_GOLDEN="$RUNNER_TEMP/m64_scripts_golden.txt" cargo test -p nmap-core --test scripts_differential
+      # M6.4d: nmap itself runs the socket fixture scripts in nse_net/ (and the
+      # shipped http-title and http-headers) against loopback services the
+      # generator runs: echo, banner, silent, drip, UDP echo, HTTP. Three
+      # scenarios, including --script-timeout on a thread waiting on I/O. The
+      # port runs the same services and scripts over sys::nsenet's tokio host;
+      # every result must match. Regenerated live here; the test job runs the
+      # committed golden.
+      - run: python3 tests/differential/m6/oracle/gen_m64_net.py "$RUNNER_TEMP"
+      - run: M64_NET_GOLDEN="$RUNNER_TEMP/m64_net_golden.txt" cargo test -p nmap-sys --test nse_net_differential
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -599,3 +608,8 @@ jobs:
       # against the committed nmap 7.94 golden (regenerated live in the
       # differential job): 34 scenarios, every result byte for byte.
       - run: cargo test -p nmap-core --test scripts_differential
+
+      # M6.4d — sockets, timers, resolve, mutex and condvar over the tokio
+      # host, against the committed nmap 7.94 golden (regenerated live in the
+      # differential job), plus receive_buf's clamp, which has no oracle.
+      - run: cargo test -p nmap-sys --test nse_net_differential

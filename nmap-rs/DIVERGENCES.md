@@ -3168,13 +3168,10 @@ Gated by three things:
       `lfs`, `libssh2` and `zlib` are not preloaded yet. The 19 libraries and 4
       suites above fail to load where they need them, and are pinned so that
       each failure must be exactly "module not found".
-- [ ] `nmap-socket-and-dnet-stubbed` — `nmap.new_socket`, `nmap.socket.*`,
-      `nmap.new_dnet`, `nmap.dnet.*`, `nmap.get_interface_info`, `mutex` and
-      `condvar` raise "not available before M6.4 (it needs I/O)" until M6.4d.
-      They exist so that libraries reading them at load time (`stdnse.lua:63`)
-      load. The exception, since M6.4c2, is `nmap.socket.loop`, which the
-      scheduler calls on every pass: with no socket open, nsock's loop has
-      nothing to wait for and returns at once, and so does this one.
+- [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
+      `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
+      Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered
+      there as `nse-dnet-send-pending` and `nse-no-pcap-sockets`.
 
 ### Behaviour matched that the corpus pins
 
@@ -3290,7 +3287,8 @@ drives `choose` over arbitrary rules.
       host time-out clock does not run: `--host-timeout` is refused on the
       command line (M7.3). `--script-timeout` works as in nmap, through the
       verbatim `Thread:timed_out`. Like nmap, it applies only to threads
-      waiting on I/O, which arrives with sockets (M6.4d).
+      waiting on I/O; `nse_net_differential`'s `script-timeout` scenario pins
+      it.
 - [ ] `nse-init-error-position` — an error that stops the engine starting
       has no traceback here. nmap writes `.../nse_main.lua:N: message` and a
       traceback. Here a load error raised by the verbatim `Script.new` reads
@@ -3303,3 +3301,119 @@ drives `choose` over arbitrary rules.
       output.")`, written to normal output when a result's text is empty, is
       not produced by `core::nse::results`. M6.4e, which prints the results,
       must write it.
+
+## Milestone 6.4d — sockets, `resolve`, `mutex`, `condvar` (`core::nse::net`, `sys::nsenet`, `prelude.lua`)
+
+`nse_nsock.cc`'s sockets, and `nse_nmaplib.cc`'s `resolve`, `mutex`,
+`condvar` and `get_interface_info`, are ported. They are split three ways:
+
+- **`core::nse::net`** checks each call's arguments as the C checks them and
+  *starts* the operation, returning its id. It does no I/O and has no
+  `unsafe`.
+- **`prelude.lua`'s glue** yields the script's thread through the engine's
+  own `_R[YIELD]`, as `nse_yield` does. The scheduler's `loop` collects
+  completions and restores each waiting thread through
+  `_R[WAITING_TO_RUNNING]`, as `nse_restore` does. The verbatim scheduler
+  therefore sees the yields and restores nsock produces. The glue also has
+  `receive_buf`, nsock's socket locks (`socket_lock`/`socket_unlock`), and
+  `mutex` and `condvar`, which are ports of the C into Lua.
+- **`sys::nsenet`** is the host: `ScriptNet` over a current-thread tokio
+  runtime that runs only while the engine waits in `poll`.
+
+**Gated** by `nse_net_differential`. nmap 7.94 runs fifteen fixture scripts
+against loopback services: echo, a banner that closes, a silent peer, a
+closed port, a server that sends in pieces, and UDP echo and silence. The
+test runs the same services and scripts through the port. The scripts cover:
+
+- TCP and UDP connect, send, `sendto` and the four reads;
+- timeouts, refusal, end of file and close;
+- `get_info`, `set_timeout` and `bind`;
+- every argument error;
+- sleep;
+- 25 threads against the 20-socket limit;
+- `mutex` (nesting, `trylock`, `running`, errors);
+- `condvar`, including signal order with three waiters;
+- `resolve`.
+
+Two shipped scripts, `http-title` and `http-headers`, also run against a
+fixture HTTP server, and a `--script-timeout` scenario times out a thread
+that is waiting on I/O. Every result matches byte for byte. Sabotage of the
+status strings, partial reads, timer completions, `socket_unlock`, signal
+order, close's reset, the read cap and `receive_buf`'s clamps is caught.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nse-receive-buf-negative-index` — `receive_buf` with a delimiter
+      function checks only `l <= r <= #buffer`. It then copies `l-1` bytes
+      (or `r`, keeping the pattern) and keeps `buf+r`, both as `size_t`
+      (`nse_nsock.cc:785-788`). A function returning indices before the
+      buffer, such as `0, 0` or `-3, -1`, makes nmap read out of bounds
+      (CWE-125). The port treats an index before the buffer as its start.
+      There is no oracle for this; a test in `nse_net_differential` pins it.
+- [x] `nse-condvar-option-overread` — `aux_condvar`'s option list
+      (`nse_nmaplib.cc:383`) has no terminating `NULL`, so
+      `luaL_checkoption` reads past it for an unknown option (CWE-125). The
+      port raises `invalid option`, as the list would if it ended properly.
+- [x] `nse-negative-timeout-message` — `set_timeout` reports a timeout
+      below -1 with `luaL_error("Negative timeout: %f", timeout)`, passing an
+      `int` where `%f` reads a `double`. That is undefined behaviour, and in
+      practice it prints whatever is in a floating-point register. The port
+      prints the value. The fixture compares only the message's prefix.
+- [x] `nse-read-size-cap` — nsock buffers whatever a read brings, and a
+      `receive_lines(n)` or `receive_bytes(n)` against a peer that never
+      sends a newline grows without bound. Here one read returns at most
+      `MAX_READ` (4 MiB) and succeeds with it. A script that wants more
+      reads again, as it must anyway when a peer sends in pieces.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `nse-port-truncation` — a port number is cast to `uint16_t`, so
+      `connect(host, 65616)` connects to port 80, as in nmap. Timeouts and
+      `sleep`'s milliseconds are cast to `int` the same way.
+- [x] `nse-socket-limit` — a thread may hold sockets only while fewer than
+      `--max-parallelism` threads hold them, or `MAX_PARALLELISM` (20) when
+      it is unset. Others wait in `connect` until a holder ends or closes all its
+      sockets; a holder that ends has its sockets closed for it. Using a
+      socket from a thread other than the one that opened it raises "Invalid
+      reuse of a socket from one thread to another."
+- [x] `nse-interface-info-literal-format` — `get_interface_info` for an
+      unknown device raises `device %s not found or no address configured`
+      with a literal `%s`, because the C passes the format to
+      `luaL_argerror`, which does not format.
+- [x] `nse-condvar-signal-lifo` — `signal` wakes the thread that waited
+      last, and the destructor that every `condvar` call registers
+      broadcasts when the calling thread ends, as in the C.
+
+### Differences, open and documented
+
+- [ ] `nse-no-ssl` — `connect(..., "ssl")` and `reconnect_ssl` answer
+      "sorry, you don't have OpenSSL", and `get_ssl_certificate` and
+      `nmap.socket.parse_ssl_certificate` raise "SSL is not available". This
+      is how an nmap built without OpenSSL behaves. TLS needs the `openssl`
+      module (`nse-c-modules-pending`).
+- [ ] `nse-no-pcap-sockets` — `pcap_open` raises `can't open pcap reader on
+      <device>`, as nmap does when it cannot open the device, and
+      `pcap_receive` raises `not a pcap socket`. Scripts that sniff
+      (`broadcast-*`, `sniffer-detect`, ...) fail.
+- [ ] `nse-dnet-send-pending` — `nmap.new_dnet()` returns a handle whose
+      `ethernet_*` and `ip_*` methods raise "raw packet sending (nmap.dnet)
+      is not available yet". Raw sends will go through `sys::rawio` (M4).
+- [ ] `nse-no-script-trace` — `--script-trace` does not trace socket
+      traffic. The command line does not accept it yet (M6.4e).
+- [ ] `nse-ops-always-yield` — in nmap, nsock can complete an operation
+      inside the call that starts it (`NU_ACTION_IMMEDIATE`), and the
+      function then returns without yielding. Here every operation yields
+      and completes in the next `loop`. nsock's `loop(50)` runs for its full
+      50 ms; this one returns as soon as an operation completes. Both change
+      only when threads run, not what they get. Thread order within a pass
+      was already the VM's (`nse-chosen-order`).
+- [ ] `nse-resolve-via-std` — `resolve` uses the standard library's
+      `getaddrinfo` (`AF_UNSPEC`, stream sockets) and keeps the asked
+      family's addresses, without duplicates. `resolve_all` asks for the
+      family directly, with `AI_IDN`, and keeps duplicates. When none of
+      the family remain, nmap returns `true, {}` and the port returns
+      `false, "Failed to resolve"`. Names in a script are ASCII in practice.
+- [ ] `nse-closed-socket-ops-dropped` — closing a socket aborts its pending
+      operations, which never complete. In nmap, nsock delivers them as
+      cancelled. A thread can wait on its own socket only, so no thread is
+      left waiting on one.

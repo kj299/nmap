@@ -29,6 +29,7 @@ any difference.
 | `m64_stdlib_*` | `utf8`, `os`, `io`, `debug` (M6.4c1) | `regen_m64_stdlib.sh` | `stdlib_differential` | 2,012 |
 | `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
 | `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 34 scenarios |
+| `m64_net_golden.txt` | sockets, timers, `resolve`, `mutex`, `condvar`, socket limits, shipped `http-*` scripts (M6.4d), vs nmap 7.94 | `oracle/gen_m64_net.py` (live in CI) | `nse_net_differential` (in `nmap-sys`) | 3 scenarios, 17 scripts |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -276,3 +277,46 @@ To see what the port prints for some scripts:
 cargo run -p nmap-core --example nse_run -- /path/to/nmap SCRIPT.nse...
 ```
 
+## M6.4d — sockets
+
+`m64_net_golden.txt` comes from nmap running the fixture scripts in
+`nse_net/`, with their own `script.db`, against loopback services that
+`oracle/gen_m64_net.py` runs while it scans:
+
+| port | service |
+|---|---|
+| 46030 | TCP echo |
+| 46031 | TCP banner (`line1\nline2\r\nline3`), then close |
+| 46032 | TCP, accepts and stays silent |
+| 46033 | closed |
+| 46034 | UDP echo |
+| 46035 | TCP, sends `ab`, `c\nd`, `e\n`, `fgh` 200 ms apart |
+| 46036 | UDP, nothing listens: a connected receive times out |
+| 8080 | HTTP, one fixed response |
+
+There are three scenarios:
+
+- `net` runs every script in the `net` category;
+- `shipped` runs this tree's `http-title` and `http-headers` against port
+  8080;
+- `script-timeout` runs `n-slow`, which waits on the silent port, under
+  `--script-timeout 1`.
+
+The generator symlinks the shipped scripts into the scratch data
+directory's `scripts/`. Without that, nmap would take them from its
+installed data directory.
+
+`nse_net_differential` (in `nmap-sys`, since it needs the tokio host) runs
+the same services and scripts through the port's engine over
+`sys::nsenet::TokioNet`, and compares byte for byte.
+
+The fixtures print only what is the same on every run:
+
+- elapsed times as a comparison against a bound;
+- `n-timeout` prints only the prefix of the negative-timeout message, whose
+  value nmap prints through undefined behaviour;
+- `n-refused` strips the function's name from one argument error, since
+  `nmap.new_socket` and `nmap.socket.new` are one function and the C reports
+  whichever name it finds first;
+- `n-sleep` reports the type of `connect_waiting`, not its value, which
+  depends on `n-many` running at the same time.

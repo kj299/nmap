@@ -45,9 +45,11 @@ In brief:
     except those waiting on unported C modules. File access goes through the
     script file policy (`docs/M6-ANALYSIS.md`, Decision 2);
   - running scripts: `nse_main.lua`'s own scheduler, with results printed as
-    nmap prints them.
+    nmap prints them;
+  - sockets, timers, `resolve`, `mutex` and `condvar`, over a tokio host
+    (`sys::nsenet`). TLS, packet capture and raw `dnet` sends are pending.
 
-  Next are sockets (M6.4d) and `--script` on the command line (M6.4e).
+  Next is `--script` on the command line (M6.4e).
 - **M7, cutover,** is in progress in parallel.
 
 ## The gates (CI-enforced; `.github/workflows/nmap-rs-ci.yml`)

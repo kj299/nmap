@@ -64,6 +64,7 @@ local find = string.find;
 local format = string.format;
 local gsub = string.gsub;
 local match = string.match;
+local sub = string.sub;
 
 local table = require "table";
 local concat = table.concat;
@@ -78,7 +79,6 @@ local difftime = os.difftime
 local nmap = require "nmap";
 
 local socket = require "nmap.socket";
-local loop = socket.loop;
 
 -- >>> nse_main.lua
 local NAME = "NSE";
@@ -114,6 +114,353 @@ local NSE_SCRIPT_RULES = {
   postrule = "postrule",
 };
 -- <<<
+
+-- The I/O half of the nmap module, written over core::nse::net, which checks
+-- each call's arguments as the C does and starts the operation; here, the
+-- thread then waits as nse_nsock.cc and nse_nmaplib.cc make it wait: it
+-- yields through _R[YIELD] (nse_yield), and `loop`, which the scheduler runs
+-- between passes, restores it through _R[WAITING_TO_RUNNING] (nse_restore)
+-- with what the operation left. The scheduler, copied from nse_main.lua
+-- below, sees the yields and restores nsock produces.
+--
+-- The functions are installed in `nmap` before stdnse loads, because stdnse
+-- keeps `nmap.socket.sleep` as it finds it.
+local net = cnse.net;
+local running = coroutine.running;
+local tointeger = math.tointeger;
+
+-- nse_yield: yield the running thread to the engine; returns what the thread
+-- is restored with.
+local function nse_yield ()
+  return yield(_R[YIELD](running()));
+end
+
+-- nse_restore: put `co` back among the running threads, with values.
+local function nse_restore (co, ...)
+  return _R[WAITING_TO_RUNNING](co, ...);
+end
+
+-- nse_destructor: call `destructor(co, key)` when the thread `co` belongs to
+-- ends; "add" or "remove".
+local function nse_destructor (what, co, key, destructor)
+  return _R[DESTRUCTOR](what, co, key, destructor);
+end
+
+local NSOCK_SOCKET = {};       -- the socket methods
+local pending = {};            -- operation -> the coroutine waiting on it
+local owner = setmetatable({}, {__mode = "k"}); -- socket -> thread (nu->thread)
+local thread_sockets = {};     -- base thread -> {socket = true} (THREAD_SOCKETS)
+local connect_waiting = {};    -- base thread -> true (CONNECT_WAITING)
+
+local function count (t)
+  local n = 0; for _ in pairs(t) do n = n + 1 end return n;
+end
+
+-- `yield` in nse_nsock.cc, first half: the socket belongs to the running
+-- thread until the operation completes. Called, not tail-called, by each
+-- method, so that the error names the method's caller.
+local function claim (sock)
+  local co = running();
+  local o = owner[sock];
+  if o ~= nil and o ~= co then
+    error("Invalid reuse of a socket from one thread to another.", 3);
+  end
+  owner[sock] = co;
+end
+
+-- The second half: wait for operation `op`, which core::nse::net started.
+local function wait (op)
+  pending[op] = running();
+  return nse_yield();
+end
+
+-- socket_lock: a thread may hold sockets while fewer than --max-parallelism
+-- (20 by default) other threads do.
+local function socket_lock (sock)
+  local p = net.max_parallelism == 0 and 20 or net.max_parallelism;
+  local base = _R[BASE]();
+  local sockets = thread_sockets[base];
+  if sockets ~= nil then
+    sockets[sock] = true;
+    return true;
+  elseif count(thread_sockets) <= p then
+    thread_sockets[base] = {[sock] = true};
+    return true;
+  else
+    connect_waiting[base] = true;
+    return false;
+  end
+end
+
+-- socket_unlock: a thread that has ended, or holds no open socket, gives up
+-- its sockets (closing them), and the threads waiting to connect retry.
+local function socket_unlock ()
+  for thread, sockets in pairs(thread_sockets) do
+    local open = 0;
+    if status(thread) == "suspended" then
+      for sock in pairs(sockets) do
+        if net.is_open(sock) then open = open + 1 end
+      end
+    end
+    if open == 0 then
+      for sock in pairs(sockets) do
+        sock:close();
+      end
+      thread_sockets[thread] = nil;
+      for co in pairs(connect_waiting) do
+        nse_restore(co);
+        connect_waiting[co] = nil;
+      end
+    end
+  end
+end
+
+function NSOCK_SOCKET.connect (self, host, port, proto)
+  net.connect_args(self, host, port, proto);
+  while not socket_lock(self) do
+    nse_yield(); -- restart once a socket is free
+  end
+  local op, err = net.connect(self, host, port, proto);
+  if op == false then return false, err end
+  owner[self] = running();
+  local r = pack(wait(op));
+  -- After a connect, the socket may be used by another thread.
+  owner[self] = nil;
+  return unpack(r, 1, r.n);
+end
+
+function NSOCK_SOCKET.send (self, data)
+  local op = net.send(self, data);
+  claim(self);
+  return wait(op);
+end
+
+function NSOCK_SOCKET.sendto (self, host, port, data)
+  local op, err = net.sendto(self, host, port, data);
+  if op == false then return false, err end
+  claim(self);
+  return wait(op);
+end
+
+function NSOCK_SOCKET.receive (self)
+  local op = net.receive(self, "any");
+  claim(self);
+  return wait(op);
+end
+
+function NSOCK_SOCKET.receive_lines (self, n)
+  local op = net.receive(self, "lines", n);
+  claim(self);
+  return wait(op);
+end
+
+function NSOCK_SOCKET.receive_bytes (self, n)
+  local op = net.receive(self, "bytes", n);
+  claim(self);
+  return wait(op);
+end
+
+-- receive_buf: read until `delimiter` (a pattern, or a function returning
+-- the delimiter's start and end) matches the buffered data; return what
+-- precedes it (and the delimiter itself when `keeppattern`), and keep the
+-- rest for the next call. A failed read loses what it had added, as in C.
+function NSOCK_SOCKET.receive_buf (self, delimiter, keeppattern)
+  net.check(self, true);
+  local t = type(delimiter);
+  if t ~= "function" and t ~= "string" then
+    error(("bad argument #2 to '?' (function/string expected, got %s)"):format(t), 2);
+  end
+  if type(keeppattern) ~= "boolean" then
+    error(("bad argument #3 to '?' (boolean expected, got %s)"):format(type(keeppattern)), 2);
+  end
+  local buf = net.buffer(self);
+  while true do
+    local l, r;
+    if t == "function" then
+      l, r = delimiter(buf);
+    else
+      l, r = find(buf, delimiter);
+    end
+    if tonumber(l) ~= nil and tonumber(r) ~= nil then
+      l, r = tointeger(tonumber(l)) or 0, tointeger(tonumber(r)) or 0;
+      if l > r or r > #buf then
+        error("invalid indices for match", 2);
+      end
+      -- The C copies l-1 (or r) bytes as a size_t, and keeps buf+r: an
+      -- index before the buffer is an out-of-bounds read there
+      -- (nse-receive-buf-negative-index). Here it is the buffer's start.
+      r = max(r, 0);
+      net.set_buffer(self, sub(buf, r + 1));
+      if keeppattern then
+        return true, sub(buf, 1, r);
+      else
+        return true, sub(buf, 1, max(l - 1, 0));
+      end
+    end
+    local op = net.receive(self, "any");
+    claim(self);
+    local ok, data = wait(op);
+    if not ok then
+      return ok, data;
+    end
+    buf = buf .. data;
+  end
+end
+
+function NSOCK_SOCKET.close (self)
+  owner[self] = nil;
+  return net.close(self);
+end
+
+NSOCK_SOCKET.get_info = net.get_info;
+NSOCK_SOCKET.set_timeout = net.set_timeout;
+NSOCK_SOCKET.bind = net.bind;
+
+-- What an nmap built without OpenSSL answers.
+function NSOCK_SOCKET.reconnect_ssl (self)
+  net.check(self, true);
+  return false, "sorry, you don't have OpenSSL";
+end
+
+function NSOCK_SOCKET.get_ssl_certificate (self)
+  error("SSL is not available", 2);
+end
+
+-- Packet capture is not available to scripts yet (nse-no-pcap-sockets).
+function NSOCK_SOCKET.pcap_open (self, device, snaplen, promisc, bpf)
+  net.check(self, false);
+  error(("can't open pcap reader on %s"):format(tostring(device)), 2);
+end
+
+function NSOCK_SOCKET.pcap_receive (self)
+  net.check(self, false);
+  error("not a pcap socket", 2);
+end
+
+NSOCK_SOCKET.pcap_close = NSOCK_SOCKET.close;
+
+net.set_meta({__index = NSOCK_SOCKET, __metatable = {}});
+
+-- nmap.socket.sleep: a timer, cancelled if the thread ends first.
+local function sleep (secs)
+  local op = net.sleep(secs);
+  nse_destructor("add", running(), {}, function () net.cancel(op) end);
+  return wait(op);
+end
+
+-- nmap.socket.loop: give up the sockets of threads done with them, then
+-- complete what the network has ready, waiting at most `ms`, and restore the
+-- threads that waited on it.
+local function loop (ms)
+  socket_unlock();
+  for _, c in ipairs(net.poll(ms)) do
+    local co = pending[c.op];
+    if co ~= nil then
+      pending[c.op] = nil;
+      nse_restore(co, unpack(c, 1, c.n));
+    end
+  end
+end
+
+socket.new = net.new;
+socket.sleep = sleep;
+socket.loop = loop;
+socket.get_stats = function ()
+  return {connect_waiting = count(connect_waiting)};
+end
+nmap.new_socket = net.new;
+
+-- nmap.mutex(object): one mutex per object.
+local mutexes = setmetatable({}, {__mode = "k"});
+function nmap.mutex (object)
+  local t = type(object);
+  if t == "nil" or t == "boolean" or t == "number" then
+    error("bad argument #1 to 'nmap.mutex' (object expected)", 2);
+  end
+  local m = mutexes[object];
+  if m ~= nil then return m end
+  local waiting, holder, key = {}, nil, {};
+  local done;
+  -- Raises at level 3: called, not tail-called, by the mutex function, so
+  -- the error names the mutex function's caller.
+  local function release (thread)
+    if holder ~= thread then
+      error("do not have a lock on this mutex", 3);
+    end
+    nse_destructor("remove", thread, key);
+    holder = table.remove(waiting, 1);
+    if holder ~= nil then
+      nse_destructor("add", holder, key, done);
+      nse_restore(holder);
+    end
+  end
+  -- aux_mutex_done: a thread that ends holding the lock releases it.
+  done = function (thread) pcall(release, thread) end;
+  m = function (op)
+    if op == "lock" then
+      if holder == nil then
+        holder = running();
+        nse_destructor("add", holder, key, done);
+        return;
+      end
+      waiting[#waiting+1] = running();
+      return nse_yield();
+    elseif op == "done" then
+      release(running());
+      return;
+    elseif op == "trylock" then
+      if holder == nil then
+        holder = running();
+        nse_destructor("add", holder, key, done);
+        return true;
+      end
+      return false;
+    elseif op == "running" then
+      return holder;
+    end
+    error(("bad argument #1 to '?' (invalid option '%s')"):format(tostring(op)), 2);
+  end
+  mutexes[object] = m;
+  return m;
+end
+
+-- nmap.condvar(object): one condition variable per object. A thread that
+-- ends wakes every thread waiting on the condition variables it obtained.
+local condvars = setmetatable({}, {__mode = "k"});
+function nmap.condvar (object)
+  local t = type(object);
+  if t == "nil" or t == "boolean" or t == "number" then
+    error("bad argument #1 to 'nmap.condvar' (object expected)", 2);
+  end
+  local cv = condvars[object];
+  if cv == nil then
+    local waiting = {};
+    cv = function (op)
+      local n;
+      if op == "wait" then
+        waiting[#waiting+1] = running();
+        return nse_yield();
+      elseif op == "signal" then
+        n = #waiting;
+        if n == 0 then n = 1 end
+      elseif op == "broadcast" then
+        n = 1;
+      else
+        -- The C's option list has no terminating NULL, so an unknown option
+        -- reads past it (nse-condvar-option-overread).
+        error(("bad argument #1 to '?' (invalid option '%s')"):format(tostring(op)), 2);
+      end
+      for i = #waiting, n, -1 do
+        local co = waiting[i];
+        if type(co) == "thread" then nse_restore(co) end
+        waiting[i] = nil;
+      end
+    end
+    condvars[object] = cv;
+  end
+  nse_destructor("add", running(), cv, function () pcall(cv, "broadcast") end);
+  return cv;
+end
 
 -- >>> nse_main.lua
 local stdnse = require "stdnse";

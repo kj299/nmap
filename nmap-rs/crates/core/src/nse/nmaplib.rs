@@ -419,6 +419,13 @@ impl Fail {
         }
     }
 
+    /// Name argument `n` as the one at fault, where it named one.
+    pub(crate) fn set_arg(&mut self, n: usize) {
+        if self.arg.is_some() {
+            self.arg = Some(n);
+        }
+    }
+
     pub(crate) fn raise<'gc>(&self, ctx: Context<'gc>, fname: &str) -> Error<'gc> {
         match self.arg {
             Some(n) => {
@@ -789,6 +796,12 @@ pub fn host_table<'gc>(ctx: Context<'gc>, lib: &Shared, index: usize) -> Table<'
     t
 }
 
+/// What an I/O function says when the module was loaded without the engine
+/// that provides it.
+fn needs_engine() -> Fail {
+    Fail::err("this function needs the NSE engine (core::nse::runtime)")
+}
+
 /// A registry value from a parsed argument.
 fn arg_value<'gc>(ctx: Context<'gc>, v: &ArgValue) -> Value<'gc> {
     match v {
@@ -836,7 +849,7 @@ pub(crate) fn install<'gc>(
 /// parsed script arguments, and set it as the global `nmap`.
 pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table<'gc> {
     let t = Table::new(&ctx);
-    let fns: [(&'static str, Body); 25] = [
+    let fns: [(&'static str, Body); 24] = [
         ("get_port_state", l_get_port_state),
         ("get_ports", l_get_ports),
         ("set_port_state", l_set_port_state),
@@ -895,7 +908,6 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
             put(s, Value::Integer(l.borrow().env.data_length.max(0)))
         }),
         ("get_random_bytes", l_get_random_bytes),
-        ("resolve", |_, _, _| Err(not_yet("resolve"))),
     ];
     for (name, body) in fns {
         install(ctx, t, lib, name, body);
@@ -905,46 +917,31 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
         "new_try",
         Callback::from_fn_with(&ctx, Handle(lib.clone()), l_new_try),
     );
-    let io: [(&'static str, Body); 2] = [
-        ("mutex", |_, _, _| Err(not_yet("mutex"))),
-        ("condvar", |_, _, _| Err(not_yet("condvar"))),
-    ];
-    for (name, body) in io {
-        install(ctx, t, lib, name, body);
-    }
     // `luaopen_nmap` requires `nmap.socket` and `nmap.dnet` and keeps them as
     // `nmap.socket` and `nmap.dnet`, with `new_socket`, `new_dnet` and
-    // `get_interface_info` taken out of them. Their functions do I/O (M6.4d);
-    // until then each raises, but the tables are there for libraries to load.
-    // `loop` is the exception: with no socket it has nothing to do.
-    let socket = Table::new(&ctx);
-    let socket_fns: [(&'static str, Body); 5] = [
-        // `l_loop` runs nsock's event loop for up to the given milliseconds;
-        // with no socket open it has no event to wait for, and returns at
-        // once. The engine calls it once per pass of its scheduler.
-        ("loop", |_, ctx, s| {
-            LuaArgs { ctx, stack: s }.check_integer(1)?;
-            s.clear();
-            Ok(())
-        }),
-        ("new", |_, _, _| Err(not_yet("socket.new"))),
-        ("sleep", |_, _, _| Err(not_yet("socket.sleep"))),
-        ("parse_ssl_certificate", |_, _, _| {
-            Err(not_yet("socket.parse_ssl_certificate"))
-        }),
-        ("get_stats", |_, _, _| Err(not_yet("socket.get_stats"))),
-    ];
-    for (name, body) in socket_fns {
-        install(ctx, socket, lib, name, body);
+    // `get_interface_info` taken out of them. The I/O functions — the
+    // sockets, `sleep`, `loop`, `get_stats`, `mutex`, `condvar` and
+    // `resolve` — are the engine's (`super::net` and `prelude.lua`), which
+    // installs them here before any library loads.
+    // Without the engine (a bare `load_nmap`) they are placeholders that say
+    // so, keeping the module's shape.
+    for name in ["resolve", "mutex", "condvar"] {
+        install(ctx, t, lib, name, |_, _, _| Err(needs_engine()));
     }
+    let socket = Table::new(&ctx);
+    for name in ["new", "sleep", "loop", "get_stats"] {
+        install(ctx, socket, lib, name, |_, _, _| Err(needs_engine()));
+    }
+    // An nmap built without OpenSSL.
+    install(ctx, socket, lib, "parse_ssl_certificate", |_, _, _| {
+        Err(Fail::err("SSL is not available"))
+    });
     t.set_field(ctx, "new_socket", socket.get_value(ctx, "new"));
     t.set_field(ctx, "socket", socket);
     let dnet = Table::new(&ctx);
     let dnet_fns: [(&'static str, Body); 2] = [
-        ("new", |_, _, _| Err(not_yet("dnet.new"))),
-        ("get_interface_info", |_, _, _| {
-            Err(not_yet("dnet.get_interface_info"))
-        }),
+        ("new", l_dnet_new),
+        ("get_interface_info", l_get_interface_info),
     ];
     for (name, body) in dnet_fns {
         install(ctx, dnet, lib, name, body);
@@ -961,12 +958,6 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
     t.set_field(ctx, "registry", registry);
     ctx.set_global("nmap", t);
     t
-}
-
-fn not_yet(name: &str) -> Fail {
-    Fail::err(format!(
-        "nmap.{name} is not available before M6.4 (it needs I/O)"
-    ))
 }
 
 #[allow(clippy::cast_possible_wrap)] // a count of things held in memory
@@ -1379,6 +1370,106 @@ fn l_add_targets<'gc>(lib: &Shared, ctx: Context<'gc>, s: &mut Stack<'gc, '_>) -
     Ok(())
 }
 
+/// One interface as `list_interfaces` and `dnet.get_interface_info` describe
+/// it.
+fn interface_table<'gc>(ctx: Context<'gc>, iface: &Interface) -> Table<'gc> {
+    let e = Table::new(&ctx);
+    e.set_field(ctx, "device", ctx.intern(c_str(&iface.device)));
+    e.set_field(ctx, "shortname", ctx.intern(c_str(&iface.shortname)));
+    e.set_field(ctx, "netmask", Value::Integer(iface.netmask_bits));
+    e.set_field(
+        ctx,
+        "address",
+        ctx.intern(iface.address.to_string().as_bytes()),
+    );
+    let link: &[u8] = match iface.link {
+        Link::Ethernet(mac) => {
+            e.set_field(ctx, "mac", ctx.intern(&mac));
+            if let IpAddr::V4(a) = iface.address {
+                let bits = u32::try_from(iface.netmask_bits.clamp(0, 32)).unwrap_or(32);
+                let mask = u32::MAX
+                    .checked_shl(32_u32.saturating_sub(bits))
+                    .unwrap_or(0);
+                let b = std::net::Ipv4Addr::from(u32::from(a) | !mask);
+                e.set_field(ctx, "broadcast", ctx.intern(b.to_string().as_bytes()));
+            }
+            b"ethernet"
+        }
+        Link::Loopback => b"loopback",
+        Link::P2p => b"p2p",
+        Link::Other => b"other",
+    };
+    e.set_field(ctx, "link", ctx.intern(link));
+    e.set_field(ctx, "up", if iface.up { "up" } else { "down" });
+    e.set_field(ctx, "mtu", Value::Integer(iface.mtu));
+    e
+}
+
+/// `dnet.get_interface_info(device)`: the interface of the scan's address
+/// family named `device` (full or short name). The C's "not found" message
+/// passes a format string as a plain message, so it reads `device %s not
+/// found`, and so does this.
+fn l_get_interface_info<'gc>(
+    lib: &Shared,
+    ctx: Context<'gc>,
+    s: &mut Stack<'gc, '_>,
+) -> Result<(), Fail> {
+    let name = LuaArgs { ctx, stack: s }.string(1)?.into_owned();
+    if name.len() >= 32 {
+        return Err(Fail::arg(1, "device name too long"));
+    }
+    let l = lib.borrow();
+    let name = c_str(&name);
+    let found = l.env.interfaces.as_ref().ok().and_then(|list| {
+        list.iter().find(|i| {
+            (c_str(&i.device) == name || c_str(&i.shortname) == name)
+                && i.address.is_ipv6() == l.env.ipv6
+        })
+    });
+    let Some(iface) = found else {
+        return Err(Fail::arg(1, "device %s not found or no address configured"));
+    };
+    let t = interface_table(ctx, iface);
+    s.replace(ctx, t);
+    Ok(())
+}
+
+/// A `dnet` object. Raw Ethernet and IP sending is not available to scripts
+/// yet (`nse-dnet-send-pending`): each method says so.
+#[derive(Debug)]
+struct Dnet;
+
+/// `dnet.new()`.
+fn l_dnet_new<'gc>(_: &Shared, ctx: Context<'gc>, s: &mut Stack<'gc, '_>) -> Result<(), Fail> {
+    let methods = Table::new(&ctx);
+    for name in [
+        "ethernet_open",
+        "ethernet_close",
+        "ethernet_send",
+        "ip_open",
+        "ip_close",
+        "ip_send",
+    ] {
+        methods.set_field(
+            ctx,
+            name,
+            Callback::from_fn(&ctx, |ctx, _, _| {
+                Err(lua_error_bytes(
+                    ctx,
+                    b"raw packet sending (nmap.dnet) is not available yet",
+                ))
+            }),
+        );
+    }
+    let meta = Table::new(&ctx);
+    meta.set_field(ctx, "__index", methods);
+    meta.set_field(ctx, "__metatable", Table::new(&ctx));
+    let u = UserData::new_static(&ctx, Dnet);
+    u.set_metatable(&ctx, Some(meta));
+    s.replace(ctx, u);
+    Ok(())
+}
+
 fn l_list_interfaces<'gc>(
     lib: &Shared,
     ctx: Context<'gc>,
@@ -1390,35 +1481,7 @@ fn l_list_interfaces<'gc>(
         Ok(list) if !list.is_empty() => {
             let t = Table::new(&ctx);
             for (i, iface) in list.iter().enumerate() {
-                let e = Table::new(&ctx);
-                e.set_field(ctx, "device", ctx.intern(c_str(&iface.device)));
-                e.set_field(ctx, "shortname", ctx.intern(c_str(&iface.shortname)));
-                e.set_field(ctx, "netmask", Value::Integer(iface.netmask_bits));
-                e.set_field(
-                    ctx,
-                    "address",
-                    ctx.intern(iface.address.to_string().as_bytes()),
-                );
-                let link: &[u8] = match iface.link {
-                    Link::Ethernet(mac) => {
-                        e.set_field(ctx, "mac", ctx.intern(&mac));
-                        if let IpAddr::V4(a) = iface.address {
-                            let bits = u32::try_from(iface.netmask_bits.clamp(0, 32)).unwrap_or(32);
-                            let mask = u32::MAX
-                                .checked_shl(32_u32.saturating_sub(bits))
-                                .unwrap_or(0);
-                            let b = std::net::Ipv4Addr::from(u32::from(a) | !mask);
-                            e.set_field(ctx, "broadcast", ctx.intern(b.to_string().as_bytes()));
-                        }
-                        b"ethernet"
-                    }
-                    Link::Loopback => b"loopback",
-                    Link::P2p => b"p2p",
-                    Link::Other => b"other",
-                };
-                e.set_field(ctx, "link", ctx.intern(link));
-                e.set_field(ctx, "up", if iface.up { "up" } else { "down" });
-                e.set_field(ctx, "mtu", Value::Integer(iface.mtu));
+                let e = interface_table(ctx, iface);
                 let _ = t.set(ctx, Value::Integer(lua_index(i)), e);
             }
             s.push_back(Value::Table(t));

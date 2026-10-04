@@ -22,6 +22,7 @@ pub mod ndp;
 pub mod net;
 pub mod netif;
 pub mod nsefs;
+pub mod nsenet;
 pub mod osscan;
 pub mod rawio;
 pub mod route;

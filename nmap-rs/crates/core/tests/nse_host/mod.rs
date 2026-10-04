@@ -2,6 +2,8 @@
 //! data directory on disk, read-only, and the system clock.
 #![allow(dead_code)] // each user takes a different subset
 
+pub mod scenarios;
+
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -127,7 +129,15 @@ pub fn env(dir: PathBuf) -> NmapEnv {
             p.exists()
                 .then(|| p.to_string_lossy().into_owned().into_bytes())
         }),
-        clock: Box::new(|| (0, 0)),
+        clock: Box::new(|| {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            (
+                i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+                i64::from(d.subsec_micros()),
+            )
+        }),
         random: Box::new(|_| false),
         log: Box::new(|_, _| {}),
     }
@@ -155,6 +165,7 @@ pub fn state(dir: &Path) -> Result<NseState, String> {
         os: Rc::new(os_env()),
         memory_limit: Some(256 << 20),
         engine: Default::default(),
+        net: std::rc::Rc::new(std::cell::RefCell::new(nmap_core::nse::net::NoNet)),
     })
 }
 

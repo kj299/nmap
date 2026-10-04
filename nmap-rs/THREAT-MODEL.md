@@ -179,12 +179,26 @@ Here:
   as aborted instead of hanging the scan (`nse-phase-budget`); nmap has no
   such bound. The command line chooses the budget (M6.4e).
   `--script-timeout` runs through nmap's own `Thread:timed_out`, and, as in
-  nmap, applies to threads waiting on I/O (M6.4d).
+  nmap, applies to threads waiting on I/O.
+- **Network data.** Whatever a peer sends reaches a script as an opaque Lua
+  string. One read returns at most 4 MiB (`nse-read-size-cap`); nsock
+  buffers without bound, so a peer that never sends the newline a
+  `receive_lines` waits for can grow nmap's memory for as long as it keeps
+  sending. Every socket a script opens counts against the parallelism limit, as
+  in nmap (`nse-socket-limit`). Scripts reach the network only through
+  `sys::nsenet`, which has no `unsafe`.
 
-**A crash nmap has.** `port_set_output` dereferences a port lookup it never
-checks; a script that edits the port table `stdnse.gethostport()` gives it
-crashes nmap. The port raises an error instead
-(`nse-port-output-on-unknown-port`).
+**Memory-safety bugs nmap has.** None of them is reproduced:
+
+- `port_set_output` dereferences a port lookup it never checks. A script
+  that edits the port table `stdnse.gethostport()` gives it crashes nmap.
+  The port raises an error instead (`nse-port-output-on-unknown-port`).
+- `receive_buf` trusts a delimiter function's indices down to `size_t`, so
+  indices before the buffer read out of bounds
+  (`nse-receive-buf-negative-index`).
+- `condvar`'s option list is not `NULL`-terminated, so an unknown option
+  reads past it (`nse-condvar-option-overread`).
+- `set_timeout` formats an `int` with `%f` (`nse-negative-timeout-message`).
 
 **Not defended.** The operator can name any script, and a script can scan,
 brute-force or exploit whatever its arguments point at. That is the tool's

@@ -126,6 +126,9 @@
     "core::nse::fspolicy": {
       "fuzzed": "A pure predicate over canonical paths the host has already resolved (component-wise prefix and equality). It parses nothing. Pinned by unit tests, including the prefix-is-a-component case, and by sabotage."
     },
+    "core::nse::net": {
+      "fuzzed": "The script-facing half of NSE sockets: it checks a script's arguments (ports, protocols, timeouts, families) as nse_nsock.cc checks them and hands data to the host as opaque bytes. It parses no network data; receive_buf's delimiter search is in the prelude's Lua, on the VM's own pattern matcher, which is fuzzed. Exercised end to end by nse_net_differential (three scenarios against nmap 7.94, every argument error included), and pinned by sabotage."
+    },
     "core::nse::package": {
       "fuzzed": "require's loader: library names come from scripts and libraries nmap ships, and files are read only through the LibrarySource it is given. The chunks it compiles go to the VM's own parser. Exercised end to end by nselib_differential, which requires all 133 shipped libraries against nmap 7.94."
     },
@@ -161,6 +164,9 @@
     },
     "sys::nsefs": {
       "fuzzed": "The ScriptFs over the real file system: it canonicalises a path with the OS and asks fspolicy. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, and that cover named files, output directories and missing files."
+    },
+    "sys::nsenet": {
+      "fuzzed": "ScriptNet over tokio: connect, read, write and timers, with every read capped at MAX_READ (4 MiB). It parses nothing; the only logic over received bytes is counting newlines to decide when a read is satisfied, which a unit test pins (Miri clean). Exercised against live fixture services by nse_net_differential."
     },
     "sys::osscan": {
       "fuzzed": "OS-detection round driver. Frame parsing is core::osprobe::demux::demux, covered by fuzz target osprobe_demux (added in M7.1); this module does the bookkeeping around it."
@@ -208,6 +214,7 @@
     "core::nse::choose": "unsafe_audited",
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
+    "core::nse::net": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",
     "core::nse::package": "unsafe_audited",
     "core::nse::results": "unsafe_audited",
@@ -267,6 +274,7 @@
     "sys::ndp": "unsafe_audited",
     "sys::netif": "unsafe_audited",
     "sys::nsefs": "unsafe_audited",
+    "sys::nsenet": "unsafe_audited",
     "sys::osscan": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
     "sys::route": "unsafe_audited",

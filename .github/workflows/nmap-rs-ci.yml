@@ -370,7 +370,7 @@ jobs:
       - run: python3 tests/differential/m6/oracle/gen_m64_nselib.py "$RUNNER_TEMP"
       - run: M64_NSELIB_GOLDEN="$RUNNER_TEMP/m64_nselib_golden.txt" cargo test -p nmap-core --test nselib_differential
       # M6.4c2: nmap itself runs the fixture scripts in nse_scripts/ (and the
-      # shipped unittest.nse) over a scratch data directory, 34 scenarios, each
+      # shipped unittest.nse) over a scratch data directory, 36 scenarios, each
       # a connect scan of loopback listeners. Every result's normal-output
       # lines and <script> XML, and every init error, must match what the
       # port's engine produces. Regenerated live here; the test job runs the
@@ -606,7 +606,7 @@ jobs:
       # M6.4c2 — running scripts. nse_main.lua's scheduler runs verbatim in the
       # port; the scripts, rules, runlevels and output it produces are checked
       # against the committed nmap 7.94 golden (regenerated live in the
-      # differential job): 34 scenarios, every result byte for byte.
+      # differential job): 36 scenarios, every result byte for byte.
       - run: cargo test -p nmap-core --test scripts_differential
 
       # M6.4d — sockets, timers, resolve, mutex and condvar over the tokio

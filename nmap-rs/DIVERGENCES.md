@@ -2775,7 +2775,9 @@ Two gates, both against nmap itself:
 - **The module**: [`m63_nmap_golden.txt`](tests/differential/m6/m63_nmap_golden.txt),
   written by running nmap 7.94 over loopback fixtures in ten scenarios
   (options, script arguments, `-sV` with and without `--allports`, UDP, IPv6,
-  selection by name and by category). In each, the probe
+  selection by name and by category). The IPv6 scenario needs IPv6 loopback,
+  so the committed golden, generated without it, has nine. CI's differential
+  job regenerates the golden live with all ten. In each, the probe
   [`m63_probe.nse`](tests/differential/m6/oracle/m63_probe.nse) prints about
   190 lines: the host table, every port reached through `get_ports` and
   `get_port_state`, and a battery of calls, mutations and error messages.
@@ -3225,7 +3227,7 @@ A test fails if any of its 14 blocks stops appearing verbatim in
 - `get_chosen_scripts`' selection loop around M6.2's grammar, in
   `core::nse::choose`.
 
-**Gated** by `scripts_differential`. nmap 7.94 runs 34 scenarios over
+**Gated** by `scripts_differential`. nmap 7.94 runs 36 scenarios over
 purpose-written fixture scripts with their own `script.db` (and the shipped
 `unittest.nse` over 22 library suites), against loopback listeners. The
 scenarios cover:

@@ -1579,8 +1579,8 @@ fn finish_try<'gc>(
     if handler.is_nil() {
         return Err(try_error(ctx, message));
     }
-    // `lua_callk` on something uncallable: the C's message, as a string (the
-    // VM's own would be a userdata, `vm-runtime-errors-are-not-strings`).
+    // `lua_callk` on something uncallable: the C's message, raised here
+    // because `meta_ops::call` reports the failure rather than raising it.
     let Ok(function) = piccolo::meta_ops::call(ctx, handler) else {
         let msg = format!("attempt to call a {} value", handler.type_name());
         return Err(lua_error_bytes(ctx, msg.as_bytes()));

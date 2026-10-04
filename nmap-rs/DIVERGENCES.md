@@ -3116,8 +3116,14 @@ Gated by three things:
       link, so only an outside actor could race it.
 - [x] `os-is-the-clock` — `os` has `clock`, `date`, `time` and `difftime`
       only. `execute`, `exit`, `getenv`, `remove`, `rename`, `tmpname` and
-      `setlocale` do not exist: no shipped script or library calls them on a
-      path a scan reaches (Decision 2).
+      `setlocale` do not exist (Decision 2). None but `getenv` is called on a
+      path a scan reaches.
+- [ ] `os-getenv-home-pending` — `getenv` is reached in one place:
+      `ssh1.parse_known_hosts_file`, which reads `$HOME/.ssh/config` and
+      `$HOME/.ssh/known_hosts`. It runs when `ssh-hostkey` is given
+      `known-hosts` without `known-hosts-path`. Until the host resolves `HOME`
+      in Rust and hands the paths in, as Decision 2 plans, that call raises
+      "attempt to call a nil value". Passing `known-hosts-path` avoids it.
 - [x] `io-no-process-or-stdin` — `io.popen`, `io.tmpfile`, `io.input`,
       `io.read` and `io.stdin`/`io.stderr` do not exist. `io.lines()` with no
       file name raises, rather than reading nmap's standard input.

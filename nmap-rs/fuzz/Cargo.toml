@@ -1,10 +1,13 @@
 # cargo-fuzz crate for nmap-rs. Detached from the main workspace (its own empty
 # [workspace] table) so the stable `cargo build`/`clippy`/`test` gates never try
 # to compile the nightly-only libfuzzer runtime, and `cargo fuzz` resolves this
-# as its own root. Fuzzes the M1 untrusted-input parsers in nmap-core:
+# as its own root. One [[bin]] per untrusted-input surface in nmap-core, each
+# documented at the top of its fuzz_targets/*.rs file, each with hand-curated
+# seeds in seeds/<name>/ (check-seeds.sh). The first three were M1's:
 #   parse_target      — CLI target/host/CIDR spec        (targets.rs)
 #   parse_port_spec   — -p port spec grammar             (ports.rs)
 #   services_parse    — nmap-services file parser        (ports.rs)
+# progress.json's `coverage` maps each module to the targets that cover it.
 # Contract: none of these may panic/abort/OOM on arbitrary bytes (Phase 4 gate 3).
 [package]
 name = "nmap-rs-fuzz"

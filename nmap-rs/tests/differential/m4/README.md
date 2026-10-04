@@ -32,9 +32,16 @@ scope here.
   `cargo test`, no C toolchain needed at test time — the C was run once to produce the
   golden, satisfying "validate every vector against the C first"). Regenerate the
   golden with `oracle/build.sh` when the format or reference changes.
-- ⏳ Later header modules (`tcp`, `udp`, `icmp`, …) extend the harness the same way.
-  The leaf modules `core::bytes` / `core::checksum` needed no packet oracle (pure
-  logic / RFC 1071 vectors).
+- ✅ **Every header module wired the same way** — `tcp`, `udp`, `icmp`, `ip6`,
+  `eth` and `arp` each have `*_vectors/` and a C-produced `*_golden/`. So do the
+  packet builder (`build_*`), receive-side validation (`validate_*`), response
+  classification (`classify_*`), IP-ID sequencing (`ipid_*`) and the whole-packet
+  walk (`pkt_vectors/`, `pkt_random_*`, `pkt_golden/`). Each is asserted by a
+  `crates/core/tests/*_differential.rs`. The leaf modules `core::bytes` /
+  `core::checksum` needed no packet oracle (pure logic / RFC 1071 vectors).
+- ✅ **The packet-walk golden is re-derived in CI** — `regen_pkt_golden.sh --check`
+  rebuilds `oracle/parse_oracle`, regenerates the vectors and golden, and fails
+  if the committed files differ, so a hand-edited golden cannot pass.
 
 ## Projection format (the canonical shape both sides emit)
 
@@ -80,8 +87,9 @@ What Phase-0 probing established it needs:
 3. **Link** `PacketParser.o` + the header-class `.o`s into `oracle/parse_oracle`; it
    reads a hex packet on stdin and writes the projection above on stdout.
 
-`oracle/` is intentionally empty until the `core::headers::ipv4` slice — the recipe is
-recorded here so that slice starts from a known-good path, not a blank page.
+`oracle/` holds the harnesses this recipe produced: `build.sh` and `parse_oracle.cc`,
+plus `classify_oracle.cc`, `ipid_oracle.cc`, `validate_oracle.cc` and the vector
+generators (`gen_*.py`).
 
 ## Wiring the differential (per module, once the harness exists)
 
@@ -96,8 +104,8 @@ done
 ```
 
 Per the kit, **validate every vector against the C first** (a wrong vector that
-"passes" teaches nothing): the C harness's projection is the golden output, captured +
-versioned under `corpus/golden/` when the harness lands; a **hidden acceptance set**
+"passes" teaches nothing): the C harness's projection is the golden output, captured and
+versioned in the `*_golden/` directories (and `pkt_golden/`) beside each vector set; a **hidden acceptance set**
 (vectors not in this committed corpus) guards against overfitting. The two bug-trigger
 vectors are the exception that proves the rule — there the C and Rust projections
 *must diverge* (the C overflows / aborts; the port degrades safely), and that divergence

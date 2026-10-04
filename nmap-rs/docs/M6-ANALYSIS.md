@@ -9,6 +9,24 @@ follow on approval.
 Every count below was measured against the C tree in this repository, not
 recalled; the commands are reproducible from the paths cited.
 
+> **Status (after M6.4c1).** The port order was approved in M7.5 (Decision 3,
+> *the M6.0 port order*, below), and M6.0–M6.3 and M6.4a/b/c1 are merged
+> (#109–#122). M6.4, sketched as one step in the build order below, was split
+> into five PRs:
+>
+> - (a) VM errors;
+> - (b) limits and the memory budget;
+> - (c1) the NSE state;
+> - (c2) the scheduler;
+> - (d) sockets;
+> - (e) `--script` on the command line.
+>
+> c2, d and e are what remain. Decision 2's sandbox shipped in c1, except
+> `HOME`, which is not resolved in Rust yet. Until it is, `ssh-hostkey`'s
+> `known-hosts` check without `known-hosts-path` raises; DIVERGENCES.md records
+> this as `os-getenv-home-pending`. PLAN.md's tracker is the live record;
+> this document is the Phase-0 analysis it started from.
+
 ## What is actually being ported
 
 NSE looks like the largest milestone in the project and is not, because most of
@@ -369,6 +387,9 @@ grammar) — both are pure, fuzzable, and independent of the runtime decision.
 The runtime work (M6.0) needs port-order approval before any Rust is written,
 per the kit.
 
+*Resolved:* M6.1 and M6.2 merged (#96, #97), and the port order was approved in
+M7.5 (next section).
+
 ## Decision 3 — the M6.0 port order (approved M7.5)
 
 M6.1 and M6.2 are merged. M6.3 is the first piece that needs a running VM, so
@@ -391,6 +412,9 @@ of the 744-file corpus and is independently gateable before the next begins:
 | 2 | `string.format` | 1,568 | **397** | nearly as broad, far simpler; a fast confirmation that the pattern set up in (1) generalises. |
 | 3 | `string.pack`/`unpack`/`packsize` | 1,747 | 169 | most call sites but fewest files — concentrated in binary protocol libraries, so it unblocks the least breadth per unit of work. |
 | 4 | the tail | 238 | ~90 | `_G`, `coroutine.wrap`, `load`, `xpcall`, `rawequal`, `string.rep` |
+
+*As built:* `pack`/`unpack` was taken early (#114), ahead of patterns (#115,
+#117), `string.format` (#116) and the tail (#118).
 
 Ordering by **files** rather than call sites is deliberate: the goal of each
 step is to make more of the corpus *runnable*, and a file blocked on one missing

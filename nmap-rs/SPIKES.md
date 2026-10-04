@@ -154,3 +154,17 @@ unblocked — so the risk is retired on paper, not mid-port.
   confirming the design links against the real Npcap SDK (`wpcap.dll` + `Packet.dll`)
   on `x86_64-pc-windows-msvc` and round-trips on the Npcap loopback adapter — which
   needs a Windows host and is deferred to the `sys::npcap` slice.
+
+## M6-1 — which Lua runtime NSE runs on (recorded in `docs/M6-ANALYSIS.md`)
+
+Not repeated here: the measurements live with the decisions they settled.
+
+- **Decision 1** (`docs/M6-ANALYSIS.md`) ruled out the C-backed bindings
+  (`mlua`, `rlua`, `hlua` all compile PUC-Lua). It surveyed the pure-Rust field
+  and chose to extend `piccolo`, a stackless VM, measuring what it lacks against
+  the shipped NSE corpus.
+- **Decision 4** settled `piccolo` master's `gc-arena` git pin by building every
+  candidate. The answer was to fork master backwards onto the published `gc-arena`
+  0.5.3 and vendor it (`crates/vendor/piccolo/PROVENANCE.md`).
+- **Outcome:** M6.0 onward is built on the vendored VM. Its patch series
+  (`patches/0001`–`0010`) records every change made to it since.

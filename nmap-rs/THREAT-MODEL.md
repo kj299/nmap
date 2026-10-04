@@ -1,4 +1,9 @@
-# Threat model — nmap-rs (Milestone 1: unprivileged TCP connect scan)
+# Threat model — nmap-rs
+
+> Sections 1–6 are the Milestone 1 model, kept as written; later sections extend
+> it per milestone: §7 traffic obfuscation (M7.5), §8 NSE (M6). Per-milestone
+> Phase-0 analyses in `docs/` carry their own threat notes; this file collects
+> the decisions.
 
 Scopes what "secure" means for the M1 MVP (unprivileged `-sT` connect scan + host
 discovery + normal/grepable/XML output) and tells the port loop which modules
@@ -20,7 +25,7 @@ Fuzz + validation priorities for M1, in order:
 | **Target spec** (`scanme.nmap.org`, `10.0.0.0/24`, `1-100.*`) | CLI / `-iL` file | **untrusted** | `core::targets` | **yes (P0)** |
 | **Port spec** (`-p 1-65535,U:53,T:80`) | CLI | **untrusted** | `core::ports` | **yes (P0)** |
 | **`nmap-services`** data file (~1 MB) | filesystem / `--datadir` | **semi-trusted** | `core::ports` | **yes (P1)** |
-| **DNS responses** (fwd/rev resolution of targets) | remote resolver | **untrusted** | `sys::net` | **yes (P1)** |
+| **DNS responses** (fwd/rev resolution of targets) | remote resolver | **untrusted** | the OS resolver (`getaddrinfo`, via `tokio::net::lookup_host` in `sys::net`) | no — no DNS bytes reach our code |
 | Connect-scan results (RST/SYN-ACK/timeout) | remote host | untrusted-but-shallow | `sys::net` + `core::connect_scan` | indirect |
 | Other CLI args / flags | operator | trusted-ish | `cli` | negative tests |
 | `NMAP_RS_TRACE`, env, `--datadir` | operator | trusted-ish | `cli`, `sys` | — |
@@ -50,8 +55,10 @@ enforces.
   overflow, no unbounded allocation: `overflow-checks` on; size math is
   `checked_*`/`saturating_*`; iterate targets lazily rather than materializing.
 - Returns **hostile DNS answers** (oversized names, compression loops, non-UTF-8)
-  → the resolver crate is fuzzed at the boundary; malformed answers degrade to
-  "unresolved," never crash.
+  → the port parses no DNS: resolution is the OS's `getaddrinfo` (through
+  `tokio::net::lookup_host`), which hands back addresses only; a failure is
+  "unresolved," never a crash. If the port ever parses DNS itself, that parser
+  is a new untrusted boundary and needs a fuzz target before it ships.
 - **Races the filesystem** on the data-file path (`--datadir`, services file) →
   prefer open-then-use over check-then-open (no TOCTOU).
 
@@ -127,3 +134,51 @@ does not land before the rate-limit options do.**
 can already pass any target and any flag, and that is the tool's purpose. These
 options do not widen what a *remote* attacker can do to us, which is what the
 rest of this document is about.
+
+## 8. NSE — scripts, their arguments, and what they parse (M6)
+
+NSE is the first part of nmap that **executes code by design**. Phase-0's
+threat notes are in [`docs/M6-ANALYSIS.md`](docs/M6-ANALYSIS.md) ("Threat
+model", Decision 2); this section records what the port does about each.
+
+| boundary | trust | what the port does | where |
+|---|---|---|---|
+| A script's code (`--script FILE`, `scripts/`) | **untrusted-ish** (shipped scripts are trusted; a path the operator names may not be) | runs in a VM with no process, environment or unrestricted file access (below) | `core::nse::runtime`, `stdlib::{iolib,oslib}` |
+| `script.db` and `.nse` metadata | semi-trusted (decides what runs) | parsed as bytes, never executed; fuzzed | `core::nse::script` (`nse_scriptdb`, `nse_metadata`) |
+| `--script` selection rules | operator | total, fuzzed; rules over 64 KiB refused | `core::nse::selection` (`nse_selection`) |
+| `--script-args` | operator, but often pasted | parsed by a port of nse_main.lua's grammar; fuzzed | `core::nse::scriptargs` (`nse_scriptargs`) |
+| Network responses handed to scripts | **untrusted** | parsed in Lua, through first-party stdlib functions that are each fuzzed and differentially tested | `core::nse::stdlib` (`nse_pattern`, `nse_format`, `nse_strpack`, `nse_tail`, `nse_utf8_date`) |
+
+**The sandbox (Decision 2, M6.4c1).** In C nmap, `luaL_openlibs` gives every
+script `os.execute`, `io.popen` and the whole file system, usually as root.
+Here:
+
+- **No process or environment surface.** There is no `os.execute`, `exit`,
+  `getenv`, `remove`, `rename` or `tmpname`, no `io.popen`, `tmpfile` or stdin,
+  and no `loadfile`, `dofile`, `package.loadlib` or C searchers. `debug` is
+  `getinfo` and `traceback` only.
+- **Files through a policy.** Scripts may read beneath nmap's data
+  directories and operator-named files. They may write operator-named files,
+  or beneath an operator-designated output directory. Paths are compared and
+  opened canonical, so `..` and symbolic links do not escape
+  (`core::nse::fspolicy`, `sys::nsefs`). A refusal looks like `EACCES`.
+  - Residual risk: a link swapped between the check and the open by an
+    actor *outside* nmap. Scripts cannot create links.
+
+**Resource bounds.** A runaway script must not take the scanner down:
+
+- **Memory.** A budget fails with a catchable "not enough memory" instead of
+  aborting the process (`Lua::set_memory_limit`, patch `0009`).
+- **Depth.** C-call depth (200), Lua stack (1,000,000 slots) and
+  `__index`/`__newindex` chains (2,000) are bounded as in PUC-Lua.
+- **Runaway matching.** The pattern matcher's worst case is bounded
+  (`pattern-worst-case-time-is-bounded`). Size-chosen buffers (`string.rep`,
+  `format`, `pack`) are checked against the budget before they are built.
+- **CPU.** Bounded by fuel today only for the engine's own prelude. Per-script
+  time limits (`--script-timeout`) arrive with the scheduler (M6.4c2). Until
+  then no script runs outside tests.
+
+**Not defended.** The operator can name any script, and a script can scan,
+brute-force or exploit whatever its arguments point at. That is the tool's
+purpose, as in §5. What the port removes is the step from "a script ran" to
+"the host running nmap is compromised".

@@ -6,10 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# The ONLY crate permitted `unsafe`. FFI bindings (Npcap, the `windows` crate)
-# land here later, each wrapped in an audited safe fn; the unsafe-audit harness
-# runs against this crate in CI and HARD-FAILS on any undocumented block. For the
-# MVP (connect scan) this crate is expected to hold ~0 unsafe.
+# The only FIRST-PARTY crate permitted `unsafe` (the vendored Lua VM in
+# crates/vendor/piccolo holds its own, audited the same way). FFI is wrapped
+# here in audited safe fns; the unsafe-audit harness runs over crates/ in CI and
+# HARD-FAILS on any undocumented block. Today its `unsafe` is the 11 blocks of
+# the `raw-ffi` getifaddrs(3) cross-check in src/netif/ffi.rs.
 [dependencies]
 nmap-core = { path = "../core" }
 # Interface / route / MTU enumeration — the DEFAULT backend. `netdev` is a vetted,

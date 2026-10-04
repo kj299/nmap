@@ -14,7 +14,10 @@ action = function()
   out[#out+1] = "close " .. show(u:close())
   out[#out+1] = "badproto " .. show(pcall(u.connect, u, "127.0.0.1", 46030, "sctp"))
   out[#out+1] = "badport " .. show(pcall(u.connect, u, "127.0.0.1", "x"))
-  out[#out+1] = "newbad " .. show(pcall(nmap.new_socket, "icmp"))
+  -- nmap names this function nmap.new_socket or nmap.socket.new (the same
+  -- function), whichever it meets first in package.loaded's hash order.
+  local ok, e = pcall(nmap.new_socket, "icmp")
+  out[#out+1] = "newbad " .. show(ok, (e:gsub("to '[^']*'", "to F")))
   out[#out+1] = "type " .. type(s)
   return table.concat(out, "\n")
 end

@@ -14,6 +14,10 @@ loopback services the scripts talk to:
     46034/udp  echo
     46035/tcp  drip: "ab", "c\\nd", "e\\n", "fgh" 200ms apart, then closes
     46036/udp  nothing listens
+    8080/tcp   HTTP: one fixed response to any request, then close
+
+The `shipped` scenario runs shipped scripts (http-title, http-headers) over
+the full nselib/ HTTP stack against the HTTP responder.
 
 Rows are gen_m64_scripts.py's.
 """
@@ -37,8 +41,17 @@ REPO = base.REPO
 FIXTURES = os.path.join(M6, "nse_net")
 PORTS = "46030,46033"
 
+# This repository's shipped scripts the `shipped` scenario runs.
+SHIPPED = ["http-title.nse", "http-headers.nse"]
+
+HTTP_BODY = b"<html><head><title>Fixture &amp; Title</title></head><body>hi</body></html>"
+HTTP_RESPONSE = (b"HTTP/1.1 200 OK\r\nServer: fixture/1.0\r\nContent-Type: text/html\r\n"
+                 b"X-Fixture: yes\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+                 % len(HTTP_BODY)) + HTTP_BODY
+
 SCENARIOS = [
     ("net", ["--script", "net"]),
+    ("shipped", ["-p", "8080", "--script", "http-title,http-headers"]),
     ("script-timeout", ["--script", "slow", "--script-timeout", "1"]),
 ]
 
@@ -94,6 +107,21 @@ def serve(stop):
     tcp(46031, banner)
     tcp(46032, silent)
     tcp(46035, drip)
+
+    def http(c):
+        c.settimeout(5)
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                d = c.recv(4096)
+                if not d:
+                    break
+                data += d
+            c.sendall(HTTP_RESPONSE)
+        except OSError:
+            pass
+        c.close()
+    tcp(8080, http)
     u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     u.bind(("127.0.0.1", 46034))
     u.settimeout(0.2)
@@ -120,6 +148,9 @@ def datadir(tmp):
     os.mkdir(scripts)
     for name in os.listdir(FIXTURES):
         os.symlink(os.path.join(FIXTURES, name), os.path.join(scripts, name))
+    # Linked in, so that nmap does not fall back on the installed copies.
+    for name in SHIPPED:
+        os.symlink(os.path.join(REPO, "scripts", name), os.path.join(scripts, name))
     return d
 
 
@@ -133,7 +164,8 @@ def main():
         for name, extra in SCENARIOS:
             xml_path = os.path.join(tmp, name + ".xml")
             nml_path = os.path.join(tmp, name + ".nmap")
-            cmd = ["nmap", "--datadir", data, "-sT", "-Pn", "-n", "-p", PORTS,
+            ports = [] if "-p" in extra else ["-p", PORTS]
+            cmd = ["nmap", "--datadir", data, "-sT", "-Pn", "-n"] + ports + [
                    "-oX", xml_path, "-oN", nml_path] + extra + ["127.0.0.1"]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            env=dict(os.environ, NMAPDIR=data))

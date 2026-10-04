@@ -104,7 +104,6 @@ pub fn scenarios(golden: &Path) -> Vec<Scenario> {
     out
 }
 
-
 /// Where a gate's scripts come from.
 pub struct Fixtures {
     /// The fixture directory under `tests/differential/m6/`.
@@ -240,6 +239,10 @@ pub fn run(sc: &Scenario, tmp: &Path, fx: &Fixtures, net: SharedNet) -> Result<V
             "-sC" => options.default = true,
             "-d" => debugging = 1,
             "-d2" => debugging = 2,
+            // The ports scanned; their states come from the golden's facts.
+            "-p" => {
+                it.next();
+            }
             "--script-timeout" => {
                 engine.script_timeout = it.next().expect("seconds").parse().expect("number");
             }
@@ -321,7 +324,6 @@ pub fn run(sc: &Scenario, tmp: &Path, fx: &Fixtures, net: SharedNet) -> Result<V
 pub fn show(b: &[u8]) -> String {
     String::from_utf8_lossy(b).replace('\n', "\\n")
 }
-
 
 /// Run every scenario of `golden` and compare: how many there were, and a
 /// description of each that differs.

@@ -117,9 +117,21 @@ pub trait ScriptNet {
     );
     /// `nsock_setup_udp`: an unconnected UDP socket for `sendto` and
     /// `receive`; the OS's error text when it cannot be made.
-    fn setup_udp(&mut self, sock: SockId, v6: bool, local: Option<SocketAddr>) -> Result<(), String>;
+    fn setup_udp(
+        &mut self,
+        sock: SockId,
+        v6: bool,
+        local: Option<SocketAddr>,
+    ) -> Result<(), String>;
     fn write(&mut self, op: OpId, sock: SockId, data: Vec<u8>, timeout: Option<Duration>);
-    fn sendto(&mut self, op: OpId, sock: SockId, to: SocketAddr, data: Vec<u8>, timeout: Option<Duration>);
+    fn sendto(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        to: SocketAddr,
+        data: Vec<u8>,
+        timeout: Option<Duration>,
+    );
     fn read(&mut self, op: OpId, sock: SockId, mode: ReadMode, timeout: Option<Duration>);
     /// Close `sock`; its pending operations never complete
     /// (`NSOCK_PENDING_NOTIFY`, whose callbacks NSE ignores).
@@ -142,7 +154,16 @@ pub trait ScriptNet {
 pub struct NoNet;
 
 impl ScriptNet for NoNet {
-    fn connect(&mut self, _: OpId, _: SockId, _: NetProto, _: Option<SocketAddr>, _: SocketAddr, _: Option<Duration>) {}
+    fn connect(
+        &mut self,
+        _: OpId,
+        _: SockId,
+        _: NetProto,
+        _: Option<SocketAddr>,
+        _: SocketAddr,
+        _: Option<Duration>,
+    ) {
+    }
     fn setup_udp(&mut self, _: SockId, _: bool, _: Option<SocketAddr>) -> Result<(), String> {
         Ok(())
     }
@@ -222,24 +243,43 @@ pub(crate) struct NetLib {
 #[collect(require_static)]
 struct NetHandle(Rc<RefCell<NetLib>>);
 
-type Body = for<'gc, 'a> fn(&Rc<RefCell<NetLib>>, Context<'gc>, &mut piccolo::Stack<'gc, 'a>) -> Result<(), Fail>;
+type Body = for<'gc, 'a> fn(
+    &Rc<RefCell<NetLib>>,
+    Context<'gc>,
+    &mut piccolo::Stack<'gc, 'a>,
+) -> Result<(), Fail>;
 
-fn install<'gc>(ctx: Context<'gc>, t: Table<'gc>, lib: &Rc<RefCell<NetLib>>, name: &'static str, shown: &'static str, body: Body) {
+fn install<'gc>(
+    ctx: Context<'gc>,
+    t: Table<'gc>,
+    lib: &Rc<RefCell<NetLib>>,
+    name: &'static str,
+    shown: &'static str,
+    body: Body,
+) {
     t.set_field(
         ctx,
         name,
-        Callback::from_fn_with(&ctx, NetHandle(lib.clone()), move |h, ctx, _, mut stack| {
-            match body(&h.0, ctx, &mut stack) {
+        Callback::from_fn_with(
+            &ctx,
+            NetHandle(lib.clone()),
+            move |h, ctx, _, mut stack| match body(&h.0, ctx, &mut stack) {
                 Ok(()) => Ok(CallbackReturn::Return),
                 Err(e) => Err(e.raise(ctx, shown)),
-            }
-        }),
+            },
+        ),
     );
 }
 
 /// The `net` table the glue is built on, and `nmap.resolve`, installed in
 /// `nmap`.
-pub(crate) fn load_net<'gc>(ctx: Context<'gc>, host: SharedNet, ipv6: bool, max_parallelism: i64, nmap: Table<'gc>) -> Table<'gc> {
+pub(crate) fn load_net<'gc>(
+    ctx: Context<'gc>,
+    host: SharedNet,
+    ipv6: bool,
+    max_parallelism: i64,
+    nmap: Table<'gc>,
+) -> Table<'gc> {
     let lib = Rc::new(RefCell::new(NetLib {
         host,
         next_op: 1,
@@ -284,7 +324,12 @@ fn args<'s, 'gc, 'a>(ctx: Context<'gc>, s: &'s piccolo::Stack<'gc, 'a>) -> LuaAr
 }
 
 /// `luaL_checkoption`.
-fn check_option(a: &LuaArgs<'_, '_, '_>, n: usize, def: Option<&str>, opts: &[&str]) -> Result<usize, Fail> {
+fn check_option(
+    a: &LuaArgs<'_, '_, '_>,
+    n: usize,
+    def: Option<&str>,
+    opts: &[&str],
+) -> Result<usize, Fail> {
     let name: Vec<u8> = match (a.get(n), def) {
         (None | Some(Value::Nil), Some(d)) => d.as_bytes().to_vec(),
         _ => a.string(n)?.into_owned(),
@@ -326,7 +371,11 @@ fn safe_error<'gc>(ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>, msg: &str
     s.replace(ctx, (false, ctx.intern(msg.as_bytes())));
 }
 
-fn l_set_meta<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_set_meta<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let Some(Value::Table(t)) = args(ctx, s).get(1) else {
         return Err(Fail::err("set_meta: table expected"));
     };
@@ -336,7 +385,11 @@ fn l_set_meta<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo
 }
 
 /// `nmap.new_socket([proto [, af]])`.
-fn l_new<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_new<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let proto = [NetProto::Tcp, NetProto::Udp][check_option(&a, 1, Some("tcp"), &["tcp", "udp"])?];
     let default_af = if lib.borrow().ipv6 { "inet6" } else { "inet" };
@@ -393,7 +446,11 @@ fn check_open(lib: &Rc<RefCell<NetLib>>, sock: &Socket) -> Result<(), Fail> {
 }
 
 /// The glue's `check(sock, open)`.
-fn l_check<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_check<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     if a.get(2).is_some_and(|v| v.to_bool()) {
@@ -403,7 +460,11 @@ fn l_check<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::S
     Ok(())
 }
 
-fn l_is_open<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_is_open<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let open = socket(&args(ctx, s), 1)?.state.borrow().open;
     s.replace(ctx, open);
     Ok(())
@@ -413,7 +474,9 @@ fn l_is_open<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::S
 fn lua_text<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Option<Vec<u8>> {
     match v {
         Value::String(s) => Some(s.as_bytes().to_vec()),
-        v @ (Value::Integer(_) | Value::Number(_)) => v.into_string(ctx).map(|s| s.as_bytes().to_vec()),
+        v @ (Value::Integer(_) | Value::Number(_)) => {
+            v.into_string(ctx).map(|s| s.as_bytes().to_vec())
+        }
         _ => None,
     }
 }
@@ -450,7 +513,10 @@ fn check_port(a: &LuaArgs<'_, '_, '_>, n: usize) -> Result<(u16, Option<Vec<u8>>
 
 /// `(uint16_t)`.
 fn truncate_u16(n: i64) -> u16 {
-    n.to_le_bytes()[..2].iter().rev().fold(0u16, |acc, &b| (acc << 8) | u16::from(b))
+    n.to_le_bytes()[..2]
+        .iter()
+        .rev()
+        .fold(0u16, |acc, &b| (acc << 8) | u16::from(b))
 }
 
 /// The connect's protocol option (`luaL_checkoption(L, 4, default, op)`):
@@ -471,7 +537,11 @@ fn connect_option(sock: &Socket, a: &LuaArgs<'_, '_, '_>) -> Result<(u16, Vec<u8
 
 /// The glue's `connect_args(sock, host, port [, proto])`: the checks
 /// `connect` makes before it takes a socket lock.
-fn l_connect_args<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_connect_args<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     connect_option(sock, &a)?;
@@ -504,7 +574,11 @@ fn resolve_for(lib: &Rc<RefCell<NetLib>>, host: &[u8], family: Family) -> Result
 
 /// The glue's `connect(sock, host, port [, proto])`: resolve and start the
 /// connection; the operation's id, or `false` and the resolver's error.
-fn l_connect<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_connect<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     let (port, host, what) = connect_option(sock, &a)?;
@@ -512,7 +586,11 @@ fn l_connect<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo:
         safe_error(ctx, s, "sorry, you don't have OpenSSL");
         return Ok(());
     }
-    let family = if lib.borrow().ipv6 { Family::Inet6 } else { Family::Inet };
+    let family = if lib.borrow().ipv6 {
+        Family::Inet6
+    } else {
+        Family::Inet
+    };
     let ip = match resolve_for(lib, &host, family) {
         Ok(ip) => ip,
         Err(e) => {
@@ -524,7 +602,11 @@ fn l_connect<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo:
     if sock.state.borrow().open {
         host_net.borrow_mut().close(sock.id);
     }
-    let proto = if what == 1 { NetProto::Udp } else { NetProto::Tcp };
+    let proto = if what == 1 {
+        NetProto::Udp
+    } else {
+        NetProto::Tcp
+    };
     let op = op_id(lib);
     {
         let mut st = sock.state.borrow_mut();
@@ -533,15 +615,24 @@ fn l_connect<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo:
         st.v6 = ip.is_ipv6();
     }
     let (bound, timeout) = (sock.state.borrow().bound, sock.timeout());
-    host_net
-        .borrow_mut()
-        .connect(op, sock.id, proto, bound, SocketAddr::new(ip, port), timeout);
+    host_net.borrow_mut().connect(
+        op,
+        sock.id,
+        proto,
+        bound,
+        SocketAddr::new(ip, port),
+        timeout,
+    );
     s.replace(ctx, op_value(op));
     Ok(())
 }
 
 /// The glue's `send(sock, data)`.
-fn l_send<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_send<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     check_open(lib, sock)?;
@@ -554,7 +645,11 @@ fn l_send<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::St
 }
 
 /// The glue's `sendto(sock, host, port, data)`.
-fn l_sendto<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_sendto<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     check_open(lib, sock)?;
@@ -578,7 +673,11 @@ fn l_sendto<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::
 
 /// The glue's `receive(sock, mode [, n])`: `receive`, `receive_lines` and
 /// `receive_bytes`.
-fn l_receive<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_receive<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     check_open(lib, sock)?;
@@ -602,7 +701,12 @@ fn count(n: i64) -> u64 {
 
 /// `(int)`.
 fn truncate_i32(n: i64) -> i32 {
-    i32::from_le_bytes([n.to_le_bytes()[0], n.to_le_bytes()[1], n.to_le_bytes()[2], n.to_le_bytes()[3]])
+    i32::from_le_bytes([
+        n.to_le_bytes()[0],
+        n.to_le_bytes()[1],
+        n.to_le_bytes()[2],
+        n.to_le_bytes()[3],
+    ])
 }
 
 /// The glue passes the method's argument `n + 1` as its own argument `n + 1`
@@ -614,7 +718,11 @@ fn renumber(e: super::stdlib::strpack::PackError, n: usize) -> Fail {
 }
 
 /// `close(sock)`.
-fn l_close<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_close<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     let (open, proto, v6) = {
@@ -637,7 +745,11 @@ fn ip_text(ip: IpAddr) -> String {
 }
 
 /// `get_info(sock)`: `true`, local address and port, remote address and port.
-fn l_get_info<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_get_info<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     check_open(lib, sock)?;
@@ -687,7 +799,11 @@ fn nse_check_integer(a: &LuaArgs<'_, '_, '_>, n: usize) -> Result<i32, Fail> {
 /// `set_timeout(sock, ms)`. The C formats a negative value with `%f` from an
 /// `int` (undefined behaviour, printing garbage); here it is the value
 /// (`nse-negative-timeout-message`).
-fn l_set_timeout<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_set_timeout<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     let t = nse_check_integer(&a, 2)?;
@@ -700,7 +816,11 @@ fn l_set_timeout<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccol
 }
 
 /// `bind(sock [, address [, port]])`: numeric addresses only.
-fn l_bind<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_bind<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     let addr = match a.get(2) {
@@ -725,7 +845,11 @@ fn l_bind<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::St
         },
     };
     let Ok(port) = u16::try_from(port) else {
-        safe_error(ctx, s, "getaddrinfo: Servname not supported for ai_socktype");
+        safe_error(
+            ctx,
+            s,
+            "getaddrinfo: Servname not supported for ai_socktype",
+        );
         return Ok(());
     };
     sock.state.borrow_mut().bound = Some(SocketAddr::new(ip, port));
@@ -734,7 +858,11 @@ fn l_bind<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::St
 }
 
 /// The glue's `sleep(secs)`: start the timer.
-fn l_sleep<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_sleep<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let secs = match a.get(1) {
         Some(Value::Integer(i)) => {
@@ -743,12 +871,16 @@ fn l_sleep<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::S
             f
         }
         Some(Value::Number(f)) => f,
-        Some(v @ Value::String(_)) => v.to_number().ok_or_else(|| Fail::from(type_error(Some(v), 1, "number")))?,
+        Some(v @ Value::String(_)) => v
+            .to_number()
+            .ok_or_else(|| Fail::from(type_error(Some(v), 1, "number")))?,
         v => return Err(type_error(v, 1, "number").into()),
     };
     if secs < 0.0 {
         let shown = Value::Number(secs).display().to_string();
-        return Err(Fail::err(format!("argument to sleep ({shown}) must not be negative\n")));
+        return Err(Fail::err(format!(
+            "argument to sleep ({shown}) must not be negative\n"
+        )));
     }
     // `(int) (secs * 1000 + 0.5)`; a sleep longer than an `int` of
     // milliseconds is the C's undefined behaviour, and here as long as asked.
@@ -767,7 +899,11 @@ fn l_sleep<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::S
     Ok(())
 }
 
-fn l_cancel<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_cancel<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let op = args(ctx, s).check_integer(1)?;
     if let Ok(op) = u64::try_from(op) {
         let host = lib.borrow().host.clone();
@@ -781,7 +917,11 @@ fn l_cancel<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::
 /// `{op, n = count, values...}` with the values the C's callbacks push:
 /// `true` for a success, `true, data` for a read, `nil, status` for a
 /// failure, nothing for a timer (`Fired`).
-fn l_poll<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_poll<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let ms = args(ctx, s).check_integer(1)?;
     let wait = Duration::from_millis(u64::try_from(ms).unwrap_or(0));
     let host = lib.borrow().host.clone();
@@ -794,9 +934,16 @@ fn l_poll<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::St
             Completion::Done => vec![Value::Boolean(true)],
             Completion::Fired => vec![],
             Completion::Data(d) => vec![Value::Boolean(true), Value::String(ctx.intern(&d))],
-            Completion::Failed(st) => vec![Value::Nil, Value::String(ctx.intern(st.as_str().as_bytes()))],
+            Completion::Failed(st) => vec![
+                Value::Nil,
+                Value::String(ctx.intern(st.as_str().as_bytes())),
+            ],
         };
-        e.set_field(ctx, "n", Value::Integer(i64::try_from(vals.len()).unwrap_or(0)));
+        e.set_field(
+            ctx,
+            "n",
+            Value::Integer(i64::try_from(vals.len()).unwrap_or(0)),
+        );
         for (j, v) in vals.into_iter().enumerate() {
             let _ = e.set(ctx, i64::try_from(j).unwrap_or(0).saturating_add(1), v);
         }
@@ -807,14 +954,22 @@ fn l_poll<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::St
 }
 
 /// The glue's `buffer(sock)`: `receive_buf`'s buffer.
-fn l_buffer<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_buffer<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let sock = socket(&args(ctx, s), 1)?;
     let b = sock.state.borrow().buffer.clone();
     s.replace(ctx, ctx.intern(&b));
     Ok(())
 }
 
-fn l_set_buffer<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_set_buffer<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     let b = a.string(2)?.into_owned();
@@ -826,16 +981,25 @@ fn l_set_buffer<'gc>(_: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo
 /// The glue's `release(sock)`: after a connect completes, the socket may be
 /// used by another thread (the C clears `nu->thread`). Nothing to do here;
 /// the glue keeps the owner. Kept so the glue reads as the C does.
-fn l_release<'gc>(_: &Rc<RefCell<NetLib>>, _: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_release<'gc>(
+    _: &Rc<RefCell<NetLib>>,
+    _: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     s.clear();
     Ok(())
 }
 
 /// `nmap.resolve(host [, family])`.
-fn l_resolve<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_resolve<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let a = args(ctx, s);
     let host = a.string(1)?.into_owned();
-    let family = [Family::Inet, Family::Inet6, Family::Unspec][check_option(&a, 2, Some("unspec"), &["inet", "inet6", "unspec"])?];
+    let family = [Family::Inet, Family::Inet6, Family::Unspec]
+        [check_option(&a, 2, Some("unspec"), &["inet", "inet6", "unspec"])?];
     let text = String::from_utf8_lossy(&host).into_owned();
     let found = match numeric(&text) {
         Some(ip) => Ok(vec![ip]),
@@ -864,7 +1028,11 @@ fn l_resolve<'gc>(lib: &Rc<RefCell<NetLib>>, ctx: Context<'gc>, s: &mut piccolo:
     }
     let t = Table::new(&ctx);
     for (i, ip) in list.iter().enumerate() {
-        let _ = t.set(ctx, i64::try_from(i).unwrap_or(0).saturating_add(1), ctx.intern(ip.to_string().as_bytes()));
+        let _ = t.set(
+            ctx,
+            i64::try_from(i).unwrap_or(0).saturating_add(1),
+            ctx.intern(ip.to_string().as_bytes()),
+        );
     }
     s.replace(ctx, (true, t));
     Ok(())

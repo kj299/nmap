@@ -12,7 +12,8 @@
 //!   after some data succeeds with what came;
 //! - a UDP receive waits through the errors an ICMP unreachable raises on a
 //!   connected socket, as nsock does, so a silent peer times out;
-//! - closing a socket drops its pending operations, which never complete.
+//! - closing a socket drops its pending operations, which never complete;
+//! - one read returns at most [`MAX_READ`] bytes, where nsock has no bound.
 //!
 //! There is no `unsafe` here: tokio's socket API is safe.
 
@@ -22,7 +23,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nmap_core::nse::net::{Completion, Family, NetProto, NetStatus, OpId, ReadMode, ScriptNet, SockId};
+use nmap_core::nse::net::{
+    Completion, Family, NetProto, NetStatus, OpId, ReadMode, ScriptNet, SockId,
+};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -107,15 +110,25 @@ async fn tcp_connect(local: Option<SocketAddr>, remote: SocketAddr) -> io::Resul
     s.connect(remote).await
 }
 
-/// Whether `buf` holds what `mode` waits for.
+/// The most one read collects before it returns what it has, satisfied or
+/// not (`nse-read-size-cap`): nsock buffers a `receive_lines` or
+/// `receive_bytes` without bound, so a service streaming without a newline
+/// grows nmap's memory for as long as the time-out allows.
+pub const MAX_READ: usize = 4 << 20;
+
+/// Whether `buf` holds what `mode` waits for, or as much as one read may.
 fn satisfied(mode: ReadMode, buf: &[u8]) -> bool {
+    if buf.len() >= MAX_READ {
+        return true;
+    }
     match mode {
         ReadMode::Any => !buf.is_empty(),
+        // A count of zero is met by any data.
         ReadMode::Lines(n) => {
             let lines = buf.iter().filter(|&&b| b == b'\n').count();
-            u64::try_from(lines).unwrap_or(u64::MAX) >= n.max(1)
+            !buf.is_empty() && u64::try_from(lines).unwrap_or(u64::MAX) >= n
         }
-        ReadMode::Bytes(n) => u64::try_from(buf.len()).unwrap_or(u64::MAX) >= n.max(1),
+        ReadMode::Bytes(n) => !buf.is_empty() && u64::try_from(buf.len()).unwrap_or(u64::MAX) >= n,
     }
 }
 
@@ -210,7 +223,12 @@ impl ScriptNet for TokioNet {
         });
     }
 
-    fn setup_udp(&mut self, sock: SockId, v6: bool, local: Option<SocketAddr>) -> Result<(), String> {
+    fn setup_udp(
+        &mut self,
+        sock: SockId,
+        v6: bool,
+        local: Option<SocketAddr>,
+    ) -> Result<(), String> {
         let bind = local.unwrap_or_else(|| unspecified(v6));
         let u = self
             .rt
@@ -254,11 +272,20 @@ impl ScriptNet for TokioNet {
         });
     }
 
-    fn sendto(&mut self, op: OpId, sock: SockId, to: SocketAddr, data: Vec<u8>, timeout: Option<Duration>) {
+    fn sendto(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        to: SocketAddr,
+        data: Vec<u8>,
+        timeout: Option<Duration>,
+    ) {
         let s = self.sock(sock);
         self.spawn(op, Some(sock), async move {
             let sent = match s {
-                Some(Sock::Udp(u)) => within(timeout, async { u.send_to(&data, to).await.is_ok() }).await,
+                Some(Sock::Udp(u)) => {
+                    within(timeout, async { u.send_to(&data, to).await.is_ok() }).await
+                }
                 _ => Some(false),
             };
             match sent {
@@ -313,7 +340,9 @@ impl ScriptNet for TokioNet {
             Sock::Tcp(t) => Some((t.local_addr().ok()?, t.peer_addr().ok()?)),
             Sock::Udp(u) => {
                 let local = u.local_addr().ok()?;
-                let remote = u.peer_addr().unwrap_or_else(|_| unspecified(local.is_ipv6()));
+                let remote = u
+                    .peer_addr()
+                    .unwrap_or_else(|_| unspecified(local.is_ipv6()));
                 Some((local, remote))
             }
         }
@@ -362,5 +391,22 @@ impl ScriptNet for TokioNet {
             return Err("Name or service not known".into());
         }
         Ok(list)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_are_satisfied_as_nsocks_are() {
+        assert!(!satisfied(ReadMode::Any, b""));
+        assert!(satisfied(ReadMode::Any, b"x"));
+        assert!(!satisfied(ReadMode::Lines(2), b"a\nb"));
+        assert!(satisfied(ReadMode::Lines(2), b"a\nb\n"));
+        assert!(satisfied(ReadMode::Lines(0), b"a"));
+        assert!(!satisfied(ReadMode::Bytes(3), b"ab"));
+        assert!(satisfied(ReadMode::Bytes(3), b"abc"));
+        assert!(satisfied(ReadMode::Lines(1), &vec![b'x'; MAX_READ]));
     }
 }

@@ -59,8 +59,31 @@ fn drip(mut c: TcpStream) {
     }
 }
 
+const HTTP_BODY: &[u8] =
+    b"<html><head><title>Fixture &amp; Title</title></head><body>hi</body></html>";
+
+fn http(mut c: TcpStream) {
+    let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut data = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !data.windows(4).any(|w| w == b"\r\n\r\n") {
+        match c.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+        }
+    }
+    let mut resp = format!(
+        "HTTP/1.1 200 OK\r\nServer: fixture/1.0\r\nContent-Type: text/html\r\nX-Fixture: yes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        HTTP_BODY.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(HTTP_BODY);
+    let _ = c.write_all(&resp);
+}
+
 /// The generator's services (`gen_m64_net.py`).
 fn serve() {
+    tcp(8080, http);
     tcp(46030, echo);
     tcp(46031, banner);
     tcp(46032, silent);
@@ -81,10 +104,12 @@ fn sockets_behave_as_under_nmap() {
         .map_or_else(|| m6().join("m64_net_golden.txt"), PathBuf::from);
     let fx = Fixtures {
         dir: "nse_net",
-        shipped: &[],
+        shipped: &["http-title.nse", "http-headers.nse"],
     };
     let (n, failures) = check(&golden, &fx, || {
-        Rc::new(RefCell::new(nmap_sys::nsenet::TokioNet::new().expect("tokio")))
+        Rc::new(RefCell::new(
+            nmap_sys::nsenet::TokioNet::new().expect("tokio"),
+        ))
     });
     assert!(n >= 2, "only {n} scenarios");
     assert!(

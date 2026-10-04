@@ -73,7 +73,13 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
     let cnse = lua.enter(|ctx| {
         let cnse = load_cnse(ctx, &config.lib, &store, config.engine);
         let nmap: piccolo::Table = ctx.get_global("nmap").expect("build installs nmap");
-        let net = super::net::load_net(ctx, config.net.clone(), ipv6, config.engine.max_parallelism, nmap);
+        let net = super::net::load_net(
+            ctx,
+            config.net.clone(),
+            ipv6,
+            config.engine.max_parallelism,
+            nmap,
+        );
         cnse.set_field(ctx, "net", net);
         ctx.stash(cnse)
     });

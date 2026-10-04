@@ -106,3 +106,75 @@ fn a_runaway_script_ends_its_phase_under_a_budget() {
         .iter()
         .all(|o| o.output.as_deref() == Some(&b"done"[..])));
 }
+
+/// `nmap.get_interface_info` (`dnet.get_interface_info`): the interface of
+/// the scan's family named by its full or short name, described as
+/// `list_interfaces` describes it, with the C's errors.
+#[test]
+fn get_interface_info_describes_an_interface() {
+    use nmap_core::nse::nmaplib::{Interface, Link, NmapEnv, NmapLib};
+    use nmap_core::nse::runtime::{new_state, run_chunk, ChunkOutcome, StateConfig};
+    let dir = nse_host::repo_root();
+    let eth = Interface {
+        device: b"eth0".to_vec(),
+        shortname: b"eth0".to_vec(),
+        netmask_bits: 24,
+        address: "192.0.2.10".parse().expect("ip"),
+        link: Link::Ethernet([0, 1, 2, 3, 4, 5]),
+        up: true,
+        mtu: 1500,
+    };
+    let lo6 = Interface {
+        device: b"lo".to_vec(),
+        shortname: b"lo".to_vec(),
+        netmask_bits: 128,
+        address: "::1".parse().expect("ip"),
+        link: Link::Loopback,
+        up: true,
+        mtu: 65536,
+    };
+    let mut st = new_state(&StateConfig {
+        lib: NmapLib::new(NmapEnv {
+            interfaces: Ok(vec![eth, lo6]),
+            ..nse_host::env(dir.clone())
+        }),
+        args: Default::default(),
+        source: std::rc::Rc::new(nse_host::Dir(dir)),
+        fs: std::rc::Rc::new(nse_host::ReadOnlyFs),
+        os: std::rc::Rc::new(nse_host::os_env()),
+        memory_limit: Some(256 << 20),
+        engine: Default::default(),
+        net: std::rc::Rc::new(std::cell::RefCell::new(nmap_core::nse::net::NoNet)),
+    })
+    .expect("state");
+    let got = run_chunk(
+        &mut st.lua,
+        "=t",
+        b"local i = nmap.get_interface_info('eth0')\n\
+          local _, lo = pcall(nmap.get_interface_info, 'lo')\n\
+          local _, long = pcall(nmap.get_interface_info, string.rep('x', 32))\n\
+          local d = nmap.new_dnet()\n\
+          local _, send = pcall(d.ip_send, d, 'x')\n\
+          return i.device, i.address, i.netmask, i.link, i.broadcast, #i.mac, i.up, i.mtu,\n\
+            lo, long, type(d), send",
+        1 << 22,
+    );
+    let want: Vec<String> = [
+        "eth0",
+        "192.0.2.10",
+        "24",
+        "ethernet",
+        "192.0.2.255",
+        "6",
+        "up",
+        "1500",
+        "bad argument #1 to 'get_interface_info' (device %s not found or no address configured)",
+        "bad argument #1 to 'get_interface_info' (device name too long)",
+        "userdata",
+        "raw packet sending (nmap.dnet) is not available yet",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(got, ChunkOutcome::Returned(want));
+}

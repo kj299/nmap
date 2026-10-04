@@ -14,7 +14,8 @@ A module's status is the highest gate it has cleared. "Done" = unsafe_audited.
   drift  --src DIR ...              fail if a shipped module is absent from the table
   exempt MODULE GATE --reason ...   record that GATE does not apply to MODULE
   cover  MODULE --targets a,b       record which fuzz target(s) cover MODULE
-  audit  [--fuzz-manifest F]        fail on an unreasoned exemption or a coverage
+  audit  [--fuzz-manifest F] [--require-done]
+                                    fail on an unreasoned exemption or a coverage
                                     claim naming a fuzz target that does not exist
 
 A gate a module is exempt from renders as [-], never [x] — an exemption is an
@@ -226,7 +227,7 @@ def _manifest_targets(manifest):
     return set(re.findall(r'^name = "(.+)"$', text, re.M))
 
 
-def cmd_audit(path, manifest):
+def cmd_audit(path, manifest, require_done=False):
     """Hard-fail on an unbacked exemption or a coverage claim naming no real target.
 
     This exists because module-to-target coverage had only ever been *inferred*, and
@@ -238,6 +239,12 @@ def cmd_audit(path, manifest):
     `core::osdb::parse` IS covered, by a target importing `osdb::model::FingerPrintDb`,
     because an inherent impl need not live in the module its type is declared in.
     No heuristic over import paths gets both right. Write the mapping down.
+
+    It also names every module that is not done. With `require_done`, that fails.
+    nmap's `core::output` sat at `differential` from M1 to M6 with no exemption
+    and no note. `show` printed "103/104" every time, and nothing asked why
+    (LESSONS #035). A retrospective, and a milestone's close, run with
+    `--require-done`. Mid-milestone, the listing alone is the reminder.
     """
     state = load(path)
     mods = state.get("modules", {})
@@ -278,6 +285,13 @@ def cmd_audit(path, manifest):
             if t not in known:
                 print(f"COVER-NO-SUCH-TARGET: {module} -> {t}")
                 rc = 1
+
+    stalled = sorted(m for m in mods if not effective_done(state, m))
+    for module in stalled:
+        print(f"NOT-DONE: {module} at {mods[module]}"
+              + ("" if require_done else " (pass --require-done to fail on this)"))
+    if require_done and stalled:
+        rc = 1
 
     n_ex = sum(len(g) for g in exemptions(state).values())
     n_cov = len(state.get("coverage", {}))
@@ -376,6 +390,8 @@ def _self_test():
         check("DONE* is counted separately from DONE",
               "0/2 modules fully gated" in render(st))
         check("audit passes on a well-formed table", cmd_audit(p, None) == 0)
+        check("audit --require-done fails while a module is not done",
+              cmd_audit(p, None, require_done=True) == 1)
         # A module may legitimately advance PAST an exempt gate; the exemption must
         # still render as [-] rather than silently becoming [x].
         cmd_set(p, "sched", "unsafe_audited")
@@ -507,6 +523,8 @@ def main(argv=None):
     pa = sub.add_parser("audit")
     pa.add_argument("--fuzz-manifest", default=None,
                     help="cargo-fuzz Cargo.toml, to check coverage names against [[bin]] entries")
+    pa.add_argument("--require-done", action="store_true",
+                    help="fail on any module that is not done (retrospectives, milestone close)")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -527,7 +545,7 @@ def main(argv=None):
         return cmd_cover(args.file, args.module,
                          [t.strip() for t in args.targets.split(",") if t.strip()])
     if args.cmd == "audit":
-        return cmd_audit(args.file, args.fuzz_manifest)
+        return cmd_audit(args.file, args.fuzz_manifest, args.require_done)
     ap.print_help()
     return 2
 

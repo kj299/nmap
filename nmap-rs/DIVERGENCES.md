@@ -2756,8 +2756,10 @@ reader never stops, since a number is never the empty string.
 - [ ] `vm-nonstandard-coroutine-functions` — the VM's `coroutine` table has
       `continue` and `yieldto`, which Lua 5.4 does not. A script can reach
       them, and `continue` resumes in the way `wrap-keeps-the-caller-frame`
-      describes. They belong to the sandbox decision with `io`, `os` and
-      `debug`.
+      describes. Decision 2 settled `io`, `os` and `debug` (M6.4c1) but not
+      these, and the NSE state still has them. They are to be removed from
+      it in M6.4c2, before the scheduler runs scripts. A script that resumes
+      with `continue` would suspend the executor the scheduler drives.
 
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 

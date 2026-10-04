@@ -1,9 +1,43 @@
-# M6.1 differential — the NSE script index and `.nse` metadata
+# M6 differentials — NSE, against nmap's own Lua and nmap itself
+
+Every M6 gate is here. The oracle is one of three things:
+
+- `liblua/` (and, where needed, `lpeg.c`) compiled **out of this repository**
+  by `oracle/build_lua_oracle.sh`;
+- `nse_main.lua` logic sliced verbatim by `oracle/extract_nse_main.py`;
+- the installed nmap 7.94, pointed at this tree with `--datadir`.
+
+Each `regen_*.sh` re-derives its files, and `--check` (what CI runs) fails on
+any difference.
+
+| corpus | gates | regenerate | Rust test | cases |
+|---|---|---|---|---|
+| `m6_scriptdb_*`, `m6_nse_*` | `.nse` metadata, `script.db` (M6.1) | `regen_m6.sh` | `nse_differential`, `nse_corpus` | 58 + 31 |
+| `m62_*` | `--script` selection (M6.2) | `regen_m62.sh` | `selection_differential`, `selection_corpus` | 98 + 15, 27,495-verdict sweep |
+| `m60_semantics_*` | VM semantics (M6.0) | `regen_m60.sh` | `lua_semantics_differential` | 99 (1 pinned) |
+| `m60_arith_*`, `m60_coerce_*` | modulo and shifts; string-to-number coercion | `regen_m60.sh` | `lua_semantics_differential` | 2,955; 1,975 |
+| `m60_floatfmt_*` | float formatting | `regen_m60.sh` | `lua_float_format_differential` | 7,917 |
+| `m6_strpack_*` | `string.pack` / `unpack` / `packsize` | `regen_m6_strpack.sh` | `strpack_differential` | 4,804 |
+| `m6_pattern_*` | `string.find` / `match` / `gmatch` / `gsub` | `regen_m6_pattern.sh` | `pattern_differential` | 11,408 |
+| `m6_format_*` | `string.format` | `regen_m6_format.sh` | `format_differential` | 6,037 |
+| `m6_tail_*` | `_G`, `rawequal`, `xpcall`, `load`, `coroutine.wrap`, `string.rep` | `regen_m6_tail.sh` | `tail_differential` | 1,019 |
+| `m63_args_*` | `--script-args` (M6.3) | `regen_m63.sh` | `scriptargs_differential` | 20,517 |
+| `m63_nmap_golden.txt` | the `nmap` module's non-I/O half, vs nmap 7.94 | `oracle/gen_m63_nmap.py` (live in CI) | `nmaplib_differential` | 10 scenarios |
+| `m64_errors_*` | VM runtime errors, numeric `for` (M6.4a) | `regen_m64_errors.sh` | `errors_differential` | 12,438 |
+| `m64_limits_*` | C-call depth, stack, `MAXTAGLOOP` (M6.4b) | `regen_m64_limits.sh` | `limits_differential` | 335 |
+| `m64_memory_*` | the memory budget, vs `ulimit -v` (M6.4b) | `regen_m64_memory.sh` | `memory_differential` | 41 |
+| `m64_stdlib_*` | `utf8`, `os`, `io`, `debug` (M6.4c1) | `regen_m64_stdlib.sh` | `stdlib_differential` | 2,012 |
+| `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
+
+Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
+The sections below explain the corpora that need it.
+
+## M6.1 differential — the NSE script index and `.nse` metadata
 
 Gate 2 for `core::nse::script`. Two oracles run here, and they answer different
 questions.
 
-## Oracle 1 — nmap's own Lua, on a corpus of edge cases
+### Oracle 1 — nmap's own Lua, on a corpus of edge cases
 
 `regen_m6.sh` compiles `liblua/` **out of this repository** into a Lua 5.4.8
 interpreter and drives it with loading logic sliced verbatim out of
@@ -37,7 +71,7 @@ A golden row whose two columns disagree is a deliberate divergence, ledgered in
 so a new one cannot appear without editing that test. There are seven, and every
 one is nmap's Lua accepting something that requires *evaluation*.
 
-## Oracle 2 — nmap's own output, over the whole shipped corpus
+### Oracle 2 — nmap's own output, over the whole shipped corpus
 
 The stronger check needs no Lua at all, and it is in
 `crates/core/tests/nse_corpus.rs`.
@@ -54,7 +88,7 @@ the index in nmap's exact output format (`nse_main.lua:1336-1343`), and require
 the result to equal the committed file **byte for byte**. It does, all 52,755 of
 them.
 
-## Why the oracle cannot simply be run over the real scripts
+### Why the oracle cannot simply be run over the real scripts
 
 Feeding a real `.nse` to oracle 1 fails: 610 of 611 shipped scripts
 `require "nmap"`, a module that only exists inside the nmap process, so
@@ -65,13 +99,13 @@ this port's is a function of the bytes, and reads all 611 outside any process.
 
 ---
 
-# M6.2 differential — the `--script` selection grammar
+## M6.2 differential — the `--script` selection grammar
 
 Gate 2 for `core::nse::selection`. Regenerate with `regen_m62.sh`; CI runs
 `regen_m62.sh --check`, which re-derives all six generated files and fails on
 any difference.
 
-## Why the oracle needs LPeg, not just Lua
+### Why the oracle needs LPeg, not just Lua
 
 M6.1 needed nmap's Lua. M6.2 needs nmap's **LPeg** as well, so
 `build_lua_oracle.sh` now compiles `lpeg.c` (through `nse_lpeg.cc`, the same
@@ -96,7 +130,7 @@ A hand-written oracle would encode what a PEG *ought* to do and bless the same
 wrong answers as the port. Compiling the real engine costs about twenty lines of
 build script.
 
-## The two oracles
+### The two oracles
 
 **1. Edge cases** — 98 `(rule, filename, categories)` triples plus 15
 rule-normalisation cases, chosen to sit on the corners: keyword follow-sets,
@@ -110,7 +144,7 @@ selected by name, and a SHA-256 over the matching filenames in index order. The
 digest is what makes it exact rather than statistical — two different selections
 of the same size cannot agree.
 
-## Three things the corpus establishes
+### Three things the corpus establishes
 
 **Grouping is right-greedy, not conventional.** `a and b or c` means
 `a and (b or c)`. On the shipped index, `safe and not intrusive or vuln` selects
@@ -126,7 +160,7 @@ scripts as `safe`. `--script Http-*` selects **none**, where `http-*` selects
 all escaped into literals before matching, so `http-titl?` does not match
 `http-title`.
 
-## Divergences
+### Divergences
 
 One, ledgered as `nse-selection-depth-ceiling` and pinned by name in
 `selection_differential.rs`: the C refuses deeply nested rules because LPeg's
@@ -135,7 +169,7 @@ or 31 chained `or`s, three different numbers from one shared budget — and this
 port evaluates them instead. Plus `nse-selection-rule-length`, the one place the
 port is stricter: rules over 64 KiB are refused.
 
-## Running the fuzzer without trashing the seeds
+### Running the fuzzer without trashing the seeds
 
 libFuzzer treats the **first** corpus directory on the command line as writable
 output and any further ones as read-only input. So this grows the curated seed
@@ -157,25 +191,20 @@ CI does the same. The seeds directory is meant to stay small and hand-read:
 20 shapes chosen by hand, plus three inputs the fuzzer found that are kept
 because they are regression tests for specific performance bugs.
 
-# M6 stdlib differentials — the Lua standard library NSE needs
+## M6 stdlib differentials — the Lua standard library NSE needs
 
 The vendored VM ships seven string functions; the rest are written first-party
-in `core::nse::stdlib` and each is gated here against `liblua/` built from this
-repository (`oracle/build_lua_oracle.sh`). Every case is a Lua chunk the
-oracle's `lua` evaluates and the Rust harness evaluates through the VM with the
-port installed. None of these corpora has an exemption list.
+in `core::nse::stdlib`. Each is gated against `liblua/` (the table above). Every
+case is a Lua chunk that the oracle's `lua` evaluates, and that the Rust harness
+(`crates/core/tests/m6_eval/`) evaluates through the VM with the port
+installed. None of these corpora has an exemption list.
 
-| corpus | gates | regenerate | cases |
-|---|---|---|---|
-| `m6_strpack_*` | `string.pack` / `unpack` / `packsize` | `regen_m6_strpack.sh` | 4,804 |
-| `m6_pattern_*` | `string.find` / `match` / `gmatch` / `gsub` | `regen_m6_pattern.sh` | 11,408 |
-| `m6_format_*` | `string.format` | `regen_m6_format.sh` | 6,037 |
-
-The pattern corpus is the first to compare error **messages**
+The pattern corpus was the first to compare error **messages**
 (`oracle/m6_pattern_driver.lua` hex-encodes them), because the matcher's errors
-are lazy and "which message, or none" is the behaviour under test. Its section J
-reads every pattern literal in `nselib/` and `scripts/`, so a change to those
-trees changes the corpus and `--check` says so.
+are lazy, and "which message, or none" is the behaviour under test. Every later
+corpus uses the same driver. Section J of the pattern corpus reads every
+pattern literal in `nselib/` and `scripts/`, so a change to those trees changes
+the corpus, and `--check` says so.
 
 To check a candidate case before adding it, run the same cases file through
 both sides and diff:
@@ -186,7 +215,30 @@ cargo run -p nmap-core --example m6_eval -- my_cases.txt > port.txt
 diff lua.txt port.txt
 ```
 
-An error that escapes a chunk will differ by the `chunk:N: ` prefix nmap's Lua
-gives it and the vendored VM does not (DIVERGENCES.md,
-`error_string_gets_position`); the gate discounts exactly that prefix, and a
-plain `diff` does not.
+The VM positions its own errors as PUC-Lua does (M6.4a). An error raised by a
+first-party stdlib function and escaping the chunk, however, lacks the
+`chunk:N: ` prefix that `luaL_error` gives it in nmap's Lua
+(`stdlib-errors-have-no-position`, DIVERGENCES.md). The gates discount exactly
+that prefix, and a plain `diff` does not. `M6_MEMORY_LIMIT=<bytes>` runs the
+example under a memory budget, as `memory_differential` does.
+
+## M6.4c1 — the NSE state
+
+`m64_stdlib_*` runs from this directory under `TZ=UTC`: the port's local time
+is UTC (`os-local-time-is-utc`). The `io` cases read the files in
+`fixtures/io/` and write in `/tmp/m64io/`, which `regen_m64_stdlib.sh`
+recreates. The Rust harness serves the same paths from memory
+(`crates/core/tests/m6_eval/memfs.rs`), so the gate never touches the disk the
+oracle wrote.
+
+`m64_nselib_golden.txt` comes from nmap itself. `oracle/gen_m64_nselib.py` runs
+two probe scripts (`oracle/m64_probe_require.nse`, `m64_probe_unittest.nse`)
+as prerules, with `-sn` against 127.0.0.1, so nothing leaves the host. They
+`require` every library in this tree's `nselib/` and run every `test_suite`.
+The port must end each one the same way, except for the libraries pinned in
+`nselib_differential.rs` to C modules not yet ported. To see one library under
+the port:
+
+```sh
+cargo run -p nmap-core --example nse_require -- [--unittest] /path/to/nmap LIB...
+```

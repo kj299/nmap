@@ -10,6 +10,6 @@ action = function()
   out[#out+1] = "sleep " .. show(stdnse.sleep(0.2))
   out[#out+1] = "slept enough " .. tostring(nmap.clock_ms() - t0 >= 150)
   out[#out+1] = "negative " .. show(pcall(stdnse.sleep, -1))
-  out[#out+1] = "stats " .. show(nmap.socket.get_stats().connect_waiting)
+  out[#out+1] = "stats " .. type(nmap.socket.get_stats().connect_waiting)
   return table.concat(out, "\n")
 end

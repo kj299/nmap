@@ -1,5 +1,6 @@
 pub mod any;
 pub mod async_callback;
+pub mod budget;
 pub mod callback;
 pub mod chunk_id;
 pub mod closure;
@@ -11,6 +12,7 @@ pub mod finalizers;
 pub mod fuel;
 pub mod function;
 pub mod io;
+pub mod limits;
 pub mod lua;
 pub mod meta_ops;
 pub mod number_format;

@@ -157,12 +157,13 @@ enum XStage {
     Handling,
 }
 
-/// How many times the handler may run on one error before `xpcall` gives up
-/// with "error in error handling". PUC-Lua passes an error raised *inside*
-/// the handler back through the handler, recursively, until the C stack
-/// overflows: `LUAI_MAXCCALLS / 10 * 11` nested C calls, less however many
-/// the caller already holds (214 handler runs from a chunk called by `pcall`,
-/// fewer deeper down). This port counts the runs instead, up to the C's ceiling.
+/// A backstop on how many times the handler may run on one error. PUC-Lua
+/// passes an error raised *inside* the handler back through the handler,
+/// each run one C level above the error it handles, until the levels reach
+/// `LUAI_MAXCCALLS / 10 * 11` and the call fails with "error in error
+/// handling", which no handler sees: 214 runs from a chunk called by `pcall`,
+/// fewer deeper down. The VM counts those levels the same way, so this bound,
+/// the most runs any depth allows, is never what stops a handler.
 const HANDLER_RUNS: u16 = 200 / 10 * 11;
 
 /// The protected call of `xpcall`. The handler is called with the error and
@@ -185,7 +186,7 @@ impl<'gc> Sequence<'gc> for XPcall<'gc> {
     fn poll(
         self: Pin<&mut Self>,
         ctx: Context<'gc>,
-        _exec: Execution<'gc, '_>,
+        exec: Execution<'gc, '_>,
         mut stack: Stack<'gc, '_>,
     ) -> Result<SequencePoll<'gc>, Error<'gc>> {
         let this = self.get_mut();
@@ -215,9 +216,12 @@ impl<'gc> Sequence<'gc> for XPcall<'gc> {
                             stack.replace(ctx, ctx.intern(msg.as_bytes()));
                             this.stage = XStage::Handling;
                             this.runs = 1;
-                            Ok(SequencePoll::Call {
+                            // Raised by the call `lua_pcall` makes, one level
+                            // up; the handler runs one above that.
+                            Ok(SequencePoll::CallAt {
                                 bottom: 0,
                                 function: this.handler,
+                                ccalls: exec.ccalls().saturating_add(2),
                             })
                         }
                     }
@@ -238,11 +242,17 @@ impl<'gc> Sequence<'gc> for XPcall<'gc> {
     fn error(
         self: Pin<&mut Self>,
         ctx: Context<'gc>,
-        _exec: Execution<'gc, '_>,
+        exec: Execution<'gc, '_>,
         error: Error<'gc>,
         mut stack: Stack<'gc, '_>,
     ) -> Result<SequencePoll<'gc>, Error<'gc>> {
         let this = self.get_mut();
+        // "not enough memory" and "error in error handling" are thrown past
+        // the handler (`LUA_ERRMEM`, `LUA_ERRERR`).
+        if ctx.bypasses_handler(&error) {
+            stack.replace(ctx, (false, error.to_value(ctx)));
+            return Ok(SequencePoll::Return);
+        }
         // From the protected function or from a run of the handler alike, the
         // error goes to the handler — until the C would have run out of stack.
         if this.runs >= HANDLER_RUNS {
@@ -252,9 +262,11 @@ impl<'gc> Sequence<'gc> for XPcall<'gc> {
         this.runs = this.runs.saturating_add(1);
         stack.replace(ctx, error.to_value(ctx));
         this.stage = XStage::Handling;
-        Ok(SequencePoll::Call {
+        // `luaG_errormsg` calls the handler one level above the error.
+        Ok(SequencePoll::CallAt {
             bottom: 0,
             function: this.handler,
+            ccalls: exec.error_ccalls().saturating_add(1),
         })
     }
 }
@@ -431,7 +443,7 @@ impl<'gc> Sequence<'gc> for Reader<'gc> {
             match piece {
                 Value::Nil => {}
                 Value::String(s) if !s.as_bytes().is_empty() => {
-                    if this.chunk.try_reserve(s.as_bytes().len()).is_err() {
+                    if !super::reserve(&mut this.chunk, s.as_bytes().len()) {
                         return Err(lua_error(ctx, "not enough memory"));
                     }
                     this.chunk.extend_from_slice(s.as_bytes());

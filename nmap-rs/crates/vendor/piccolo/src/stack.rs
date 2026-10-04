@@ -42,6 +42,13 @@ impl<'gc, 'a> Stack<'gc, 'a> {
         }
     }
 
+    /// Whether the thread's stack has room for `n` more values
+    /// (`lua_checkstack`): its whole height, not this callback's part of it,
+    /// counts against `LUAI_MAXSTACK`.
+    pub fn has_room(&self, n: usize) -> bool {
+        crate::limits::stack_has_room(self.values.len(), n)
+    }
+
     pub fn get(&self, i: usize) -> Value<'gc> {
         self.values
             .get(self.bottom + i)

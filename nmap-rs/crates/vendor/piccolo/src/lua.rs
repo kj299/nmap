@@ -1,12 +1,13 @@
-use std::ops;
+use std::{ops, rc::Rc};
 
 use gc_arena::{
     arena::{CollectionPhase, Root},
     metrics::Metrics,
-    Arena, Collect, Mutation, Rootable,
+    Arena, Collect, Gc, Mutation, Rootable,
 };
 
 use crate::{
+    budget::{self, Budget},
     finalizers::Finalizers,
     stash::{Fetchable, Stashable},
     stdlib::{load_base, load_coroutine, load_io, load_math, load_string, load_table},
@@ -107,8 +108,135 @@ impl<'gc> Context<'gc> {
     }
 
     /// Calls `ctx.interned_strings().intern(&ctx, s)`.
+    ///
+    /// A string of `REFUSE_FROM` bytes or more that does not fit the memory
+    /// budget is not made: the empty string comes back in its place, and the
+    /// running Lua code fails with "not enough memory" before anything sees
+    /// it (see [`Context::can_allocate`]).
     pub fn intern(self, s: &[u8]) -> String<'gc> {
+        if s.len() >= REFUSE_FROM && !self.can_allocate(s.len()) {
+            return self.state.empty;
+        }
         self.state.strings.intern(&self, s)
+    }
+
+    /// The memory budget, in bytes ([`Lua::set_memory_limit`]).
+    pub fn memory_limit(self) -> usize {
+        self.state.budget.limit.get()
+    }
+
+    /// Whether `bytes` more may be allocated under the memory budget. Code
+    /// that builds a buffer whose size a script chooses asks first, as
+    /// PUC-Lua's allocator would be asked.
+    ///
+    /// The heap the budget counts holds garbage not yet collected, and
+    /// PUC-Lua's allocator, refused, collects in full and tries again before
+    /// it fails. So a request that does not fit now, but would beside what the
+    /// last full collection left live, is granted, and a full collection runs
+    /// before Lua goes on, failing the code with "not enough memory" if the
+    /// heap is still past the budget then. A request that would not fit even
+    /// then is refused: the Lua code running fails with "not enough memory"
+    /// (`LUA_ERRMEM`) as soon as the callback, or the instruction, making it
+    /// returns.
+    pub fn can_allocate(self, bytes: usize) -> bool {
+        self.state.budget.allows(bytes)
+    }
+
+    /// The heap's size now, to pass to [`Context::memory_check`] after the
+    /// code it measures.
+    pub fn memory_mark(self) -> usize {
+        self.metrics().total_allocation()
+    }
+
+    /// Whether the code that ran since `mark` must fail with "not enough
+    /// memory" now: an allocation it asked for was refused.
+    ///
+    /// Code that grew the heap past the budget does not fail here. PUC-Lua's
+    /// allocator, refused, collects in full and tries again before it fails
+    /// (`luaM_malloc_`); so a full collection is requested instead
+    /// ([`Context::collection_requested`]), and if the heap is still past the
+    /// budget after it, the code fails then, before it runs on (see
+    /// [`Lua::enter`]). Code that allocates nothing never fails, so a script
+    /// can always drop what it holds.
+    pub fn memory_check(self, mark: usize) -> bool {
+        let budget = &self.state.budget;
+        if budget.refused.get() {
+            return true;
+        }
+        let total = self.metrics().total_allocation();
+        if total > budget.limit.get() && total > mark {
+            budget.collect.set(true);
+        }
+        false
+    }
+
+    /// Whether a full collection must run before Lua code goes on: the
+    /// executor ends its step, and [`Lua::enter`] collects.
+    pub fn collection_requested(self) -> bool {
+        self.state.budget.collect.get()
+    }
+
+    /// The error of a refused allocation: `LUA_ERRMEM`'s "not enough memory",
+    /// made in advance so that raising it allocates nothing.
+    pub fn not_enough_memory(self) -> Error<'gc> {
+        Value::String(self.state.not_enough_memory).into()
+    }
+
+    /// The error of a call nested past the margin error handlers have:
+    /// `LUA_ERRERR`'s "error in error handling".
+    pub fn error_in_error_handling(self) -> Error<'gc> {
+        Value::String(self.state.error_in_error_handling).into()
+    }
+
+    /// Whether `error` is one PUC-Lua throws past any message handler
+    /// (`luaD_throw` with `LUA_ERRMEM` or `LUA_ERRERR`, not `luaG_errormsg`).
+    /// A memory error is recognised by its text: `lua_error` raises any error
+    /// object equal to the memory-error message as a memory error, so
+    /// `error("not enough memory", 0)` is one too. "error in error handling"
+    /// is recognised only as the very string
+    /// [`Context::error_in_error_handling`] raises.
+    pub fn bypasses_handler(self, error: &Error<'gc>) -> bool {
+        let Error::Lua(e) = error else {
+            return false;
+        };
+        let Value::String(s) = e.0 else {
+            return false;
+        };
+        s.as_bytes() == crate::limits::NOT_ENOUGH_MEMORY.as_bytes()
+            || Gc::ptr_eq(
+                s.into_inner(),
+                self.state.error_in_error_handling.into_inner(),
+            )
+    }
+
+    /// Forget a refusal made outside any running Lua code, which has nothing
+    /// to fail.
+    pub(crate) fn clear_memory_refusal(self) {
+        self.state.budget.refused.set(false);
+    }
+
+    /// Whether the code that last grew the heap past the budget must fail,
+    /// the collection it requested having left the heap past it still.
+    pub(crate) fn take_memory_failure(self) -> bool {
+        self.state.budget.failed.replace(false)
+    }
+
+    /// Note that a "not enough memory" error is on its way to a handler, and
+    /// forget the refusal that raised it.
+    pub(crate) fn begin_memory_unwind(self) {
+        self.state.budget.refused.set(false);
+        self.state.budget.unwinding.set(true);
+    }
+
+    /// Whether a "not enough memory" error has just reached a handler, which
+    /// should then wait for a collection before it runs; if so, that
+    /// collection is requested.
+    pub(crate) fn end_memory_unwind(self) -> bool {
+        let caught = self.state.budget.unwinding.replace(false);
+        if caught {
+            self.state.budget.sweep.set(true);
+        }
+        caught
     }
 
     /// Calls `ctx.interned_strings().intern_static(&ctx, s)`.
@@ -125,12 +253,21 @@ impl<'gc> ops::Deref for Context<'gc> {
     }
 }
 
+/// Strings this long or longer are refused when they do not fit the memory
+/// budget. A shorter one is made anyway, so that the VM's own small strings
+/// (metamethod names, error messages) are always real; the code that asked
+/// for it fails all the same.
+pub const REFUSE_FROM: usize = 4096;
+
 /// A Lua execution environment.
 ///
 /// This is the top-level `piccolo` type. In order to load and call any Lua code, the first step is
 /// to create a `Lua` instance.
 pub struct Lua {
     arena: Arena<Rootable![State<'_>]>,
+    budget: Rc<Budget>,
+    /// The heap size past which `enter` collects in full before it returns.
+    collect_at: usize,
 }
 
 impl Default for Lua {
@@ -142,8 +279,12 @@ impl Default for Lua {
 impl Lua {
     /// Create a new `Lua` instance with no parts of the stdlib loaded.
     pub fn empty() -> Self {
+        let arena = Arena::<Rootable![State<'_>]>::new(|mc| State::new(mc));
+        let budget = arena.mutate(|_, state| state.budget.clone());
         Lua {
-            arena: Arena::<Rootable![State<'_>]>::new(|mc| State::new(mc)),
+            arena,
+            budget,
+            collect_at: usize::MAX,
         }
     }
 
@@ -214,6 +355,28 @@ impl Lua {
         self.arena.metrics()
     }
 
+    /// Limit the memory this state's Lua code may use, in bytes, as counted by
+    /// [`Lua::total_memory`]. Past it, an allocation fails with a catchable
+    /// "not enough memory" instead of growing the heap until the system
+    /// refuses and the process aborts. Unlimited by default.
+    pub fn set_memory_limit(&mut self, limit: usize) {
+        self.budget.limit.set(limit);
+        self.budget.live.set(self.total_memory());
+        self.collect_at = self.next_collection(self.total_memory());
+    }
+
+    pub fn memory_limit(&self) -> usize {
+        self.budget.limit.get()
+    }
+
+    /// Where the next full collection falls when `live` bytes survived the
+    /// last: halfway to the limit, so that garbage alone never fills the
+    /// budget.
+    fn next_collection(&self, live: usize) -> usize {
+        let limit = self.memory_limit();
+        live.saturating_add(limit.saturating_sub(live) / 2)
+    }
+
     /// Enter the garbage collection arena and perform some operation.
     ///
     /// In order to interact with Lua or do any useful work with Lua values, you must do so from
@@ -231,8 +394,23 @@ impl Lua {
     {
         const COLLECTOR_GRANULARITY: f64 = 1024.0;
 
+        let entered = budget::enter(self.budget.clone());
         let r = self.arena.mutate(move |mc, state| f(state.ctx(mc)));
-        if self.arena.metrics().allocation_debt() > COLLECTOR_GRANULARITY {
+        drop(entered);
+        let requested = self.budget.collect.replace(false);
+        let sweep = self.budget.sweep.replace(false);
+        if requested || sweep || self.total_memory() > self.collect_at {
+            // Near the memory budget, or past it: free all garbage before Lua
+            // runs again, so that the budget measures what is live. Still past
+            // it, the code that went past it fails (`luaM_malloc_`'s retry).
+            self.gc_collect();
+            let live = self.total_memory();
+            self.budget.live.set(live);
+            self.collect_at = self.next_collection(live);
+            if requested {
+                self.budget.failed.set(live > self.budget.limit.get());
+            }
+        } else if self.arena.metrics().allocation_debt() > COLLECTOR_GRANULARITY {
             if self.arena.collection_phase() == CollectionPhase::Collecting {
                 self.arena.collect_debt();
             } else {
@@ -291,22 +469,34 @@ impl Lua {
     }
 }
 
-#[derive(Copy, Clone, Collect)]
+#[derive(Collect)]
 #[collect(no_drop)]
 struct State<'gc> {
     globals: Table<'gc>,
     registry: Registry<'gc>,
     strings: InternedStringSet<'gc>,
     finalizers: Finalizers<'gc>,
+    #[collect(require_static)]
+    budget: Rc<Budget>,
+    not_enough_memory: String<'gc>,
+    error_in_error_handling: String<'gc>,
+    empty: String<'gc>,
 }
 
 impl<'gc> State<'gc> {
     fn new(mc: &Mutation<'gc>) -> State<'gc> {
+        let strings = InternedStringSet::new(mc);
         Self {
             globals: Table::new(mc),
             registry: Registry::new(mc),
-            strings: InternedStringSet::new(mc),
+            strings,
             finalizers: Finalizers::new(mc),
+            budget: Rc::new(Budget::new(mc.metrics().clone())),
+            not_enough_memory: strings
+                .intern_static(mc, crate::limits::NOT_ENOUGH_MEMORY.as_bytes()),
+            error_in_error_handling: strings
+                .intern_static(mc, crate::limits::ERROR_IN_ERROR_HANDLING.as_bytes()),
+            empty: strings.intern_static(mc, b""),
         }
     }
 

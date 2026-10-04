@@ -23,6 +23,16 @@ pub fn load_string<'gc>(ctx: Context<'gc>) {
             let (string, i, j) = stack.consume::<(String, Option<i64>, Option<i64>)>(ctx)?;
             let i = i.unwrap_or(1);
             let substr = sub(string.as_bytes(), i, j.or(Some(i)))?;
+            // `str_byte`: a slice of `INT_MAX` or more, or one the stack has no
+            // room for, is refused (`luaL_checkstack`).
+            if substr.len() >= i32::MAX as usize || !stack.has_room(substr.len()) {
+                let msg = if substr.len() >= i32::MAX as usize {
+                    "string slice too long"
+                } else {
+                    "stack overflow (string slice too long)"
+                };
+                return Err(Value::String(ctx.intern(msg.as_bytes())).into());
+            }
             stack.extend(substr.iter().map(|b| Value::Integer(i64::from(*b))));
             Ok(CallbackReturn::Return)
         }),

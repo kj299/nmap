@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{
     compiler::{FunctionRef, LineNumber},
+    limits::{CallLimit, LUAI_MAXCCALLS},
     thread::BadThreadMode,
     CallbackReturn, Context, Error, FromMultiValue, Fuel, Function, IntoMultiValue, SequencePoll,
     Stack, String, Thread, ThreadMode, Variadic,
@@ -185,7 +186,21 @@ impl<'gc> Executor<'gc> {
     /// delivered through a separate channel than normal results and cannot be caught by Lua.
     pub fn step(self, ctx: Context<'gc>, fuel: &mut Fuel) -> Result<bool, BadThreadMode> {
         let mut state = self.0.borrow_mut(&ctx);
+        ctx.clear_memory_refusal();
+        if ctx.take_memory_failure() {
+            // The code that ended the last step by growing the heap past the
+            // budget fails, now that a collection has not brought it back.
+            let thread = state.thread_stack.last().copied().unwrap();
+            if let Ok(mut thread_state) = thread.into_inner().try_borrow_mut(&ctx) {
+                if raise_memory_error(ctx, &mut thread_state) {
+                    ctx.begin_memory_unwind();
+                }
+            }
+        }
         Ok(loop {
+            // Set when this pass raises "not enough memory": the step then
+            // ends, so that `Lua::enter` collects before Lua runs again.
+            let mut out_of_memory = false;
             let mut top_thread = state.thread_stack.last().copied().unwrap();
             let mut res_thread = None;
             match top_thread.mode() {
@@ -236,7 +251,8 @@ impl<'gc> Executor<'gc> {
                         top_state.return_to(bottom);
                     }
                     Err(err) => {
-                        top_state.frames.push(Frame::Error(err.into()));
+                        let ccalls = top_state.ccalls();
+                        top_state.raise(err, ccalls);
                     }
                 }
                 drop(res_state);
@@ -254,7 +270,8 @@ impl<'gc> Executor<'gc> {
                         if let Err(err) =
                             to_thread.resume(ctx, Variadic(top_state.stack.drain(bottom..)))
                         {
-                            top_state.frames.push(Frame::Error(err.into()));
+                            let ccalls = top_state.ccalls();
+                            top_state.raise(err.into(), ccalls);
                         } else {
                             top_state.frames.push(Frame::Yielded);
                             thread_stack.pop();
@@ -273,9 +290,20 @@ impl<'gc> Executor<'gc> {
                     thread: Thread<'gc>,
                     bottom: usize,
                 ) {
+                    // `lua_resume`: the coroutine runs one C level above its
+                    // resumer, which must be below the limit.
+                    let from = top_state.ccalls();
+                    if from >= LUAI_MAXCCALLS {
+                        let ccalls = top_state.top_ccalls();
+                        raise_limit(ctx, top_state, bottom, CallLimit::CStack, ccalls);
+                        return;
+                    }
+                    // A thread that cannot be borrowed is running, and
+                    // `resume` below reports that.
+                    let _ = thread.set_ccalls(&ctx, from + 1);
                     if let Err(err) = thread.resume(ctx, Variadic(top_state.stack.drain(bottom..)))
                     {
-                        top_state.frames.push(Frame::Error(err.into()));
+                        top_state.raise(err.into(), from);
                     } else {
                         // Tail call the thread resume if we can.
                         if top_state.frames.is_empty() {
@@ -287,19 +315,88 @@ impl<'gc> Executor<'gc> {
                     }
                 }
 
+                /// A call that would cross a limit, raised from the Rust
+                /// function making it: as from a C function, with no
+                /// position.
+                fn raise_limit<'gc>(
+                    ctx: Context<'gc>,
+                    top_state: &mut ThreadState<'gc>,
+                    bottom: usize,
+                    limit: CallLimit,
+                    ccalls: u32,
+                ) {
+                    top_state.stack.truncate(bottom);
+                    let error = match limit {
+                        CallLimit::ErrorHandling => ctx.error_in_error_handling(),
+                        _ => crate::Value::String(ctx.intern(limit.message().as_bytes())).into(),
+                    };
+                    raise_limit_error(top_state, error, ccalls);
+                }
+
+                /// As `raise_limit`, for a call a Rust callback made in its
+                /// place (`CallbackReturn::Call` with no `then`): a stand-in for
+                /// the VM's own work, `__call`'s `tryfuncTM` say, which raises
+                /// from the Lua function it returns to, with its position.
+                fn raise_limit_in_caller<'gc>(
+                    ctx: Context<'gc>,
+                    top_state: &mut ThreadState<'gc>,
+                    bottom: usize,
+                    limit: CallLimit,
+                    ccalls: u32,
+                ) {
+                    let Some(&Frame::Lua { closure, pc, .. }) = top_state.frames.last() else {
+                        return raise_limit(ctx, top_state, bottom, limit, ccalls);
+                    };
+                    if limit == CallLimit::ErrorHandling {
+                        return raise_limit(ctx, top_state, bottom, limit, ccalls);
+                    }
+                    top_state.stack.truncate(bottom);
+                    let mut msg = lua_where(closure, pc.saturating_sub(1));
+                    msg.extend_from_slice(limit.message().as_bytes());
+                    let error = crate::Value::String(ctx.intern(&msg)).into();
+                    raise_limit_error(top_state, error, ccalls);
+                }
+
+                fn raise_limit_error<'gc>(
+                    top_state: &mut ThreadState<'gc>,
+                    error: Error<'gc>,
+                    ccalls: u32,
+                ) {
+                    // PUC-Lua counted the call before refusing it.
+                    let ccalls = top_state.effective_ccalls(ccalls);
+                    top_state.raise(error, ccalls);
+                }
+
                 match top_state.frames.pop() {
-                    Some(Frame::Callback { bottom, callback }) => {
+                    Some(Frame::Callback {
+                        bottom,
+                        callback,
+                        ccalls,
+                    }) => {
                         fuel.consume(Self::FUEL_PER_CALLBACK);
-                        match callback.call(
+                        let mark = ctx.memory_mark();
+                        let running = top_state.effective_ccalls(ccalls);
+                        let ret = callback.call(
                             ctx,
                             Execution {
                                 executor: self,
                                 fuel,
                                 threads: &state.thread_stack,
                                 upper_frames: &top_state.frames,
+                                ccalls: running,
+                                error_ccalls: top_state.error_ccalls,
                             },
                             Stack::new(&mut top_state.stack, bottom),
-                        ) {
+                        );
+                        // Whatever the callback made of a refused allocation
+                        // is discarded; it fails, as `luaM_` would have.
+                        out_of_memory = ctx.memory_check(mark);
+                        let ret = if out_of_memory {
+                            Err(ctx.not_enough_memory())
+                        } else {
+                            ret
+                        };
+                        match ret {
                             Ok(CallbackReturn::Return) => {
                                 top_state.return_to(bottom);
                             }
@@ -308,17 +405,36 @@ impl<'gc> Executor<'gc> {
                                     bottom,
                                     sequence,
                                     pending_error: None,
+                                    ccalls,
                                 });
                             }
                             Ok(CallbackReturn::Call { function, then }) => {
-                                if let Some(sequence) = then {
-                                    top_state.frames.push(Frame::Sequence {
-                                        bottom,
-                                        sequence,
-                                        pending_error: None,
-                                    });
+                                // A callback that goes on afterwards calls with
+                                // `lua_call`, which takes a C level. One that
+                                // does not is a tail call (`__call`, `bind`), and
+                                // keeps its own, as a Lua tail call does.
+                                let tail = then.is_none();
+                                let ccalls = match then {
+                                    Some(sequence) => {
+                                        top_state.frames.push(Frame::Sequence {
+                                            bottom,
+                                            sequence,
+                                            pending_error: None,
+                                            ccalls,
+                                        });
+                                        ccalls.saturating_add(1)
+                                    }
+                                    None => ccalls,
+                                };
+                                if let Err(limit) = top_state.push_call(bottom, function, ccalls) {
+                                    if tail {
+                                        raise_limit_in_caller(
+                                            ctx, top_state, bottom, limit, ccalls,
+                                        );
+                                    } else {
+                                        raise_limit(ctx, top_state, bottom, limit, ccalls);
+                                    }
                                 }
-                                top_state.push_call(bottom, function);
                             }
                             Ok(CallbackReturn::Yield { to_thread, then }) => {
                                 if let Some(sequence) = then {
@@ -326,6 +442,7 @@ impl<'gc> Executor<'gc> {
                                         bottom,
                                         sequence,
                                         pending_error: None,
+                                        ccalls,
                                     });
                                 }
                                 do_yield(
@@ -342,13 +459,14 @@ impl<'gc> Executor<'gc> {
                                         bottom,
                                         sequence,
                                         pending_error: None,
+                                        ccalls,
                                     });
                                 }
                                 do_resume(ctx, &mut state.thread_stack, top_state, thread, bottom);
                             }
                             Err(err) => {
                                 top_state.stack.truncate(bottom);
-                                top_state.frames.push(Frame::Error(err))
+                                top_state.raise(err, running);
                             }
                         }
                     }
@@ -356,19 +474,33 @@ impl<'gc> Executor<'gc> {
                         bottom,
                         mut sequence,
                         pending_error,
+                        ccalls,
                     }) => {
                         fuel.consume(Self::FUEL_PER_SEQ_STEP);
 
+                        let running = top_state.effective_ccalls(ccalls);
                         let exec = Execution {
                             executor: self,
                             fuel,
                             threads: &state.thread_stack,
                             upper_frames: &top_state.frames,
+                            ccalls: running,
+                            error_ccalls: top_state.error_ccalls,
                         };
+                        let mark = ctx.memory_mark();
+                        // An error that `error` passes on keeps the level it
+                        // was raised at; one that `poll` returns is raised here.
+                        let handling = pending_error.is_some();
                         let poll = if let Some(err) = pending_error {
                             sequence.error(ctx, exec, err, Stack::new(&mut top_state.stack, bottom))
                         } else {
                             sequence.poll(ctx, exec, Stack::new(&mut top_state.stack, bottom))
+                        };
+                        out_of_memory = ctx.memory_check(mark);
+                        let poll = if out_of_memory {
+                            Err(ctx.not_enough_memory())
+                        } else {
+                            poll
                         };
 
                         match poll {
@@ -377,6 +509,7 @@ impl<'gc> Executor<'gc> {
                                     bottom,
                                     sequence,
                                     pending_error: None,
+                                    ccalls,
                                 });
                             }
                             Ok(SequencePoll::Return) => {
@@ -390,11 +523,37 @@ impl<'gc> Executor<'gc> {
                                     bottom,
                                     sequence,
                                     pending_error: None,
+                                    ccalls,
                                 });
-                                top_state.push_call(bottom + rel_bottom, function);
+                                let ccalls = ccalls.saturating_add(1);
+                                if let Err(limit) =
+                                    top_state.push_call(bottom + rel_bottom, function, ccalls)
+                                {
+                                    raise_limit(ctx, top_state, bottom + rel_bottom, limit, ccalls);
+                                }
+                            }
+                            Ok(SequencePoll::CallAt {
+                                function,
+                                bottom: rel_bottom,
+                                ccalls: absolute,
+                            }) => {
+                                top_state.frames.push(Frame::Sequence {
+                                    bottom,
+                                    sequence,
+                                    pending_error: None,
+                                    ccalls,
+                                });
+                                let ccalls = top_state.relative_ccalls(absolute);
+                                if let Err(limit) =
+                                    top_state.push_call(bottom + rel_bottom, function, ccalls)
+                                {
+                                    raise_limit(ctx, top_state, bottom + rel_bottom, limit, ccalls);
+                                }
                             }
                             Ok(SequencePoll::TailCall(function)) => {
-                                top_state.push_call(bottom, function);
+                                if let Err(limit) = top_state.push_call(bottom, function, ccalls) {
+                                    raise_limit(ctx, top_state, bottom, limit, ccalls);
+                                }
                             }
                             Ok(SequencePoll::Yield {
                                 to_thread,
@@ -404,6 +563,7 @@ impl<'gc> Executor<'gc> {
                                     bottom,
                                     sequence,
                                     pending_error: None,
+                                    ccalls,
                                 });
                                 do_yield(
                                     ctx,
@@ -430,6 +590,7 @@ impl<'gc> Executor<'gc> {
                                     bottom,
                                     sequence,
                                     pending_error: None,
+                                    ccalls,
                                 });
                                 do_resume(
                                     ctx,
@@ -444,7 +605,11 @@ impl<'gc> Executor<'gc> {
                             }
                             Err(error) => {
                                 top_state.stack.truncate(bottom);
-                                top_state.frames.push(Frame::Error(error));
+                                if handling && !out_of_memory {
+                                    top_state.frames.push(Frame::Error(error));
+                                } else {
+                                    top_state.raise(error, running);
+                                }
                             }
                         }
                     }
@@ -456,27 +621,52 @@ impl<'gc> Executor<'gc> {
                             thread: top_thread,
                             fuel,
                         };
-                        match run_vm(ctx, lua_frame, Self::VM_GRANULARITY) {
-                            Err(err) => {
-                                // `luaG_runerror` from a Lua function: the
-                                // message, as a string, after the position of
-                                // the instruction that raised it.
-                                let err = match top_state.frames.last() {
-                                    Some(Frame::Lua { closure, pc, .. }) if err.is_lua_error() => {
-                                        let mut msg = if err.is_positioned() {
-                                            lua_where(*closure, pc.saturating_sub(1))
-                                        } else {
-                                            std::vec::Vec::new()
-                                        };
-                                        msg.extend_from_slice(err.to_string().as_bytes());
-                                        Error::from(crate::Value::String(ctx.intern(&msg)))
-                                    }
-                                    _ => err.into(),
-                                };
-                                top_state.frames.push(Frame::Error(err));
-                            }
-                            Ok(instructions_run) => {
+                        let mark = ctx.memory_mark();
+                        let ran = run_vm(ctx, lua_frame, Self::VM_GRANULARITY);
+                        // A call or return ends `run_vm` without its own
+                        // check; the new top frame fails instead.
+                        out_of_memory = matches!(ran, Err(super::VMError::NotEnoughMemory))
+                            || (!ctx.collection_requested() && ctx.memory_check(mark));
+                        if out_of_memory {
+                            if let Ok(instructions_run) = ran {
                                 fuel.consume(instructions_run.try_into().unwrap());
+                            }
+                            raise_memory_error(ctx, top_state);
+                        } else {
+                            match ran {
+                                Err(err) => {
+                                    // `luaG_runerror` from a Lua function: the
+                                    // message, as a string, after the position of
+                                    // the instruction that raised it.
+                                    let ccalls = top_state.ccalls();
+                                    let err = match top_state.frames.last() {
+                                        // `LUA_ERRERR`: the one string handlers
+                                        // let past, with no position.
+                                        _ if matches!(
+                                            err,
+                                            super::VMError::ErrorInErrorHandling
+                                        ) =>
+                                        {
+                                            ctx.error_in_error_handling()
+                                        }
+                                        Some(Frame::Lua { closure, pc, .. })
+                                            if err.is_lua_error() =>
+                                        {
+                                            let mut msg = if err.is_positioned() {
+                                                lua_where(*closure, pc.saturating_sub(1))
+                                            } else {
+                                                std::vec::Vec::new()
+                                            };
+                                            msg.extend_from_slice(err.to_string().as_bytes());
+                                            Error::from(crate::Value::String(ctx.intern(&msg)))
+                                        }
+                                        _ => err.into(),
+                                    };
+                                    top_state.raise(err, ccalls);
+                                }
+                                Ok(instructions_run) => {
+                                    fuel.consume(instructions_run.try_into().unwrap());
+                                }
                             }
                         }
                     }
@@ -495,13 +685,21 @@ impl<'gc> Executor<'gc> {
                                 bottom,
                                 sequence,
                                 pending_error,
+                                ccalls,
                             } => {
                                 assert!(pending_error.is_none());
                                 top_state.frames.push(Frame::Sequence {
                                     bottom,
                                     sequence,
                                     pending_error: Some(err),
+                                    ccalls,
                                 });
+                                // A "not enough memory" error has reached its
+                                // handler, and the frames it unwound are gone:
+                                // collect them before the handler runs.
+                                if ctx.end_memory_unwind() {
+                                    break false;
+                                }
                             }
                             frame => panic!("tried to wind through improper frame {frame:?}"),
                         }
@@ -511,6 +709,14 @@ impl<'gc> Executor<'gc> {
             }
 
             fuel.consume(Self::FUEL_PER_STEP);
+
+            if out_of_memory {
+                ctx.begin_memory_unwind();
+                break false;
+            }
+            if ctx.collection_requested() {
+                break false;
+            }
 
             if !fuel.should_continue() {
                 break false;
@@ -612,6 +818,8 @@ pub struct Execution<'gc, 'a> {
     fuel: &'a mut Fuel,
     threads: &'a [Thread<'gc>],
     upper_frames: &'a [Frame<'gc>],
+    ccalls: u32,
+    error_ccalls: u32,
 }
 
 impl<'gc, 'a> Execution<'gc, 'a> {
@@ -621,7 +829,21 @@ impl<'gc, 'a> Execution<'gc, 'a> {
             fuel: self.fuel,
             threads: self.threads,
             upper_frames: self.upper_frames,
+            ccalls: self.ccalls,
+            error_ccalls: self.error_ccalls,
         }
+    }
+
+    /// The C calls (PUC-Lua's `nCcalls`) the running callback runs under.
+    pub fn ccalls(&self) -> u32 {
+        self.ccalls
+    }
+
+    /// The C calls the error last raised in this thread was raised under:
+    /// in `Sequence::error`, the error being handled. A message handler runs
+    /// one level above it ([`SequencePoll::CallAt`](crate::SequencePoll)).
+    pub fn error_ccalls(&self) -> u32 {
+        self.error_ccalls
     }
 
     /// The fuel parameter passed to `Executor::step`.
@@ -694,6 +916,32 @@ impl<'gc, 'a> Execution<'gc, 'a> {
             },
         })
     }
+}
+
+/// Raise "not enough memory" in the code at the top of `state`, which has
+/// just run: from a Lua frame, from the frame a call or return of it left on
+/// top. Returns whether there was code to raise it in.
+fn raise_memory_error<'gc>(ctx: Context<'gc>, state: &mut ThreadState<'gc>) -> bool {
+    match state.frames.last() {
+        Some(Frame::Lua { .. } | Frame::Sequence { .. }) => {}
+        // The thread's last frame had returned: it ends with the error
+        // instead.
+        Some(Frame::Result { .. }) if state.frames.len() == 1 => {
+            state.frames.pop();
+            state.stack.clear();
+        }
+        // A call was queued: it is not made.
+        Some(&Frame::Callback { bottom, .. }) => {
+            state.frames.pop();
+            state.stack.truncate(bottom);
+        }
+        // Anything else has stopped running Lua code, or has an error on its
+        // way already.
+        _ => return false,
+    }
+    let ccalls = state.ccalls();
+    state.raise(ctx.not_enough_memory(), ccalls);
+    true
 }
 
 /// `luaG_addinfo`'s prefix, `chunk:line: `, for instruction `op` of `closure`.

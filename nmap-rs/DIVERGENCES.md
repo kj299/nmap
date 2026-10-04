@@ -2478,13 +2478,13 @@ listed at the end.
       script chose, not a subject a host chose, so it is not remotely
       triggerable through any shipped script; it is closed because the threat
       model treats scripts as untrusted too.
-- [x] `pattern-gsub-allocation-failure-is-a-lua-error` — **partial; see
-      `vm-allocation-failure-aborts` below.** The `gsub` result buffer grows
-      with `try_reserve`, so a buffer the system refuses raises "not enough
-      memory", which a script can `pcall`, rather than aborting. But the
-      finished buffer, and every capture `find`/`match`/`gmatch` return, then
-      becomes a Lua string through the VM's `intern`, which cannot fail softly.
-      This guard closes the one allocation this module owns, nothing more.
+- [x] `pattern-gsub-allocation-failure-is-a-lua-error` — the `gsub` result
+      buffer asks the VM's memory budget before it grows, then grows with
+      `try_reserve`, so a buffer past the budget, or one the system refuses,
+      raises "not enough memory", which a script can `pcall`, rather than
+      aborting. The finished buffer, and every capture `find`/`match`/`gmatch`
+      return, becomes a Lua string through the VM's `intern`, which refuses
+      past the budget too (`vm-allocation-failure-aborts`, closed in M6.4b).
 - [x] `pattern-gsub-yields-to-the-host-between-matches`: `gsub` is a VM
       sequence that spends one unit of fuel per replacement and returns to the
       host when the fuel runs out, so a long substitution no longer holds the
@@ -2549,33 +2549,30 @@ mutated real NSE patterns, and robustness under large inputs and memory caps),
 every finding re-checked against `lstrlib.c`. None is a wrong answer from the
 matcher. Each is reachable *through* these functions but is a defect of the
 vendored VM, equally reachable from plain Lua code, so it is recorded here and
-not fixed in this module. They are open:
+not fixed in this module. Four are closed by M6.4b (below); one is open:
 
-- [ ] `vm-allocation-failure-aborts` — PUC-Lua allocates every string through
-      `luaM_`, which raises a catchable "not enough memory" when the system
-      refuses. The VM's `Context::intern` aborts the process instead, so under a
-      memory cap `pcall(string.match, s, "^((.*).).")` on a 100 MB subject
-      returns `false, "not enough memory"` in C and kills the port with exit
-      134 — as do `string.upper` and `table.concat` on the same input. A remote
-      host controls subject sizes, so this is a scanner-killing path; the NSE
-      runtime needs a memory budget that refuses before the allocator does.
-
-- [ ] `vm-no-c-call-depth-limit` — PUC-Lua counts nested C-to-Lua calls and
-      raises "C stack overflow" at `LUAI_MAXCCALLS` (200); a `gsub` callback
-      that calls `gsub` again fails at depth 196. The stackless VM counts
-      nothing, so the recursion succeeds at any depth, and a runaway one —
-      `local function f(c) return (c:gsub(".", f)) end` — grows the heap
-      until something else stops it (about 1.4 GB in 1.6 s before the eval
-      harness's fuel budget did). Plain Lua recursion is unbounded the same way.
-      This is a memory-exhaustion vector a script controls; the NSE runtime
-      needs a call-depth or memory budget before M6.4.
-- [ ] `vm-index-chain-unbounded` — `luaV_finishget` stops an `__index` chain
-      after `MAXTAGLOOP` (2,000) hops with "'__index' chain too long; possible
-      loop"; `meta_ops::index` counts no hops, so a cyclic chain hangs (fuel
-      still bounds it) and a 2,500-table chain succeeds.
-- [ ] `vm-index-non-table-is-called` — an `__index` that is neither a function
-      nor a table (a string, say) is *indexed* by PUC-Lua, through that value's
-      own metatable; `meta_ops::index` tries to *call* it and raises.
+- [x] `vm-allocation-failure-aborts` (closed in M6.4b) — PUC-Lua allocates
+      every string through `luaM_`, which raises a catchable "not enough
+      memory" when the system refuses. The VM's `Context::intern` aborted the
+      process instead, so under a memory cap `pcall(string.match, s,
+      "^((.*).).")` on a 100 MB subject returned `false, "not enough memory"`
+      in C and killed the port with exit 134 — as did `string.upper` and
+      `table.concat` on the same input. The VM now has a memory budget that
+      refuses before the allocator does; see Milestone 6.4b.
+- [x] `vm-no-c-call-depth-limit` (closed in M6.4b) — PUC-Lua counts nested
+      C-to-Lua calls and raises "C stack overflow" at `LUAI_MAXCCALLS` (200); a
+      `gsub` callback that calls `gsub` again fails at depth 196. The stackless
+      VM counted nothing, so a runaway recursion — `local function f(c) return
+      (c:gsub(".", f)) end` — grew the heap until something else stopped it
+      (about 1.4 GB in 1.6 s). It now fails at depth 196, as in C.
+- [x] `vm-index-chain-unbounded` (closed in M6.4b) — `luaV_finishget` stops
+      an `__index` chain after `MAXTAGLOOP` (2,000) hops with "'__index' chain
+      too long; possible loop"; `meta_ops::index` counted no hops, so a cyclic
+      chain hung (fuel still bounded it) and a 2,500-table chain succeeded.
+- [x] `vm-index-non-table-is-called` (closed in M6.4b) — an `__index` that is
+      neither a function nor a table (a string, say) is *indexed* by PUC-Lua,
+      through that value's own metatable; `meta_ops::index` tried to *call*
+      it and raised.
 - [ ] `vm-hex-float-double-rounding` — `read_hex_float` rounds after every
       digit, so `"0x3.00000000000011"` converts to exactly 3 and is accepted as
       an integer argument (`find`'s `init`, `gsub`'s count) where `l_str2d`
@@ -2637,8 +2634,9 @@ accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
       whose size it argues from the specification (`MAX_ITEM`, `MAX_ITEMF`).
       Here each item is built in a `Vec` grown with `try_reserve`, so there is
       no bound to argue and a refused allocation is the catchable "not enough
-      memory". The finished string still goes through the VM's `intern`
-      (`vm-allocation-failure-aborts`).
+      memory". The output buffer asks the VM's memory budget before it grows,
+      and the finished string goes through the VM's `intern`, which refuses
+      past it (`vm-allocation-failure-aborts`, closed in M6.4b).
 
 ### Differences that belong to the VM, not to this module
 
@@ -2687,11 +2685,12 @@ reader never stops, since a number is never the empty string.
       `""` immediately here. The C runs its copy loop `n` times regardless of
       the result's size — 2^63 iterations of copying nothing, a hang
       (measured: killed after 20 s). Same answer, without the loop.
-- [x] `strrep-allocation-is-fallible`: the result buffer is reserved with
-      `try_reserve_exact` before it is filled, so a result under the C's
-      `MAXSIZE` bound that the system still refuses is the catchable "not
-      enough memory". The finished string still goes through the VM's
-      `intern` (`vm-allocation-failure-aborts`).
+- [x] `strrep-allocation-is-fallible`: the result's size is put to the VM's
+      memory budget, then reserved with `try_reserve_exact`, before it is
+      filled, so a result under the C's `MAXSIZE` bound that the budget or the
+      system refuses is the catchable "not enough memory" — not a gigabyte
+      buffer an overcommitting allocator grants and then cannot back
+      (`vm-allocation-failure-aborts`, closed in M6.4b).
 
 ### Faithfully reproduced C behaviour (deliberately *not* "improved")
 
@@ -2710,12 +2709,13 @@ reader never stops, since a number is never the empty string.
 
 ### Differences that belong to these bindings, observable only at the edges
 
-- [x] `xpcall-handler-run-count`: the C re-runs a failing handler until its C
-      stack overflows — 214 runs from a chunk called by `pcall`, fewer when
-      nested inside other `pcall`s — then reports "error in error handling".
-      This port counts runs up to the C's ceiling, `LUAI_MAXCCALLS / 10 * 11`
-      (220), at any depth. The result is the same; a handler that counts its
-      own runs sees a different number.
+- [x] `xpcall-handler-run-count` (matched since M6.4b): the C re-runs a
+      failing handler, each run one C level above the error it handles, until
+      the levels reach `LUAI_MAXCCALLS / 10 * 11` (220) — 214 runs from a chunk
+      called by `pcall`, fewer when nested inside other `pcall`s — then
+      reports "error in error handling". The port counted runs up to 220 at
+      any depth; the VM now counts C levels, and calls the handler at the
+      C's level, so a handler that counts its own runs sees the C's number.
 - [x] `xpcall-handler-runs-after-unwind`: PUC-Lua calls the handler at the
       point of the error, before the stack unwinds, which is what lets
       `debug.traceback` in a handler show the failing frame. Here the handler
@@ -2936,3 +2936,118 @@ wrong types, and errors on later lines. Two VM defects closed:
       string fails in the string metatable's metamethod, with its message,
       `attempt to add a 'string' with a 'number'`. Integer division of numeric
       strings by zero fails inside that C function, unpositioned.
+
+## Milestone 6.4b — the limits on a running state (vendored VM patch `0009`)
+
+A stackless VM needs no call-depth limit to stay sound, and piccolo had none,
+nor any bound on its heap. So a runaway script — recursion through `gsub`,
+an `__index` that indexes itself, a function that calls itself, a loop that
+fills a table — grew the heap until the system refused, and then the process
+aborted, because Rust's allocator cannot fail softly. Patch `0009` gives the
+VM PUC-Lua's limits and its "not enough memory":
+
+- **`LUAI_MAXCCALLS` (200).** Every frame records the C calls it runs under,
+  counted as `ccall` counts them. A level is taken by:
+  - a call a Rust function makes, as a C function's `lua_call` would;
+  - a metamethod (`luaT_callTMres`);
+  - a generic `for` iterator (`OP_TFORCALL`);
+  - a coroutine resume (`lua_resume`, one above its resumer, whatever depth
+    it yielded at).
+
+  No level is taken by a Lua call, `__call`, a chain of `__index` tables, or
+  a Rust tail call. A call landing exactly on 200 raises "C stack overflow",
+  with the caller's position when the caller is Lua. A message handler runs
+  one level above the error it handles, as `luaG_errormsg` runs it, so it may
+  go past 200 until 220, where every call raises "error in error handling",
+  which no handler sees.
+- **`LUAI_MAXSTACK` (1,000,000 slots)** for each thread, with "stack overflow";
+  `table.unpack` and `string.byte` refuse results the stack has no room for, as
+  `lua_checkstack` does ("too many results to unpack", "stack overflow (string
+  slice too long)").
+- **`MAXTAGLOOP` (2,000)**: `__index` and `__newindex` are followed as
+  `luaV_finishget`/`luaV_finishset` follow them, in one go, a function called,
+  anything else indexed in turn.
+- **A memory budget** (`Lua::set_memory_limit`, unlimited by default; the NSE
+  runtime sets it). It follows `luaM_malloc_`, which collects in full and
+  tries again before it fails:
+  - **A request that fits** beside what the last collection left live is
+    granted. If the heap is then past the budget, a full collection runs
+    before Lua goes on, and the code fails with "not enough memory" only if
+    the heap is still past it.
+  - **A request that cannot fit even then** is refused up front. This covers
+    a string, a table's next array or map part, and a buffer the stdlib builds
+    to a size a script chooses (`string.rep`, `gsub`, `format`, `pack`,
+    `table.concat`, `..`, `load`'s reader).
+  - **The error** is catchable, has no position, and `xpcall`'s handler never
+    sees it (`LUA_ERRMEM`). Raised by `error` with that exact text, it is a
+    memory error too, as `lua_error` makes it. A script that drops what it
+    holds runs on.
+
+Gated by two corpora, both compared on every value and every message, with no
+exemption list:
+
+- [`m64_limits_cases.txt`](tests/differential/m6/m64_limits_cases.txt): 335
+  chunks against `liblua/`. Nineteen ways of recursing through C levels are
+  each run from fourteen kinds of caller, message handlers among them,
+  comparing how many levels each reached. It also covers runaway recursion,
+  `__index` and `__newindex` chains either side of 2,000, and result counts.
+- [`m64_memory_cases.txt`](tests/differential/m6/m64_memory_cases.txt): 41
+  chunks, each run by `liblua/` in a process of its own under `ulimit -v`,
+  and here in a fresh VM under a 32 MiB budget. They cover:
+  - requests no limit allows;
+  - allocations that grow until they fail, then recover;
+  - memory errors inside coroutines, callbacks and metamethods;
+  - memory errors and message handlers;
+  - work well within any limit.
+
+  No case depends on where exactly memory runs out.
+
+Beyond the four VM entries above (`vm-allocation-failure-aborts`,
+`vm-no-c-call-depth-limit`, `vm-index-chain-unbounded`,
+`vm-index-non-table-is-called`), the corpora found:
+
+- **Unbounded recursion stayed unbounded** after the stack limit was added.
+  A frame here starts at its function's register, so `return 1 + f()` grows
+  no stack at all; the limit now counts each frame's function slot, as
+  PUC-Lua's stack holds it.
+- **`table.unpack({}, 1, 1e15)`** pushed values until fuel ran out, and
+  `string.byte` of a large string pushed every byte; both now refuse as the C
+  does.
+- **`string.rep('x', 2e9)` built a 2 GB buffer** before the VM refused the
+  string made from it. An allocator that overcommits grants that and fails
+  later; one that does not aborts.
+- **`__concat` took two C levels** where the C takes one.
+
+### Open, and documented
+
+- [ ] `parser-nesting-limit-is-fixed` — PUC-Lua's parser counts its nesting
+      as C levels on top of the caller's (`enterlevel`) and fails with "C stack
+      overflow"; the vendored parser allows 200 nested constructs whatever the
+      caller's depth and fails with `chunk:1: recursion limit reached`. Both
+      are catchable `load` errors; the threshold and the wording differ.
+- [ ] `table-sort-takes-no-c-level` — the vendored `table.sort` is written in
+      Lua, so its comparator runs one C level lower than C's `sort`, which
+      calls it with `lua_call`; a recursion through a comparator overflows one
+      level later. `table.sort` is not one of the first-party stdlib functions.
+- [ ] `stack-limit-counts-slots-differently` — frames are laid out
+      differently, so runaway recursion stops within a few dozen slots of where
+      PUC-Lua's does, and a result count within a few dozen of 1,000,000 may be
+      accepted where the C refuses. The corpus compares only well inside and
+      well past the limit.
+- [ ] `memory-budget-is-not-the-system` — PUC-Lua runs out where the system's
+      allocator does; the port runs out at its budget, which counts the VM's
+      heap as `gc-arena` measures it plus the stdlib's buffers. The two are
+      different numbers, so where a script runs out differs, while what it then
+      observes is the same. A grant that fits beside the live heap can take the
+      heap past the budget until the collection after it, by at most the
+      budget itself, so a budget should be at most half of the memory the
+      scanner may use.
+
+### Behaviour now matched that the corpora pin
+
+- [x] `xpcall-handler-run-count` — see the M6 tail: 214 runs, as in C.
+- [x] `vm-call-metamethod-is-free` — `__call` takes no C level, and a limit
+      it reaches is raised from the Lua caller, with its position, as from
+      `tryfuncTM` inside `luaD_precall`.
+- [x] `memory-error-skips-handlers` — "not enough memory" goes past `xpcall`'s
+      handler and `coroutine.wrap`'s position prefix, as `LUA_ERRMEM` does.

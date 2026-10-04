@@ -42,8 +42,8 @@ pub fn load_table<'gc>(ctx: Context<'gc>) {
                 return Ok(CallbackReturn::Return);
             }
 
-            let length = try_compute_length(start, end)
-                .ok_or_else(|| "Too many values to unpack".into_value(ctx))?;
+            let length = try_compute_length(&stack, start, end)
+                .ok_or_else(|| "too many results to unpack".into_value(ctx))?;
             Unpack::MainLoop {
                 start,
                 table,
@@ -75,10 +75,12 @@ pub fn load_table<'gc>(ctx: Context<'gc>) {
                         stack.replace(ctx, v);
                         Ok(CallbackReturn::Return)
                     }
-                    ConcatMetaResult::Call(func) => Ok(CallbackReturn::Call {
-                        function: func,
-                        then: None,
-                    }),
+                    ConcatMetaResult::Call(func) | ConcatMetaResult::Concatenate(func) => {
+                        Ok(CallbackReturn::Call {
+                            function: func,
+                            then: None,
+                        })
+                    }
                 }
             });
 
@@ -547,11 +549,16 @@ impl<'gc> Sequence<'gc> for Pack<'gc> {
 }
 
 // Try to compute the length of a range for unpack, accounting for potential overflow.
-fn try_compute_length(start: i64, end: i64) -> Option<usize> {
+/// How many values `unpack(t, start, end)` returns, if they fit: `luaB_unpack`
+/// refuses `INT_MAX` or more, and more than the stack has room for.
+fn try_compute_length(stack: &Stack<'_, '_>, start: i64, end: i64) -> Option<usize> {
     assert!(start <= end);
-    end.checked_sub(start)
-        .and_then(|l| l.checked_add(1))
-        .and_then(|l| usize::try_from(l).ok())
+    let n = (end as u64).wrapping_sub(start as u64);
+    if n >= i32::MAX as u64 {
+        return None;
+    }
+    let n = usize::try_from(n).ok()?.checked_add(1)?;
+    stack.has_room(n).then_some(n)
 }
 
 const UNPACK_ELEMS_PER_FUEL: usize = 8;
@@ -607,8 +614,8 @@ impl<'gc> Sequence<'gc> for Unpack<'gc> {
             if start > end {
                 return Ok(SequencePoll::Return);
             }
-            let length = try_compute_length(start, end)
-                .ok_or_else(|| "Too many values to unpack".into_value(ctx))?;
+            let length = try_compute_length(&stack, start, end)
+                .ok_or_else(|| "too many results to unpack".into_value(ctx))?;
             *self = Unpack::MainLoop {
                 start,
                 table,

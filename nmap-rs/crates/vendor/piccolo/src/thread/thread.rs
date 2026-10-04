@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::{
     closure::{UpValue, UpValueState},
     fuel::count_fuel,
+    limits::{CallLimit, LUAI_MAXCCALLS, LUAI_MAXCCALLS_ERR, LUAI_MAXSTACK},
     meta_ops,
     types::{RegisterIndex, VarCount},
     BoxSequence, Callback, Closure, Context, Error, FromMultiValue, Fuel, Function, IntoMultiValue,
@@ -81,6 +82,8 @@ impl<'gc> Thread<'gc> {
                 frames: vec::Vec::new_in(MetricsAlloc::new(&ctx)),
                 stack: vec::Vec::new_in(MetricsAlloc::new(&ctx)),
                 open_upvalues: vec::Vec::new_in(MetricsAlloc::new(&ctx)),
+                ccalls_base: 0,
+                error_ccalls: 0,
             }),
         );
         ctx.finalizers().register_thread(&ctx, p);
@@ -112,8 +115,29 @@ impl<'gc> Thread<'gc> {
         let mut state = self.check_mode(&ctx, ThreadMode::Stopped)?;
         assert!(state.stack.is_empty());
         state.stack.extend(args.into_multi_value(ctx));
-        state.push_call(0, function);
+        if let Err(limit) = state.push_call(0, function, 0) {
+            state.raise_at_start(ctx, limit);
+        }
         Ok(())
+    }
+
+    /// Set how many C calls (`LUAI_MAXCCALLS`) the code at the top of this
+    /// thread runs under — PUC-Lua's `nCcalls` — from which calls it makes
+    /// count up. An `Executor` sets it to one more than the resumer's for
+    /// each coroutine it resumes, as `lua_resume` does, whatever depth the
+    /// coroutine yielded at; an embedder sets it for a main thread it runs
+    /// from inside nested calls of its own.
+    pub fn set_ccalls(self, mc: &Mutation<'gc>, ccalls: u32) -> Result<(), BadThreadMode> {
+        match self.0.try_borrow_mut(mc) {
+            Ok(mut state) => {
+                state.set_ccalls(ccalls);
+                Ok(())
+            }
+            Err(_) => Err(BadThreadMode {
+                found: ThreadMode::Running,
+                expected: None,
+            }),
+        }
     }
 
     /// If this thread is `Stopped`, start a new suspended function.
@@ -153,7 +177,11 @@ impl<'gc> Thread<'gc> {
         match state.frames.pop().expect("no frame to resume") {
             Frame::Start(function) => {
                 assert!(bottom == 0 && state.open_upvalues.is_empty() && state.frames.is_empty());
-                state.push_call(0, function);
+                // `resume` starts the body with `ccall(L, ..., 0)`: no level
+                // taken, but the limit checked.
+                if let Err(limit) = state.push_call(0, function, 0) {
+                    state.raise_at_start(ctx, limit);
+                }
             }
             Frame::Yielded => {
                 state.return_to(bottom);
@@ -295,6 +323,9 @@ pub(super) enum Frame<'gc> {
         pc: usize,
         stack_size: usize,
         expected_return: Option<LuaReturn>,
+        /// C calls (`nCcalls`) this frame runs under, counted from the
+        /// thread's `ccalls_base`.
+        ccalls: u32,
     },
     /// A frame for a running sequence. When it is the top frame, either the `poll` or `error`
     /// method will be called the next time this thread is stepped, depending on whether there is a
@@ -305,6 +336,7 @@ pub(super) enum Frame<'gc> {
         // Will be set when unwinding has stopped at this frame. If set, this must be the top frame
         // of the stack.
         pending_error: Option<Error<'gc>>,
+        ccalls: u32,
     },
     /// A suspended function call that has not yet been run. Must be the only frame in the stack.
     Start(Function<'gc>),
@@ -312,6 +344,7 @@ pub(super) enum Frame<'gc> {
     Callback {
         bottom: usize,
         callback: Callback<'gc>,
+        ccalls: u32,
     },
     /// Thread has yielded and is waiting resume. Must be the top frame of the stack or immediately
     /// below a Result frame.
@@ -330,9 +363,64 @@ pub struct ThreadState<'gc> {
     pub(super) frames: vec::Vec<Frame<'gc>, MetricsAlloc<'gc>>,
     pub(super) stack: vec::Vec<Value<'gc>, MetricsAlloc<'gc>>,
     pub(super) open_upvalues: vec::Vec<UpValue<'gc>, MetricsAlloc<'gc>>,
+    /// What frames' `ccalls` count from: chosen so that the top frame runs
+    /// under the C calls last set by `set_ccalls`. Frames below it may then
+    /// count below zero, and run under none.
+    pub(super) ccalls_base: i64,
+    /// The C calls the error unwinding, or last unwound, was raised under:
+    /// an error handler runs one level above it (`luaG_errormsg`).
+    pub(super) error_ccalls: u32,
 }
 
 impl<'gc> ThreadState<'gc> {
+    /// The C calls the top frame runs under, counted from `ccalls_base`.
+    pub(super) fn top_ccalls(&self) -> u32 {
+        for frame in self.frames.iter().rev() {
+            match frame {
+                Frame::Lua { ccalls, .. }
+                | Frame::Sequence { ccalls, .. }
+                | Frame::Callback { ccalls, .. } => return *ccalls,
+                _ => {}
+            }
+        }
+        0
+    }
+
+    /// PUC-Lua's `nCcalls` for the code running at the top of this thread.
+    pub(super) fn ccalls(&self) -> u32 {
+        self.effective_ccalls(self.top_ccalls())
+    }
+
+    /// Raise `error` at the top of the thread, from code running under
+    /// `ccalls` C calls (absolute).
+    pub(super) fn raise(&mut self, error: Error<'gc>, ccalls: u32) {
+        self.error_ccalls = ccalls;
+        self.frames.push(Frame::Error(error));
+    }
+
+    /// The frame-relative `ccalls` for code running under `absolute` C calls.
+    pub(super) fn relative_ccalls(&self, absolute: u32) -> u32 {
+        u32::try_from((i64::from(absolute) - self.ccalls_base).max(0)).unwrap_or(u32::MAX)
+    }
+
+    pub(super) fn effective_ccalls(&self, ccalls: u32) -> u32 {
+        u32::try_from(self.ccalls_base.saturating_add(i64::from(ccalls)).max(0)).unwrap_or(u32::MAX)
+    }
+
+    pub(super) fn set_ccalls(&mut self, ccalls: u32) {
+        self.ccalls_base = i64::from(ccalls) - i64::from(self.top_ccalls());
+    }
+
+    /// The error for a thread whose first call could not be made: the
+    /// thread ends with it, as `resume`'s `luaD_rawrunprotected` ends a
+    /// coroutine.
+    fn raise_at_start(&mut self, ctx: Context<'gc>, limit: CallLimit) {
+        self.stack.clear();
+        self.frames.push(Frame::Error(
+            Value::String(ctx.intern(limit.message().as_bytes())).into(),
+        ));
+    }
+
     pub(super) fn mode(&self) -> ThreadMode {
         match self.frames.last() {
             None => {
@@ -361,7 +449,21 @@ impl<'gc> ThreadState<'gc> {
     ///
     /// Arguments are taken from the top of the stack starting at `bottom`, which will become the
     /// bottom of the newly pushed frame.
-    pub(super) fn push_call(&mut self, bottom: usize, function: Function<'gc>) {
+    ///
+    /// `ccalls` is the C calls the new frame runs under, counted from the
+    /// thread's `ccalls_base`: the caller's, plus one where PUC-Lua makes
+    /// the call through `ccall`. Nothing is changed when the call would
+    /// cross `LUAI_MAXCCALLS` or `LUAI_MAXSTACK`; the caller raises the
+    /// error.
+    pub(super) fn push_call(
+        &mut self,
+        bottom: usize,
+        function: Function<'gc>,
+        ccalls: u32,
+    ) -> Result<(), CallLimit> {
+        if let Some(limit) = self.call_limit(bottom, self.stack.len() - bottom, function, ccalls) {
+            return Err(limit);
+        }
         match function {
             Function::Closure(closure) => {
                 let proto = closure.prototype();
@@ -374,8 +476,8 @@ impl<'gc> ThreadState<'gc> {
                 } else {
                     0
                 };
-                self.stack[bottom..].rotate_right(var_params);
                 let base = bottom + var_params;
+                self.stack[bottom..].rotate_right(var_params);
 
                 self.stack.resize(base + stack_size, Value::Nil);
 
@@ -387,12 +489,54 @@ impl<'gc> ThreadState<'gc> {
                     pc: 0,
                     stack_size,
                     expected_return: None,
+                    ccalls,
                 });
             }
             Function::Callback(callback) => {
-                self.frames.push(Frame::Callback { bottom, callback });
+                self.frames.push(Frame::Callback {
+                    bottom,
+                    callback,
+                    ccalls,
+                });
             }
         }
+        Ok(())
+    }
+
+    /// The limit a call of `function` with `given_params` arguments, whose
+    /// frame would start at `bottom` and run under `ccalls`, would cross.
+    pub(super) fn call_limit(
+        &self,
+        bottom: usize,
+        given_params: usize,
+        function: Function<'gc>,
+        ccalls: u32,
+    ) -> Option<CallLimit> {
+        // `ccall` checks the C stack first (`luaE_checkcstack`). Only a call
+        // landing exactly on the limit raises: an error handler runs one
+        // level above the error it handles, past the limit, and may call on
+        // until the margin past it runs out.
+        let effective = self.effective_ccalls(ccalls);
+        if effective == LUAI_MAXCCALLS {
+            return Some(CallLimit::CStack);
+        }
+        if effective >= LUAI_MAXCCALLS_ERR {
+            return Some(CallLimit::ErrorHandling);
+        }
+        if let Function::Closure(closure) = function {
+            // `luaD_precall`'s `checkstackGCp`, before the frame exists. A
+            // frame here starts at its function's register, where PUC-Lua's
+            // starts one above, so each frame adds the function's slot.
+            let proto = closure.prototype();
+            let top = bottom
+                .saturating_add(given_params.saturating_sub(proto.fixed_params as usize))
+                .saturating_add(proto.stack_size as usize)
+                .saturating_add(self.frames.len());
+            if top > LUAI_MAXSTACK {
+                return Some(CallLimit::Stack);
+            }
+        }
+        None
     }
 
     /// Return to the current top frame from a popped frame.
@@ -722,9 +866,11 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
         self.state.stack.remove(function_index);
         self.state.stack.truncate(function_index + arg_count);
 
-        self.state.push_call(function_index, call);
-
-        Ok(())
+        // A Lua call (`OP_CALL`) takes no C level.
+        let ccalls = self.state.top_ccalls();
+        self.state
+            .push_call(function_index, call, ccalls)
+            .map_err(limit_error)
     }
 
     /// Calls the function at the given index with a constant number of arguments without
@@ -769,9 +915,9 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
             .stack
             .extend_from_within(function_index + 1..function_index + 1 + arg_count);
 
-        self.state.push_call(top, call);
-
-        Ok(())
+        // `OP_TFORCALL` calls the iterator with `luaD_call`: one C level.
+        let ccalls = self.state.top_ccalls().saturating_add(1);
+        self.state.push_call(top, call, ccalls).map_err(limit_error)
     }
 
     /// Calls an externally defined function in a completely non-destructive way in a new frame, and
@@ -780,10 +926,34 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
     /// Nothing at all in the frame is invalidated, other than optionally placing the return value.
     pub(super) fn call_meta_function(
         self,
+        ctx: Context<'gc>,
+        func: Function<'gc>,
+        args: &[Value<'gc>],
+        meta_ret: MetaReturn,
+    ) -> Result<(), VMError> {
+        // `luaT_callTMres` calls a metamethod with `luaD_call`: one C level.
+        self.call_meta(ctx, func, args, meta_ret, 1)
+    }
+
+    /// As [`Self::call_meta_function`], for a function that stands for a loop
+    /// of the VM's own, which takes no C level.
+    pub(super) fn call_meta_loop(
+        self,
+        ctx: Context<'gc>,
+        func: Function<'gc>,
+        args: &[Value<'gc>],
+        meta_ret: MetaReturn,
+    ) -> Result<(), VMError> {
+        self.call_meta(ctx, func, args, meta_ret, 0)
+    }
+
+    fn call_meta(
+        self,
         _ctx: Context<'gc>,
         func: Function<'gc>,
         args: &[Value<'gc>],
         meta_ret: MetaReturn,
+        levels: u32,
     ) -> Result<(), VMError> {
         let Some(Frame::Lua {
             expected_return,
@@ -812,9 +982,8 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
 
         self.state.stack.extend_from_slice(args);
 
-        self.state.push_call(top, func);
-
-        Ok(())
+        let ccalls = self.state.top_ccalls().saturating_add(levels);
+        self.state.push_call(top, func, ccalls).map_err(limit_error)
     }
 
     /// Tail-call the function at the given register with the given arguments. Pops the current Lua
@@ -849,6 +1018,14 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
 
         let call = meta_ops::call(ctx, self.state.stack[function_index])?;
 
+        // The called function reuses this frame's C level, and its limits
+        // are checked while this frame, whose position an error gives, is
+        // still here (`luaD_pretailcall`).
+        let ccalls = self.state.top_ccalls();
+        if let Some(limit) = self.state.call_limit(bottom, arg_count, call, ccalls) {
+            return Err(limit_error(limit));
+        }
+
         self.state.close_upvalues(&ctx, bottom);
         self.state.frames.pop();
 
@@ -860,9 +1037,9 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
             .copy_within(function_index + 1..function_index + 1 + arg_count, bottom);
         self.state.stack.truncate(bottom + arg_count);
 
-        self.state.push_call(bottom, call);
-
-        Ok(())
+        self.state
+            .push_call(bottom, call, ccalls)
+            .map_err(limit_error)
     }
 
     /// Return to the upper frame with results starting at the given register index.
@@ -1007,6 +1184,15 @@ impl<'gc, 'a> LuaRegisters<'gc, 'a> {
         }
 
         self.open_upvalues.truncate(start);
+    }
+}
+
+/// A call limit, raised from the Lua function making the call
+/// (`luaG_runerror`).
+fn limit_error(limit: CallLimit) -> VMError {
+    match limit {
+        CallLimit::ErrorHandling => VMError::ErrorInErrorHandling,
+        _ => VMError::Lua(limit.message().into()),
     }
 }
 

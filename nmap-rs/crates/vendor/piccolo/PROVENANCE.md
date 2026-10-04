@@ -10,7 +10,7 @@ one the rest of this port lives by: **no silent drift.**
 | commit | `ce709eb1dae5c543cbc78e7e12bb80249d88c55f` (2025-07-10) |
 | upstream version | `0.3.3` (the tag; master carries 139 unreleased commits on top) |
 | license | MIT **or** CC0-1.0, at your option (`LICENSE-MIT`, `LICENSE-CC0`) |
-| local changes | eight patches in `patches/`, listed below |
+| local changes | nine patches in `patches/`, listed below |
 | omitted | the `util/` workspace member (`piccolo-util`); unused here, and it carries 4 further `unsafe` blocks |
 
 `Cargo.toml` is **ours**, not upstream's: upstream's is a workspace root and
@@ -32,6 +32,7 @@ without reverse-engineering it from one combined diff.
 | `0006-port-float-formatting-from-puc-lua.patch` | `tostring` and `..` for floats, ported from `tostringbuff` in `lobject.c`; also fixes an `i64::MIN.abs()` abort in the concat length estimate |
 | `0007-port-string-to-number-coercion-from-puc-lua.patch` | `luaO_str2num` and which operators reach for it: the integer-before-float subtype, `tointegerns` for the bitwise operators, the float-to-integer range, and the `inf`/`nan` refusal. The first patch to touch `tests/` — see below |
 | `0008-port-runtime-errors-and-numeric-for-from-puc-lua.patch` | runtime errors as PUC-Lua raises them: Lua strings, in its words (`ldebug.c`'s `typeerror`, `concaterror`, `opinterror`, `ordererror`; `lstrlib.c`'s `trymt`; `__name`), prefixed `chunk:LINE:` from the failing instruction (`luaO_chunkid`, now `src/chunk_id.rs`); `error` levels and `assert` positions (`luaL_where`), counting a tail-called Rust function's caller as C does; and the numeric `for` rewritten to Lua 5.4's `forprep`/`forloop`, which closes a hang on a zero step. Also corrects `tests/scripts/pcall.lua` and `coroutine.lua` — see below |
+| `0009-port-call-depth-stack-and-memory-limits-from-puc-lua.patch` | PUC-Lua's limits on a running state (`src/limits.rs`). `LUAI_MAXCCALLS`, counted per frame as `ccall` counts it: a call from a Rust function, a metamethod, a `for` iterator and a coroutine resume each take a level, and a message handler runs one level above its error (`SequencePoll::CallAt`, `Execution::error_ccalls`). `LUAI_MAXSTACK`, and `lua_checkstack` for `table.unpack` and `string.byte`. `__index`/`__newindex` followed as `luaV_finishget`/`luaV_finishset` follow them, up to `MAXTAGLOOP`. And a memory budget (`src/budget.rs`, `Lua::set_memory_limit`) that fails with a catchable "not enough memory" where the process used to abort: requests are granted, refused or followed by a full collection as `luaM_malloc_` does, and handlers never see the error |
 
 ### The one patch that edits upstream's tests
 

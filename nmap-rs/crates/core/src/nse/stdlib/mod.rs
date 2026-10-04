@@ -152,6 +152,22 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
     );
 }
 
+/// Make room for `additional` more bytes in a buffer whose size a script
+/// chooses, or say why not: `luaL_Buffer` raises "not enough memory" when
+/// its allocator refuses. The buffer is not on the VM's heap, so the memory
+/// budget is asked for the whole capacity it grows to, before the allocator
+/// is — which, overcommitting, would grant gigabytes it cannot back.
+pub(crate) fn reserve(out: &mut Vec<u8>, additional: usize) -> bool {
+    if out.capacity().saturating_sub(out.len()) >= additional {
+        return true;
+    }
+    let grown = out
+        .len()
+        .saturating_add(additional)
+        .max(out.capacity().saturating_mul(2));
+    piccolo::budget::allows(grown) && out.try_reserve(additional).is_ok()
+}
+
 /// A Lua error carrying a string, which is what `luaL_error` and
 /// `luaL_argerror` raise: `pcall` returns it as the message.
 pub(crate) fn lua_error<'gc>(ctx: Context<'gc>, msg: &str) -> Error<'gc> {

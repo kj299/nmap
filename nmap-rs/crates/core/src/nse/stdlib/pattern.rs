@@ -1047,8 +1047,9 @@ impl Gmatch {
 /// Append `bytes` to a `gsub` result, failing as `luaL_Buffer` does — with a
 /// catchable error — if the allocation is refused, rather than aborting.
 fn put(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PatternError> {
-    out.try_reserve(bytes.len())
-        .map_err(|_| PatternError::out_of_memory())?;
+    if !super::reserve(out, bytes.len()) {
+        return Err(PatternError::out_of_memory());
+    }
     out.extend_from_slice(bytes);
     Ok(())
 }

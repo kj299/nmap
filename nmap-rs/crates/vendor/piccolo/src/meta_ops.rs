@@ -389,184 +389,113 @@ fn get_metamethod<'gc>(
         .filter(|v| !v.is_nil())
 }
 
+/// `MAXTAGLOOP` (`lvm.c`): how many `__index` / `__newindex` values a lookup
+/// follows before it gives up.
+pub const MAXTAGLOOP: usize = 2000;
+
+/// The metatable PUC-Lua consults for `v` (`luaT_gettmbyobj`), if any.
+fn metatable_of<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Option<Table<'gc>> {
+    match v {
+        Value::Table(t) => t.metatable(),
+        Value::UserData(u) => u.metatable(),
+        // What makes `s:sub(1, 2)` and `("x"):rep(3)` work: a method call
+        // and a plain index both route here.
+        Value::String(_) => Some(string_metatable(ctx)),
+        _ => None,
+    }
+}
+
+/// `luaV_finishget`: follow `__index` values from `table` until one gives
+/// the value. A table is read raw; a function is called (the one call this
+/// returns); anything else is indexed in turn, through its own metatable. A
+/// lookup runs in one go, at most `MAXTAGLOOP` hops, so that no chain costs
+/// more than one call level, as no chain does in PUC-Lua.
 pub fn index<'gc>(
     ctx: Context<'gc>,
     table: Value<'gc>,
     key: Value<'gc>,
 ) -> Result<MetaResult<'gc, 2>, MetaOperatorError> {
-    let idx = match table {
-        Value::Table(table) => {
+    let mut t = table;
+    let mut hops = 0;
+    loop {
+        if let Value::Table(table) = t {
             let v = table.get_value(ctx, key);
             if !v.is_nil() {
                 return Ok(MetaResult::Value(v));
             }
-
-            let idx = if let Some(mt) = table.metatable() {
-                mt.get_value(ctx, MetaMethod::Index)
-            } else {
-                Value::Nil
+        }
+        if hops == MAXTAGLOOP {
+            return Err(MetaOperatorError::Message(
+                "'__index' chain too long; possible loop".into(),
+            ));
+        }
+        hops += 1;
+        let tm = metatable_of(ctx, t)
+            .map(|mt| mt.get_value(ctx, MetaMethod::Index))
+            .unwrap_or_default();
+        if tm.is_nil() {
+            // A table without one reads as nil; anything else cannot be
+            // indexed.
+            return match t {
+                Value::Table(_) => Ok(MetaResult::Value(Value::Nil)),
+                _ => Err(unary_error(ctx, MetaMethod::Index, t)),
             };
-
-            if idx.is_nil() {
-                return Ok(MetaResult::Value(Value::Nil));
-            }
-
-            idx
         }
-        Value::UserData(u) if u.metatable().is_some() => {
-            let idx = if let Some(mt) = u.metatable() {
-                mt.get_value(ctx, MetaMethod::Index)
-            } else {
-                Value::Nil
-            };
-
-            if idx.is_nil() {
-                return Err(unary_error(ctx, MetaMethod::Index, table));
-            }
-
-            idx
+        if let Value::Function(function) = tm {
+            return Ok(MetaResult::Call(MetaCall {
+                function,
+                args: [t, key],
+            }));
         }
-        // Strings. This arm is what makes `s:sub(1, 2)` and `("x"):rep(3)` work: the VM lowers
-        // both a method call and a plain index to this function (`Operation::Method`,
-        // `Operation::GetIndex` and `Operation::GetField` all route here), so one arm covers
-        // every path. Without it a string index raises, and no amount of filling in the `string`
-        // library helps, because the lookup never reaches that table.
-        Value::String(_) => {
-            let idx = string_metatable(ctx).get_value(ctx, MetaMethod::Index);
-
-            if idx.is_nil() {
-                return Err(unary_error(ctx, MetaMethod::Index, table));
-            }
-
-            idx
-        }
-        _ => return Err(unary_error(ctx, MetaMethod::Index, table)),
-    };
-
-    // NOTE: The __index metamethod (and others) can easily infinite loop or enter arbitrarily long
-    // chains:
-    //
-    // `t = {}; setmetatable(t, { __index = t }); t.a`
-    //
-    // PUC-Rio Lua guards the maximum length of metamethod chains to `MAXTAGLOOP` in cases where no
-    // Lua code is invoked. It must do this, because otherwise Lua code could cause the interpreter
-    // to infinite loop without triggering hook functions. We don't HAVE to mimic this behavior here
-    // due to piccolo's flexibility: the `Executor` design allows us to ensure that control is still
-    // periodically returned by performing the access through a separate callback.
-    //
-    // We could introduce a maximum chain depth, or try to detect infinite chains in simple cases,
-    // or just follow chains of metamethods in blocks to reduce the number of separate callback
-    // calls. Right now, it works in the absolute *simplest* possible way.
-    //
-    // We could also make it a little nicer to deal with arbitrary long metamethod chains by
-    // replacing the `MetaCall` machinery with a `Sequence` and allowing `Sequence` impls to
-    // participate in custom backtrace printing. If done generically, every metamethod chain call
-    // could print its current chain depth as part of the backtrace, helping to debug infinite
-    // loops due to metamethod chains. Changing `MetaCall` to use sequences also has a potential
-    // performance benefit because a `BoxSequence` can avoid allocation when the sequence is a ZST.
-    Ok(MetaResult::Call(match idx {
-        table @ (Value::Table(_) | Value::UserData(_)) => MetaCall {
-            function: Callback::from_fn(&ctx, |ctx, _, mut stack| {
-                let table = stack.get(0);
-                let key = stack.get(1);
-                stack.clear();
-
-                match index(ctx, table, key)? {
-                    MetaResult::Value(v) => {
-                        stack.push_back(v);
-                        Ok(CallbackReturn::Return)
-                    }
-                    MetaResult::Call(call) => {
-                        stack.extend(call.args);
-                        Ok(CallbackReturn::Call {
-                            function: call.function,
-                            then: None,
-                        })
-                    }
-                }
-            })
-            .into(),
-            args: [table, key],
-        },
-        _ => MetaCall {
-            function: call(ctx, idx).map_err(|e| MetaOperatorError::Call(MetaMethod::Index, e))?,
-            args: [table, key],
-        },
-    }))
+        t = tm;
+    }
 }
 
+/// `luaV_finishset`: follow `__newindex` values from `table` until one
+/// takes the value. A table that holds the key, or has no `__newindex`, is
+/// written raw; a function is called; anything else is assigned to in turn.
+/// At most `MAXTAGLOOP` hops, all in one go.
 pub fn new_index<'gc>(
     ctx: Context<'gc>,
     table: Value<'gc>,
     key: Value<'gc>,
     value: Value<'gc>,
 ) -> Result<Option<MetaCall<'gc, 3>>, MetaOperatorError> {
-    let idx = match table {
-        Value::Table(table) => {
-            let v = table.get_value(ctx, key);
-            if !v.is_nil() {
-                // If the value is present in the table, then we do not invoke the metamethod.
+    let mut t = table;
+    let mut hops = 0;
+    loop {
+        if let Value::Table(table) = t {
+            if !table.get_value(ctx, key).is_nil() {
                 table.set_raw(&ctx, key, value)?;
                 return Ok(None);
             }
-
-            let idx = if let Some(mt) = table.metatable() {
-                mt.get_value(ctx, MetaMethod::NewIndex)
-            } else {
-                Value::Nil
-            };
-
-            if idx.is_nil() {
-                // If we do not have a __newindex metamethod, then just set the table value
-                // directly.
-                table.set_raw(&ctx, key, value)?;
-                return Ok(None);
-            }
-
-            idx
         }
-        Value::UserData(u) if u.metatable().is_some() => {
-            let idx = if let Some(mt) = u.metatable() {
-                mt.get_value(ctx, MetaMethod::NewIndex)
-            } else {
-                Value::Nil
-            };
-
-            if idx.is_nil() {
-                return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
-            }
-
-            idx
+        if hops == MAXTAGLOOP {
+            return Err(MetaOperatorError::Message(
+                "'__newindex' chain too long; possible loop".into(),
+            ));
         }
-        _ => {
-            return Err(unary_error(ctx, MetaMethod::NewIndex, table).into());
-        }
-    };
-
-    Ok(Some(match idx {
-        table @ (Value::Table(_) | Value::UserData(_)) => MetaCall {
-            function: Callback::from_fn(&ctx, |ctx, _, mut stack| {
-                // NOTE: Potential for indexing loop here, see note in __index.
-                let (table, key, value): (Value, Value, Value) = stack.consume(ctx)?;
-                if let Some(call) = new_index(ctx, table, key, value)? {
-                    stack.extend(call.args);
-                    Ok(CallbackReturn::Call {
-                        function: call.function,
-                        then: None,
-                    })
-                } else {
-                    Ok(CallbackReturn::Return)
+        hops += 1;
+        let tm = metatable_of(ctx, t)
+            .map(|mt| mt.get_value(ctx, MetaMethod::NewIndex))
+            .unwrap_or_default();
+        if tm.is_nil() {
+            return match t {
+                Value::Table(table) => {
+                    table.set_raw(&ctx, key, value)?;
+                    Ok(None)
                 }
-            })
-            .into(),
-            args: [table, key, value],
-        },
-        _ => MetaCall {
-            function: call(ctx, idx)
-                .map_err(|e| MetaOperatorError::Call(MetaMethod::NewIndex, e))?,
-            args: [table, key, value],
-        },
-    }))
+                _ => Err(unary_error(ctx, MetaMethod::NewIndex, t)),
+            };
+        }
+        if let Value::Function(function) = tm {
+            return Ok(Some(MetaCall {
+                function,
+                args: [t, key, value],
+            }));
+        }
+        t = tm;
+    }
 }
 
 pub fn call<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<Function<'gc>, MetaCallError> {
@@ -954,7 +883,13 @@ pub fn less_equal<'gc>(
 #[collect(no_drop)]
 pub enum ConcatMetaResult<'gc> {
     Value(Value<'gc>),
+    /// A `__concat` metamethod, to call with the values: one call level, as
+    /// `luaT_callTMres` takes.
     Call(Function<'gc>),
+    /// A function that concatenates the values itself, calling each
+    /// metamethod it meets. It stands for `luaV_concat`'s loop, which is no
+    /// call, so it takes no call level of its own.
+    Concatenate(Function<'gc>),
 }
 
 pub fn concat<'gc>(
@@ -1025,6 +960,11 @@ pub fn concat_many<'gc>(
             break;
         };
 
+        // A result past the memory budget is refused before it is built; the
+        // instruction then fails with "not enough memory".
+        if len >= crate::lua::REFUSE_FROM && !ctx.can_allocate(len) {
+            return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(b""))));
+        }
         let mut bytes = Vec::with_capacity(len);
         for value in values {
             match value {
@@ -1037,6 +977,13 @@ pub fn concat_many<'gc>(
             }
         }
         return Ok(ConcatMetaResult::Value(Value::String(ctx.intern(&bytes))));
+    }
+
+    // `a .. b` with a metamethod: call it straight from the Lua frame.
+    if let [a, b] = *values {
+        if let MetaResult::Call(call) = concat(ctx, a, b)? {
+            return Ok(ConcatMetaResult::Call(call.function));
+        }
     }
 
     // Without a `__concat` anywhere the operation cannot succeed: raise
@@ -1087,7 +1034,7 @@ pub fn concat_many<'gc>(
         });
         Ok(CallbackReturn::Sequence(s))
     });
-    Ok(ConcatMetaResult::Call(func.into()))
+    Ok(ConcatMetaResult::Concatenate(func.into()))
 }
 
 pub fn concat_separated<'gc>(

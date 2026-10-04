@@ -112,6 +112,9 @@ pub struct EngineOptions {
     /// `--min-parallelism`, which raises the engine's limit on concurrent
     /// script threads (1,000) when it is higher.
     pub min_parallelism: i64,
+    /// `--max-parallelism`: how many script threads may hold open sockets at
+    /// once (20 when 0).
+    pub max_parallelism: i64,
 }
 
 impl Default for EngineOptions {
@@ -119,6 +122,7 @@ impl Default for EngineOptions {
         Self {
             script_timeout: 0.0,
             min_parallelism: 0,
+            max_parallelism: 0,
         }
     }
 }

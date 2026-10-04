@@ -1,0 +1,12 @@
+Entry { filename = "n-banner.nse", categories = { "net", } }
+Entry { filename = "n-condvar.nse", categories = { "net", } }
+Entry { filename = "n-drip.nse", categories = { "net", } }
+Entry { filename = "n-echo.nse", categories = { "net", } }
+Entry { filename = "n-mutex.nse", categories = { "net", } }
+Entry { filename = "n-refused.nse", categories = { "net", } }
+Entry { filename = "n-resolve.nse", categories = { "net", } }
+Entry { filename = "n-sleep.nse", categories = { "net", } }
+Entry { filename = "n-slow.nse", categories = { "slow", } }
+Entry { filename = "n-tables.nse", categories = { "net", } }
+Entry { filename = "n-timeout.nse", categories = { "net", } }
+Entry { filename = "n-udp.nse", categories = { "net", } }

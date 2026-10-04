@@ -40,6 +40,8 @@ pub struct StateConfig {
     pub memory_limit: Option<usize>,
     /// What the engine reads of the run's options.
     pub engine: EngineOptions,
+    /// The network scripts' sockets use ([`super::net::NoNet`] for none).
+    pub net: super::net::SharedNet,
 }
 
 /// The engine's Lua, from `nse_main.lua` (see the file).
@@ -67,7 +69,14 @@ pub struct NseState {
 pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
     let mut lua = build(config);
     let store = Rc::new(RefCell::new(Store::default()));
-    let cnse = lua.enter(|ctx| ctx.stash(load_cnse(ctx, &config.lib, &store, config.engine)));
+    let ipv6 = config.lib.borrow().env.ipv6;
+    let cnse = lua.enter(|ctx| {
+        let cnse = load_cnse(ctx, &config.lib, &store, config.engine);
+        let nmap: piccolo::Table = ctx.get_global("nmap").expect("build installs nmap");
+        let net = super::net::load_net(ctx, config.net.clone(), ipv6, config.engine.max_parallelism, nmap);
+        cnse.set_field(ctx, "net", net);
+        ctx.stash(cnse)
+    });
     let engine = run_with(
         &mut lua,
         "=nse_main",

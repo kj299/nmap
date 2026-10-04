@@ -419,6 +419,13 @@ impl Fail {
         }
     }
 
+    /// Name argument `n` as the one at fault, where it named one.
+    pub(crate) fn set_arg(&mut self, n: usize) {
+        if self.arg.is_some() {
+            self.arg = Some(n);
+        }
+    }
+
     pub(crate) fn raise<'gc>(&self, ctx: Context<'gc>, fname: &str) -> Error<'gc> {
         match self.arg {
             Some(n) => {

@@ -174,9 +174,17 @@ Here:
 - **Runaway matching.** The pattern matcher's worst case is bounded
   (`pattern-worst-case-time-is-bounded`). Size-chosen buffers (`string.rep`,
   `format`, `pack`) are checked against the budget before they are built.
-- **CPU.** Bounded by fuel today only for the engine's own prelude. Per-script
-  time limits (`--script-timeout`) arrive with the scheduler (M6.4c2). Until
-  then no script runs outside tests.
+- **CPU.** The engine steps the VM in slices and takes an optional fuel
+  budget per phase. With one, a script in `while true do end` ends its phase
+  as aborted instead of hanging the scan (`nse-phase-budget`); nmap has no
+  such bound. The command line chooses the budget (M6.4e).
+  `--script-timeout` runs through nmap's own `Thread:timed_out`, and, as in
+  nmap, applies to threads waiting on I/O (M6.4d).
+
+**A crash nmap has.** `port_set_output` dereferences a port lookup it never
+checks; a script that edits the port table `stdnse.gethostport()` gives it
+crashes nmap. The port raises an error instead
+(`nse-port-output-on-unknown-port`).
 
 **Not defended.** The operator can name any script, and a script can scan,
 brute-force or exploit whatever its arguments point at. That is the tool's

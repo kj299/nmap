@@ -345,3 +345,9 @@ name = "nse_utf8_date"
 path = "fuzz_targets/nse_utf8_date.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_results"
+path = "fuzz_targets/nse_results.rs"
+test = false
+doc = false

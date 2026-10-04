@@ -209,7 +209,7 @@ pub fn xml_escape(s: &[u8]) -> Vec<u8> {
             b'"' => out.extend_from_slice(b"&quot;"),
             b'\'' => out.extend_from_slice(b"&apos;"),
             b'-' if i > 0 && s[i.saturating_sub(1)] == b'-' => out.extend_from_slice(b"&#45;"),
-            c if c < 0x20 || c > 0x7F => {
+            c if !(0x20..=0x7F).contains(&c) => {
                 out.extend_from_slice(format!("&#x{c:x};").as_bytes());
             }
             c => out.push(c),
@@ -260,15 +260,24 @@ mod tests {
             b"|_a: \\x0D\\x00\\xFF\t"
         );
         assert_eq!(protect_xml(b"\r\0"), b"\r\\x00");
-        assert_eq!(xml_escape(b"a<&\"'>--x\r\x7f\x80"), b"a&lt;&amp;&quot;&apos;&gt;-&#45;x&#xd;\x7f&#x80;");
+        assert_eq!(
+            xml_escape(b"a<&\"'>--x\r\x7f\x80"),
+            b"a&lt;&amp;&quot;&apos;&gt;-&#45;x&#xd;\x7f&#x80;"
+        );
     }
 
     #[test]
     fn xml_elements() {
-        assert_eq!(result("a", b"x\"y").xml(), b"<script id=\"a\" output=\"x&quot;y\"/>");
+        assert_eq!(
+            result("a", b"x\"y").xml(),
+            b"<script id=\"a\" output=\"x&quot;y\"/>"
+        );
         let mut r = result("a", b"t");
         r.table_xml = Some(b"<elem>1</elem>\n".to_vec());
-        assert_eq!(r.xml(), b"<script id=\"a\" output=\"t\"><elem>1</elem>\n</script>");
+        assert_eq!(
+            r.xml(),
+            b"<script id=\"a\" output=\"t\"><elem>1</elem>\n</script>"
+        );
         assert_eq!(
             phase_normal(ScriptPhase::PreScan, &[result("a", b"x")]),
             b"Pre-scan script results:\n|_a: x\n"

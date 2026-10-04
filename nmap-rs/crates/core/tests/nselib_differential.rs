@@ -70,7 +70,7 @@ fn expected(kind: &str) -> BTreeMap<String, String> {
 /// Whether `detail` is the failure a missing `module` causes.
 fn missing(detail: Option<&str>, module: &str) -> bool {
     match detail {
-        Some(d) => d.contains(&format!("module '{module}' not found")) || d.starts_with("<table"),
+        Some(d) => d.contains(&format!("module '{module}' not found")) || d.starts_with("table: "),
         None => false,
     }
 }

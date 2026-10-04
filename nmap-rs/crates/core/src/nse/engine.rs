@@ -62,12 +62,15 @@ struct XmlWriter {
     open: Vec<Vec<u8>>,
 }
 
+/// A result once rendered: its text and its table's XML.
+type Rendered = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// What the `cnse` functions share with the driver.
 #[derive(Default)]
 pub(crate) struct Store {
     stored: Vec<Stored>,
     /// For each stored result, once rendered: its text and its table's XML.
-    rendered: Vec<Option<(Option<Vec<u8>>, Option<Vec<u8>>)>>,
+    rendered: Vec<Option<Rendered>>,
     xml: XmlWriter,
 }
 
@@ -78,13 +81,16 @@ struct Cnse {
     store: Rc<RefCell<Store>>,
 }
 
-type CnseBody = for<'gc, 'a> fn(
-    &Cnse,
-    Context<'gc>,
-    &mut piccolo::Stack<'gc, 'a>,
-) -> Result<(), Fail>;
+type CnseBody =
+    for<'gc, 'a> fn(&Cnse, Context<'gc>, &mut piccolo::Stack<'gc, 'a>) -> Result<(), Fail>;
 
-fn install<'gc>(ctx: Context<'gc>, t: Table<'gc>, c: &Rc<Cnse>, name: &'static str, body: CnseBody) {
+fn install<'gc>(
+    ctx: Context<'gc>,
+    t: Table<'gc>,
+    c: &Rc<Cnse>,
+    name: &'static str,
+    body: CnseBody,
+) {
     let c = Rc::clone(c);
     t.set_field(
         ctx,
@@ -152,7 +158,11 @@ pub(crate) fn load_cnse<'gc>(
     }
     install(ctx, t, &c, "rendered", l_rendered);
     t.set_field(ctx, "script_timeout", Value::Number(options.script_timeout));
-    t.set_field(ctx, "min_parallelism", Value::Integer(options.min_parallelism));
+    t.set_field(
+        ctx,
+        "min_parallelism",
+        Value::Integer(options.min_parallelism),
+    );
     t
 }
 
@@ -162,7 +172,11 @@ fn args<'s, 'gc, 'a>(ctx: Context<'gc>, s: &'s piccolo::Stack<'gc, 'a>) -> LuaAr
 
 /// `timedOut(host)`: whether the host's `--host-timeout` has passed; never,
 /// here (see the module documentation).
-fn l_timed_out<'gc>(c: &Cnse, ctx: Context<'gc>, s: &mut piccolo::Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_timed_out<'gc>(
+    c: &Cnse,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
     get_target(&c.lib.borrow(), &args(ctx, s), 1)?;
     s.replace(ctx, false);
     Ok(())
@@ -181,7 +195,11 @@ fn l_check_target<'gc>(
 }
 
 /// The states whose ports portrules see, in `ports`' order.
-const RULE_STATES: [PortState; 3] = [PortState::Open, PortState::OpenFiltered, PortState::Unfiltered];
+const RULE_STATES: [PortState; 3] = [
+    PortState::Open,
+    PortState::OpenFiltered,
+    PortState::Unfiltered,
+];
 const PROTOCOLS: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Sctp];
 
 /// `ports(host)`: an iterator over the port tables of the host's open,
@@ -236,7 +254,10 @@ fn store_result<'gc>(
     let id = a.string(base)?.into_owned();
     let tab = a.get(base.saturating_add(1)).unwrap_or(Value::Nil);
     let str = a.get(base.saturating_add(2)).unwrap_or(Value::Nil);
-    if !matches!(str, Value::Nil | Value::String(_) | Value::Integer(_) | Value::Number(_)) {
+    if !matches!(
+        str,
+        Value::Nil | Value::String(_) | Value::Integer(_) | Value::Number(_)
+    ) {
         return Err(Fail::err("String output is not a string"));
     }
     let keep = |v: Value<'gc>| (!v.is_nil()).then(|| ctx.stash(v));
@@ -316,7 +337,12 @@ fn l_scan_progress_meter<'gc>(
 ) -> Result<(), Fail> {
     args(ctx, s).string(1)?;
     let meter = Callback::from_fn(&ctx, |ctx, _, mut stack| {
-        const OPS: [&[u8]; 4] = [b"printStats", b"printStatsIfNecessary", b"mayBePrinted", b"endTask"];
+        const OPS: [&[u8]; 4] = [
+            b"printStats",
+            b"printStatsIfNecessary",
+            b"mayBePrinted",
+            b"endTask",
+        ];
         let op = args(ctx, &stack)
             .string(1)
             .map_err(|e| Fail::from(e).raise(ctx, "?"))?
@@ -400,7 +426,11 @@ fn l_xml_write_escaped<'gc>(
     s: &mut piccolo::Stack<'gc, '_>,
 ) -> Result<(), Fail> {
     let text = args(ctx, s).string(1)?.into_owned();
-    c.store.borrow_mut().xml.out.extend_from_slice(&xml_escape(&text));
+    c.store
+        .borrow_mut()
+        .xml
+        .out
+        .extend_from_slice(&xml_escape(&text));
     s.clear();
     Ok(())
 }
@@ -487,7 +517,12 @@ fn l_rendered<'gc>(
 pub type Budget = Option<u64>;
 
 /// Step `ex` until it finishes, or the budget is spent.
-pub(crate) fn finish(lua: &mut Lua, ex: &StashedExecutor, budget: Budget, what: &str) -> Result<(), String> {
+pub(crate) fn finish(
+    lua: &mut Lua,
+    ex: &StashedExecutor,
+    budget: Budget,
+    what: &str,
+) -> Result<(), String> {
     const SLICE: i32 = 4096;
     let mut spent: u64 = 0;
     loop {
@@ -507,13 +542,18 @@ pub(crate) fn finish(lua: &mut Lua, ex: &StashedExecutor, budget: Budget, what: 
 /// Take the outcome of a finished executor: `Ok` with nothing, or the
 /// error that escaped, as text.
 pub(crate) fn outcome(lua: &mut Lua, ex: &StashedExecutor) -> Result<(), String> {
-    lua.enter(|ctx| match ctx.fetch(ex).take_result::<piccolo::Variadic<Vec<Value>>>(ctx) {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(match e {
-            piccolo::Error::Lua(v) => v.0.display().to_string(),
-            piccolo::Error::Runtime(r) => format!("{r:#}"),
-        }),
-        Err(e) => Err(e.to_string()),
+    lua.enter(|ctx| {
+        match ctx
+            .fetch(ex)
+            .take_result::<piccolo::Variadic<Vec<Value>>>(ctx)
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(match e {
+                piccolo::Error::Lua(v) => v.0.display().to_string(),
+                piccolo::Error::Runtime(r) => format!("{r:#}"),
+            }),
+            Err(e) => Err(e.to_string()),
+        }
     })
 }
 
@@ -586,12 +626,18 @@ impl super::runtime::NseState {
     /// Load what script selection chose ([`super::choose::choose`]): its
     /// warnings logged as `log_error` logs them, its scripts loaded, then its
     /// error, if it ended with one — the order the C raises them in.
-    pub fn load_chosen(&mut self, chosen: &super::choose::Chosen, budget: Budget) -> Result<(), String> {
+    pub fn load_chosen(
+        &mut self,
+        chosen: &super::choose::Chosen,
+        budget: Budget,
+    ) -> Result<(), String> {
         for w in &chosen.warnings {
             let mut line = b"NSE: ".to_vec();
             line.extend_from_slice(w);
             line.push(b'\n');
-            self.lib.borrow_mut().log(super::nmaplib::LogTarget::Stderr, &line);
+            self.lib
+                .borrow_mut()
+                .log(super::nmaplib::LogTarget::Stderr, &line);
         }
         self.load_scripts(&chosen.scripts, budget)?;
         match &chosen.error {
@@ -627,9 +673,7 @@ impl super::runtime::NseState {
                 let n = i64::try_from(i).unwrap_or(i64::MAX).saturating_add(1);
                 let _ = list.set(ctx, n, super::nmaplib::host_table(ctx, &lib, i));
             }
-            let f: piccolo::Function = engine
-                .get(ctx, "main")
-                .expect("the prelude returns main");
+            let f: piccolo::Function = engine.get(ctx, "main").expect("the prelude returns main");
             ctx.stash(Executor::start(ctx, f, (list, scantype)))
         });
         let aborted = finish(&mut self.lua, &ex, budget, "script scan")
@@ -665,7 +709,8 @@ impl super::runtime::NseState {
         });
         // A result whose rendering did not finish is reported with no text,
         // as the C reports a FORMAT_TABLE that failed.
-        let _ = finish(&mut self.lua, &ex, budget, "rendering").and_then(|()| outcome(&mut self.lua, &ex));
+        let _ = finish(&mut self.lua, &ex, budget, "rendering")
+            .and_then(|()| outcome(&mut self.lua, &ex));
         let rendered = std::mem::take(&mut self.store.borrow_mut().rendered);
         let lib = self.lib.borrow();
         let out = PhaseResults {
@@ -690,7 +735,7 @@ impl super::runtime::NseState {
     fn collect(
         mut out: PhaseResults,
         stored: Vec<Stored>,
-        rendered: Vec<Option<(Option<Vec<u8>>, Option<Vec<u8>>)>>,
+        rendered: Vec<Option<Rendered>>,
     ) -> PhaseResults {
         for (s, r) in stored.into_iter().zip(rendered) {
             let (output, table_xml) = r.unwrap_or((None, None));

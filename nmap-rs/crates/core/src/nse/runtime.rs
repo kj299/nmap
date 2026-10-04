@@ -68,14 +68,20 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
     let mut lua = build(config);
     let store = Rc::new(RefCell::new(Store::default()));
     let cnse = lua.enter(|ctx| ctx.stash(load_cnse(ctx, &config.lib, &store, config.engine)));
-    let engine = run_with(&mut lua, "=nse_main", PRELUDE.as_bytes(), PRELUDE_FUEL, Some(&cnse))
-        .and_then(|ex| {
-            lua.try_enter(|ctx| {
-                let t: piccolo::Table = ctx.fetch(&ex).take_result::<piccolo::Table>(ctx)??;
-                Ok(ctx.stash(t))
-            })
-            .map_err(|e| format!("{e:#}"))
-        })?;
+    let engine = run_with(
+        &mut lua,
+        "=nse_main",
+        PRELUDE.as_bytes(),
+        PRELUDE_FUEL,
+        Some(&cnse),
+    )
+    .and_then(|ex| {
+        lua.try_enter(|ctx| {
+            let t: piccolo::Table = ctx.fetch(&ex).take_result::<piccolo::Table>(ctx)??;
+            Ok(ctx.stash(t))
+        })
+        .map_err(|e| format!("{e:#}"))
+    })?;
     Ok(NseState {
         lua,
         engine,

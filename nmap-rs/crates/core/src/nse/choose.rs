@@ -243,7 +243,12 @@ mod tests {
             }
         }
         fn list_dir(&self, _: &[u8]) -> Vec<Vec<u8>> {
-            vec![b"z.nse".to_vec(), b"y.txt".to_vec(), b"x.nse".to_vec()]
+            vec![
+                b"y.nse".to_vec(),
+                b"z.nse".to_vec(),
+                b"w.txt".to_vec(),
+                b"x.nse".to_vec(),
+            ]
         }
     }
 
@@ -290,7 +295,15 @@ mod tests {
 
     #[test]
     fn default_version_and_forcing() {
-        let c = choose(&[], RuleOptions { default: true, version: true }, &db(), &Fake);
+        let c = choose(
+            &[],
+            RuleOptions {
+                default: true,
+                version: true,
+            },
+            &db(),
+            &Fake,
+        );
         assert_eq!(names(&c).len(), 2);
         let c = choose(&rules(&[" + safe "]), RuleOptions::default(), &db(), &Fake);
         assert!(c.scripts.iter().all(|s| s.forced));
@@ -298,21 +311,35 @@ mod tests {
 
     #[test]
     fn files_directories_and_errors() {
-        let c = choose(&rules(&["./mine", "dir/"]), RuleOptions::default(), &db(), &Fake);
+        let c = choose(
+            &rules(&["./mine", "dir/"]),
+            RuleOptions::default(),
+            &db(),
+            &Fake,
+        );
         assert_eq!(
             names(&c),
             [
                 ("/data/scripts/./mine.nse".into(), "file path", true, false),
                 ("/data/scripts/dir//x.nse".into(), "directory", false, false),
+                ("/data/scripts/dir//y.nse".into(), "directory", false, false),
                 ("/data/scripts/dir//z.nse".into(), "directory", false, false),
             ]
         );
-        let c = choose(&rules(&["safe and not safe"]), RuleOptions::default(), &db(), &Fake);
+        let c = choose(
+            &rules(&["safe and not safe"]),
+            RuleOptions::default(),
+            &db(),
+            &Fake,
+        );
         assert_eq!(
             c.error.as_deref(),
             Some(&b"'safe and not safe' did not match a category, filename, or directory"[..])
         );
         let c = choose(&rules(&["dir"]), RuleOptions::default(), &db(), &Fake);
-        assert!(c.error.unwrap().starts_with(b"directory '/data/scripts/dir'"));
+        assert!(c
+            .error
+            .unwrap()
+            .starts_with(b"directory '/data/scripts/dir'"));
     }
 }

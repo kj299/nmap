@@ -30,4 +30,6 @@ Entry { filename = "s-strict.nse", categories = { "errors", } }
 Entry { filename = "s-string.nse", categories = { "shapes", } }
 Entry { filename = "s-table.nse", categories = { "shapes", } }
 Entry { filename = "s-tostring.nse", categories = { "shapes", } }
+Entry { filename = "s-worker-check.nse", categories = { "workers", } }
+Entry { filename = "s-worker.nse", categories = { "workers", } }
 Entry { filename = "s-yield.nse", categories = { "errors", } }

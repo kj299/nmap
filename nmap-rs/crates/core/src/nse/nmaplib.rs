@@ -487,7 +487,11 @@ const PROTOCOLS: [&str; 3] = ["tcp", "udp", "sctp"];
 const PROTOCOL_VALUES: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Sctp];
 
 /// `nseU_gettarget(L, 1)`: the host a host table names.
-pub(crate) fn get_target(lib: &NmapLib, args: &LuaArgs<'_, '_, '_>, idx: usize) -> Result<usize, Fail> {
+pub(crate) fn get_target(
+    lib: &NmapLib,
+    args: &LuaArgs<'_, '_, '_>,
+    idx: usize,
+) -> Result<usize, Fail> {
     let Some(Value::Table(t)) = args.get(idx) else {
         return Err(type_error(args.get(idx), idx, "table").into());
     };
@@ -804,7 +808,8 @@ fn arg_table<'gc>(ctx: Context<'gc>, a: &ArgTable) -> Table<'gc> {
     t
 }
 
-pub(crate) type Body = for<'gc, 'a> fn(&Shared, Context<'gc>, &mut Stack<'gc, 'a>) -> Result<(), Fail>;
+pub(crate) type Body =
+    for<'gc, 'a> fn(&Shared, Context<'gc>, &mut Stack<'gc, 'a>) -> Result<(), Fail>;
 
 pub(crate) fn install<'gc>(
     ctx: Context<'gc>,

@@ -19,8 +19,6 @@ use nmap_core::nse::script::parse_script_db;
 use nmap_core::nse::scriptargs::registry_args;
 use nmap_core::nse::selection::split_arg;
 
-use super as nse_host;
-
 pub fn m6() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/differential/m6")
 }
@@ -116,7 +114,7 @@ pub struct Fixtures {
 /// data files and `nselib/`, and in `scripts/` the fixtures and the shipped
 /// scripts named.
 pub fn datadir(tmp: &Path, fx: &Fixtures) -> PathBuf {
-    let repo = nse_host::repo_root();
+    let repo = super::repo_root();
     let d = tmp.join("data");
     std::fs::create_dir_all(&d).expect("data dir");
     for e in std::fs::read_dir(&repo).expect("repo").flatten() {
@@ -255,12 +253,12 @@ pub fn run(sc: &Scenario, tmp: &Path, fx: &Fixtures, net: SharedNet) -> Result<V
     let mut st = new_state(&StateConfig {
         lib: NmapLib::new(nmap_core::nse::nmaplib::NmapEnv {
             debugging,
-            ..nse_host::env(data.clone())
+            ..super::env(data.clone())
         }),
         args: registry_args(None, &script_args).expect("arguments parse"),
-        source: Rc::new(nse_host::Dir(data.clone())),
-        fs: Rc::new(nse_host::ReadOnlyFs),
-        os: Rc::new(nse_host::os_env()),
+        source: Rc::new(super::Dir(data.clone())),
+        fs: Rc::new(super::ReadOnlyFs),
+        os: Rc::new(super::os_env()),
         memory_limit: Some(256 << 20),
         engine,
         net,

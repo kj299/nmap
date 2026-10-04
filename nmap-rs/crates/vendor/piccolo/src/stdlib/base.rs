@@ -91,9 +91,11 @@ pub fn load_base<'gc>(ctx: Context<'gc>) {
                     }
                     MetaResult::Call(call) => {
                         stack.replace(ctx, Variadic(call.args));
+                        // `luaL_callmeta` calls `__tostring` with `lua_call`,
+                        // which takes a C level: so this call goes on after it.
                         Ok(CallbackReturn::Call {
                             function: call.function,
-                            then: None,
+                            then: Some(BoxSequence::new(&ctx, ReturnResults)),
                         })
                     }
                 }
@@ -406,6 +408,22 @@ impl<'gc> Sequence<'gc> for PCall {
         mut stack: Stack<'gc, '_>,
     ) -> Result<SequencePoll<'gc>, Error<'gc>> {
         stack.replace(ctx, (false, error));
+        Ok(SequencePoll::Return)
+    }
+}
+
+/// Returns whatever the call it follows returned.
+#[derive(Collect)]
+#[collect(require_static)]
+struct ReturnResults;
+
+impl<'gc> Sequence<'gc> for ReturnResults {
+    fn poll(
+        self: Pin<&mut Self>,
+        _ctx: Context<'gc>,
+        _exec: Execution<'gc, '_>,
+        _stack: Stack<'gc, '_>,
+    ) -> Result<SequencePoll<'gc>, Error<'gc>> {
         Ok(SequencePoll::Return)
     }
 }

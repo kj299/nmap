@@ -159,8 +159,9 @@ fn arg_err(arg: usize, msg: impl Into<Vec<u8>>) -> FormatError {
 }
 
 fn put(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), FormatError> {
-    out.try_reserve(bytes.len())
-        .map_err(|_| err("not enough memory"))?;
+    if !super::reserve(out, bytes.len()) {
+        return Err(err("not enough memory"));
+    }
     out.extend_from_slice(bytes);
     Ok(())
 }

@@ -32,6 +32,12 @@ pub enum VMError {
     /// `for` loop.
     #[error("{0}")]
     Lua(std::string::String),
+    /// `LUA_ERRMEM`: an allocation did not fit the memory budget.
+    #[error("not enough memory")]
+    NotEnoughMemory,
+    /// `LUA_ERRERR`: calls nested past the margin error handlers have.
+    #[error("error in error handling")]
+    ErrorInErrorHandling,
     #[error("_ENV upvalue is only allowed on top-level closure")]
     BadEnvUpValue,
     #[error("Invalid types in for loop; expected numbers, found {0}, {1}, and {2}")]
@@ -47,7 +53,11 @@ impl VMError {
     pub fn is_lua_error(&self) -> bool {
         matches!(
             self,
-            VMError::BadCall(_) | VMError::OperatorError(_) | VMError::Lua(_)
+            VMError::BadCall(_)
+                | VMError::OperatorError(_)
+                | VMError::Lua(_)
+                | VMError::NotEnoughMemory
+                | VMError::ErrorInErrorHandling
         )
     }
 
@@ -57,6 +67,8 @@ impl VMError {
         !matches!(
             self,
             VMError::OperatorError(MetaOperatorError::MessageFromC(_))
+                | VMError::NotEnoughMemory
+                | VMError::ErrorInErrorHandling
         )
     }
 }

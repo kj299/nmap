@@ -29,6 +29,9 @@ pub fn rep(s: &[u8], n: i64, sep: &[u8]) -> Result<Vec<u8>, RepError> {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
+    if !piccolo::budget::allows(total) {
+        return Err(RepError("not enough memory"));
+    }
     out.try_reserve_exact(total)
         .map_err(|_| RepError("not enough memory"))?;
     for i in 0..n {

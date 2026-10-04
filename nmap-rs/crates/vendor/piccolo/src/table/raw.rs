@@ -5,7 +5,7 @@ use gc_arena::{allocator_api::MetricsAlloc, Collect, Gc, Mutation};
 use hashbrown::{hash_map, HashMap};
 use thiserror::Error;
 
-use crate::{Callback, Closure, Function, String, Table, Thread, UserData, Value};
+use crate::{budget, Callback, Closure, Function, String, Table, Thread, UserData, Value};
 
 #[derive(Debug, Copy, Clone, Error)]
 pub enum InvalidTableKey {
@@ -227,7 +227,13 @@ impl<'gc> RawTable<'gc> {
 
             // If we can fit our new key in an optimally sized array, resize the array and do that.
             if optimal_size > index_key {
-                self.grow_array(optimal_size - self.array.len());
+                let additional = optimal_size - self.array.len();
+                // `luaH_resize` fails, and leaves the table as it was, when the
+                // allocator refuses: so does this, before allocating.
+                if !budget::allows(additional.saturating_mul(mem::size_of::<Value<'gc>>())) {
+                    return Ok(Value::Nil);
+                }
+                self.grow_array(additional);
                 // If the value is non-nil, it should have been replaced in the map part without
                 // needing to grow growing.
                 debug_assert!(self.array[index_key].is_nil());
@@ -238,6 +244,9 @@ impl<'gc> RawTable<'gc> {
 
         // If we can't grow the array, we need to grow the map and place the key there. We
         // explicitly double the size of the map.
+        if !budget::allows(map_growth_bytes(self.map.len())) {
+            return Ok(Value::Nil);
+        }
         self.reserve_map(self.map.len().max(1));
 
         // Now we can insert the new key value pair
@@ -616,6 +625,17 @@ impl<'gc> Key<'gc> {
 
 // Returns the closest i64 to a given f64 such that casting the i64 back to an f64 results in an
 // equal value, if such an integer exists.
+/// Roughly what doubling a map part of `len` entries adds: hashbrown's
+/// buckets, a power of two at least 8/7 of the capacity, each an entry and a
+/// control byte.
+fn map_growth_bytes(len: usize) -> usize {
+    let capacity = len.max(1).saturating_mul(2);
+    let buckets = (capacity.saturating_mul(8) / 7)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX);
+    buckets.saturating_mul(mem::size_of::<(Key<'static>, Value<'static>)>() + 1)
+}
+
 fn f64_to_i64(n: f64) -> Option<i64> {
     let i = n as i64;
     if i as f64 == n {

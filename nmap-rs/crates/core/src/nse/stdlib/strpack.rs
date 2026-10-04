@@ -400,8 +400,11 @@ fn getdetails(
 /// raises "not enough memory" when `luaL_Buffer` cannot grow; a plain `Vec`
 /// push would abort the process instead, and `pcall` cannot catch an abort.
 fn grow(out: &mut Vec<u8>, additional: usize) -> Result<(), PackError> {
-    out.try_reserve(additional)
-        .map_err(|_| PackError::plain("not enough memory"))
+    if super::reserve(out, additional) {
+        Ok(())
+    } else {
+        Err(PackError::plain("not enough memory"))
+    }
 }
 
 /// Append `n` padding bytes.

@@ -554,3 +554,15 @@ jobs:
       # multi-line cases are pinned (`vm-error-line-is-the-statements`).
       - run: bash tests/differential/m6/regen_m64_errors.sh --check
       - run: cargo test -p nmap-core --test errors_differential
+
+      # M6.4b — the limits on a running state. 335 chunks: nineteen ways of
+      # recursing through PUC-Lua's C levels, each from fourteen kinds of
+      # caller, comparing the depth reached (LUAI_MAXCCALLS); runaway
+      # recursion (LUAI_MAXSTACK); __index/__newindex chains either side of
+      # MAXTAGLOOP; result counts. Then 41 chunks run out of memory, each in an
+      # oracle process of its own under `ulimit -v` and in a VM under a 32 MiB
+      # budget, comparing what the script observes.
+      - run: bash tests/differential/m6/regen_m64_limits.sh --check
+      - run: cargo test -p nmap-core --test limits_differential
+      - run: bash tests/differential/m6/regen_m64_memory.sh --check
+      - run: cargo test -p nmap-core --test memory_differential

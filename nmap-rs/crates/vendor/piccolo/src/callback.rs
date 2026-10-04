@@ -261,6 +261,16 @@ pub enum SequencePoll<'gc> {
         bottom: usize,
         function: Function<'gc>,
     },
+    /// As `Call`, with the function running under `ccalls` C calls
+    /// (`LUAI_MAXCCALLS`) rather than one more than this `Sequence`. An error
+    /// handler is called this way, one level above the error it handles
+    /// ([`Execution::error_ccalls`](crate::Execution::error_ccalls)), as
+    /// `luaG_errormsg` calls it.
+    CallAt {
+        bottom: usize,
+        function: Function<'gc>,
+        ccalls: u32,
+    },
     /// Yield the values in the stack starting at `bottom`. When the `Sequence` is resumed, the
     /// resume arguments will be on the stack starting at `bottom`.
     Yield {

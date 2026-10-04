@@ -43,6 +43,7 @@ pub(super) fn run_vm<'gc>(
     }
 
     loop {
+        let mark = ctx.memory_mark();
         let op = current_prototype.opcodes[*registers.pc].decode();
         *registers.pc += 1;
 
@@ -390,10 +391,6 @@ pub(super) fn run_vm<'gc>(
                 match meta_ops::concat_many(ctx, values)? {
                     ConcatMetaResult::Value(v) => registers.stack_frame[dest.0 as usize] = v,
                     ConcatMetaResult::Call(func) => {
-                        // This would be nice to do in-place (without copying params)
-                        // but that turns out to be difficult to do without corrupting
-                        // the stack, and likely isn't worth the complexity for the
-                        // fallback case.
                         let args = values.to_owned();
                         lua_frame.call_meta_function(
                             ctx,
@@ -401,6 +398,15 @@ pub(super) fn run_vm<'gc>(
                             &args,
                             MetaReturn::Register(dest),
                         )?;
+                        break;
+                    }
+                    ConcatMetaResult::Concatenate(func) => {
+                        // This would be nice to do in-place (without copying params)
+                        // but that turns out to be difficult to do without corrupting
+                        // the stack, and likely isn't worth the complexity for the
+                        // fallback case.
+                        let args = values.to_owned();
+                        lua_frame.call_meta_loop(ctx, func, &args, MetaReturn::Register(dest))?;
                         break;
                     }
                 }
@@ -754,7 +760,12 @@ pub(super) fn run_vm<'gc>(
         }
 
         instructions_run += 1;
-        if instructions_run >= max_instructions {
+        // An allocation this instruction made did not fit the memory budget:
+        // fail, or collect, before the next one runs.
+        if ctx.memory_check(mark) {
+            return Err(VMError::NotEnoughMemory);
+        }
+        if instructions_run >= max_instructions || ctx.collection_requested() {
             break;
         }
     }

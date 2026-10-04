@@ -1,0 +1,44 @@
+# name	oracle_status	oracle_value
+# The verdict of nmap's OWN Lua 5.4, one process per case under
+# ulimit -v 131072. Regenerate with ./regen_m64_memory.sh.
+huge_rep	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_rep_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_rep_sep	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_rep_sep_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_rep_long_unit	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_rep_long_unit_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_format	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_format_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_gsub	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_gsub_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_concat_table	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_concat_table_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_concat_op	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_concat_op_escaped	error	6e6f7420656e6f756768206d656d6f7279
+huge_in_coroutine	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_in_wrap	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_in_gsub_callback	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_in_index	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+huge_in_tostring	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+runaway_doubling	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_table_ints	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_table_hash	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_strings	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_tables	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_closures	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_coroutines	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_nested	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:1000
+runaway_held_then_dropped	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 boolean:true integer:1000
+runaway_escaped	error	6e6f7420656e6f756768206d656d6f7279
+runaway_in_coroutine	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 string:64656164
+xpcall_skips_handler	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+xpcall_runaway_skips_handler	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+xpcall_same_text_is_handled	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+xpcall_rethrown_is_handled	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 boolean:false string:6e6f7420656e6f756768206d656d6f7279
+xpcall_handler_runs_out	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279
+error_object_is_a_string	ok	string:737472696e67 boolean:true integer:17
+within_rep	ok	integer:1000000
+within_table	ok	integer:100000
+within_strings	ok	integer:10000 string:3130303030
+within_garbage	ok	integer:200006893
+within_after_refusal	ok	boolean:false string:6e6f7420656e6f756768206d656d6f7279 boolean:false string:6e6f7420656e6f756768206d656d6f7279 integer:100000

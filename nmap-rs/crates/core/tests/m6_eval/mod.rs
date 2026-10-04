@@ -8,7 +8,7 @@
 #![allow(dead_code)] // each user takes a different subset
 
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
-use piccolo::{Closure, Error, Executor, Fuel, Lua, Value, Variadic};
+use piccolo::{Closure, Error, Executor, Fuel, Lua, Thread, Value, Variadic};
 use std::path::Path;
 
 pub fn hex(b: &[u8]) -> String {
@@ -76,6 +76,12 @@ fn render_error(e: &Error) -> String {
 /// matcher has no unbounded loop to regress into.
 const FUEL_BUDGET: u64 = 50_000_000;
 
+/// The C calls (`nCcalls`) a chunk runs under in the oracle: `lua.c` calls
+/// `pmain` with `lua_pcall`, `pmain` runs the driver with another, and the
+/// driver calls each chunk with `pcall`. Starting the port's chunk at the same
+/// depth makes "C stack overflow" fall at the same depth on both sides.
+pub const ORACLE_CCALLS: u32 = 3;
+
 /// Evaluate one chunk in a fresh VM with the ported functions installed, and
 /// return `(status, value)` as the driver would print them.
 ///
@@ -83,15 +89,26 @@ const FUEL_BUDGET: u64 = 50_000_000;
 /// error, it escapes `pcall`, and in the scanner it would take the process
 /// down. No golden row says "PANIC" or "TIMEOUT", so either is a mismatch.
 pub fn eval(src: &[u8]) -> (String, String) {
+    eval_limited(src, None)
+}
+
+/// [`eval`], with the VM's memory budget set to `limit` bytes.
+pub fn eval_limited(src: &[u8], limit: Option<usize>) -> (String, String) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut lua = Lua::core();
+        if let Some(limit) = limit {
+            lua.set_memory_limit(limit);
+        }
         let ex = match lua.try_enter(|ctx| {
             load_patterns(ctx).expect("Lua::core() has a string table");
             load_strpack(ctx).expect("Lua::core() has a string table");
             load_format(ctx).expect("Lua::core() has a string table");
             load_tail(ctx).expect("Lua::core() has string and coroutine tables");
             let c = Closure::load(ctx, Some("=chunk"), src)?;
-            Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
+            let thread = Thread::new(ctx);
+            thread.start(ctx, c.into(), ())?;
+            thread.set_ccalls(&ctx, ORACLE_CCALLS)?;
+            Ok(ctx.stash(Executor::run(&ctx, thread)?))
         }) {
             Ok(e) => e,
             Err(_) => return ("loaderror".to_string(), "-".to_string()),

@@ -48,6 +48,14 @@ per-module control ledger the phases refer to.
   is worse than none because it reports *clean* (LESSONS #6: `scan_c_flaws.py`
   globbed only `.c`/`.h` and silently skipped nmap's ~9.4k LOC of C++ `.cc`,
   reporting nothing until the extension set was widened).
+  **Teach the scanner the contracts of the target's embedded libraries**
+  (LESSONS #032). The built-in sinks are libc's. A codebase that embeds an
+  interpreter or a framework has API contracts of its own that a single line
+  can break: an option list that must end in a sentinel, a message argument
+  that is printed rather than formatted. Add each to the scanner's
+  `SENTINEL_LIST_ARGS` and `NON_FORMATTING_ARGS` tables. With the generic rules
+  alone, the scanner reported 0 sites in the three files where nmap's NSE port
+  later found four out-of-bounds reads through the Lua C API.
 - **Classify the FFI/syscall surface by failure mode** (LESSONS #1). For each
   external call the port will make, record three properties: can it **block
   indefinitely** (→ needs a timeout / worker thread / a design that avoids it),
@@ -165,6 +173,21 @@ winlsof's phase order was sound; its one miss was not spiking the hang first.
   asserting the port rejects every input in the gap, plus fuzz seeds at each
   boundary). A golden captured over UB records whatever the allocator happened to
   leave in memory.
+  **When a C flaw is found later, sweep the existing fixtures for an input that
+  reaches it** (LESSONS #033). The rule above can only fire for flaws known when
+  the golden was written. nmap's M6.3 probe passed an unknown option to a
+  function whose option list has no terminator, and its golden recorded that UB
+  for a milestone and a half. Every new ledger entry for a C defect ends with a
+  grep of the corpora and probes for calls that reach it.
+- **A golden encodes the host that generated it** (LESSONS #034). Fixtures
+  print only facts that hold on every host the comparison runs on. A fact read
+  from the host's configuration, such as how many times `/etc/hosts` lists a
+  name, belongs in neither the golden nor the comparison. Scenarios that
+  depend on a host capability, such as IPv6 loopback, are named in the
+  generator. The docs say which goldens lack them and where they do run.
+  Fixtures that run concurrently must not print each other's state. The
+  generating host is invisible in review: nmap's port passed locally and
+  failed on CI because a runner listed `localhost` twice.
 - Stand up an **intentional-divergence ledger** (`DIVERGENCES.md`, template in
   the skeleton): every place the Rust will *deliberately* differ from C —
   starting with the Phase-0 flaw scan's findings.
@@ -230,6 +253,16 @@ for `--all`, `--all-features`, and any package selector — they are part of a
 gate's identity, not decoration on it. Three separate failures in this kit's
 history came from a gate that had been customised for convenience and therefore
 stopped covering what it was aimed at (LESSONS #023, #026, #030).
+The declared MSRV is one of those gates: build `--all-targets` with the MSRV
+toolchain before pushing, and run the full clippy sweep whenever the MSRV
+moves. Test code counts. A `use super as name;` that stable Rust accepts broke
+nmap's MSRV job (LESSONS #036).
+
+**A sabotage check restores the file from a copy, never from git.** Mutate,
+run the gate, then put back the bytes you saved before mutating. `git checkout
+-- file` restores the last *commit* and silently discards any uncommitted work
+in that file. In nmap's M6.4d that work was a security fix, and the next
+sabotage run was measured against the old code (LESSONS #038).
 
 For a hazardous module (flagged in Phase 1), **spike first**: a timeboxed
 experiment on the one scary syscall/idiom to learn its behavior (does it block?
@@ -428,6 +461,8 @@ kept both trees side by side — preserve that discipline.
 | No silent behavior drift | `differential/diff_run.py` + `DIVERGENCES.md` | CI |
 | Lints as errors | `clippy -D warnings` (+ overflow/cast lints) | CI |
 | Don't re-port a C vuln | `c-flaw-scan/scan_c_flaws.py` at Phase 0 | review |
+| Every module reaches DONE | `progress/progress.py audit --require-done` | CI, retrospective |
+| Signature checks reject forgeries | strict verification (e.g. Ed25519 `verify_strict`), tested with small-order keys | review (LESSONS #037) |
 
 See `harnesses/ci/porting-ci.template.yml` for the wiring and
 `make -C porting-kit check-kit` to smoke-test every harness.
@@ -440,3 +475,12 @@ Every port **ends with a retrospective** (`PROMPTS/90-retrospective.md`) that
 diffs lived experience against this playbook and patches it. New lessons append
 to `LESSONS.md` with the section they amended. The kit is never "done" — it is
 the running sum of every port it has survived.
+
+The retrospective also checks the port's records against the code:
+- run `progress.py audit --require-done`, so a module stuck below DONE is
+  either finished or given its reason (LESSONS #035);
+- re-scan the C with any scanner rules added since Phase 0, then sweep the
+  goldens for inputs that reach what they find (LESSONS #032, #033);
+- check that every count the docs quote matches the golden it describes.
+  nmap's docs said 34 scenarios for a milestone, while its golden had held 36
+  since the merge.

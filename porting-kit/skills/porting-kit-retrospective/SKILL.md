@@ -35,7 +35,13 @@ A port that ships without this wastes its most valuable output.
    recorded outside the kit does not compound. Promote every one you find.
    Treat `progress.json` as **suspect until verified**: run
    `progress.py --file <f> drift --src crates` before trusting it, because a stale
-   table misleads this review specifically (LESSONS #021).
+   table misleads this review specifically (LESSONS #021). Then run
+   `progress.py --file <f> audit --require-done`: a module below DONE with no
+   reason is a finding (LESSONS #035).
+   **Re-scan the C with every scanner rule added since Phase 0**, and for each new
+   hit, grep the goldens and probes for an input that reaches it. A golden
+   recorded over undefined behaviour passes until the allocator changes
+   (LESSONS #032, #033).
 2. **Diff lived experience against `PLAYBOOK.md`.** Per phase: did entry/exit criteria
    match reality? Was a gate missing that would have caught a bug earlier? Did any
    harness misfire, over-report, or get skipped (a skipped control is a broken

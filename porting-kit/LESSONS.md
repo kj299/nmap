@@ -985,6 +985,170 @@ These entries are the M2 retrospective.
      already the default.** A flag that turns out to be a no-op is not a cheap win;
      it is evidence that the unflagged path was wrong all along.
 
+## 032. The flaw scanner knew libc's contracts, not the embedded interpreter's
+
+- **Date:** 2026-10-04
+- **Codebase:** nmap — M6 (NSE), retrospective after M6.4d
+- **What happened:** The NSE port found four memory-safety defects in nmap's C
+  glue to Lua:
+  - `condvar`'s option list has no terminating `NULL`, so `luaL_checkoption`
+    reads past it;
+  - `set_port_version`'s list has the same flaw;
+  - `receive_buf` copies `l-1` bytes as a `size_t`;
+  - `port_set_output` dereferences an unchecked lookup.
+
+  They were found by reading the C while porting it. `scan_c_flaws.py`, run
+  over the three files that hold them, reported **0 sites**. LESSONS #020
+  already explained the last two: a guard and a dataflow fact. The first two
+  are not that kind of flaw. They are single-line API misuse, the scanner's
+  stated domain, but of the *Lua C API*, which the scanner had never heard
+  of. The same pattern caught a `luaL_argerror` passed a literal `%s`, which
+  that function never formats.
+- **Measured before wiring:** two rules, driven by per-API tables, over nmap's
+  774 C/C++ files. They gave five hits and five true positives, with no false
+  positives:
+  - four unterminated `luaL_checkoption` lists. Two are in modules not yet
+    ported (`nmapdb`, `zlib`). One had gone unnoticed even though the port
+    had already reimplemented its function (`set_port_version`; see #033).
+  - the literal-`%s` `luaL_argerror`.
+
+  A third candidate, `%f` given an `int` in `luaL_error`, was measured and
+  left out. It needs the argument's type, and two of its four hits were
+  doubles.
+- **Root cause:** "Scan the C for vulnerability classes" was read as "scan
+  for libc's". An embedded runtime brings its own contracts, and a port of
+  the glue around it is exactly where they are broken.
+- **Kit change:** `scan_c_flaws.py` gains the `unterminated-list` (CWE-170)
+  and `nonformatting-format` (CWE-628) categories. They are driven by
+  `SENTINEL_LIST_ARGS` and `NON_FORMATTING_ARGS`, which the Lua C API seeds,
+  with self-tests and a sabotage check. PLAYBOOK Phase 0 now says to extend
+  the tables for each embedded library. The cflaw-scan skill names both
+  categories.
+- **Section amended:** PLAYBOOK · Phase 0; `harnesses/c-flaw-scan/scan_c_flaws.py`; `skills/porting-kit-cflaw-scan/SKILL.md`.
+
+## 033. A golden recorded undefined behaviour because the flaw was found after the golden
+
+- **Date:** 2026-10-04
+- **Codebase:** nmap — M6.3 probe, found in the M6.4d retrospective
+- **What happened:** M6.3's nmap probe called `set_port_version(host, port,
+  "matched")` to pin the unknown-option error. In nmap that call reads past an
+  unterminated option list (#032), and then past the parallel enum array. The
+  golden recorded `invalid option 'matched'` only because the bytes after the
+  list happened to hold a `NULL`. The port, which raises that error by
+  design, matched for a milestone and a half. PLAYBOOK Phase 2 already said
+  "record no golden where the C is undefined". It could not fire, because
+  nobody knew the input was undefined when the probe was written.
+- **Root cause:** The UB rule is applied once, when a corpus is built. Flaws
+  found later never flow back to the corpora built before them.
+- **Fix:** The case was removed from the probe, the golden regenerated, and
+  the port's error pinned by a unit test. Ledgered as
+  `nmaplib-set-port-version-option-overread`.
+- **Kit change:** PLAYBOOK Phase 2 now says every new ledger entry for a C
+  defect ends with a grep of the corpora for inputs that reach it. The
+  retrospective prompt and skill re-scan with new rules and sweep the
+  goldens. The cflaw-scan skill has the sweep as step 5.
+- **Section amended:** PLAYBOOK · Phase 2, compounding loop; `PROMPTS/90-retrospective.md`; `skills/porting-kit-retrospective/SKILL.md`; `skills/porting-kit-cflaw-scan/SKILL.md`.
+
+## 034. A golden encodes the host that generated it
+
+- **Date:** 2026-10-04
+- **Codebase:** nmap — M6.4d (`nse_net_differential`) and M6.3 (`nmaplib_differential`)
+- **What happened:** Three variants turned up in one milestone.
+  1. `nmap.resolve("localhost")` gave one address where the golden was
+     generated and two on CI, whose runners list `localhost` twice in
+     `/etc/hosts`. The port passed locally and failed in CI.
+  2. A fixture printing `connect_waiting` read the state of *another* fixture
+     running at the same time. That fixture was added later, and the
+     generator's runs disagreed with each other.
+  3. M6.3's docs said "ten scenarios" for a golden that had always had nine,
+     because the IPv6 scenario needs IPv6 loopback and the generating host had
+     none. IPv6 was checked only by CI's live regeneration. That turned out to
+     be fine, but no document said so.
+- **Root cause:** The generator's host is invisible in review. A golden looks
+  like a property of the oracle, but it is a property of the oracle on one
+  machine.
+- **Kit change:** PLAYBOOK Phase 2 says what a fixture may print: only facts
+  that hold on every host. Capability-dependent scenarios are named in the
+  generator, and the docs say which goldens lack them and where they run.
+  Concurrent fixtures must not print each other's state. The retrospective
+  checks quoted counts against the goldens. That check found a second drift:
+  `scripts_differential` was documented as 34 scenarios and had 36.
+- **Section amended:** PLAYBOOK · Phase 2, compounding loop; `PROMPTS/90-retrospective.md`.
+
+## 035. A module sat below DONE for eight milestones because nothing asked why
+
+- **Date:** 2026-10-04
+- **Codebase:** nmap — `core::output`
+- **What happened:** `core::output` (normal, grepable and XML rendering) was
+  marked `differential` in M1 and never moved. Every later `progress.py show`
+  printed "103/104 modules fully gated". `drift` passed, because the module
+  was tracked. `audit` passed, because it checks only exemptions and
+  coverage. Closing the gap took ten minutes: Miri on its 28 tests, a check
+  for `unsafe` (none), and a fuzz exemption with its reason written down.
+  This is #021 and #027 again from the other side. Those made the table
+  complete; nothing made it *finished*.
+- **Kit change:** `progress.py audit` lists every module not done, and
+  `--require-done` makes that a failure. nmap's CI runs it, since that table
+  is now 104/104. The retrospective prompt and skill run it. PLAYBOOK's
+  cross-cutting table gains the row.
+- **Section amended:** `harnesses/progress/progress.py`; PLAYBOOK · Cross-cutting controls, compounding loop; `PROMPTS/90-retrospective.md`; `skills/porting-kit-retrospective/SKILL.md`.
+
+## 036. The MSRV is a gate: build tests with it, and re-lint when it moves
+
+- **Date:** 2026-10-04 (the first half is promoted from nmap's BACKLOG, written at the MSRV correction)
+- **Codebase:** nmap — MSRV correction to 1.88; M6.4d
+- **What happened:** Two incidents.
+  - **The MSRV correction.** When the declared MSRV was corrected to a
+    measured 1.88, the build passed but the full clippy sweep then raised ten
+    findings across six files (`is_multiple_of`, `repeat_n`). BACKLOG noted
+    it as "worth a LESSONS entry" and it was never promoted.
+  - **M6.4d.** A shared test runner used `use super as nse_host;`, which
+    current stable accepts and 1.88 rejects. Only CI's MSRV job caught it,
+    after the push.
+- **Kit change:** PLAYBOOK Phase 4's "run each gate as CI runs it" names the
+  MSRV build of `--all-targets`, test code included, as a pre-push gate, and
+  a full clippy sweep whenever the MSRV moves.
+- **Section amended:** PLAYBOOK · Phase 4.
+
+## 037. Signature verification must be strict, and a reference implementation is not a strictness oracle
+
+- **Date:** 2026-10-04 (promoted from nmap's BACKLOG, written in Workstream S)
+- **Codebase:** nmap — Workstream S (`core::sigstore::verify`)
+- **What happened:** Workstream S measured Ed25519 verification against a
+  small-order public key. These all accept forged signatures:
+  - OpenSSL;
+  - python-cryptography;
+  - RFC 8032's reference implementation;
+  - `ed25519-dalek`'s non-strict `verify`.
+
+  Only `verify_strict` rejects them. The RFC's reference `verify()` also
+  builds a bad-length exception and never raises it, so it accepts a 65-byte
+  signature and cannot serve as an oracle for length handling. All of this
+  was recorded in the port's BACKLOG with "worth a LESSONS entry" and stayed
+  there (#019's failure, again).
+- **Kit change:** PLAYBOOK's cross-cutting table gains "signature checks
+  reject forgeries": strict verification, tested with small-order keys. When
+  a port's oracle is a reference implementation, its *rejections* must be
+  tested, not assumed.
+- **Section amended:** PLAYBOOK · Cross-cutting controls.
+
+## 038. A sabotage check that restores with `git checkout` discards the work it is checking
+
+- **Date:** 2026-10-04
+- **Codebase:** nmap — M6.4d
+- **What happened:** A sabotage helper mutated a file, ran the gate, and
+  restored the file with `git checkout -- file`. The file held an
+  uncommitted security fix, `receive_buf`'s clamp of an end index before the
+  buffer. The restore silently reverted it to the last commit, and the next
+  sabotage run measured the old code. It was noticed only because `git
+  status` no longer listed the file. The fix was re-applied and committed
+  before any further sabotage.
+- **Root cause:** "Restore the original" and "restore the last commit" are
+  the same thing only on a clean tree.
+- **Kit change:** PLAYBOOK Phase 4: a sabotage check saves the file's bytes
+  before mutating and puts them back from that copy.
+- **Section amended:** PLAYBOOK · Phase 4.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole
@@ -1010,3 +1174,9 @@ These entries are the M2 retrospective.
   shell has no logic and no shared state to race. LESSONS #8's split is not just a
   Miri workaround; it is the property that lets a safety rewrite reason about an
   async engine at all.
+- **Sabotage caught missing fixtures, not just weak assertions** (nmap M6.4d).
+  Two of nine mutations survived the first run: `socket_unlock` disabled, and
+  `condvar` signal order reversed. Neither failed anything, because no fixture
+  held more than 20 sockets or had more than one waiter. Writing those two
+  fixtures, checked first against nmap, turned both into catches. A surviving
+  mutant is usually a missing *case*, not a missing assertion.

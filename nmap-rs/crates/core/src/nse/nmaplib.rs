@@ -380,7 +380,7 @@ impl NmapLib {
         self.queue.iter().map(Vec::as_slice)
     }
 
-    fn log(&mut self, to: LogTarget, msg: &[u8]) {
+    pub(crate) fn log(&mut self, to: LogTarget, msg: &[u8]) {
         (self.env.log)(to, msg);
     }
 }

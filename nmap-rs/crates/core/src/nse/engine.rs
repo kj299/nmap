@@ -583,6 +583,23 @@ impl super::runtime::NseState {
         outcome(&mut self.lua, &ex)
     }
 
+    /// Load what script selection chose ([`super::choose::choose`]): its
+    /// warnings logged as `log_error` logs them, its scripts loaded, then its
+    /// error, if it ended with one — the order the C raises them in.
+    pub fn load_chosen(&mut self, chosen: &super::choose::Chosen, budget: Budget) -> Result<(), String> {
+        for w in &chosen.warnings {
+            let mut line = b"NSE: ".to_vec();
+            line.extend_from_slice(w);
+            line.push(b'\n');
+            self.lib.borrow_mut().log(super::nmaplib::LogTarget::Stderr, &line);
+        }
+        self.load_scripts(&chosen.scripts, budget)?;
+        match &chosen.error {
+            Some(e) => Err(String::from_utf8_lossy(e).into_owned()),
+            None => Ok(()),
+        }
+    }
+
     /// `script_scan(targets, phase)`: run the phase over `hosts` (none for
     /// the pre- and post-scan phases) and render what the scripts stored.
     pub fn run_phase(
@@ -651,7 +668,7 @@ impl super::runtime::NseState {
         let _ = finish(&mut self.lua, &ex, budget, "rendering").and_then(|()| outcome(&mut self.lua, &ex));
         let rendered = std::mem::take(&mut self.store.borrow_mut().rendered);
         let lib = self.lib.borrow();
-        let mut out = PhaseResults {
+        let out = PhaseResults {
             run: Vec::new(),
             hosts: lib
                 .hosts()
@@ -664,6 +681,17 @@ impl super::runtime::NseState {
                 .collect(),
             aborted: None,
         };
+        drop(lib);
+        Self::collect(out, stored, rendered)
+    }
+
+    /// File each rendered result under its run, host or port, each list in
+    /// order of script id (`nse-results-sorted-by-id`).
+    fn collect(
+        mut out: PhaseResults,
+        stored: Vec<Stored>,
+        rendered: Vec<Option<(Option<Vec<u8>>, Option<Vec<u8>>)>>,
+    ) -> PhaseResults {
         for (s, r) in stored.into_iter().zip(rendered) {
             let (output, table_xml) = r.unwrap_or((None, None));
             let result = ScriptOutput {
@@ -690,6 +718,16 @@ impl super::runtime::NseState {
                         }
                     }
                 }
+            }
+        }
+        // `ScriptResults` is a `std::multiset<ScriptResult *>`: ordered by
+        // the results' addresses, not by the `operator<` on script ids that
+        // `ScriptResult` defines. Sorting by id is what that operator meant.
+        out.run.sort_by(|a, b| a.id.cmp(&b.id));
+        for h in &mut out.hosts {
+            h.results.sort_by(|a, b| a.id.cmp(&b.id));
+            for (_, _, list) in &mut h.ports {
+                list.sort_by(|a, b| a.id.cmp(&b.id));
             }
         }
         out

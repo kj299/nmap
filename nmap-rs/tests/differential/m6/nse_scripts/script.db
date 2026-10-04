@@ -1,0 +1,33 @@
+Entry { filename = "c-alpha.nse", categories = { "default", "testa", } }
+Entry { filename = "c-beta.nse", categories = { "testb", } }
+Entry { filename = "c-both.nse", categories = { "testa", "testb", } }
+Entry { filename = "e-circular1.nse", categories = { "circular", } }
+Entry { filename = "e-circular2.nse", categories = { "circular", } }
+Entry { filename = "s-actionerror.nse", categories = { "errors", } }
+Entry { filename = "s-allrules.nse", categories = { "rules", } }
+Entry { filename = "s-args.nse", categories = { "args", } }
+Entry { filename = "s-bool.nse", categories = { "shapes", } }
+Entry { filename = "s-bytes.nse", categories = { "shapes", } }
+Entry { filename = "s-coroutine.nse", categories = { "shapes", } }
+Entry { filename = "s-dep-a.nse", categories = { "deps", } }
+Entry { filename = "s-dep-b.nse", categories = { "deps", } }
+Entry { filename = "s-empty.nse", categories = { "shapes", } }
+Entry { filename = "s-emptytable.nse", categories = { "shapes", } }
+Entry { filename = "s-errtable.nse", categories = { "errors", } }
+Entry { filename = "s-falserule.nse", categories = { "forceme", } }
+Entry { filename = "s-float.nse", categories = { "shapes", } }
+Entry { filename = "s-globals.nse", categories = { "shapes", } }
+Entry { filename = "s-holes.nse", categories = { "shapes", } }
+Entry { filename = "s-multiline.nse", categories = { "shapes", } }
+Entry { filename = "s-newtry.nse", categories = { "errors", } }
+Entry { filename = "s-nil.nse", categories = { "shapes", } }
+Entry { filename = "s-number.nse", categories = { "shapes", } }
+Entry { filename = "s-outtable.nse", categories = { "shapes", } }
+Entry { filename = "s-pair.nse", categories = { "shapes", } }
+Entry { filename = "s-portinfo.nse", categories = { "rules", } }
+Entry { filename = "s-ruleerror.nse", categories = { "errors", } }
+Entry { filename = "s-strict.nse", categories = { "errors", } }
+Entry { filename = "s-string.nse", categories = { "shapes", } }
+Entry { filename = "s-table.nse", categories = { "shapes", } }
+Entry { filename = "s-tostring.nse", categories = { "shapes", } }
+Entry { filename = "s-yield.nse", categories = { "errors", } }

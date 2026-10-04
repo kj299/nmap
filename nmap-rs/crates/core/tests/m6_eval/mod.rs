@@ -7,9 +7,33 @@
 //! against the oracle before it is added to a corpus.
 #![allow(dead_code)] // each user takes a different subset
 
+mod memfs;
+
+use nmap_core::nse::stdlib::debuglib::load_debug;
+use nmap_core::nse::stdlib::iolib::load_io;
+use nmap_core::nse::stdlib::oslib::{load_os, OsEnv};
+use nmap_core::nse::stdlib::utf8lib::load_utf8;
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
-use piccolo::{Closure, Error, Executor, Fuel, Lua, Thread, Value, Variadic};
+use piccolo::{Closure, Error, Executor, Fuel, Lua, Table, Thread, Value, Variadic};
 use std::path::Path;
+use std::rc::Rc;
+
+/// The fixture files the `io` corpus reads.
+fn fixtures() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/differential/m6/fixtures/io")
+}
+
+/// `time(NULL)` and `clock()`, from the host, for `os`.
+fn os_env() -> OsEnv {
+    OsEnv {
+        now: Box::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        }),
+        cpu_seconds: Box::new(|| 0.0),
+    }
+}
 
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|c| format!("{c:02x}")).collect()
@@ -104,6 +128,29 @@ pub fn eval_limited(src: &[u8], limit: Option<usize>) -> (String, String) {
             load_strpack(ctx).expect("Lua::core() has a string table");
             load_format(ctx).expect("Lua::core() has a string table");
             load_tail(ctx).expect("Lua::core() has string and coroutine tables");
+            load_io(ctx, Rc::new(memfs::MemFs::with_fixtures(&fixtures())));
+            load_os(ctx, Rc::new(os_env()));
+            load_utf8(ctx);
+            // `package.loaded`, for `traceback`'s global names.
+            let loaded = Table::new(&ctx);
+            for lib in [
+                "_G",
+                "string",
+                "table",
+                "math",
+                "coroutine",
+                "io",
+                "os",
+                "utf8",
+            ] {
+                let v = if lib == "_G" {
+                    Value::Table(ctx.globals())
+                } else {
+                    ctx.globals().get_value(ctx, lib)
+                };
+                loaded.set(ctx, lib, v).expect("string key");
+            }
+            load_debug(ctx, loaded);
             let c = Closure::load(ctx, Some("=chunk"), src)?;
             let thread = Thread::new(ctx);
             thread.start(ctx, c.into(), ())?;

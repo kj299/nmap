@@ -894,18 +894,49 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
         "new_try",
         Callback::from_fn_with(&ctx, Handle(lib.clone()), l_new_try),
     );
-    let io: [(&'static str, Body); 5] = [
-        ("new_socket", |_, _, _| Err(not_yet("new_socket"))),
-        ("new_dnet", |_, _, _| Err(not_yet("new_dnet"))),
-        ("get_interface_info", |_, _, _| {
-            Err(not_yet("get_interface_info"))
-        }),
+    let io: [(&'static str, Body); 2] = [
         ("mutex", |_, _, _| Err(not_yet("mutex"))),
         ("condvar", |_, _, _| Err(not_yet("condvar"))),
     ];
     for (name, body) in io {
         install(ctx, t, lib, name, body);
     }
+    // `luaopen_nmap` requires `nmap.socket` and `nmap.dnet` and keeps them as
+    // `nmap.socket` and `nmap.dnet`, with `new_socket`, `new_dnet` and
+    // `get_interface_info` taken out of them. Their functions do I/O (M6.4d);
+    // until then each raises, but the tables are there for libraries to load.
+    let socket = Table::new(&ctx);
+    let socket_fns: [(&'static str, Body); 5] = [
+        ("loop", |_, _, _| Err(not_yet("socket.loop"))),
+        ("new", |_, _, _| Err(not_yet("socket.new"))),
+        ("sleep", |_, _, _| Err(not_yet("socket.sleep"))),
+        ("parse_ssl_certificate", |_, _, _| {
+            Err(not_yet("socket.parse_ssl_certificate"))
+        }),
+        ("get_stats", |_, _, _| Err(not_yet("socket.get_stats"))),
+    ];
+    for (name, body) in socket_fns {
+        install(ctx, socket, lib, name, body);
+    }
+    t.set_field(ctx, "new_socket", socket.get_value(ctx, "new"));
+    t.set_field(ctx, "socket", socket);
+    let dnet = Table::new(&ctx);
+    let dnet_fns: [(&'static str, Body); 2] = [
+        ("new", |_, _, _| Err(not_yet("dnet.new"))),
+        ("get_interface_info", |_, _, _| {
+            Err(not_yet("dnet.get_interface_info"))
+        }),
+    ];
+    for (name, body) in dnet_fns {
+        install(ctx, dnet, lib, name, body);
+    }
+    t.set_field(ctx, "new_dnet", dnet.get_value(ctx, "new"));
+    t.set_field(
+        ctx,
+        "get_interface_info",
+        dnet.get_value(ctx, "get_interface_info"),
+    );
+    t.set_field(ctx, "dnet", dnet);
     let registry = Table::new(&ctx);
     registry.set_field(ctx, "args", arg_table(ctx, args));
     t.set_field(ctx, "registry", registry);

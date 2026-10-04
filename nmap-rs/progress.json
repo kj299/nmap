@@ -21,6 +21,12 @@
     "core::nse::stdlib::base": [
       "nse_tail"
     ],
+    "core::nse::stdlib::osdate": [
+      "nse_utf8_date"
+    ],
+    "core::nse::stdlib::oslib": [
+      "nse_utf8_date"
+    ],
     "core::nse::stdlib::pattern": [
       "nse_pattern"
     ],
@@ -32,6 +38,9 @@
     ],
     "core::nse::stdlib::strrep": [
       "nse_tail"
+    ],
+    "core::nse::stdlib::utf8lib": [
+      "nse_utf8_date"
     ],
     "core::osdb::expr": [
       "osdb_expr"
@@ -105,8 +114,23 @@
     "core::log": {
       "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
     },
+    "core::nse::fspolicy": {
+      "fuzzed": "A pure predicate over canonical paths the host has already resolved (component-wise prefix and equality). It parses nothing. Pinned by unit tests, including the prefix-is-a-component case, and by sabotage."
+    },
+    "core::nse::package": {
+      "fuzzed": "require's loader: library names come from scripts and libraries nmap ships, and files are read only through the LibrarySource it is given. The chunks it compiles go to the VM's own parser. Exercised end to end by nselib_differential, which requires all 133 shipped libraries against nmap 7.94."
+    },
+    "core::nse::runtime": {
+      "fuzzed": "Builds the NSE state from fixed parts and runs the fixed prelude. Takes no input beyond the configuration the host passes. Exercised by nselib_differential and the prelude's verbatim test."
+    },
     "core::nse::stdlib": {
       "fuzzed": "Binding only: converts Lua values with the VM's own conversions and hands every byte of script- or packet-supplied data to the pure modules core::nse::stdlib::strpack, ::pattern, ::strformat and ::strrep, which carry the nse_strpack, nse_pattern, nse_format and nse_tail targets. Nothing here parses input. It is exercised end to end by the strpack, pattern, format and tail differentials, and by in-module tests Miri runs, including the gsub and format sequences that call back into the VM."
+    },
+    "core::nse::stdlib::debuglib": {
+      "fuzzed": "Read-only introspection of the running VM's frames (patch 0010). It takes no data beyond a level number or a function, and is exercised by the stdlib differential's debug section and by strict.lua in every library load."
+    },
+    "core::nse::stdlib::iolib": {
+      "fuzzed": "io over files the policy allows: nmap's own data files and files the operator named, not remote data. read_number is bounded by L_MAXLENNUM and hands its numeral to the VM's own conversion. Exercised by the 2,012-case stdlib differential against liblua/ over fixture files, and by in-module arithmetic justified per function."
     },
     "core::trace": {
       "fuzzed": "A single enabled() predicate over a verbosity flag. Takes no input of any kind."
@@ -125,6 +149,9 @@
     },
     "sys::ndp": {
       "fuzzed": "Neighbour-discovery I/O driver. Frame parsing is core::ndp::resolve_from_frame, covered by fuzz target ndp_advert; this module only drives the capture and the timeout."
+    },
+    "sys::nsefs": {
+      "fuzzed": "The ScriptFs over the real file system: it canonicalises a path with the OS and asks fspolicy. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, and that cover named files, output directories and missing files."
     },
     "sys::osscan": {
       "fuzzed": "OS-detection round driver. Frame parsing is core::osprobe::demux::demux, covered by fuzz target osprobe_demux (added in M7.1); this module does the bookkeeping around it."
@@ -169,16 +196,24 @@
     "core::macvendor": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::ndp": "unsafe_audited",
+    "core::nse::fspolicy": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",
+    "core::nse::package": "unsafe_audited",
+    "core::nse::runtime": "unsafe_audited",
     "core::nse::script": "unsafe_audited",
     "core::nse::scriptargs": "unsafe_audited",
     "core::nse::selection": "unsafe_audited",
     "core::nse::stdlib": "unsafe_audited",
     "core::nse::stdlib::base": "unsafe_audited",
+    "core::nse::stdlib::debuglib": "unsafe_audited",
+    "core::nse::stdlib::iolib": "unsafe_audited",
+    "core::nse::stdlib::osdate": "unsafe_audited",
+    "core::nse::stdlib::oslib": "unsafe_audited",
     "core::nse::stdlib::pattern": "unsafe_audited",
     "core::nse::stdlib::strformat": "unsafe_audited",
     "core::nse::stdlib::strpack": "unsafe_audited",
     "core::nse::stdlib::strrep": "unsafe_audited",
+    "core::nse::stdlib::utf8lib": "unsafe_audited",
     "core::osdb::expr": "unsafe_audited",
     "core::osdb::model": "unsafe_audited",
     "core::osdb::parse": "unsafe_audited",
@@ -219,6 +254,7 @@
     "sys::group": "unsafe_audited",
     "sys::ndp": "unsafe_audited",
     "sys::netif": "unsafe_audited",
+    "sys::nsefs": "unsafe_audited",
     "sys::osscan": "unsafe_audited",
     "sys::rawio": "unsafe_audited",
     "sys::route": "unsafe_audited",

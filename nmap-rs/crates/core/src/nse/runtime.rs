@@ -1,0 +1,202 @@
+//! The Lua state NSE runs in, assembled as `nse_main.cc`'s `init_main` and
+//! `nse_main.lua`'s preamble assemble it.
+//!
+//! Every script and library shares one state. It holds the standard library
+//! the scripts are allowed (the VM's own, and the first-party half in
+//! [`super::stdlib`]), `package` and `require` ([`super::package`]), and the
+//! modules the engine provides — `nmap` ([`super::nmaplib`]) — each both in
+//! `package.loaded` and as a global, as `luaL_requiref(L, name, open, 1)`
+//! leaves them.
+
+use std::rc::Rc;
+
+use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, StashedTable, Value, Variadic};
+
+use super::nmaplib::{load_nmap, Shared};
+use super::package::{load_package, preload_module, LibrarySource};
+use super::scriptargs::ArgTable;
+use super::stdlib::debuglib::load_debug;
+use super::stdlib::iolib::{load_io, ScriptFs};
+use super::stdlib::oslib::{load_os, OsEnv};
+use super::stdlib::utf8lib::load_utf8;
+use super::stdlib::{load_format, load_patterns, load_strpack, load_tail};
+
+/// What the state is built from.
+pub struct StateConfig {
+    /// The `nmap` module's state: the run's options and hosts.
+    pub lib: Shared,
+    /// `--script-args` and `--script-args-file`, parsed.
+    pub args: ArgTable,
+    /// Where `require` finds `nselib/`.
+    pub source: Rc<dyn LibrarySource>,
+    /// The files `io` may open, and its standard output.
+    pub fs: Rc<dyn ScriptFs>,
+    /// The clocks `os` reads.
+    pub os: Rc<OsEnv>,
+    /// The VM's memory budget, in bytes ([`Lua::set_memory_limit`]).
+    pub memory_limit: Option<usize>,
+}
+
+/// The engine's Lua, from `nse_main.lua` (see the file).
+pub const PRELUDE: &str = include_str!("prelude.lua");
+
+/// The fuel the prelude may use: it loads `stdnse` and `strict`, a few
+/// thousand instructions.
+const PRELUDE_FUEL: u64 = 50_000_000;
+
+/// A built NSE state.
+pub struct NseState {
+    pub lua: Lua,
+    /// What the prelude returned: the engine's own values (`NSE_YIELD_VALUE`,
+    /// `REQUIRE_ERROR`, `print_debug`, ...).
+    pub engine: StashedTable,
+}
+
+/// Build NSE's Lua state and run the prelude in it; the prelude's error if it
+/// fails, which means `nselib/` is missing or broken.
+pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
+    let mut lua = build(config);
+    let engine = run_to_completion(&mut lua, "=nse_main", PRELUDE.as_bytes(), PRELUDE_FUEL)
+        .and_then(|ex| {
+            lua.try_enter(|ctx| {
+                let t: piccolo::Table = ctx.fetch(&ex).take_result::<piccolo::Table>(ctx)??;
+                Ok(ctx.stash(t))
+            })
+            .map_err(|e| format!("{e:#}"))
+        })?;
+    Ok(NseState { lua, engine })
+}
+
+/// The state, before the prelude has run.
+fn build(config: &StateConfig) -> Lua {
+    let mut lua = Lua::core();
+    if let Some(limit) = config.memory_limit {
+        lua.set_memory_limit(limit);
+    }
+    lua.enter(|ctx| {
+        load_patterns(ctx).expect("Lua::core() has a string table");
+        load_strpack(ctx).expect("Lua::core() has a string table");
+        load_format(ctx).expect("Lua::core() has a string table");
+        load_tail(ctx).expect("Lua::core() has string and coroutine tables");
+        // `LUA_VERSION`, which `nse_main.lua` checks before anything else.
+        ctx.set_global("_VERSION", "Lua 5.4");
+        load_io(ctx, config.fs.clone());
+        load_os(ctx, config.os.clone());
+        load_utf8(ctx);
+        // `debug` needs `package.loaded`, which `load_package` then records
+        // it in: the library table is put in place first and filled after.
+        let debug = piccolo::Table::new(&ctx);
+        ctx.set_global("debug", debug);
+        let loaded = load_package(ctx, config.source.clone());
+        let filled = load_debug(ctx, loaded);
+        for (k, v) in filled {
+            debug.set(ctx, k, v).expect("string keys");
+        }
+        ctx.set_global("debug", debug);
+        let nmap = load_nmap(ctx, &config.lib, &config.args);
+        preload_module(ctx, loaded, "nmap", Value::Table(nmap), true);
+        // `luaL_requiref(L, "nmap.socket", ..., 0)`: in `package.loaded`
+        // only, as is `nmap.dnet`.
+        for sub in ["socket", "dnet"] {
+            let module = nmap.get_value(ctx, sub);
+            let name = if sub == "socket" {
+                "nmap.socket"
+            } else {
+                "nmap.dnet"
+            };
+            preload_module(ctx, loaded, name, module, false);
+        }
+    });
+    lua
+}
+
+/// The outcome of [`run_chunk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkOutcome {
+    /// What the chunk returned, each value as `tostring` shows it.
+    Returned(Vec<String>),
+    /// The error that escaped it.
+    Raised(String),
+    /// It was still running when the fuel ran out.
+    OutOfFuel,
+}
+
+/// Compile `src` as a chunk named `name` and step it until it finishes; the
+/// executor, holding its result, or why it did not finish.
+fn run_to_completion(
+    lua: &mut Lua,
+    name: &str,
+    src: &[u8],
+    fuel: u64,
+) -> Result<StashedExecutor, String> {
+    let ex: StashedExecutor = lua
+        .try_enter(|ctx| {
+            let f = Closure::load(ctx, Some(name), src)?;
+            Ok(ctx.stash(Executor::start(ctx, f.into(), ())))
+        })
+        .map_err(|e| format!("{e:#}"))?;
+    const SLICE: i32 = 4096;
+    let mut spent: u64 = 0;
+    loop {
+        let mut f = Fuel::with(SLICE);
+        match lua.enter(|ctx| ctx.fetch(&ex).step(ctx, &mut f)) {
+            Ok(true) => return Ok(ex),
+            Ok(false) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        spent = spent.saturating_add(u64::from(SLICE.unsigned_abs()));
+        if spent > fuel {
+            return Err(format!("{name}: out of fuel"));
+        }
+    }
+}
+
+/// Run `src` as a chunk named `name` in `lua` to completion, or until `fuel`
+/// is spent.
+pub fn run_chunk(lua: &mut Lua, name: &str, src: &[u8], fuel: u64) -> ChunkOutcome {
+    let ex = match run_to_completion(lua, name, src, fuel) {
+        Ok(ex) => ex,
+        Err(e) if e.ends_with("out of fuel") => return ChunkOutcome::OutOfFuel,
+        Err(e) => return ChunkOutcome::Raised(e),
+    };
+    lua.enter(
+        |ctx| match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
+            Ok(Ok(vs)) => {
+                ChunkOutcome::Returned(vs.0.into_iter().map(|v| v.display().to_string()).collect())
+            }
+            Ok(Err(e)) => ChunkOutcome::Raised(match e {
+                piccolo::Error::Lua(v) => v.0.display().to_string(),
+                piccolo::Error::Runtime(r) => format!("{r:#}"),
+            }),
+            Err(e) => ChunkOutcome::Raised(e.to_string()),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PRELUDE;
+
+    /// Every `-- >>> nse_main.lua` block of the prelude, verbatim in
+    /// `nse_main.lua`: the engine's Lua is copied from nmap's, not restated.
+    #[test]
+    #[cfg(not(miri))] // reads nse_main.lua from disk
+    fn prelude_blocks_are_nse_main_verbatim() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../nse_main.lua");
+        let nse_main = std::fs::read_to_string(&path).expect("nse_main.lua at the repository root");
+        let mut blocks = 0;
+        let mut rest = PRELUDE;
+        while let Some(start) = rest.find("-- >>> nse_main.lua\n") {
+            let body = &rest[start + "-- >>> nse_main.lua\n".len()..];
+            let end = body.find("-- <<<\n").expect("every block is closed");
+            let block = &body[..end];
+            assert!(
+                nse_main.contains(block),
+                "prelude block not found verbatim in nse_main.lua:\n{block}"
+            );
+            blocks += 1;
+            rest = &body[end..];
+        }
+        assert_eq!(blocks, 5, "the prelude's blocks");
+    }
+}

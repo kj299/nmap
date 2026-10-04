@@ -22,10 +22,15 @@
 //! [`base::chunk_id`], which names a chunk in an error message.
 
 pub mod base;
+pub mod debuglib;
+pub mod iolib;
+pub mod osdate;
+pub mod oslib;
 pub mod pattern;
 pub mod strformat;
 pub mod strpack;
 pub mod strrep;
+pub mod utf8lib;
 
 pub use self::base::load_tail;
 

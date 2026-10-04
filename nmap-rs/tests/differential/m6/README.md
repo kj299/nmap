@@ -318,5 +318,7 @@ The fixtures print only what is the same on every run:
 - `n-refused` strips the function's name from one argument error, since
   `nmap.new_socket` and `nmap.socket.new` are one function and the C reports
   whichever name it finds first;
+- `n-resolve` reports whether every address of `localhost` is `127.0.0.1`,
+  not the list, whose length depends on the machine's `/etc/hosts`;
 - `n-sleep` reports the type of `connect_waiting`, not its value, which
   depends on `n-many` running at the same time.

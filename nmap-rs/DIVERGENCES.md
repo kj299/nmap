@@ -3051,3 +3051,129 @@ Beyond the four VM entries above (`vm-allocation-failure-aborts`,
       `tryfuncTM` inside `luaD_precall`.
 - [x] `memory-error-skips-handlers` — "not enough memory" goes past `xpcall`'s
       handler and `coroutine.wrap`'s position prefix, as `LUA_ERRMEM` does.
+
+## Milestone 6.4c1 — the NSE runtime's state: `require`, `io`, `os`, `utf8`, `debug` (`core::nse::{package, runtime, fspolicy}`, `core::nse::stdlib::{iolib, oslib, osdate, utf8lib, debuglib}`, `sys::nsefs`, vendored VM patch `0010`)
+
+The state every script runs in, built as `nse_main.cc` builds it. The order
+is:
+
+1. the base library, then the `string`, `io`, `os`, `utf8` and `debug`
+   libraries;
+2. `package` and `require`, with NSE's searcher (`nselib/X.lua` through
+   `nmap.fetchfile`) ahead of `package.preload`;
+3. the `nmap` module, set as a global and preloaded, with `nmap.socket` and
+   `nmap.dnet` in `package.loaded`;
+4. the parts of `nse_main.lua` that libraries rely on, run before anything
+   else. These are `strict(_ENV)`, NSE's `coroutine.resume`/`wrap`,
+   `stdnse.silent_require`, and the `print_verbose`/`print_debug` helpers.
+   They are copied from `nse_main.lua` byte for byte (`prelude.lua`), and a
+   test fails if a block stops appearing there verbatim.
+
+Gated by three things:
+
+- **Every library loads.** All 133 libraries in `nselib/` are required in a
+  fresh state, and how each one ends, ok or the error, must match nmap 7.94
+  run against this tree's `nselib/` (`m64_nselib_golden.txt`, regenerated
+  live in CI).
+  - 114 load as they do under nmap.
+  - 19 are pinned to fail, each only because a C module it requires is not
+    ported yet: `openssl` (12), `lpeg` (5) or `nmapdb` (2).
+- **Every unit-test suite passes.** Each library's `test_suite` runs as
+  nmap's `--script-args=unittest` runs it.
+  - 22 of 26 suites pass.
+  - `coap`, `json`, `mongodb` and `ssh2` are pinned to the same missing
+    modules.
+- **A stdlib corpus** (`m64_stdlib_cases.txt`): 2,012 chunks against nmap's
+  own `liblua/` under `TZ=UTC`, covering all of `utf8`, `os.date`/`time`/
+  `difftime`/`clock`, `io` over fixture files, and `debug.getinfo`/
+  `traceback`. Every result and message is compared. The only allowances are
+  argument naming in method calls (below) and a `chunk:N:` position nmap's
+  message lacks.
+- **A fuzz target** (`nse_utf8_date`) checks `utf8` decoding against a
+  transliteration of `utf8_decode`, and checks `gmtime`, `timegm` and every
+  `strftime` conversion against glibc in-process.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `io-files-through-policy` — Decision 2 (`docs/M6-ANALYSIS.md`). nmap
+      gives scripts the whole file system with nmap's privileges, usually
+      root. Here every `io.open`/`io.lines`/`io.output` goes through
+      `FsPolicy`:
+      - **reading** is allowed beneath nmap's data directories, and of a file
+        the operator named in `--script-args`;
+      - **writing** is allowed to a named file, or beneath an output directory
+        the operator designated.
+
+      Paths are compared canonical, with `..` and symbolic links resolved, and
+      the canonical path is what is opened. A refusal reads as the system's:
+      `nil, "NAME: Permission denied", 13`. The checks are pinned by unit
+      tests and sabotage: a data directory made writable fails them, and so
+      does a `..` or symlink escape. One sabotage no test can catch is opening
+      the path as given rather than the canonical one. That differs only when
+      a link is swapped between check and open, and a script cannot make a
+      link, so only an outside actor could race it.
+- [x] `os-is-the-clock` — `os` has `clock`, `date`, `time` and `difftime`
+      only. `execute`, `exit`, `getenv`, `remove`, `rename`, `tmpname` and
+      `setlocale` do not exist: no shipped script or library calls them on a
+      path a scan reaches (Decision 2).
+- [x] `io-no-process-or-stdin` — `io.popen`, `io.tmpfile`, `io.input`,
+      `io.read` and `io.stdin`/`io.stderr` do not exist. `io.lines()` with no
+      file name raises, rather than reading nmap's standard input.
+- [x] `debug-is-introspection-only` — `debug` has `getinfo` and `traceback`
+      only, read-only through patch `0010`. There is no `getlocal`/`setlocal`,
+      `getupvalue`/`setupvalue`, `sethook`, `getregistry`, `getmetatable`/
+      `setmetatable` or `upvalueid`. The shipped tree uses `getinfo` (in
+      `strict.lua`) and `traceback`; the rest reach into other scripts' state.
+- [x] `require-searches-only-nselib` — `require` finds a library through
+      NSE's searcher or `package.preload`. `package.path` and `package.cpath`
+      are never searched, `package.loadlib` does not exist, and no C library
+      can be loaded. `loadfile` and `dofile` do not exist; `require` reads
+      files only through the library source it was given.
+
+### Differences, open and documented
+
+- [ ] `os-local-time-is-utc` — there is no time-zone database here, so local
+      time is UTC. `os.date` without `!`, `os.time` and `%Z` behave as PUC-Lua
+      does under `TZ=UTC` (the corpus runs the oracle so). A DST flag of
+      `true` is read as glibc reads it in a zone without DST: one hour
+      earlier.
+- [ ] `stdlib-bad-argument-naming` — the bindings number arguments from the
+      receiver and always know their own name. PUC-Lua's `luaL_argerror` asks
+      the calling instruction instead:
+      - for a method call (`f:read("x")`) it numbers one lower, `bad argument
+        #1 to 'read'` where the port says `#2`;
+      - for a function reached some other way (`pcall(io.stdout.read, 5)`) it
+        names it `'?'` where the port names it `'read'`.
+
+      Ten cases are pinned (`METHOD_NAMING`), each required to differ from
+      nmap only in that number and name.
+- [ ] `debug-traceback-names-approximate` — `traceback` names a function as
+      PUC-Lua's `pushglobalfuncname` does, from `package.loaded`. Where PUC-Lua
+      falls back on the calling instruction (`local 'f'`, `method 'm'`,
+      `field 'x'`), the VM keeps no such record, and the frame reads
+      `function <src:line>`. `getinfo`'s `name`/`namewhat` are always
+      nil/"". No shipped code parses a traceback.
+- [ ] `vm-close-attribute-unsupported` — the vendored parser rejects Lua
+      5.4's `<close>` attribute, so `io` handles' `__close` is never reached
+      from Lua. No shipped script or library uses `<close>`.
+- [ ] `nse-c-modules-pending` — `openssl`, `lpeg` (and `re` on it), `nmapdb`,
+      `lfs`, `libssh2` and `zlib` are not preloaded yet. The 19 libraries and 4
+      suites above fail to load where they need them, and are pinned so that
+      each failure must be exactly "module not found".
+- [ ] `nmap-socket-and-dnet-stubbed` — `nmap.new_socket`, `nmap.socket.*`,
+      `nmap.new_dnet`, `nmap.dnet.*`, `nmap.get_interface_info`, `mutex` and
+      `condvar` raise "not available before M6.4 (it needs I/O)" until M6.4d.
+      They exist so that libraries reading them at load time (`stdnse.lua:63`)
+      load.
+
+### Behaviour matched that the corpus pins
+
+- [x] `os-time-sets-fields-before-failing` — `os.time` normalises the table's
+      fields before reporting that the time cannot be represented, as C's
+      `setallfields` runs before the error.
+- [x] `strftime-century-unpadded` — `%C` and `%F` print a small or negative
+      year's century and year unpadded, as glibc does.
+- [x] `io-read-negative-count` — `f:read(-1)` raises "not enough memory", as
+      C's `(size_t)` conversion asks for a buffer no allocator grants.
+- [x] `print-tostring-returning-nothing` — `print` of a value whose
+      `__tostring` returns nothing raises `'__tostring' must return a string`.

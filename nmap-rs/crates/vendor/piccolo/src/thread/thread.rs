@@ -140,6 +140,21 @@ impl<'gc> Thread<'gc> {
         }
     }
 
+    /// The functions active in this thread, innermost first, as
+    /// [`Execution::frame_info`](crate::Execution::frame_info) reports them;
+    /// `None` while the thread is running and cannot be looked at.
+    pub fn frame_infos(self) -> Option<std::vec::Vec<crate::thread::FrameInfo<'gc>>> {
+        let state = self.0.try_borrow().ok()?;
+        Some(
+            state
+                .frames
+                .iter()
+                .rev()
+                .filter_map(crate::thread::FrameInfo::of)
+                .collect(),
+        )
+    }
+
     /// If this thread is `Stopped`, start a new suspended function.
     pub fn start_suspended(
         self,

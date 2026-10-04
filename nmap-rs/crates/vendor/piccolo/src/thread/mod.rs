@@ -9,7 +9,7 @@ use crate::meta_ops::{MetaCallError, MetaOperatorError};
 pub use self::{
     executor::{
         BadExecutorMode, CurrentThread, Execution, Executor, ExecutorInner, ExecutorMode,
-        UpperLuaFrame,
+        FrameInfo, UpperLuaFrame,
     },
     thread::{BadThreadMode, OpenUpValue, Thread, ThreadInner, ThreadMode},
 };

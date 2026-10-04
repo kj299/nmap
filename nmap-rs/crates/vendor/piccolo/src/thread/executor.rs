@@ -893,6 +893,26 @@ impl<'gc, 'a> Execution<'gc, 'a> {
         std::vec::Vec::new()
     }
 
+    /// `lua_getstack(L, level)` and the facts `lua_getinfo` reads from it:
+    /// the function `level` calls up from the running callback — 0 is the
+    /// callback itself, 1 its caller — counted as [`Execution::where_at`]
+    /// counts, or `None` past the bottom of this thread's stack.
+    pub fn frame_info(&self, level: usize) -> Option<FrameInfo<'gc>> {
+        if level == 0 {
+            return Some(FrameInfo::rust(None));
+        }
+        let mut seen = 0;
+        for frame in self.upper_frames.iter().rev() {
+            if let Some(info) = FrameInfo::of(frame) {
+                seen += 1;
+                if seen == level {
+                    return Some(info);
+                }
+            }
+        }
+        None
+    }
+
     /// If the function we are returning to is Lua, returns information about the Lua frame we are
     /// returning to.
     pub fn upper_lua_frame(&self) -> Option<UpperLuaFrame<'gc>> {
@@ -946,18 +966,62 @@ fn raise_memory_error<'gc>(ctx: Context<'gc>, state: &mut ThreadState<'gc>) -> b
 
 /// `luaG_addinfo`'s prefix, `chunk:line: `, for instruction `op` of `closure`.
 fn lua_where(closure: crate::Closure<'_>, op: usize) -> std::vec::Vec<u8> {
+    let line = line_at(closure, op);
+    let mut out = crate::chunk_id::chunk_id(closure.prototype().chunk_name.as_bytes());
+    out.extend_from_slice(format!(":{line}: ").as_bytes());
+    out
+}
+
+/// What `lua_getinfo` can report about one active function.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameInfo<'gc> {
+    /// The function, when there is a value for it: a Lua function, or a
+    /// callback that has not yet run. A running Rust function has none.
+    pub function: Option<Function<'gc>>,
+    /// For a Lua function, its closure and the line it is executing, 1-based
+    /// (`currentline`).
+    pub lua: Option<(crate::Closure<'gc>, i64)>,
+}
+
+impl<'gc> FrameInfo<'gc> {
+    fn rust(function: Option<Function<'gc>>) -> Self {
+        FrameInfo {
+            function,
+            lua: None,
+        }
+    }
+
+    /// The function a frame runs, if the frame is one: `None` for the
+    /// bookkeeping frames (results, errors, yields) that run nothing.
+    pub(super) fn of(frame: &Frame<'gc>) -> Option<Self> {
+        match frame {
+            Frame::Lua { closure, pc, .. } => {
+                let line = line_at(*closure, pc.saturating_sub(1));
+                Some(FrameInfo {
+                    function: Some(Function::Closure(*closure)),
+                    lua: Some((*closure, i64::try_from(line.0).unwrap_or(i64::MAX) + 1)),
+                })
+            }
+            Frame::Sequence { .. } => Some(FrameInfo::rust(None)),
+            Frame::Callback { callback, .. } => {
+                Some(FrameInfo::rust(Some(Function::Callback(*callback))))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The source line of instruction `op` of `closure`.
+fn line_at(closure: crate::Closure<'_>, op: usize) -> LineNumber {
     let proto = closure.prototype();
-    let line = match proto
+    match proto
         .opcode_line_numbers
         .binary_search_by_key(&op, |(opi, _)| *opi)
     {
         Ok(i) => proto.opcode_line_numbers[i].1,
         Err(0) => LineNumber(0),
         Err(i) => proto.opcode_line_numbers[i - 1].1,
-    };
-    let mut out = crate::chunk_id::chunk_id(proto.chunk_name.as_bytes());
-    out.extend_from_slice(format!(":{line}: ").as_bytes());
-    out
+    }
 }
 
 pub struct CurrentThread<'gc> {

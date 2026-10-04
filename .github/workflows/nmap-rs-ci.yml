@@ -362,6 +362,13 @@ jobs:
       # against the committed golden.
       - run: sudo python3 tests/differential/m6/oracle/gen_m63_nmap.py "$RUNNER_TEMP"
       - run: M63_GOLDEN="$RUNNER_TEMP/m63_nmap_golden.txt" cargo test -p nmap-core --test nmaplib_differential
+      # M6.4c1: nmap itself, over this repository's nselib/, requires every
+      # library and runs every unit-test suite (two probe scripts, prerules,
+      # -sn against 127.0.0.1, so nothing leaves the runner). The port must end
+      # each the same way, but for the libraries pinned to C modules not yet
+      # ported. Regenerated live here; the test job runs the committed golden.
+      - run: python3 tests/differential/m6/oracle/gen_m64_nselib.py "$RUNNER_TEMP"
+      - run: M64_NSELIB_GOLDEN="$RUNNER_TEMP/m64_nselib_golden.txt" cargo test -p nmap-core --test nselib_differential
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -566,3 +573,15 @@ jobs:
       - run: cargo test -p nmap-core --test limits_differential
       - run: bash tests/differential/m6/regen_m64_memory.sh --check
       - run: cargo test -p nmap-core --test memory_differential
+
+      # M6.4c1 — the NSE state. 2,012 chunks against nmap's own Lua under
+      # TZ=UTC: all of `utf8`, `os` as the clock (`date`, `time`, `difftime`),
+      # `io` over fixture files and a scratch directory, and
+      # `debug.getinfo`/`traceback`. Ten method-call messages are pinned, each
+      # required to differ only in argument numbering and naming. Then every
+      # nselib/ library is required, and every unit-test suite run, against
+      # the committed nmap 7.94 golden (regenerated live in the differential
+      # job).
+      - run: bash tests/differential/m6/regen_m64_stdlib.sh --check
+      - run: cargo test -p nmap-core --test stdlib_differential
+      - run: cargo test -p nmap-core --test nselib_differential

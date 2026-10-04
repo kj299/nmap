@@ -509,6 +509,20 @@ fn float_item(p: &Parsed, conv: u8, x: f64, out: &mut Vec<u8>) -> Result<(), For
     pad(p, &lead, &body, true, out)
 }
 
+/// `LUA_NUMBER_FMT`, `"%.14g"`, as `fprintf` writes a float: what
+/// `io.write` writes for one, without the `.0` `tostring` adds.
+pub(crate) fn lua_number_fmt(x: f64) -> Vec<u8> {
+    let sign = if x.is_sign_negative() { "-" } else { "" };
+    let body = if x.is_nan() {
+        "nan".to_string()
+    } else if x.is_infinite() {
+        "inf".to_string()
+    } else {
+        general_form(x.abs(), 14, false)
+    };
+    format!("{sign}{body}").into_bytes()
+}
+
 /// `%.*e` of a non-negative finite `x`: `d.ddde±XX`.
 fn exp_form(x: f64, prec: usize, alt: bool) -> String {
     let s = format!("{x:.prec$e}");

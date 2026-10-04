@@ -1,8 +1,9 @@
 # VENDORED THIRD-PARTY CODE — see PROVENANCE.md before editing anything here.
 #
 # `piccolo`, a stackless pure-Rust Lua VM, at upstream commit ce709eb plus the
-# numbered patch series in patches/ (ten patches; PROVENANCE.md lists them). It is vendored rather than depended on from crates.io
-# for two reasons, both measured (docs/M6-ANALYSIS.md, Decision 4):
+# numbered patch series in patches/ (eleven patches; PROVENANCE.md lists
+# them). It is vendored rather than depended on from crates.io for two
+# reasons, both measured (docs/M6-ANALYSIS.md, Decision 4):
 #
 #   * upstream master pins `gc-arena` by GIT REV, which `cargo deny check
 #     sources` rejects outright, and the published 0.3.3 is materially worse

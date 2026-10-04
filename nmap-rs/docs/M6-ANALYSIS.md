@@ -9,9 +9,9 @@ follow on approval.
 Every count below was measured against the C tree in this repository, not
 recalled; the commands are reproducible from the paths cited.
 
-> **Status (after M6.4c1).** The port order was approved in M7.5 (Decision 3,
-> *the M6.0 port order*, below), and M6.0–M6.3 and M6.4a/b/c1 are merged
-> (#109–#122). M6.4, sketched as one step in the build order below, was split
+> **Status (after M6.4c2).** The port order was approved in M7.5 (Decision 3,
+> *the M6.0 port order*, below). M6.0–M6.3 and M6.4a/b/c1 are merged
+> (#109–#122), and c2, the scheduler, is in review. M6.4, sketched as one step in the build order below, was split
 > into five PRs:
 >
 > - (a) VM errors;
@@ -21,7 +21,7 @@ recalled; the commands are reproducible from the paths cited.
 > - (d) sockets;
 > - (e) `--script` on the command line.
 >
-> c2, d and e are what remain. Decision 2's sandbox shipped in c1, except
+> d and e are what remain. Decision 2's sandbox shipped in c1, except
 > `HOME`, which is not resolved in Rust yet. Until it is, `ssh-hostkey`'s
 > `known-hosts` check without `known-hosts-path` raises; DIVERGENCES.md records
 > this as `os-getenv-home-pending`. PLAN.md's tracker is the live record;

@@ -37,16 +37,17 @@ In brief:
 - **Workstream S** (signature-database maintenance): every unblocked slice is merged.
 - **M6, NSE, is in progress.** Done so far:
   - `.nse` metadata and `--script` selection;
-  - the vendored Lua VM (`crates/vendor/piccolo`, ten local patches), with
+  - the vendored Lua VM (`crates/vendor/piccolo`, eleven local patches), with
     PUC-Lua's errors, limits and memory budget;
   - the first-party standard library;
   - `--script-args` and the `nmap` module's non-I/O half;
   - the NSE state, in which all `nselib/` libraries load as under nmap 7.94
     except those waiting on unported C modules. File access goes through the
-    script file policy (`docs/M6-ANALYSIS.md`, Decision 2).
+    script file policy (`docs/M6-ANALYSIS.md`, Decision 2);
+  - running scripts: `nse_main.lua`'s own scheduler, with results printed as
+    nmap prints them.
 
-  Next are the script scheduler (M6.4c2), sockets (M6.4d) and `--script` on
-  the command line (M6.4e).
+  Next are sockets (M6.4d) and `--script` on the command line (M6.4e).
 - **M7, cutover,** is in progress in parallel.
 
 ## The gates (CI-enforced; `.github/workflows/nmap-rs-ci.yml`)

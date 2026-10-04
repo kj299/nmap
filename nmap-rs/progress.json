@@ -12,8 +12,14 @@
     "core::macvendor": [
       "macvendor_parse"
     ],
+    "core::nse::choose": [
+      "nse_results"
+    ],
     "core::nse::nmaplib": [
       "nse_scriptargs"
+    ],
+    "core::nse::results": [
+      "nse_results"
     ],
     "core::nse::scriptargs": [
       "nse_scriptargs"
@@ -114,6 +120,9 @@
     "core::log": {
       "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
     },
+    "core::nse::engine": {
+      "fuzzed": "Drives the VM through nse_main.lua's own scheduler and stores results; the bytes a script returns reach output only through core::nse::results, which nse_results fuzzes against transliterations of the C. Exercised end to end by scripts_differential (34 scenarios against nmap 7.94), including the cnse functions' argument checks."
+    },
     "core::nse::fspolicy": {
       "fuzzed": "A pure predicate over canonical paths the host has already resolved (component-wise prefix and equality). It parses nothing. Pinned by unit tests, including the prefix-is-a-component case, and by sabotage."
     },
@@ -196,9 +205,12 @@
     "core::macvendor": "unsafe_audited",
     "core::matcher": "unsafe_audited",
     "core::ndp": "unsafe_audited",
+    "core::nse::choose": "unsafe_audited",
+    "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",
     "core::nse::package": "unsafe_audited",
+    "core::nse::results": "unsafe_audited",
     "core::nse::runtime": "unsafe_audited",
     "core::nse::script": "unsafe_audited",
     "core::nse::scriptargs": "unsafe_audited",

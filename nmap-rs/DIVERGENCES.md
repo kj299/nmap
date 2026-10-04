@@ -2644,11 +2644,12 @@ accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
       binding always says `'format'`, where PUC-Lua says `'string.format'`
       for a call made by `pcall` or in tail position. The corpus rewrites that
       one name inside its batches and compares the rest of each message.
-- [x] `format-tostring-of-references`: `%s` uses the VM's own `tostring`, so a
-      table prints as `<table 0x…>` where PUC-Lua prints `table: 0x…`, and a
-      metatable's `__name` is not consulted. Keeping `%s` and `tostring`
-      consistent within the port was preferred to matching one of them; the
-      address differs between runs in both.
+- [x] `format-tostring-of-references`: `%s` uses the VM's own `tostring`.
+      Until M6.4c2 a table printed as `<table 0x…>` where PUC-Lua prints
+      `table: 0x…`; vendored patch `0011` now prints `type: 0x…` as
+      `luaL_tolstring` does, for `%s` and `tostring` alike. A metatable's
+      `__name` is still not consulted. The address differs between runs in
+      both.
 - [x] `format-tostring-may-yield`: a `__tostring` metamethod called by `%s`
       runs as a VM call, so it may yield, where PUC-Lua raises "attempt to
       yield across a C-call boundary" — as for `gsub` callbacks.
@@ -2753,13 +2754,12 @@ reader never stops, since a number is never the empty string.
 - [ ] `vm-vararg-outside-vararg-function` — `function f() return ... end`
       compiles; PUC-Lua rejects it ("cannot use '...' outside a vararg
       function"). The VM accepts a program the C refuses.
-- [ ] `vm-nonstandard-coroutine-functions` — the VM's `coroutine` table has
-      `continue` and `yieldto`, which Lua 5.4 does not. A script can reach
-      them, and `continue` resumes in the way `wrap-keeps-the-caller-frame`
-      describes. Decision 2 settled `io`, `os` and `debug` (M6.4c1) but not
-      these, and the NSE state still has them. They are to be removed from
-      it in M6.4c2, before the scheduler runs scripts. A script that resumes
-      with `continue` would suspend the executor the scheduler drives.
+- [x] `vm-nonstandard-coroutine-functions` — the VM's `coroutine` table has
+      `continue` and `yieldto`, which Lua 5.4 does not, and `continue`
+      resumes in the way `wrap-keeps-the-caller-frame` describes. **Closed
+      in M6.4c2:** the NSE state removes both before any script runs, since
+      a script resuming with `continue` would suspend the executor the
+      scheduler drives. A test checks they are gone.
 
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 
@@ -3172,7 +3172,9 @@ Gated by three things:
       `nmap.new_dnet`, `nmap.dnet.*`, `nmap.get_interface_info`, `mutex` and
       `condvar` raise "not available before M6.4 (it needs I/O)" until M6.4d.
       They exist so that libraries reading them at load time (`stdnse.lua:63`)
-      load.
+      load. The exception, since M6.4c2, is `nmap.socket.loop`, which the
+      scheduler calls on every pass: with no socket open, nsock's loop has
+      nothing to wait for and returns at once, and so does this one.
 
 ### Behaviour matched that the corpus pins
 
@@ -3185,3 +3187,119 @@ Gated by three things:
       C's `(size_t)` conversion asks for a buffer no allocator grants.
 - [x] `print-tostring-returning-nothing` — `print` of a value whose
       `__tostring` returns nothing raises `'__tostring' must return a string`.
+
+## Milestone 6.4c2 — running scripts: the engine (`core::nse::{engine, results, choose}`, vendored VM patch `0011`)
+
+NSE's engine is nmap's own Lua. `nse_main.lua`'s scheduler and its supporting
+code run as nmap's code, copied block by block into `prelude.lua`:
+
+- `Script.new`, which loads a script and checks its fields;
+- the `Thread` and `Worker` classes;
+- `run`, which starts threads up to the concurrency limit, resumes them,
+  times them out and collects orphans;
+- the runlevels from `dependencies`, `format_table` and `format_xml`;
+- the per-phase thread iterators, and `main`.
+
+A test fails if any of its 14 blocks stops appearing verbatim in
+`nse_main.lua`. What nmap writes in C is ported:
+
+- `nse_main.cc`'s `cnse` library, including the result setters and
+  `ScriptResult`, in `core::nse::engine`;
+- the output functions `formatScriptOutput`, `printscriptresults` and
+  `printhostscriptresults`, with `escape_for_screen`, `protect_xml` and
+  `xml.cc`'s `escape`, in `core::nse::results`;
+- `get_chosen_scripts`' selection loop around M6.2's grammar, in
+  `core::nse::choose`.
+
+**Gated** by `scripts_differential`. nmap 7.94 runs 34 scenarios over
+purpose-written fixture scripts with their own `script.db` (and the shipped
+`unittest.nse` over 22 library suites), against loopback listeners. The
+scenarios cover:
+
+- every rule type, forced scripts and runlevels;
+- worker threads;
+- string, number, boolean, table, `__tostring` and `output_table` outputs,
+  `(table, string)` pairs, and bytes needing escapes;
+- errors in rules and actions, `nmap.new_try`, unexpected yields and
+  `strict.lua`, at `-d` and `-d2` too;
+- category expressions, globs, `-sC`, files, directories, and missing
+  extensions;
+- every load error `Script.new` raises, and the selection errors.
+
+Every result's normal-output lines and `<script>` XML match byte for byte,
+and each init error's message matches.
+
+A fuzz target, `nse_results`, checks the output formatting against
+transliterations of the C, and that what a script returns cannot put a
+control byte on the terminal or break out of an XML attribute. It also
+drives `choose` over arbitrary rules.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nse-port-output-on-unknown-port` — `port_set_output` dereferences
+      the port `nseU_getport` returns without checking that one was found
+      (CWE-476). A script that changes the port table
+      `stdnse.gethostport()` hands it (its `number` or `protocol`) crashes
+      nmap when its result is stored. Here it is an error, which ends the
+      phase like any engine error.
+- [x] `nse-phase-budget` — nmap steps nothing: a script in `while true do
+      end` hangs the scan. The port steps the VM in slices and takes an
+      optional fuel budget per call into the engine (`engine::Budget`). The
+      phase then ends with `Script Engine Scan Aborted`, and the results
+      stored so far are kept. The command line decides the budget (M6.4e);
+      with none, behaviour is nmap's.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `nse-orphaned-workers-never-run` — a worker thread
+      (`stdnse.new_thread`) still pending when the last script thread of a
+      runlevel finishes is abandoned: `run` sees only workers left, prints
+      `%d orphans left!` at `-d`, and stops. A worker whose parent does not
+      wait for it never runs, in nmap and here (`workers` scenario).
+- [x] `nse-error-hides-output-at-debug` — at `-d`, a script that raises
+      prints a traceback and stores no result, where at `-d0` it stores
+      `ERROR: Script execution failed (use -d to debug)`.
+
+### Differences, open and documented
+
+- [ ] `nse-results-sorted-by-id` — nmap keeps a container's results in a
+      `std::multiset<ScriptResult *>`. That is ordered by the results'
+      addresses, not by the `operator<` on script ids that `ScriptResult`
+      defines, so the order is allocation order and varies run to run. The
+      port orders them by script id, which is what that operator meant; the
+      generator sorts nmap's to compare.
+- [ ] `nse-chosen-order` — two orders the C leaves to chance are fixed:
+      - rules that matched no indexed script are tried as files and
+        directories in the order given (the C walks a Lua table in hash
+        order);
+      - a directory's scripts load in name order (the C takes `readdir`'s
+        order).
+
+      Thread start order inside a runlevel is still the VM's table order
+      over coroutines, as in the C; results do not depend on it, since they
+      are sorted.
+- [ ] `nse-portrule-order` — `cnse.ports` hands out a host's ports as the
+      keys of a Lua table, so portrule threads start in hash order in the
+      C. Here the order is by state (open, open|filtered, unfiltered), then
+      protocol, then number: `PortList::nextPort`'s order.
+- [ ] `nse-progress-meter-silent` — the scheduler's progress lines (`NSE
+      Timing: About ...% done`, `--stats-every`, the runtime-interaction keys)
+      are not printed; `scan_progress_meter` checks its operations and does
+      nothing.
+- [ ] `nse-no-host-timeout` — `cnse.timedOut` is always false, and the
+      host time-out clock does not run: `--host-timeout` is refused on the
+      command line (M7.3). `--script-timeout` works as in nmap, through the
+      verbatim `Thread:timed_out`. Like nmap, it applies only to threads
+      waiting on I/O, which arrives with sockets (M6.4d).
+- [ ] `nse-init-error-position` — an error that stops the engine starting
+      has no traceback here. nmap writes `.../nse_main.lua:N: message` and a
+      traceback. Here a load error raised by the verbatim `Script.new` reads
+      `nse_main:N: message`, and a selection error, raised in Rust, is the
+      bare message. The gate compares the message after the position.
+- [ ] `nse-selection-warnings-first` — `Warning: Could not load '...'` for an
+      indexed script whose file is missing is logged before any script
+      loads, where the C logs it between loads.
+- [ ] `nse-empty-result-bug-line` — nmap's `error("Bug in %s: no string
+      output.")`, written to normal output when a result's text is empty, is
+      not produced by `core::nse::results`. M6.4e, which prints the results,
+      must write it.

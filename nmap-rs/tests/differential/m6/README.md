@@ -28,6 +28,7 @@ any difference.
 | `m64_memory_*` | the memory budget, vs `ulimit -v` (M6.4b) | `regen_m64_memory.sh` | `memory_differential` | 41 |
 | `m64_stdlib_*` | `utf8`, `os`, `io`, `debug` (M6.4c1) | `regen_m64_stdlib.sh` | `stdlib_differential` | 2,012 |
 | `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
+| `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 34 scenarios |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -242,3 +243,36 @@ the port:
 ```sh
 cargo run -p nmap-core --example nse_require -- [--unittest] /path/to/nmap LIB...
 ```
+
+## M6.4c2 — running scripts
+
+`m64_scripts_golden.txt` comes from nmap itself, running the fixture scripts in
+`nse_scripts/`. Each one exercises one thing:
+
+- an output shape: string, number, table, `__tostring`, `output_table`,
+  bytes that need escaping;
+- a rule;
+- an error path;
+- a selection case.
+
+They come with their own `script.db`. `oracle/gen_m64_scripts.py` builds a
+scratch data directory from this tree's data files and `nselib/`, with a
+`scripts/` holding the fixtures and the shipped `unittest.nse`. It then runs
+each scenario as a connect scan of two loopback listeners and one closed
+port. It records the scan's port facts, then each result's normal-output
+lines and its `<script>` element, or the init error's message.
+`scripts_differential` builds the same directory, chooses the same scripts with
+`core::nse::choose`, runs the three phases through the engine, and compares
+byte for byte.
+
+The fixtures keep at most one string key per table level. Lua orders string
+keys by hash, which varies run to run under nmap. Results are compared in
+script-id order, which is the port's order; nmap's own order is allocation
+order (`nse-results-sorted-by-id`).
+
+To see what the port prints for some scripts:
+
+```sh
+cargo run -p nmap-core --example nse_run -- /path/to/nmap SCRIPT.nse...
+```
+

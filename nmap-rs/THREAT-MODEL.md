@@ -174,12 +174,18 @@ Here:
 - **Runaway matching.** The pattern matcher's worst case is bounded
   (`pattern-worst-case-time-is-bounded`). Size-chosen buffers (`string.rep`,
   `format`, `pack`) are checked against the budget before they are built.
-- **CPU.** The engine steps the VM in slices and takes an optional fuel
-  budget per phase. With one, a script in `while true do end` ends its phase
-  as aborted instead of hanging the scan (`nse-phase-budget`); nmap has no
-  such bound. The command line chooses the budget (M6.4e).
-  `--script-timeout` runs through nmap's own `Thread:timed_out`, and, as in
-  nmap, applies to threads waiting on I/O.
+- **CPU.** The engine steps the VM in slices and checks a watchdog between
+  them. On the command line, a phase whose scheduler makes no pass for ten
+  minutes, or for `--script-timeout` when set, ends as aborted. The results
+  stored so far are kept and the scan carries on (`nse-stall-limit`). In
+  nmap a script in `while true do end` hangs the scan. `--script-timeout`
+  also runs through nmap's own `Thread:timed_out`, which, as in nmap,
+  reaches threads waiting on I/O.
+- **Code from the working directory.** nmap never looks for data files in
+  the working directory, and neither does the port now. Before M6.4e its
+  command line searched `.`, `..` and `../..` for data files. For NSE that
+  would have meant running Lua from wherever the operator stands
+  (`datadir-no-working-directory`).
 - **Network data.** Whatever a peer sends reaches a script as an opaque Lua
   string. One read returns at most 4 MiB (`nse-read-size-cap`); nsock
   buffers without bound, so a peer that never sends the newline a

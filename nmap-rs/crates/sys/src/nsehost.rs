@@ -221,6 +221,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // real files and directories; Miri has no filesystem
     fn scripts_are_found_as_nse_fetchscript_finds_them() {
         let tmp = std::env::temp_dir().join(format!("nmap-rs-nsehost-{}", std::process::id()));
         let scripts = tmp.join("data/scripts");

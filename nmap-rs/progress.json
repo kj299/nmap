@@ -159,6 +159,9 @@
     "output": {
       "fuzzed": "Renders ScanResults to normal, grepable and XML text. It parses nothing. Every attacker-derived string reaches it already escaped: -sV fields through the CLI's printable_escape (as portlist.cc's cstringSanityCheck), NSE output through core::nse::results (fuzzed by nse_results). XML attributes go through xml_escape, pinned by xml_is_well_formed_shape_and_escapes and os_names_and_classes_are_xml_escaped. Miri clean on its 28 tests (M6.4d retrospective); no unsafe. Exercised end to end by the M1 and M7 differentials."
     },
+    "sys::datadir": {
+      "fuzzed": "nmap_fetchfile's search order over directories the run gives it: it joins a file name onto each and asks the OS whether it is readable. It parses nothing. Pinned by unit tests (order, directories, absolute names, the working directory never searched) and by nse_cli_differential, with sabotage of the search caught."
+    },
     "sys::fpengine": {
       "fuzzed": "I/O driver for the IPv6 fingerprint battery. Every byte-level decision delegates to core::fp6_match::is_response (fuzz target fp6_match); its only local slicing is network_layer(), a total frame.get(14..).unwrap_or(&[])."
     },
@@ -167,6 +170,9 @@
     },
     "sys::nsefs": {
       "fuzzed": "The ScriptFs over the real file system: it canonicalises a path with the OS and asks fspolicy. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, and that cover named files, output directories and missing files."
+    },
+    "sys::nsehost": {
+      "fuzzed": "The host side of NSE: nselib/ and script lookup over the data directories, the interface list from sys::netif, random bytes from the OS, and a ScriptNet wrapper that timestamps polls. It parses no network or file data. Pinned by unit tests and exercised end to end by nse_cli_differential against nmap 7.94."
     },
     "sys::nsenet": {
       "fuzzed": "ScriptNet over tokio: connect, read, write and timers, with every read capped at MAX_READ (4 MiB). It parses nothing; the only logic over received bytes is counting newlines to decide when a read is satisfied, which a unit test pins (Miri clean). Exercised against live fixture services by nse_net_differential."
@@ -271,12 +277,14 @@
     "output": "unsafe_audited",
     "ports": "unsafe_audited",
     "sys::capture": "unsafe_audited",
+    "sys::datadir": "unsafe_audited",
     "sys::flagscan": "unsafe_audited",
     "sys::fpengine": "unsafe_audited",
     "sys::group": "unsafe_audited",
     "sys::ndp": "unsafe_audited",
     "sys::netif": "unsafe_audited",
     "sys::nsefs": "unsafe_audited",
+    "sys::nsehost": "unsafe_audited",
     "sys::nsenet": "unsafe_audited",
     "sys::osscan": "unsafe_audited",
     "sys::rawio": "unsafe_audited",

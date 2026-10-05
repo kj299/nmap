@@ -140,7 +140,7 @@ pub fn home() -> Option<PathBuf> {
     std::env::home_dir().filter(|h| !h.as_os_str().is_empty())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))] // real directories and the working directory; Miri has no filesystem
 mod tests {
     use super::*;
 

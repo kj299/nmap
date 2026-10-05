@@ -140,7 +140,8 @@ fn open(setup: Setup) -> Result<Running, String> {
                 Some(std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?)
             }
             Some(p) => return Err(format!("{} is not a file", p.display())),
-            None => return Err("nil is not a file".to_string()),
+            // `nse_fetch`'s path for a file it did not find.
+            None => return Err(format!("no path to file/directory: {name} is not a file")),
         },
     };
     let args = registry_args(file_args.as_deref(), setup.script_args.as_bytes())

@@ -72,7 +72,16 @@ fn a_script_that_never_yields_ends_its_phase_at_the_stall_limit() {
     let out = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
         .args(["--datadir"])
         .arg(&d)
-        .args(["-sT", "-Pn", "-p", "1", "--script", "spin", "--script-timeout", "2"])
+        .args([
+            "-sT",
+            "-Pn",
+            "-p",
+            "1",
+            "--script",
+            "spin",
+            "--script-timeout",
+            "2",
+        ])
         .arg("127.0.0.1")
         .output()
         .expect("nmap-rs runs");

@@ -1579,8 +1579,8 @@ fn finish_try<'gc>(
     if handler.is_nil() {
         return Err(try_error(ctx, message));
     }
-    // `lua_callk` on something uncallable: the C's message, as a string (the
-    // VM's own would be a userdata, `vm-runtime-errors-are-not-strings`).
+    // `lua_callk` on something uncallable: the C's message, raised here
+    // because `meta_ops::call` reports the failure rather than raising it.
     let Ok(function) = piccolo::meta_ops::call(ctx, handler) else {
         let msg = format!("attempt to call a {} value", handler.type_name());
         return Err(lua_error_bytes(ctx, msg.as_bytes()));
@@ -1813,6 +1813,29 @@ mod tests {
             "#,
         );
         assert_eq!(got, ["true", "OS:SCAN(V=7.94)", "closed", "reset"]);
+    }
+
+    /// `l_set_port_version`'s option list has no terminating `NULL`, so in
+    /// nmap an unknown probe state reads past it, and the index it returns
+    /// then reads past `opversion` (`nmaplib-set-port-version-option-overread`).
+    /// That is undefined behaviour, so no golden records it; here it is the
+    /// error a terminated list gives, raised before the port is looked at.
+    #[test]
+    fn an_unknown_probe_state_is_an_invalid_option() {
+        let logs: Logs = Rc::default();
+        let lib = NmapLib::new(env(&logs));
+        lib.borrow_mut().set_hosts(vec![full_host()]);
+        let got = run(
+            &lib,
+            "return pcall(nmap.set_port_version, host, {number = 1, protocol = 'tcp'}, 'matched')",
+        );
+        assert_eq!(
+            got,
+            [
+                "false",
+                "bad argument #3 to 'set_port_version' (invalid option 'matched')"
+            ]
+        );
     }
 
     #[test]

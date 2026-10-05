@@ -22,7 +22,13 @@ retrospective and **patch the Porting Kit** with what you learned.
    - commit *sequences* where a message says "the real fix" / "actually" (these
      mark where the first approach failed — highest signal, more than reverts),
    - churn per file/module (proxy for time sinks),
-   - the `progress.json` final state and the `DIVERGENCES.md` entries.
+   - the `progress.json` final state and the `DIVERGENCES.md` entries. Run
+     `progress.py audit --require-done`: a module stuck below DONE with no
+     reason is a finding (LESSONS #035);
+   - every count the docs quote against the golden it describes, and every
+     golden against the host facts it might encode (LESSONS #034);
+   - the C re-scanned with any scanner rules added since Phase 0, and the
+     corpora swept for inputs that reach each new hit (LESSONS #032, #033).
 
 2. **Diff lived experience against `PLAYBOOK.md`.** For each phase ask:
    - Did the entry/exit criteria match reality? Was a gate missing that would

@@ -156,6 +156,9 @@
     "net": {
       "fuzzed": "Thin tokio socket wrappers. Anything received is handed to a core parser, each of which is separately fuzzed."
     },
+    "output": {
+      "fuzzed": "Renders ScanResults to normal, grepable and XML text. It parses nothing. Every attacker-derived string reaches it already escaped: -sV fields through the CLI's printable_escape (as portlist.cc's cstringSanityCheck), NSE output through core::nse::results (fuzzed by nse_results). XML attributes go through xml_escape, pinned by xml_is_well_formed_shape_and_escapes and os_names_and_classes_are_xml_escaped. Miri clean on its 28 tests (M6.4d retrospective); no unsafe. Exercised end to end by the M1 and M7 differentials."
+    },
     "sys::fpengine": {
       "fuzzed": "I/O driver for the IPv6 fingerprint battery. Every byte-level decision delegates to core::fp6_match::is_response (fuzz target fp6_match); its only local slicing is network_layer(), a total frame.get(14..).unwrap_or(&[])."
     },
@@ -265,7 +268,7 @@
     "model": "unsafe_audited",
     "net": "unsafe_audited",
     "options": "unsafe_audited",
-    "output": "differential",
+    "output": "unsafe_audited",
     "ports": "unsafe_audited",
     "sys::capture": "unsafe_audited",
     "sys::flagscan": "unsafe_audited",

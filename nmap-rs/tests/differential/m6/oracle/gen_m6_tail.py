@@ -40,9 +40,9 @@ the open:
     (`load-syntax-error-wording`, `load-never-loads-bytecode`).
 
 Runtime errors raised by the VM itself ("attempt to index a nil value") are
-kept out of the corpus: the vendored VM hands them to `pcall` as a userdata,
-not a string (`vm-runtime-errors-are-not-strings`), which is a defect of the
-VM, not of these bindings.
+kept out of the corpus. When it was written, the vendored VM handed them to
+`pcall` as a userdata (`vm-runtime-errors-are-not-strings`). M6.4a closed
+that, and `m64_errors_cases.txt` now covers them against `liblua/`.
 """
 from __future__ import annotations
 

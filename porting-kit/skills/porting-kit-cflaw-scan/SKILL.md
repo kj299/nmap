@@ -13,7 +13,12 @@ directive "the C may be buggy — don't re-port a CVE" (RETROSPECTIVE §9).
    `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py <c-src-dirs>`
    Categories: unbounded-copy (CWE-120), format-string (CWE-134),
    int-overflow-mul (CWE-190), command-exec (CWE-78), toctou (CWE-367),
-   stack-vla-alloca (CWE-770).
+   stack-vla-alloca (CWE-770), unterminated-list (CWE-170),
+   nonformatting-format (CWE-628).
+   **Extend the API-contract tables first** if the C embeds an interpreter or
+   framework: `SENTINEL_LIST_ARGS` (an array argument that must end in a
+   sentinel) and `NON_FORMATTING_ARGS` (a message argument printed as is). The
+   built-in sinks are libc's. nmap's Lua C API seeds the tables (LESSONS #032).
 2. **Check signal-to-noise before trusting it** (LESSONS #2 — this exact tool once
    produced 828 false format-string positives on lsof, burying ~215 real
    candidates, until it was fixed to locate the true format-position argument).
@@ -27,6 +32,10 @@ directive "the C may be buggy — don't re-port a CVE" (RETROSPECTIVE §9).
    policy, mechanized.
 4. Feed confirmed flaws into `THREAT-MODEL.md` §6 and into the module's test vectors
    (add a boundary/hostile-input case that exercises the fix).
+5. **Sweep the existing corpora for an input that reaches each confirmed flaw**
+   (LESSONS #033). A golden recorded over undefined behaviour passes until the
+   allocator changes. Remove the case from the oracle's input, and pin the port's
+   behaviour with a test on the Rust side instead.
 
 ## Note
 This is a fast heuristic, not a full SAST pass — it bootstraps the flaw inventory in

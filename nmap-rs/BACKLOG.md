@@ -24,7 +24,7 @@ draft PR when picked up. Kept in-repo so it survives across sessions.
   `icmp-quote-requires-our-source`, `icmp-quote-verifies-our-sequence`,
   `icmp-reason-fidelity`, `icmp-bpf-widened-for-tcp-scans`.
 
-### 3. M5 — OS detection  ⟵ **IN PROGRESS**
+### 3. M5 — OS detection  ⟵ **DONE** (PLAN.md; retrospective merged)
 Phase 0 done (inventory + cflaw-scan + threat model + FPModel spike); both the IPv4
 and IPv6 tracks are approved. Port order, leaf-first:
 1. ~~`core::osdb::expr`~~ — **done**, C-oracle differential over 23.8k cases.
@@ -184,7 +184,7 @@ and IPv6 tracks are approved. Port order, leaf-first:
        a privileged host with real IPv6 to exercise. Treat it as untested-in-anger until
        someone runs it there.
 
-## Workstream S — signature-database maintenance  ⟵ **IN PROGRESS**
+## Workstream S — signature-database maintenance  ⟵ **every unblocked slice done; S5 blocked on policy** (PLAN.md)
 
 Phase 0 done (`docs/S-ANALYSIS.md`): the C has no update mechanism, no version
 metadata to read, and resolves DB paths through `$NMAPDIR` with no way to verify
@@ -427,9 +427,9 @@ retrospective rather than quietly picking a convention per module.
   mechanical and behaviour-preserving (`x % n == 0` -> `x.is_multiple_of(n)` with a
   non-zero literal divisor is exact, and it removes a `%` operator, which suits the
   `arithmetic_side_effects` posture; `repeat().take()` -> `repeat_n` is identical).
-  Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Worth a
-  LESSONS entry: an MSRV bump must be validated with the full clippy sweep, not just
-  a build.
+  Note the standing "no `std::iter::repeat_n`" constraint is now lifted. Promoted to
+  the kit as LESSONS #036 (M6.4d retrospective): an MSRV bump must be validated with
+  the full clippy sweep, not just a build.
 - **RESOLVED (seed pollution): 979 fuzzer-generated files pruned, recurrence
   gated.** `cargo fuzz run <t> fuzz/seeds/<t>` treats the seed directory as a
   *corpus* and writes discovered inputs into it, so local smoke runs silently
@@ -465,7 +465,7 @@ retrospective rather than quietly picking a convention per module.
   small-order public key, OpenSSL, python-cryptography, RFC 8032's own reference
   implementation and `ed25519-dalek`'s non-strict `verify` all accept forged
   signatures; only `verify_strict` rejects. Any future Ed25519 call site in this tree
-  must use it. Worth a LESSONS entry at the Workstream S retrospective, alongside the
+  must use it. Promoted to the kit as LESSONS #037 (M6.4d retrospective), with the
   observation that RFC 8032's reference `verify()` constructs a bad-length exception
   and never raises it — so it accepts a 65-byte signature and is not usable as a
   differential oracle for length handling.

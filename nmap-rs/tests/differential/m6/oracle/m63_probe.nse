@@ -254,7 +254,10 @@ action = function(host)
       w("after_" .. label, render(nmap.get_port_state(host, target)))
     end
   end
-  try("version_bad_state", nmap.set_port_version, host, open, "matched")
+  -- No unknown probe state: l_set_port_version's option list has no
+  -- terminating NULL, so nmap reads past it, which is undefined behaviour and
+  -- recorded in no golden (nmaplib-set-port-version-option-overread). A unit
+  -- test in core::nse::nmaplib pins the port's error instead.
   try("version_no_table", nmap.set_port_version, host, {number = open.number, protocol = "tcp"}, "hardmatched")
   try("version_unknown_port", nmap.set_port_version, host, {number = 59999, protocol = "tcp"})
   try("version_bad_host", nmap.set_port_version, {}, open)

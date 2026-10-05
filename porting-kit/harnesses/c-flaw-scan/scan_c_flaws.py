@@ -19,6 +19,19 @@ Categories flagged (CWE in parens):
   command-exec      system/popen/exec* with composed strings     (CWE-78)
   unchecked-malloc  malloc/calloc/realloc result used w/o check   (CWE-690) [weak]
   toctou            access()/stat() then open()/fopen()          (CWE-367)
+  unterminated-list a sentinel-terminated array, passed to an API that
+                    needs the sentinel, with no sentinel           (CWE-170/125)
+  nonformatting-format  a format specifier in a literal handed to an API
+                    that does not format it                       (CWE-628)
+
+The last two are *API contracts* of the code's embedded libraries, not of libc,
+and live in two tables (SENTINEL_LIST_ARGS, NON_FORMATTING_ARGS) to extend per
+target. nmap's Lua C API seeds them. Before they existed, this scanner reported
+0 sites in the three NSE files where nmap's M6 port found four unterminated
+`luaL_checkoption` lists. Each is an out-of-bounds read, and each index then
+reads a parallel array. Across nmap's 774 C/C++ files the two rules report
+exactly those four lists and one `luaL_argerror` printing a literal `%s`, with
+no false positives. (LESSONS #032.)
 
 What this CANNOT find (know it before you trust a clean scan)
 ------------------------------------------------------------
@@ -147,6 +160,58 @@ def _scan_format_strings(src):
     return hits
 
 
+# Embedded-API contracts (LESSONS #032). Extend these per target: a function
+# whose argument must be an array ending in a sentinel, and a function whose
+# message argument is printed as is.
+#   name -> (0-based index of the array argument, accepted sentinels)
+SENTINEL_LIST_ARGS = {
+    "luaL_checkoption": (3, ("NULL", "0", "nullptr")),
+}
+#   name -> 0-based index of the message argument
+NON_FORMATTING_ARGS = {
+    "luaL_argerror": 2,
+}
+_SENTINEL_CALL = re.compile(r"\b(" + "|".join(SENTINEL_LIST_ARGS) + r")\s*\(")
+_NONFMT_CALL = re.compile(r"\b(" + "|".join(NON_FORMATTING_ARGS) + r")\s*\(")
+_ARRAY_DEF = r"\b{name}\s*\[\s*\w*\s*\]\s*=\s*\{{([^}}]*)\}}"
+_CONVERSION = re.compile(r"%[-+ #0]*\d*(?:\.\d+)?[hlLqjzt]*[diouxXeEfgGcspn]")
+
+
+def _scan_contracts(src):
+    hits = []
+    for m in _SENTINEL_CALL.finditer(src):
+        idx, sentinels = SENTINEL_LIST_ARGS[m.group(1)]
+        args, _end = _call_args(src, m.end() - 1)
+        if idx >= len(args):
+            continue
+        name = args[idx].strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            continue  # an expression: cannot tell
+        # The nearest definition before the call (a function-local static).
+        defs = [d for d in re.finditer(_ARRAY_DEF.format(name=re.escape(name)), src)
+                if d.start() < m.start()]
+        if not defs:
+            continue
+        body = re.sub(r"/\*.*?\*/|//[^\n]*", "", defs[-1].group(1), flags=re.S)
+        elems = [e.strip() for e in body.split(",") if e.strip()]
+        if elems and elems[-1] not in sentinels:
+            lineno = src.count("\n", 0, m.start()) + 1
+            hits.append({"line": lineno, "category": "unterminated-list",
+                         "cwe": "CWE-170",
+                         "text": f"{m.group(1)}(..., {name}) but {name}[] ends in {elems[-1][:40]}"})
+    for m in _NONFMT_CALL.finditer(src):
+        idx = NON_FORMATTING_ARGS[m.group(1)]
+        args, _end = _call_args(src, m.end() - 1)
+        if idx >= len(args):
+            continue
+        msg = args[idx].strip()
+        if msg.startswith('"') and _CONVERSION.search(msg.replace("%%", "")):
+            lineno = src.count("\n", 0, m.start()) + 1
+            hits.append({"line": lineno, "category": "nonformatting-format",
+                         "cwe": "CWE-628", "text": (m.group(1) + "(... " + msg)[:120]})
+    return hits
+
+
 def scan_text(src):
     hits = []
     for lineno, line in enumerate(src.splitlines(), 1):
@@ -158,6 +223,7 @@ def scan_text(src):
             if rx.search(line):
                 hits.append({"line": lineno, "category": cat, "cwe": cwe, "text": stripped[:120]})
     hits.extend(_scan_format_strings(src))
+    hits.extend(_scan_contracts(src))
     hits.sort(key=lambda h: h["line"])
     return hits
 
@@ -219,6 +285,19 @@ void bad(char *u, char *dynfmt) {
     if (access(path, R_OK)) {}          /* toctou */
     /* strcpy(x, y);  in a comment - should be ignored */
 }
+static int opts_bad (lua_State *L) {
+  static const char *op[] = {"wait", "signal", "broadcast"};
+  return luaL_checkoption(L, 1, NULL, op);          /* unterminated-list */
+}
+static int opts_ok (lua_State *L) {
+  static const char *const ok[] = {"tcp", "udp", NULL};
+  luaL_argerror(L, 1, "invalid option");            /* SAFE: no specifier */
+  luaL_argerror(L, 1, "100%% sure");                /* SAFE: escaped percent */
+  return luaL_checkoption(L, 2, "tcp", ok);         /* SAFE: terminated */
+}
+static int bad_msg (lua_State *L) {
+  return luaL_argerror(L, 1, "device %s not found"); /* nonformatting-format */
+}
 '''
 
 
@@ -238,6 +317,12 @@ def _self_test():
     check("flags int-overflow-mul", "int-overflow-mul" in cats)
     check("flags command-exec", "command-exec" in cats)
     check("flags toctou", "toctou" in cats)
+    check("flags exactly the unterminated option list",
+          [h["text"].split("(")[0] for h in hits if h["category"] == "unterminated-list"]
+          == ["luaL_checkoption"]
+          and "op[]" in next(h["text"] for h in hits if h["category"] == "unterminated-list"))
+    check("flags exactly the format specifier handed to luaL_argerror",
+          len([h for h in hits if h["category"] == "nonformatting-format"]) == 1)
     check("ignores the commented strcpy (no double count)",
           sum(1 for h in hits if h["category"] == "unbounded-copy") == 1)
     # The Pass-1 fix: only NON-LITERAL format args flag; the stream/buffer/size

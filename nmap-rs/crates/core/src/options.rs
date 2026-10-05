@@ -157,6 +157,23 @@ pub struct RunConfig {
     /// cancels is the probe file's own: `Exclude T:9100-9107`, the JetDirect
     /// printer ports, where sending version probes makes printers print.
     pub allports: bool,
+    /// `--datadir <dir>`: searched first for data files, `nselib/` and
+    /// `scripts/` (`nmap_fetchfile`; `sys::datadir`).
+    pub datadir: Option<String>,
+    /// NSE is on (C's `o.script`): `--script`, `-sC` or `-A`. With no rules
+    /// given, the `default` category runs (`check_rules`).
+    pub script: bool,
+    /// `--script` rules, each argument split on every comma as
+    /// `NmapOps::chooseScripts` splits it, in order, across repeated options.
+    pub script_rules: Vec<String>,
+    /// `--script-args`: the last one given, as `strdup(optarg)` keeps it.
+    pub script_args: Option<String>,
+    /// `--script-args-file`: the last one given.
+    pub script_args_file: Option<String>,
+    /// `--script-timeout`, in seconds, applied after the loop like C's
+    /// `delayed_options.pre_scripttimeout`. `None` ⇒ the template's (`-T5`
+    /// sets 600), else none.
+    pub script_timeout: Option<f64>,
     /// `-T<0-5>` or `-T<name>`: the timing template. `None` ⇒ `-T3` (Normal),
     /// nmap's default.
     pub timing_template: Option<TimingTemplate>,
@@ -258,6 +275,16 @@ impl RunConfig {
         p
     }
 
+    /// `o.scripttimeout` after the loop: `--script-timeout` if given, else the
+    /// 600 seconds `-T5` sets (`nmap.cc:1398`), else 0, no timeout.
+    pub fn script_timeout_secs(&self) -> f64 {
+        match (self.script_timeout, self.timing_template) {
+            (Some(s), _) => s,
+            (None, Some(TimingTemplate::Insane)) => 600.0,
+            (None, _) => 0.0,
+        }
+    }
+
     /// Complaints that are not refusals: C's `error()` calls, which print and
     /// carry on. The two that can only be known after the whole command line is
     /// read live here rather than in the parse loop.
@@ -336,6 +363,12 @@ impl Default for RunConfig {
             open_only: false,
             reason: false,
             allports: false,
+            datadir: None,
+            script: false,
+            script_rules: Vec::new(),
+            script_args: None,
+            script_args_file: None,
+            script_timeout: None,
             timing_template: None,
             min_rtt_timeout_ms: None,
             max_rtt_timeout_ms: None,
@@ -1038,10 +1071,66 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 }
                 consumed_extra = adv;
             }
-            // `-A` turns on the aggressive set; OS detection is the part we implement.
+            // `-A` turns on the aggressive set: OS and version detection, and
+            // scripts (`delayed_options.advanced`, `nmap.cc:1452`).
+            // Traceroute is the part not implemented.
             "-A" => {
                 cfg.os_detection = true;
                 cfg.service_version = true;
+                cfg.script = true;
+            }
+            // `-sC`: scripts on; with no `--script`, the `default` category.
+            "-sC" => cfg.script = true,
+            // ---- NSE (M6.4e) --------------------------------------------
+            // Matched before any long option that is a prefix of another:
+            // `--script` is a prefix of `--script-args`, so the longer names
+            // come first.
+            _ if long_flag(s, "script-args-file", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "script-args-file", &mut keybuf2).unwrap_or("--script-args-file");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.script_args_file = Some(v);
+            }
+            _ if long_flag(s, "script-args", &mut keybuf).is_some() => {
+                let key = long_flag(s, "script-args", &mut keybuf2).unwrap_or("--script-args");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.script_args = Some(v);
+            }
+            _ if long_flag(s, "script-timeout", &mut keybuf).is_some() => {
+                let key =
+                    long_flag(s, "script-timeout", &mut keybuf2).unwrap_or("--script-timeout");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                // `if (d < 0 || d > LONG_MAX) fatal(...)`; `tval2secs`'s -1
+                // failure is caught by the first test.
+                let d = crate::timespec::tval2secs(&v);
+                #[allow(clippy::cast_precision_loss)]
+                let too_big = d > i64::MAX as f64;
+                if d.is_nan() || d < 0.0 || too_big {
+                    cfg.invalid
+                        .push("Bogus --script-timeout argument specified".to_string());
+                } else {
+                    cfg.script_timeout = Some(d);
+                }
+            }
+            _ if long_flag(s, "script", &mut keybuf).is_some() => {
+                let key = long_flag(s, "script", &mut keybuf2).unwrap_or("--script");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.script = true;
+                cfg.script_rules.extend(
+                    crate::nse::selection::split_arg(v.as_bytes())
+                        .into_iter()
+                        .map(|r| String::from_utf8_lossy(r).into_owned()),
+                );
+            }
+            _ if long_flag(s, "datadir", &mut keybuf).is_some() => {
+                let key = long_flag(s, "datadir", &mut keybuf2).unwrap_or("--datadir");
+                let (v, adv) = long_opt_value(args, i, key);
+                consumed_extra = adv;
+                cfg.datadir = Some(v);
             }
             "--version-light" => {
                 cfg.service_version = true;
@@ -1382,6 +1471,71 @@ mod tests {
 
     fn cfg(args: &[&str]) -> RunConfig {
         parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// The NSE options as `nmap.cc:657-676` and `NmapOps::chooseScripts`
+    /// read them (M6.4e).
+    #[test]
+    fn script_options_parse_as_nmap_reads_them() {
+        let c = cfg(&[
+            "--script",
+            "a,b",
+            "-script=c",
+            "--script-args",
+            "x=1",
+            "--script-args=y=2",
+            "--script-args-file",
+            "f.txt",
+            "--datadir=/d",
+            "10.0.0.1",
+        ]);
+        assert!(c.script);
+        assert_eq!(c.script_rules, ["a", "b", "c"]);
+        assert_eq!(c.script_args.as_deref(), Some("y=2"));
+        assert_eq!(c.script_args_file.as_deref(), Some("f.txt"));
+        assert_eq!(c.datadir.as_deref(), Some("/d"));
+        assert_eq!(c.targets, ["10.0.0.1"]);
+        assert!(c.unrecognized.is_empty(), "{:?}", c.unrecognized);
+        // -sC and -A turn scripts on with no rules: the default category.
+        for flag in ["-sC", "-A"] {
+            let c = cfg(&[flag, "h"]);
+            assert!(c.script && c.script_rules.is_empty(), "{flag}");
+        }
+        // An empty --script is one empty rule, which selection skips.
+        assert_eq!(cfg(&["--script", "", "h"]).script_rules, [""]);
+    }
+
+    /// `--script-timeout` takes `tval2secs`, refuses a negative or bogus value
+    /// with C's message, and beats `-T5`'s 600 seconds from either side.
+    #[test]
+    fn script_timeout_is_tval2secs_and_beats_the_template() {
+        assert_eq!(
+            cfg(&["--script-timeout", "5m", "h"]).script_timeout_secs(),
+            300.0
+        );
+        assert_eq!(
+            cfg(&["--script-timeout=250ms", "h"]).script_timeout_secs(),
+            0.25
+        );
+        assert_eq!(cfg(&["-T5", "h"]).script_timeout_secs(), 600.0);
+        assert_eq!(cfg(&["-T4", "h"]).script_timeout_secs(), 0.0);
+        assert_eq!(
+            cfg(&["--script-timeout", "7", "-T5", "h"]).script_timeout_secs(),
+            7.0
+        );
+        assert_eq!(
+            cfg(&["-T5", "--script-timeout", "0", "h"]).script_timeout_secs(),
+            0.0
+        );
+        for bad in ["-1", "abc", "5x"] {
+            let c = cfg(&["--script-timeout", bad, "h"]);
+            assert_eq!(
+                c.invalid,
+                ["Bogus --script-timeout argument specified"],
+                "{bad}"
+            );
+            assert_eq!(c.targets, ["h"], "{bad} must consume its argument");
+        }
     }
 
     #[test]

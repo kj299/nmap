@@ -39,8 +39,21 @@ impl PolicyFs {
                 read_roots: dirs(data_dirs),
                 write_roots: dirs(output_dirs),
                 named,
+                read_named: Vec::new(),
             },
         }
+    }
+
+    /// Also readable, and only readable: each of `files` that exists. An
+    /// absent one is dropped, so a file created later is not let in.
+    pub fn with_read_files(mut self, files: &[PathBuf]) -> PolicyFs {
+        self.policy.read_named.extend(
+            files
+                .iter()
+                .filter_map(|f| f.canonicalize().ok())
+                .filter(|f| f.is_file()),
+        );
+        self
     }
 
     pub fn policy(&self) -> &FsPolicy {

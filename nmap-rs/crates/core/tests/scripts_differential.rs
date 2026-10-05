@@ -178,3 +178,41 @@ fn get_interface_info_describes_an_interface() {
     .collect();
     assert_eq!(got, ChunkOutcome::Returned(want));
 }
+
+/// `os.getenv` answers `HOME` alone, with the home directory the host hands
+/// in, and nothing for any other name or with no home (`os-getenv-home-only`).
+#[test]
+fn getenv_reports_home_and_nothing_else() {
+    use nmap_core::nse::runtime::{new_state, run_chunk, ChunkOutcome, StateConfig};
+    use nmap_core::nse::stdlib::oslib::OsEnv;
+    let dir = nse_host::repo_root();
+    let run = |home: Option<&[u8]>| {
+        let mut st = new_state(&StateConfig {
+            lib: nmap_core::nse::nmaplib::NmapLib::new(nse_host::env(dir.clone())),
+            args: Default::default(),
+            source: std::rc::Rc::new(nse_host::Dir(dir.clone())),
+            fs: std::rc::Rc::new(nse_host::ReadOnlyFs),
+            os: std::rc::Rc::new(OsEnv {
+                home: home.map(<[u8]>::to_vec),
+                ..nse_host::os_env()
+            }),
+            memory_limit: Some(256 << 20),
+            engine: Default::default(),
+            net: std::rc::Rc::new(std::cell::RefCell::new(nmap_core::nse::net::NoNet)),
+        })
+        .expect("state");
+        run_chunk(
+            &mut st.lua,
+            "=t",
+            b"return tostring(os.getenv('HOME')), tostring(os.getenv('PATH')), \
+              tostring(os.getenv('home')), select('#', os.getenv('X'))",
+            1 << 20,
+        )
+    };
+    let got = |v: &[&str]| ChunkOutcome::Returned(v.iter().map(|s| s.to_string()).collect());
+    assert_eq!(
+        run(Some(b"/home/op")),
+        got(&["/home/op", "nil", "nil", "1"])
+    );
+    assert_eq!(run(None), got(&["nil", "nil", "nil", "1"]));
+}

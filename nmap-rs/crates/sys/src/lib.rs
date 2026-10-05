@@ -15,6 +15,7 @@
 //! 0 for this crate.
 
 pub mod capture;
+pub mod datadir;
 pub mod flagscan;
 pub mod fpengine;
 pub mod group;

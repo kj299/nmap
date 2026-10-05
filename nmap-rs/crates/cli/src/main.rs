@@ -20,6 +20,7 @@ use nmap_core::{
     render_normal, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable, TargetSpec,
     TimingParams, TimingTemplate,
 };
+use nmap_sys::datadir::DataDirs;
 use nmap_sys::net::resolve_host;
 use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig};
 
@@ -242,6 +243,9 @@ async fn main() -> ExitCode {
         }
     }
 
+    let _ = DATA.set(DataDirs::from_env(
+        cfg.datadir.as_deref().map(std::path::Path::new),
+    ));
     let services = load_services();
     if services.is_none() {
         nmap_core::verbose!(1, "nmap-services not found; service names limited");
@@ -1435,76 +1439,44 @@ fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
     }
 }
 
-/// Locate the `nmap-services` data file in a few conventional places. The port
-/// never fails if it is absent — it just loses frequency-ranked default ports
-/// and service names.
-/// Locate `nmap-os-db`, mirroring [`load_services`]'s search order. `None` if absent —
-/// `-O` then degrades to a warning rather than a silent no-op.
+/// The data-file search for this run, set once from `--datadir` before any
+/// file is read: nmap's order, never the working directory
+/// (`sys::datadir`).
+static DATA: std::sync::OnceLock<DataDirs> = std::sync::OnceLock::new();
+
+fn data() -> &'static DataDirs {
+    DATA.get_or_init(|| DataDirs::from_env(None))
+}
+
+/// `nmap_fetchfile(name)`, read as text.
+fn read_data_file(name: &str) -> Option<String> {
+    let path = data().fetch(name)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            nmap_core::debug!(1, "loaded {name} from {}", path.display());
+            Some(text)
+        }
+        Err(_) => None,
+    }
+}
+
+/// `nmap-os-db`. `None` if absent — `-O` then degrades to a warning rather
+/// than a silent no-op.
 #[cfg(feature = "pcap")]
 fn load_os_db() -> Option<String> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-os-db");
-            p
-        }),
-        Some("nmap-os-db".into()),
-        Some("../nmap-os-db".into()),
-        Some("../../nmap-os-db".into()),
-        Some("/usr/share/nmap/nmap-os-db".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded os-db from {}", cand.display());
-            return Some(text);
-        }
-    }
-    None
+    read_data_file("nmap-os-db")
 }
 
+/// `nmap-services`. The port never fails if it is absent — it just loses
+/// frequency-ranked default ports and service names.
 fn load_services() -> Option<ServiceTable> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-services");
-            p
-        }),
-        Some("nmap-services".into()),
-        Some("../nmap-services".into()),
-        Some("../../nmap-services".into()),
-        Some("/usr/share/nmap/nmap-services".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded services from {}", cand.display());
-            return Some(ServiceTable::parse(&text));
-        }
-    }
-    None
+    read_data_file("nmap-services").map(|t| ServiceTable::parse(&t))
 }
 
-/// Locate and read the `nmap-service-probes` data file (same search convention as
-/// [`load_services`]). `None` if absent — `-sV` then degrades to a warning.
+/// Read the `nmap-service-probes` data file. `None` if absent — `-sV` then
+/// degrades to a warning.
 fn load_probe_db_text() -> Option<String> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-service-probes");
-            p
-        }),
-        Some("nmap-service-probes".into()),
-        Some("../nmap-service-probes".into()),
-        Some("../../nmap-service-probes".into()),
-        Some("../../../nmap-service-probes".into()),
-        Some("/usr/share/nmap/nmap-service-probes".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded service probes from {}", cand.display());
-            return Some(text);
-        }
-    }
-    None
+    read_data_file("nmap-service-probes")
 }
 
 // Skipped under Miri: every test here reads a golden file, and Miri's isolation

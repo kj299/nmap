@@ -12,6 +12,7 @@
 use std::fmt::Write as _;
 
 use crate::model::{Host, PortState, Protocol, ScanResults};
+use crate::nse::results::ScriptOutput;
 use crate::ports::ServiceTable;
 
 /// Per-run metadata the renderers need. Times are pre-formatted strings so the
@@ -224,6 +225,46 @@ fn ignored_reason(host: &Host, state: PortState) -> &'static str {
 }
 
 /// Render the full normal (default, human-readable) report.
+/// One script result as normal output prints it: `formatScriptOutput`'s
+/// lines, or, for a result with no text, the line nmap's `error()` writes to
+/// the normal output in its place (`Bug in ...`, `nse_main.cc:534`).
+fn script_normal(s: &ScriptOutput) -> String {
+    if s.output.as_deref().unwrap_or(&[]).is_empty() {
+        return format!(
+            "Bug in {}: no string output.\n",
+            String::from_utf8_lossy(&s.id)
+        );
+    }
+    match s.normal() {
+        Some(lines) => format!("{}\n", String::from_utf8_lossy(&lines)),
+        None => String::new(),
+    }
+}
+
+/// A pre- or post-scan block (`printscriptresults`).
+fn script_block_normal(out: &mut String, title: &str, list: &[ScriptOutput]) {
+    if list.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{title}");
+    for s in list {
+        out.push_str(&script_normal(s));
+    }
+}
+
+/// A list of `<script>` elements inside `tag` (`<prescript>`, `<hostscript>`,
+/// `<postscript>`), or nothing for an empty list.
+fn script_block_xml(out: &mut String, tag: &str, list: &[ScriptOutput]) {
+    if list.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "<{tag}>");
+    for s in list {
+        let _ = writeln!(out, "{}", String::from_utf8_lossy(&s.xml()));
+    }
+    let _ = writeln!(out, "</{tag}>");
+}
+
 pub fn render_normal(
     results: &ScanResults,
     meta: &ScanMeta,
@@ -236,9 +277,11 @@ pub fn render_normal(
         meta.scanner, meta.version, meta.started
     );
 
+    script_block_normal(&mut out, "Pre-scan script results:", &results.scripts.pre);
+
     let mut up = 0usize;
     let mut first = true;
-    for host in &results.hosts {
+    for (i, host) in results.hosts.iter().enumerate() {
         // The host still counts as up even when `--open` drops it from the
         // report: it WAS found, it just has nothing the operator asked to see.
         // C counts it the same way (`nmap.cc:2312` skips only the printing).
@@ -248,9 +291,20 @@ pub fn render_normal(
         if !host_is_reportable(host, meta) {
             continue;
         }
-        render_host_normal(&mut out, host, services, meta, first);
+        render_host_normal(
+            &mut out,
+            host,
+            results.scripts.hosts.get(&i),
+            services,
+            meta,
+            first,
+        );
         first = false;
     }
+    if !results.scripts.post.is_empty() && !first {
+        out.push('\n');
+    }
+    script_block_normal(&mut out, "Post-scan script results:", &results.scripts.post);
 
     let fps = collect_service_fingerprints(results);
     out.push_str(&service_fingerprint_block(&fps));
@@ -320,11 +374,11 @@ https://nmap.org/cgi-bin/submit.cgi?new-service :"
 fn render_host_normal(
     out: &mut String,
     host: &Host,
+    scripts: Option<&crate::model::HostScripts>,
     services: Option<&ServiceTable>,
     meta: &ScanMeta,
     first: bool,
 ) {
-    let service_version = meta.service_version;
     let name = match &host.hostname {
         Some(h) => format!("{h} ({})", host.address),
         None => host.address.to_string(),
@@ -399,8 +453,37 @@ fn render_host_normal(
     }
 
     let shown = shown_ports(host, meta);
-    if shown.is_empty() {
-        return;
+    if !shown.is_empty() {
+        render_port_table(out, &shown, scripts, services, meta);
+    }
+    // `printhostscriptresults`, after the port table.
+    if let Some(list) = scripts.map(|s| s.host.as_slice()).filter(|l| !l.is_empty()) {
+        out.push('\n');
+        script_block_normal(out, "Host script results:", list);
+    }
+}
+
+/// The port table, with each port's script results as full-width rows under
+/// it (`printportoutput`). A full row does not widen a column, as in
+/// `NmapOutputTable`. nmap writes a result's `Bug in` line while it builds
+/// the table, so it comes out before it.
+fn render_port_table(
+    out: &mut String,
+    shown: &[&crate::model::Port],
+    scripts: Option<&crate::model::HostScripts>,
+    services: Option<&ServiceTable>,
+    meta: &ScanMeta,
+) {
+    let service_version = meta.service_version;
+    let port_scripts = |p: &crate::model::Port| -> &[ScriptOutput] {
+        scripts.map_or(&[], |s| s.port(p.protocol, p.number))
+    };
+    for p in shown {
+        for s in port_scripts(p) {
+            if s.output.as_deref().unwrap_or(&[]).is_empty() {
+                out.push_str(&script_normal(s));
+            }
+        }
     }
 
     // Column-aligned table (nmap's NmapOutputTable shape). The columns are
@@ -467,9 +550,14 @@ fn render_host_normal(
         line.trim_end().to_string()
     };
     let _ = writeln!(out, "{}", emit(&headers));
-    for row in &rows {
+    for (row, p) in rows.iter().zip(shown) {
         let cells: Vec<&str> = row.iter().map(String::as_str).collect();
         let _ = writeln!(out, "{}", emit(&cells));
+        for s in port_scripts(p) {
+            if let Some(lines) = s.normal() {
+                let _ = writeln!(out, "{}", String::from_utf8_lossy(&lines));
+            }
+        }
     }
 }
 
@@ -787,9 +875,11 @@ pub fn render_xml(
         xml_escape(meta.started),
         xml_escape(meta.version)
     );
+    script_block_xml(&mut out, "prescript", &results.scripts.pre);
 
     let mut up = 0usize;
-    for host in &results.hosts {
+    for (i, host) in results.hosts.iter().enumerate() {
+        let scripts = results.scripts.hosts.get(&i);
         let is_up = host.state == crate::model::HostState::Up;
         if is_up {
             up = up.saturating_add(1);
@@ -840,22 +930,32 @@ pub fn render_xml(
         }
         for p in shown_ports(host, meta) {
             let svc = service_name(p.number, p.protocol, p.service.name.as_deref(), services);
+            let script_xml: String = scripts
+                .map_or(&[][..], |s| s.port(p.protocol, p.number))
+                .iter()
+                .map(|s| String::from_utf8_lossy(&s.xml()).into_owned())
+                .collect();
             let _ = writeln!(
                 out,
-                "<port protocol=\"{}\" portid=\"{}\"><state state=\"{}\" reason=\"{}\"/>{}</port>",
+                "<port protocol=\"{}\" portid=\"{}\"><state state=\"{}\" reason=\"{}\"/>{}{}</port>",
                 p.protocol.as_str(),
                 p.number,
                 p.state.as_str(),
                 p.reason.as_str(),
                 service_xml(svc, &p.service, meta.service_version),
+                script_xml,
             );
         }
         let _ = writeln!(out, "</ports>");
         if let Some(os) = &host.os {
             out.push_str(&os_xml(os));
         }
+        if let Some(s) = scripts {
+            script_block_xml(&mut out, "hostscript", &s.host);
+        }
         let _ = writeln!(out, "</host>");
     }
+    script_block_xml(&mut out, "postscript", &results.scripts.post);
 
     let _ = writeln!(
         out,
@@ -879,7 +979,10 @@ mod tests {
     /// this port's `-sL` only in the banner and elapsed time.
     #[test]
     fn a_list_scan_host_renders_as_one_line() {
-        let mut results = ScanResults { hosts: Vec::new() };
+        let mut results = ScanResults {
+            hosts: Vec::new(),
+            ..Default::default()
+        };
         for last in 1u8..=3 {
             results.hosts.push(Host::new(
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)),
@@ -922,7 +1025,10 @@ mod tests {
             PortState::Closed,
             Reason::ConnRefused,
         ));
-        let results = ScanResults { hosts: vec![host] };
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
         let out = render_normal(&results, &meta(), None);
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].starts_with("Starting "), "got: {:?}", lines[0]);
@@ -942,6 +1048,7 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 HostState::Unknown,
             )],
+            ..Default::default()
         };
         let g = render_grepable(&results, &meta(), None);
         assert!(g.contains("Status: Unknown"), "grepable:\n{g}");
@@ -1130,7 +1237,10 @@ mod tests {
                 Reason::ConnRefused,
             ));
         }
-        let results = ScanResults { hosts: vec![host] };
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
         let out = render_normal(&results, &meta(), None);
         assert!(
             out.contains("Not shown: 26 closed tcp ports (conn-refused)"),
@@ -1170,7 +1280,10 @@ mod tests {
             PortState::Closed,
             Reason::ConnRefused,
         ));
-        let results = ScanResults { hosts: vec![host] };
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
         let m = ScanMeta {
             open_only: true,
             ..meta()
@@ -1502,7 +1615,10 @@ mod tests {
             p.service.fingerprint = fp.map(str::to_owned);
             host.ports.push(p);
         }
-        let results = ScanResults { hosts: vec![host] };
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
         assert_eq!(
             collect_service_fingerprints(&results),
             vec!["FP-22;".to_owned(), "FP-443;".to_owned()]

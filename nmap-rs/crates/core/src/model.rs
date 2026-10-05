@@ -254,6 +254,40 @@ impl Host {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScanResults {
     pub hosts: Vec<Host>,
+    /// What NSE scripts reported, when scripts ran.
+    pub scripts: ScriptReport,
+}
+
+/// NSE results (M6.4e). nmap keeps them on the run, on each `Target` and on
+/// each `Port`; this port keeps them beside the hosts, so the scan's own
+/// records stay as the scan left them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScriptReport {
+    /// Pre-scan results (`<prescript>`, "Pre-scan script results:").
+    pub pre: Vec<crate::nse::results::ScriptOutput>,
+    /// Post-scan results (`<postscript>`, "Post-scan script results:").
+    pub post: Vec<crate::nse::results::ScriptOutput>,
+    /// Per host, by its index in [`ScanResults::hosts`].
+    pub hosts: std::collections::BTreeMap<usize, HostScripts>,
+}
+
+/// One host's script results.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostScripts {
+    /// Host-script results (`<hostscript>`, "Host script results:").
+    pub host: Vec<crate::nse::results::ScriptOutput>,
+    /// Port-script results, per port.
+    pub ports: Vec<(Protocol, u16, Vec<crate::nse::results::ScriptOutput>)>,
+}
+
+impl HostScripts {
+    /// The results for one port, if any.
+    pub fn port(&self, proto: Protocol, number: u16) -> &[crate::nse::results::ScriptOutput] {
+        self.ports
+            .iter()
+            .find(|(p, n, _)| *p == proto && *n == number)
+            .map_or(&[], |(_, _, v)| v.as_slice())
+    }
 }
 
 impl ScanResults {

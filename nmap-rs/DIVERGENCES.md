@@ -3130,12 +3130,10 @@ Gated by three things:
       only. `execute`, `exit`, `getenv`, `remove`, `rename`, `tmpname` and
       `setlocale` do not exist (Decision 2). None but `getenv` is called on a
       path a scan reaches.
-- [ ] `os-getenv-home-pending` — `getenv` is reached in one place:
-      `ssh1.parse_known_hosts_file`, which reads `$HOME/.ssh/config` and
-      `$HOME/.ssh/known_hosts`. It runs when `ssh-hostkey` is given
-      `known-hosts` without `known-hosts-path`. Until the host resolves `HOME`
-      in Rust and hands the paths in, as Decision 2 plans, that call raises
-      "attempt to call a nil value". Passing `known-hosts-path` avoids it.
+- [x] `os-getenv-home-pending` — **closed in M6.4e** by
+      `os-getenv-home-only` (Milestone 6.4e). `ssh1.parse_known_hosts_file`
+      reads `$HOME/.ssh/config` and `$HOME/.ssh/known_hosts`. The command
+      line now hands in `HOME`, and those two files are readable.
 - [x] `io-no-process-or-stdin` — `io.popen`, `io.tmpfile`, `io.input`,
       `io.read` and `io.stdin`/`io.stderr` do not exist. `io.lines()` with no
       file name raises, rather than reading nmap's standard input.
@@ -3262,8 +3260,8 @@ drives `choose` over arbitrary rules.
       end` hangs the scan. The port steps the VM in slices and takes an
       optional fuel budget per call into the engine (`engine::Budget`). The
       phase then ends with `Script Engine Scan Aborted`, and the results
-      stored so far are kept. The command line decides the budget (M6.4e);
-      with none, behaviour is nmap's.
+      stored so far are kept. The command line does not use the fuel budget;
+      it bounds time through the watchdog instead (`nse-stall-limit`).
 
 ### Faithfully reproduced (deliberately *not* "fixed")
 
@@ -3316,10 +3314,9 @@ drives `choose` over arbitrary rules.
 - [ ] `nse-selection-warnings-first` — `Warning: Could not load '...'` for an
       indexed script whose file is missing is logged before any script
       loads, where the C logs it between loads.
-- [ ] `nse-empty-result-bug-line` — nmap's `error("Bug in %s: no string
-      output.")`, written to normal output when a result's text is empty, is
-      not produced by `core::nse::results`. M6.4e, which prints the results,
-      must write it.
+- [x] `nse-empty-result-bug-line` — **closed in M6.4e**: normal output
+      writes `Bug in ID: no string output.` where nmap's `-oN` file has it.
+      See `nse-bug-line-on-stdout`.
 
 ## Milestone 6.4d — sockets, `resolve`, `mutex`, `condvar` (`core::nse::net`, `sys::nsenet`, `prelude.lua`)
 
@@ -3418,7 +3415,8 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
       `ethernet_*` and `ip_*` methods raise "raw packet sending (nmap.dnet)
       is not available yet". Raw sends will go through `sys::rawio` (M4).
 - [ ] `nse-no-script-trace` — `--script-trace` does not trace socket
-      traffic. The command line does not accept it yet (M6.4e).
+      traffic. The command line refuses it, failing closed with every
+      option it does not implement.
 - [ ] `nse-ops-always-yield` — in nmap, nsock can complete an operation
       inside the call that starts it (`NU_ACTION_IMMEDIATE`), and the
       function then returns without yielding. Here every operation yields
@@ -3436,3 +3434,136 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
       operations, which never complete. In nmap, nsock delivers them as
       cancelled. A thread can wait on its own socket only, so no thread is
       left waiting on one.
+
+## Milestone 6.4e — `--script` on the command line (`cli::nse`, `sys::{datadir, nsehost}`, `core::output`)
+
+The command line runs NSE as nmap does (`nmap.cc:2084-2356`):
+- `open_nse` before the scan;
+- the pre-scan phase;
+- the scan phase over the hosts that are up, after `-sV` and `-O`;
+- the post-scan phase.
+
+The engine runs on a thread of its own. The options it takes are `--script`,
+`--script-args`, `--script-args-file`, `--script-timeout`, `-sC`, `-A`'s
+scripts and `--datadir`. Results print where nmap prints them:
+- pre-scan, host and post-scan blocks;
+- port results as full-width rows under their port;
+- `<prescript>`, `<script>` in `<port>`, `<hostscript>` and `<postscript>`
+  in XML.
+
+**Gated** by `nse_cli_differential` (`nmap-cli`). `oracle/gen_m64_cli.py`
+runs nmap 7.94 and then `nmap-rs`, each as a whole program, over the same
+fifteen scenarios against loopback services. Both outputs are parsed by the
+same code. The scenarios cover:
+- every phase, and the Bug-in line;
+- every output shape, script errors and worker threads;
+- `-sC`, and script arguments from the command line, a file and both;
+- scripts on the network, and shipped `http-title` and `http-headers`;
+- `--script-timeout`;
+- a port state a script sets;
+- three start-up failures.
+
+Each result's normal-output lines and canonical `<script>` element, each
+port's state and each start-up error must match. Two tests have no oracle:
+the stall limit, and the working directory never being searched. Sabotage
+of ten points is caught:
+- the Bug-in line and the block titles;
+- port rows and XML containers;
+- the args-file order and the default rule;
+- `--script-timeout`;
+- which hosts the scan phase gets, and the port states scripts set;
+- the watchdog and the directory search.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `datadir-no-working-directory` — the port's command line looked for
+      `nmap-services`, `nmap-os-db` and `nmap-service-probes` in `.`, `..`
+      and `../..`. nmap never searches the working directory, "for security
+      and consistency reasons" (`nmap.cc:2744`), and for NSE that search
+      would load and run Lua from wherever the operator stands.
+      `sys::datadir` follows `nmap_fetchfile`'s order:
+      - `--datadir`;
+      - `$NMAPDIR`, then `$NMAP_RS_DATADIR`, this port's older name for it;
+      - `~/.nmap`;
+      - the executable's directory, then `../share/nmap` beside it;
+      - `/usr/share/nmap`.
+
+      It also prints nmap's warning when a `./` copy is passed over. A
+      script the operator names (`--script ./mine.nse`) is still found as
+      given, as `nse_fetchscript` finds it.
+- [x] `nse-stall-limit` — in nmap a script that computes without yielding
+      hangs the scan for good, and `--script-timeout` reaches only threads
+      that are waiting. The engine runs a watchdog between slices of VM
+      work. If the scheduler has made no pass, it stops the phase with
+      nmap's `Script Engine Scan Aborted` report, keeping the results stored
+      so far, and the scan carries on. The limit is `--script-timeout` when
+      that is set (at least one second), else ten minutes. A script yields
+      on every socket call, so a legitimate one does not compute for ten
+      minutes without a pass.
+- [x] `nse-script-db-required` — when `scripts/script.db` is missing or
+      unreadable, nmap writes a new one into its data directory. The port
+      does not write into a data directory unasked: it fails to start the
+      engine and says how to point it at one. `--script-updatedb` is refused,
+      like every unimplemented option.
+- [x] `nse-chosen-scripts-readable` — Decision 2 lets scripts read beneath
+      the data directories and the files named in their arguments. The
+      scripts the operator chose are also readable, wherever they are, and
+      never writable. Otherwise `--script ./mine.nse` could not load.
+- [x] `os-getenv-home-only` — `os.getenv` answers `HOME` alone, with the
+      home directory the host resolved; every other variable is unset. The
+      one shipped call site is `ssh1.lua`, and it reads only `HOME`. The
+      operator's `~/.ssh/config` and `~/.ssh/known_hosts` are readable for
+      it, and never writable.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `nse-script-timeout-from-t5` — `-T5` sets a 600-second script
+      timeout unless `--script-timeout` is given, from either side of it
+      (`nmap.cc:1398`, `:1502`).
+- [x] `nse-script-args-file-lookup` — `--script-args-file` is found as
+      `fetchfile_absolute` finds it: an absolute path as given, else in the
+      data directories. Its contents come before `--script-args`. A missing
+      file fails with nmap's own message.
+- [x] `nse-excluded-ports-after-sv` — after `-sV` without `--allports`,
+      `nmap.port_is_excluded` reports the probe file's `Exclude` ports. So
+      scripts that check it, such as `shortport.version_port_or_service`,
+      stay off the JetDirect ports that `-sV` itself avoids.
+- [x] `nse-scan-phase-up-hosts` — the scan phase gets only the hosts that
+      are up, as nmap's `Targets` holds them.
+
+### Differences, open and documented
+
+- [ ] `nse-bug-line-on-stdout` — nmap writes `Bug in ID: no string output.`
+      with `error()`: to standard error and to an `-oN` file, inside the
+      block being written. The port renders normal output once for every
+      destination, so the line is in normal output on the terminal too, and
+      not repeated on standard error.
+- [ ] `nse-sv-version-scripts-pending` — in nmap, `-sV` also opens NSE and
+      runs the `version` category during the scan phase
+      (`o.scriptversion`, `nmap.cc:2084`). The port's `-sV` does not run
+      scripts yet.
+- [ ] `nse-host-os-pending` — `host.os` and `host.os_fp` are not given to
+      scripts after `-O`. nmap derives them from its overall OS
+      classification, which the port's report does not carry in that form.
+- [ ] `nse-script-version-changes-not-reported` — a version a script sets
+      (`nmap.set_port_version`) does not reach the report. A port state it
+      sets does.
+- [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
+      but the scan does not pick them up (nmap's `--script-args newtargets`).
+- [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
+      `LOG_PLAIN`) go to the terminal as they happen. nmap also copies
+      `LOG_PLAIN` lines into an `-oN` file.
+- [ ] `nse-env-subset` — what scripts read of the run is incomplete:
+      - `nmap.is_privileged()` is false;
+      - `-e`, `--dns-servers` and `--data-length` are not passed (the port
+        has no such options yet);
+      - `os.clock()` is the time since the engine started, not processor
+        time.
+- [ ] `datadir-home-from-environment` — `~/.nmap` is found through `$HOME`
+      first. nmap reads the home directory from the password database, for
+      the real and then the effective user.
+- [ ] `nse-script-help-trace-updatedb-refused` — `--script-help`,
+      `--script-trace` and `--script-updatedb` are refused, failing closed.
+- [ ] `nse-os-block-after-scripts` — with `-O`, the OS block is printed
+      after the whole report, as before M6.4e, so it comes after `Host
+      script results:` where nmap prints it before.

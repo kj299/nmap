@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use nmap_core::build::PacketOverrides;
 use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
+use nmap_core::nse::nmaplib::Phase;
 use nmap_core::options::{RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
@@ -20,6 +21,9 @@ use nmap_core::{
     render_normal, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable, TargetSpec,
     TimingParams, TimingTemplate,
 };
+mod nse;
+
+use nmap_sys::datadir::DataDirs;
 use nmap_sys::net::resolve_host;
 use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig};
 
@@ -242,6 +246,9 @@ async fn main() -> ExitCode {
         }
     }
 
+    let _ = DATA.set(DataDirs::from_env(
+        cfg.datadir.as_deref().map(std::path::Path::new),
+    ));
     let services = load_services();
     if services.is_none() {
         nmap_core::verbose!(1, "nmap-services not found; service names limited");
@@ -279,6 +286,26 @@ async fn main() -> ExitCode {
             eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
         }
         return ExitCode::FAILURE;
+    }
+
+    // NSE (M6.4e): `open_nse`, then the pre-scan phase, before any scanning
+    // (`nmap.cc:2084-2099`).
+    let nse = if cfg.script {
+        match tokio::task::block_in_place(|| nse::Nse::start(nse_setup(&cfg, services.as_ref()))) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                eprintln!("NSE: failed to initialize the script engine:\n{e}\n\nQUITTING!");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+    let mut scripts = nmap_core::model::ScriptReport::default();
+    if let Some(n) = &nse {
+        if let Some(r) = run_phase(n, Phase::PreScan, Vec::new()) {
+            scripts.pre = r.run;
+        }
     }
 
     // The scan engine derives its per-probe timeout adaptively from observed
@@ -349,6 +376,34 @@ async fn main() -> ExitCode {
         String::new()
     };
 
+    // The scan phase over the hosts that are up, then post-scan
+    // (`nmap.cc:2288`, `:2349`).
+    if let Some(n) = &nse {
+        let up: Vec<usize> = (0..results.hosts.len())
+            .filter(|&i| results.hosts[i].state == HostState::Up)
+            .collect();
+        let hosts = up
+            .iter()
+            .map(|&i| nse::script_host(&results.hosts[i]))
+            .collect();
+        if let Some(r) = run_phase(n, Phase::Scan, hosts) {
+            for (i, h) in up.iter().zip(r.hosts) {
+                apply_port_states(&mut results.hosts[*i], &h.host);
+                scripts.hosts.insert(
+                    *i,
+                    nmap_core::model::HostScripts {
+                        host: h.results,
+                        ports: h.ports,
+                    },
+                );
+            }
+        }
+        if let Some(r) = run_phase(n, Phase::PostScan, Vec::new()) {
+            scripts.post = r.run;
+        }
+    }
+    results.scripts = scripts;
+
     let meta = ScanMeta {
         scanner: "nmap-rs",
         version: env!("CARGO_PKG_VERSION"),
@@ -396,6 +451,7 @@ async fn run_scan(
                 .iter()
                 .map(|ip| nmap_core::model::Host::new(*ip, nmap_core::model::HostState::Unknown))
                 .collect(),
+            ..Default::default()
         },
         ScanKind::Connect => {
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
@@ -1435,76 +1491,126 @@ fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
     }
 }
 
-/// Locate the `nmap-services` data file in a few conventional places. The port
-/// never fails if it is absent — it just loses frequency-ranked default ports
-/// and service names.
-/// Locate `nmap-os-db`, mirroring [`load_services`]'s search order. `None` if absent —
-/// `-O` then degrades to a warning rather than a silent no-op.
+/// What the script engine reads of the run (`open_nse`, `cnse`).
+fn nse_setup(cfg: &RunConfig, services: Option<&ServiceTable>) -> nse::Setup {
+    let timeout = cfg.script_timeout_secs();
+    // The stall limit (`nse-stall-limit`): `--script-timeout` when one is in
+    // force, else ten minutes. A limit below a second would stop a phase
+    // between two scheduler passes, so it is one second at least.
+    let stall = if timeout > 0.0 {
+        std::time::Duration::from_secs_f64(timeout.max(1.0))
+    } else {
+        nse::DEFAULT_STALL
+    };
+    // The probe file's `Exclude` ports, which `nmap.port_is_excluded` reports
+    // after `-sV` without `--allports`: scripts that check it stay off the
+    // ports `-sV` itself avoids (JetDirect printers).
+    let excluded_ports = (cfg.service_version && !cfg.allports)
+        .then(load_probe_db_text)
+        .flatten()
+        .map(|t| ProbeDb::parse(&t))
+        .filter(|db| db.excluded_seen)
+        .map(|db| db.exclude);
+    nse::Setup {
+        data: data().clone(),
+        rules: cfg.script_rules.clone(),
+        script_args: cfg.script_args.clone().unwrap_or_default(),
+        script_args_file: cfg.script_args_file.clone(),
+        script_timeout: timeout,
+        stall,
+        verbose: i64::from(cfg.verbose),
+        debugging: i64::from(cfg.debugging),
+        timing_level: i64::from(
+            cfg.timing_template
+                .unwrap_or(TimingTemplate::Normal)
+                .level(),
+        ),
+        version_intensity: i64::from(cfg.version_intensity),
+        ttl: cfg.ttl.map_or(-1, i64::from),
+        ipv6: cfg.ipv6,
+        min_parallelism: cfg.min_parallelism.map_or(0, i64::from),
+        max_parallelism: cfg.max_parallelism.map_or(0, i64::from),
+        services: services.cloned(),
+        excluded_ports,
+    }
+}
+
+/// `script_scan` for one phase. An engine error is reported as nmap reports
+/// it, and what the scripts stored before it is kept.
+fn run_phase(
+    n: &nse::Nse,
+    phase: Phase,
+    hosts: Vec<nmap_core::nse::nmaplib::ScriptHost>,
+) -> Option<nmap_core::nse::engine::PhaseResults> {
+    let r = tokio::task::block_in_place(|| n.run(phase, hosts));
+    match &r {
+        None => eprintln!("NSE: the script engine stopped unexpectedly"),
+        Some(r) => {
+            if let Some(e) = &r.aborted {
+                eprintln!(
+                    "NSE: Script Engine Scan Aborted.\nAn error was thrown by the engine: {e}"
+                );
+            }
+        }
+    }
+    r
+}
+
+/// Port states the scripts changed (`nmap.set_port_state`), back on the
+/// scan's record of the host.
+fn apply_port_states(
+    host: &mut nmap_core::model::Host,
+    scripted: &nmap_core::nse::nmaplib::ScriptHost,
+) {
+    for sp in &scripted.ports {
+        if let Some(p) = host
+            .ports
+            .iter_mut()
+            .find(|p| p.protocol == sp.protocol && p.number == sp.number)
+        {
+            p.state = sp.state;
+        }
+    }
+}
+
+/// The data-file search for this run, set once from `--datadir` before any
+/// file is read: nmap's order, never the working directory
+/// (`sys::datadir`).
+static DATA: std::sync::OnceLock<DataDirs> = std::sync::OnceLock::new();
+
+fn data() -> &'static DataDirs {
+    DATA.get_or_init(|| DataDirs::from_env(None))
+}
+
+/// `nmap_fetchfile(name)`, read as text.
+fn read_data_file(name: &str) -> Option<String> {
+    let path = data().fetch(name)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            nmap_core::debug!(1, "loaded {name} from {}", path.display());
+            Some(text)
+        }
+        Err(_) => None,
+    }
+}
+
+/// `nmap-os-db`. `None` if absent — `-O` then degrades to a warning rather
+/// than a silent no-op.
 #[cfg(feature = "pcap")]
 fn load_os_db() -> Option<String> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-os-db");
-            p
-        }),
-        Some("nmap-os-db".into()),
-        Some("../nmap-os-db".into()),
-        Some("../../nmap-os-db".into()),
-        Some("/usr/share/nmap/nmap-os-db".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded os-db from {}", cand.display());
-            return Some(text);
-        }
-    }
-    None
+    read_data_file("nmap-os-db")
 }
 
+/// `nmap-services`. The port never fails if it is absent — it just loses
+/// frequency-ranked default ports and service names.
 fn load_services() -> Option<ServiceTable> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-services");
-            p
-        }),
-        Some("nmap-services".into()),
-        Some("../nmap-services".into()),
-        Some("../../nmap-services".into()),
-        Some("/usr/share/nmap/nmap-services".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded services from {}", cand.display());
-            return Some(ServiceTable::parse(&text));
-        }
-    }
-    None
+    read_data_file("nmap-services").map(|t| ServiceTable::parse(&t))
 }
 
-/// Locate and read the `nmap-service-probes` data file (same search convention as
-/// [`load_services`]). `None` if absent — `-sV` then degrades to a warning.
+/// Read the `nmap-service-probes` data file. `None` if absent — `-sV` then
+/// degrades to a warning.
 fn load_probe_db_text() -> Option<String> {
-    let candidates = [
-        std::env::var_os("NMAP_RS_DATADIR").map(|d| {
-            let mut p = std::path::PathBuf::from(d);
-            p.push("nmap-service-probes");
-            p
-        }),
-        Some("nmap-service-probes".into()),
-        Some("../nmap-service-probes".into()),
-        Some("../../nmap-service-probes".into()),
-        Some("../../../nmap-service-probes".into()),
-        Some("/usr/share/nmap/nmap-service-probes".into()),
-    ];
-    for cand in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&cand) {
-            nmap_core::debug!(1, "loaded service probes from {}", cand.display());
-            return Some(text);
-        }
-    }
-    None
+    read_data_file("nmap-service-probes")
 }
 
 // Skipped under Miri: every test here reads a golden file, and Miri's isolation

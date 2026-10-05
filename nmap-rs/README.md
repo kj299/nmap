@@ -47,9 +47,14 @@ In brief:
   - running scripts: `nse_main.lua`'s own scheduler, with results printed as
     nmap prints them;
   - sockets, timers, `resolve`, `mutex` and `condvar`, over a tokio host
-    (`sys::nsenet`). TLS, packet capture and raw `dnet` sends are pending.
+    (`sys::nsenet`). TLS, packet capture and raw `dnet` sends are pending;
+  - `--script`, `-sC`, `--script-args` and `--script-timeout` on the
+    command line, with results in normal and XML output as nmap prints them.
+    Data files and scripts come from nmap's data directories, never the
+    working directory.
 
-  Next is `--script` on the command line (M6.4e).
+  What remains of NSE is ledgered in `DIVERGENCES.md`: TLS, packet capture,
+  raw `dnet` sends, `-sV`'s version scripts, and the unported C modules.
 - **M7, cutover,** is in progress in parallel.
 
 ## The gates (CI-enforced; `.github/workflows/nmap-rs-ci.yml`)

@@ -30,6 +30,7 @@ any difference.
 | `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
 | `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 36 scenarios |
 | `m64_net_golden.txt` | sockets, timers, `resolve`, `mutex`, `condvar`, socket limits, shipped `http-*` scripts (M6.4d), vs nmap 7.94 | `oracle/gen_m64_net.py` (live in CI) | `nse_net_differential` (in `nmap-sys`) | 3 scenarios, 17 scripts |
+| `m64_cli_golden.txt` | `nmap-rs --script` as a whole program: every phase's results and port states in normal and XML output, script arguments, timeouts, start-up errors (M6.4e), vs nmap 7.94 | `oracle/gen_m64_cli.py` (live in CI) | `nse_cli_differential` (in `nmap-cli`) | 15 scenarios |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -322,3 +323,29 @@ The fixtures print only what is the same on every run:
   not the list, whose length depends on the machine's `/etc/hosts`;
 - `n-sleep` reports the type of `connect_waiting`, not its value, which
   depends on `n-many` running at the same time.
+
+## M6.4e — `--script` on the command line
+
+`oracle/gen_m64_cli.py` compares two whole programs: nmap, which writes the
+golden, and `nmap-rs`, in `--check` mode. Each runs with `--datadir` set to
+one scratch data directory, holding:
+- this tree's data files and `nselib/`;
+- in `scripts/`, the fixtures of `nse_scripts/`, `nse_net/` and `nse_cli/`,
+  and the shipped `http-title` and `http-headers`;
+- a `script.db` listing them all.
+
+The services are those of the other two generators. Each scenario is one
+command line with `-oN` and `-oX`, and the same Python parses both programs'
+files, so the comparison cannot disagree with itself:
+- **Normal output:** each script result's lines go into their block: `pre`,
+  `host`, `post`, `port:PROTO/NUMBER`, or `port-table` for a `Bug in` line
+  written before the table.
+- **XML:** each `<script>` element, re-serialised, and each port's state.
+- **Errors:** the message after `NSE: failed to initialize the script
+  engine:`.
+
+Within a block, results are sorted by id (`nse-results-sorted-by-id`).
+`crates/cli/tests/nse_cli_differential.rs` runs the check against the
+built binary. It also has two tests with no oracle:
+- the stall limit;
+- that a `scripts/` in the working directory is never used.

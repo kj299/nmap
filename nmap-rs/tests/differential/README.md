@@ -11,7 +11,7 @@ the comparison needs the whole binary).
 | this one | M1: `-sT` end to end (`run_differential.sh`, below) | installed nmap, on a loopback fixture |
 | [`m4/`](m4/README.md) | M4: packet headers, builder, parser, validation, classification | C harnesses compiled from this tree's sources |
 | `m5/` | M5: OS-detection expressions, probes and IPv6 fingerprinting; `run_os_differential.sh` runs `-O` on the wire | C harnesses from this tree, and installed nmap |
-| [`m6/`](m6/README.md) | M6: NSE — script metadata, selection, the Lua VM and stdlib, `--script-args`, the `nmap` module, the NSE state, running scripts, sockets | `liblua/` and `lpeg.c` from this tree; installed nmap 7.94 |
+| [`m6/`](m6/README.md) | M6: NSE — script metadata, selection, the Lua VM and stdlib, `--script-args`, the `nmap` module, the NSE state, running scripts, sockets, `--script` | `liblua/` and `lpeg.c` from this tree; installed nmap 7.94 |
 | `m7/` | M7: log-file output, time-value parsing, and the `--top-ports`/`-F`/`--port-ratio` port sets | C harnesses from this tree; installed nmap (`--packet-trace`, `--datadir` this tree) |
 | `s/` | Workstream S: SHA-256, minisign verification, service fingerprints | OpenSSL CLI; a C++ harness over this tree's service-fingerprint code |
 

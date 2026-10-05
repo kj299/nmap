@@ -520,11 +520,19 @@ fn l_rendered<'gc>(
 /// is nmap's behaviour, no limit.
 pub type Budget = Option<u64>;
 
-/// Step `ex` until it finishes, or the budget is spent.
+/// A check the engine runs between slices of VM work: `Some(reason)` stops
+/// the call there, as a spent [`Budget`] does, and the phase is reported
+/// aborted with `reason`. The command line's stall limit is one
+/// (`nse-stall-limit`).
+pub type Watchdog = Box<dyn FnMut() -> Option<String>>;
+
+/// Step `ex` until it finishes, the budget is spent, or the watchdog stops
+/// it.
 pub(crate) fn finish(
     lua: &mut Lua,
     ex: &StashedExecutor,
     budget: Budget,
+    mut watchdog: Option<&mut Watchdog>,
     what: &str,
 ) -> Result<(), String> {
     const SLICE: i32 = 4096;
@@ -539,6 +547,9 @@ pub(crate) fn finish(
         spent = spent.saturating_add(u64::from(SLICE.unsigned_abs()));
         if budget.is_some_and(|b| spent > b) {
             return Err(format!("{what}: out of fuel"));
+        }
+        if let Some(reason) = watchdog.as_mut().and_then(|w| w()) {
+            return Err(format!("{what}: {reason}"));
         }
     }
 }
@@ -623,7 +634,13 @@ impl super::runtime::NseState {
                 .expect("the prelude returns load_scripts");
             ctx.stash(Executor::start(ctx, f, list))
         });
-        finish(&mut self.lua, &ex, budget, "loading scripts")?;
+        finish(
+            &mut self.lua,
+            &ex,
+            budget,
+            self.watchdog.as_mut(),
+            "loading scripts",
+        )?;
         outcome(&mut self.lua, &ex)
     }
 
@@ -680,9 +697,15 @@ impl super::runtime::NseState {
             let f: piccolo::Function = engine.get(ctx, "main").expect("the prelude returns main");
             ctx.stash(Executor::start(ctx, f, (list, scantype)))
         });
-        let aborted = finish(&mut self.lua, &ex, budget, "script scan")
-            .and_then(|()| outcome(&mut self.lua, &ex))
-            .err();
+        let aborted = finish(
+            &mut self.lua,
+            &ex,
+            budget,
+            self.watchdog.as_mut(),
+            "script scan",
+        )
+        .and_then(|()| outcome(&mut self.lua, &ex))
+        .err();
         let mut results = self.render(budget);
         results.aborted = aborted;
         results
@@ -713,8 +736,14 @@ impl super::runtime::NseState {
         });
         // A result whose rendering did not finish is reported with no text,
         // as the C reports a FORMAT_TABLE that failed.
-        let _ = finish(&mut self.lua, &ex, budget, "rendering")
-            .and_then(|()| outcome(&mut self.lua, &ex));
+        let _ = finish(
+            &mut self.lua,
+            &ex,
+            budget,
+            self.watchdog.as_mut(),
+            "rendering",
+        )
+        .and_then(|()| outcome(&mut self.lua, &ex));
         let rendered = std::mem::take(&mut self.store.borrow_mut().rendered);
         let lib = self.lib.borrow();
         let out = PhaseResults {

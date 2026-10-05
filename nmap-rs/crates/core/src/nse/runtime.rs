@@ -62,6 +62,15 @@ pub struct NseState {
     pub(crate) lib: super::nmaplib::Shared,
     /// Results the scripts stored, until a phase renders them.
     pub(crate) store: Rc<RefCell<Store>>,
+    /// Run between slices of every call into the engine.
+    pub(crate) watchdog: Option<super::engine::Watchdog>,
+}
+
+impl NseState {
+    /// Set the check run between slices of VM work ([`super::engine::Watchdog`]).
+    pub fn set_watchdog(&mut self, watchdog: Option<super::engine::Watchdog>) {
+        self.watchdog = watchdog;
+    }
 }
 
 /// Build NSE's Lua state and run the prelude in it; the prelude's error if it
@@ -102,6 +111,7 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
         engine,
         lib: config.lib.clone(),
         store,
+        watchdog: None,
     })
 }
 

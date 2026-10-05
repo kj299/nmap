@@ -32,6 +32,7 @@ fn os_env() -> OsEnv {
                 .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         }),
         cpu_seconds: Box::new(|| 0.0),
+        home: None,
     }
 }
 

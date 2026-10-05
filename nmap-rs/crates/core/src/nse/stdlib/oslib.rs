@@ -24,6 +24,8 @@ pub struct OsEnv {
     pub now: Box<dyn Fn() -> i64>,
     /// `clock() / CLOCKS_PER_SEC`: processor time used, in seconds.
     pub cpu_seconds: Box<dyn Fn() -> f64>,
+    /// The home directory `os.getenv("HOME")` reports, if any.
+    pub home: Option<Vec<u8>>,
 }
 
 #[derive(Collect)]
@@ -73,6 +75,27 @@ pub fn load_os<'gc>(ctx: Context<'gc>, env: Rc<OsEnv>) -> Table<'gc> {
             };
             // `difftime` on two `time_t`s, as a double.
             stack.replace(ctx, (t1 as f64) - (t2 as f64));
+            Ok(CallbackReturn::Return)
+        }),
+    );
+    // `getenv`, for `HOME` alone: the one variable a shipped Lua file reads
+    // (`ssh1.lua:244`). Every other name is unset (`os-getenv-home-only`).
+    os.set_field(
+        ctx,
+        "getenv",
+        Callback::from_fn_with(&ctx, Env(e.0.clone()), |env, ctx, _, mut stack| {
+            let is_home = {
+                let args = LuaArgs { ctx, stack: &stack };
+                args.string(1)
+                    .map_err(|e| raise(ctx, "getenv", e))?
+                    .as_ref()
+                    == b"HOME"
+            };
+            let value = match (&env.0.home, is_home) {
+                (Some(home), true) => Value::String(ctx.intern(home)),
+                _ => Value::Nil,
+            };
+            stack.replace(ctx, value);
             Ok(CallbackReturn::Return)
         }),
     );

@@ -15,6 +15,7 @@
 //! 0 for this crate.
 
 pub mod capture;
+pub mod datadir;
 pub mod flagscan;
 pub mod fpengine;
 pub mod group;
@@ -22,6 +23,7 @@ pub mod ndp;
 pub mod net;
 pub mod netif;
 pub mod nsefs;
+pub mod nsehost;
 pub mod nsenet;
 pub mod osscan;
 pub mod rawio;

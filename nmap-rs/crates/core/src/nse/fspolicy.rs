@@ -30,6 +30,10 @@ pub struct FsPolicy {
     pub write_roots: Vec<PathBuf>,
     /// Files the operator named in `--script-args`: readable and writable.
     pub named: Vec<PathBuf>,
+    /// Files the host makes readable and nothing more: the operator's
+    /// `~/.ssh/config` and `~/.ssh/known_hosts`, which `ssh1.lua` reads
+    /// through `os.getenv("HOME")` (`os-getenv-home-only`).
+    pub read_named: Vec<PathBuf>,
 }
 
 impl FsPolicy {
@@ -43,7 +47,7 @@ impl FsPolicy {
         if self.named.iter().any(|n| n == canonical) || beneath(&self.write_roots) {
             return true;
         }
-        !write && beneath(&self.read_roots)
+        !write && (beneath(&self.read_roots) || self.read_named.iter().any(|n| n == canonical))
     }
 }
 
@@ -75,7 +79,16 @@ mod tests {
             read_roots: vec![PathBuf::from("/usr/share/nmap")],
             write_roots: vec![PathBuf::from("/home/op/loot")],
             named: vec![PathBuf::from("/home/op/users.txt")],
+            read_named: vec![PathBuf::from("/home/op/.ssh/known_hosts")],
         }
+    }
+
+    #[test]
+    fn read_named_files_are_readable_not_writable() {
+        let p = policy();
+        assert!(p.allows(Path::new("/home/op/.ssh/known_hosts"), false));
+        assert!(!p.allows(Path::new("/home/op/.ssh/known_hosts"), true));
+        assert!(!p.allows(Path::new("/home/op/.ssh/known_hosts/x"), false));
     }
 
     #[test]

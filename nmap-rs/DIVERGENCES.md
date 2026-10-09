@@ -713,11 +713,13 @@ one** (`macvendor_corpus.rs`) — and fuzzed (`macvendor_parse`, 5.5M runs).
       `services-parse-degrade`, `probedb-parse-degrade` and `osdb-parse-degrade`. On the
       shipped file the behaviour is identical — it parses with zero warnings.
 - [x] `macvendor-empty-vendor-skipped` (`core::macvendor`): a line holding a valid prefix
-      and no vendor name reaches an `assert(*endptr)` in the C, aborting a debug build. In
-      a release build (`NDEBUG`) the assert vanishes and the entry is stored with an
-      **empty** organisation name, which would later be reported as the host's vendor.
-      Here the line is warned about and skipped, so no address can resolve to a blank
-      registrant.
+      and no vendor name reaches an `assert(*endptr)` in the C. nmap's build never
+      defines `NDEBUG` (neither `Makefile.in` nor `configure.ac` does), so the assert is
+      live in every standard build. A data file with such a line kills the scan:
+      measured on 7.94, SIGABRT, `MACLookup.cc:154: Assertion '*endptr' failed`
+      (M6.6 Phase 0). Only an `NDEBUG` build would store an **empty** organisation
+      name. Here the line is warned about and skipped, so no address can resolve to a
+      blank registrant.
 - [x] `macvendor-no-fgets-truncation` (`core::macvendor`): the C reads lines into a
       128-byte `fgets` buffer, so a longer line is split and its tail is parsed as if it
       were a new line — which fails the hex-digit check and (per
@@ -1682,6 +1684,19 @@ removed: that one was theatre, this one is unobservable.
       the actual reason — observable as `Not shown: N closed tcp ports (reset)` under `-sS`.
 
 ## Platform / environment differences
+
+- [ ] `datafiles-read-as-utf8` (`cli`, `read_data_file`) — data files are
+      read with `read_to_string` (`crates/cli/src/main.rs:1586-1595`), so a
+      single byte that is not valid UTF-8 loses the whole file, as if it were
+      absent. The C reads bytes; measured in M6.6 Phase 0, a vendor of
+      `"Latin\xe9 Corp"` is returned as-is. The shipped files are valid UTF-8,
+      so only files an operator supplies are affected. M6.6's new loaders
+      (`nmap-mac-prefixes`, `nmap-protocols`) read bytes.
+- [ ] `datafiles-no-etc-fallback` (`cli`) — when `nmap-services` (or
+      `nmap-protocols`) is not on the data path, the C falls back to
+      `/etc/services` (`/etc/protocols`) or the Windows system directory
+      (`services.cc:131-142`, `protocols.cc:101-108`). The port has no fallback
+      (`crates/cli/src/main.rs:1604-1607`); it loses service names instead.
 
 - [x] `rawio-safe-socket2-l3-plus-pcap-l2` (`sys::rawio`, ports the `send_ip_packet*` /
       `send_eth_packet` chokepoint): the send half of the raw path mirrors nmap's
@@ -2892,6 +2907,20 @@ have no source in `-oX`, so the golden takes them from the probe itself and
 the comparison checks only how the port renders them: the interface and its
 MTU, the source address, `directly_connected` and the timing estimates.
 
+### Open, found later
+
+- [ ] `nmaplib-unknown-service-name` — **a port defect, found in M6.6 Phase 0.**
+      - **In C.** `nmap-services` names 15,316 entries `unknown`, and C stores
+        them with `s_name = NULL` (`services.cc:228-232`). So under 7.94 both
+        `port.service` and `nmapdb.getservbyport` give nil for those ports.
+      - **Here.** `ServiceTable::service_name` returns `Some("unknown")`
+        (`crates/core/src/ports.rs:63-65`), and it reaches scripts through
+        `nmaplib.rs:649-658` (`deductions`) and `:1150-1159`.
+      - **Measured on 4/tcp:** 7.94's script sees `4=nil/nil/closed`; the
+        port's sees `4=unknown/string/closed`.
+      - **Fix.** Planned in M6.6 step a (`docs/M6.6-ANALYSIS.md`): nil in the
+        NSE paths, with normal and XML output still printing `unknown`.
+
 ## Milestone 6.4a — errors the VM raises, and the numeric `for` (vendored VM patch `0008`)
 
 Before scripts get sockets, the errors they catch have to be what nmap's Lua
@@ -3203,19 +3232,30 @@ Gated by three things:
       Found in M6.5 Phase 0 (`docs/M6.5-ANALYSIS.md` §1.4). Whether the
       command line should set a default budget is a user-visible change,
       left to M7.
-- [ ] `nse-sc-aborts-on-unported-modules` — `-sC`, `--script default`,
-      `--script version` and `--script safe` against the shipped `scripts/`
-      stop at start-up with `nse_main:918: could not load script` and
-      `QUITTING!` (measured). Nine `default` scripts hard-require `nmapdb` or
-      `lpeg`: address-info, nbstat, rpcinfo, snmp-interfaces, wdb-version,
+- [ ] `nse-sc-aborts-on-unported-modules` — on the shipped `scripts/`, these
+      stop at start-up with `could not load script` and `QUITTING!` (measured):
+      - `-sC` and `-A`;
+      - `--script default`, `version`, `safe`, `vuln`, `intrusive`,
+        `exploit` and `all`.
+
+      **Why.** Nine `default` scripts hard-require `nmapdb` or `lpeg`:
+      address-info, nbstat, rpcinfo, snmp-interfaces, wdb-version,
       http-favicon, bitcoinrpc-info, ntp-info and snmp-info. Every nmap build
       registers both modules (`nse_main.cc:564-567`), so this matches no real
-      nmap. The `-sC` scenario in `nse_cli_differential` passes because it
-      runs on a fixture datadir (`gen_m64_cli.py:10-14,59`).
+      nmap.
 
-      **Retired by** porting `nmapdb` and `lpeg`. Their order relative to
-      M6.5 is decision D0 in `docs/M6.5-ANALYSIS.md`. When they land, the
-      exit criterion is a CLI scenario that runs `-sC` on the real datadir.
+      **Why the gate missed it.** The `-sC` scenario in
+      `nse_cli_differential` passes because it runs on a fixture datadir
+      (`gen_m64_cli.py:10-14,59`).
+
+      **Retired by M6.6** (`nmapdb` and `lpeg`) for `-sC`, `-A`, `default`
+      and `version` only.
+      - The other categories also contain scripts that hard-require `lfs`
+        (http-fetch, `safe`) or `openssl` (http-vuln-cve2014-3704: `vuln`,
+        `intrusive`, `exploit`). Measured on 7.94 with only those modules
+        removed.
+      - M6.6 replaces this entry with one for those categories, naming its
+        retiring milestones (`docs/M6.6-ANALYSIS.md` §0, D1).
 - [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
       `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
       Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered

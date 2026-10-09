@@ -70,6 +70,21 @@ on `nmap.have_ssl()`. So a port that ships `nmap` alone does not fail 744 files;
 degrades exactly where the corpus already expects to degrade. That is what makes a
 leaf-first build order possible here instead of a big-bang.
 
+### Correction (M6.5 Phase 0)
+
+The table above miscounts, and the order built on it does not survive measurement
+([`M6.5-ANALYSIS.md`](M6.5-ANALYSIS.md), §0 and §8):
+
+- **`openssl`:** "41 hard" is **2** hard `require`s (`bittorrent.lua:96`,
+  `http-vuln-cve2014-3704.nse:8`) and **39** `stdnse.silent_require`s, which drop the
+  script quietly rather than abort the run. With the 19 `pcall`s, 60 files require it.
+- **`libssh2`:** its one "hard" require is a `silent_require` (`libssh2-utility.lua:15`).
+- **`nmapdb`** (`nse_db.cc`) is missing from the table. `datafiles.lua:19` hard-requires
+  it, so today `-sC` with the shipped `scripts/` aborts at load (measured).
+- **No file gates on `nmap.have_ssl()`.** It has 0 call sites and appears only in
+  `nselib/nmap.luadoc:23`. The 7 files bind a local `have_ssl` from
+  `pcall(require, "openssl")`.
+
 ## The concurrency model, and why it is the hard part
 
 NSE is cooperatively scheduled Lua coroutines. A script that does I/O calls into
@@ -130,6 +145,11 @@ Leaf-first, and ordered by the dependency weight measured above:
 6. **M6.5 — `openssl`**, the only other module with real weight (41 hard requires).
 7. **M6.6 — `lpeg`, `lfs`, `zlib`, `libssh2`**: 8 hard requires between them, all
    already `pcall`-guarded or trivially few. Individually optional.
+
+   *Superseded (M6.5 Phase 0):* the order of steps 6 and 7 rested on the miscount
+   corrected above. `nmapdb` and `lpeg` are registered by every nmap build, and nine
+   `default` scripts need them, so their order relative to `openssl` is re-posed as
+   decision D0 in [`M6.5-ANALYSIS.md`](M6.5-ANALYSIS.md).
 
 Gates: 6.1 and 6.2 are pure parsers and get the full ladder (differential against
 the C's own selection, fuzz, mutation). 6.3-6.7 are gated by running the real

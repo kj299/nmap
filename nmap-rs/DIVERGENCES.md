@@ -3091,7 +3091,11 @@ Gated by three things:
   live in CI).
   - 114 load as they do under nmap.
   - 19 are pinned to fail, each only because a C module it requires is not
-    ported yet: `openssl` (12), `lpeg` (5) or `nmapdb` (2).
+    ported yet: `openssl` (12), `lpeg` (5) or `nmapdb` (2). One of the 12,
+    `libssh2-utility`, actually blocks on `libssh2` first. The pin passes only
+    because `missing()` accepts any `table:` detail, whatever the module
+    (`crates/core/tests/nselib_differential.rs:36,71-76`). M6.5 re-pins it
+    and tightens `missing()` (`docs/M6.5-ANALYSIS.md` §8).
 - **Every unit-test suite passes.** Each library's `test_suite` runs as
   nmap's `--script-args=unittest` runs it.
   - 22 of 26 suites pass.
@@ -3185,6 +3189,19 @@ Gated by three things:
       protocol list (`nse_db.cc:49`), and `zlib`'s stream `flush` modes
       (`nse_zlib.cc:685`). Each indexes a parallel array with the result. The
       port of each must use a terminated list.
+- [ ] `nse-sc-aborts-on-unported-modules` — `-sC`, `--script default`,
+      `--script version` and `--script safe` against the shipped `scripts/`
+      stop at start-up with `nse_main:918: could not load script` and
+      `QUITTING!` (measured). Nine `default` scripts hard-require `nmapdb` or
+      `lpeg`: address-info, nbstat, rpcinfo, snmp-interfaces, wdb-version,
+      http-favicon, bitcoinrpc-info, ntp-info and snmp-info. Every nmap build
+      registers both modules (`nse_main.cc:564-567`), so this matches no real
+      nmap. The `-sC` scenario in `nse_cli_differential` passes because it
+      runs on a fixture datadir (`gen_m64_cli.py:10-14,59`).
+
+      **Retired by** porting `nmapdb` and `lpeg`. Their order relative to
+      M6.5 is decision D0 in `docs/M6.5-ANALYSIS.md`. When they land, the
+      exit criterion is a CLI scenario that runs `-sC` on the real datadir.
 - [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
       `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
       Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered

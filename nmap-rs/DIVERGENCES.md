@@ -2776,6 +2776,14 @@ reader never stops, since a number is never the empty string.
       a script resuming with `continue` would suspend the executor the
       scheduler drives. A test checks they are gone.
 
+- [ ] `stdlib-type-errors-ignore-name` — the stdlib's type-error helper
+      (`crates/core/src/nse/stdlib/mod.rs:258-263`) names a userdata
+      `userdata`. PUC-Lua's `luaL_typeerror` uses the metatable's `__name`, so
+      7.94 says `got FILE*` (measured in M6.6 Phase 0). `tostring` has the
+      same gap (`format-tostring-of-references`). M6.6 step b honours
+      `__name` in both (`docs/M6.6-ANALYSIS.md`, E7), and LPeg needs that,
+      because its patterns are `lpeg-pattern`.
+
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 
 Two gates, both against nmap itself:

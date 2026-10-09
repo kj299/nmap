@@ -52,6 +52,9 @@ In brief:
     command line, with results in normal and XML output as nmap prints them.
     Data files and scripts come from nmap's data directories, never the
     working directory.
+    **But** `-sC` and `--script default` with the shipped `scripts/` still
+    stop at start-up, because nine `default` scripts need the unported
+    `nmapdb` or `lpeg` module (`nse-sc-aborts-on-unported-modules`).
 
   What remains of NSE is ledgered in `DIVERGENCES.md`: TLS, packet capture,
   raw `dnet` sends, `-sV`'s version scripts, and the unported C modules.

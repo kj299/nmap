@@ -2981,8 +2981,9 @@ VM PUC-Lua's limits and its "not enough memory":
 - **`MAXTAGLOOP` (2,000)**: `__index` and `__newindex` are followed as
   `luaV_finishget`/`luaV_finishset` follow them, in one go, a function called,
   anything else indexed in turn.
-- **A memory budget** (`Lua::set_memory_limit`, unlimited by default; the NSE
-  runtime sets it). It follows `luaM_malloc_`, which collects in full and
+- **A memory budget** (`Lua::set_memory_limit`, unlimited by default). The
+  gates set it to 256 MiB, but the command line sets none
+  (`nse-cli-no-memory-budget`). It follows `luaM_malloc_`, which collects in full and
   tries again before it fails:
   - **A request that fits** beside what the last collection left live is
     granted. If the heap is then past the budget, a full collection runs
@@ -3189,6 +3190,19 @@ Gated by three things:
       protocol list (`nse_db.cc:49`), and `zlib`'s stream `flush` modes
       (`nse_zlib.cc:685`). Each indexes a parallel array with the result. The
       port of each must use a terminated list.
+- [ ] `nse-cli-no-memory-budget` — the command line builds the NSE state
+      with `memory_limit: None` (`crates/cli/src/nse.rs:258`). Only the gates
+      set a budget (256 MiB). With no budget, piccolo's `Budget::allows`
+      always says yes (`crates/vendor/piccolo/src/budget.rs:35-69`).
+      - **What is still caught.** Buffers built through `stdlib::reserve`
+        still fail softly, because `try_reserve` reports the failure.
+      - **What aborts.** Any other VM allocation the system refuses aborts
+        the process. In nmap, Lua's allocator returns NULL and the script
+        gets a catchable "not enough memory".
+
+      Found in M6.5 Phase 0 (`docs/M6.5-ANALYSIS.md` §1.4). Whether the
+      command line should set a default budget is a user-visible change,
+      left to M7.
 - [ ] `nse-sc-aborts-on-unported-modules` — `-sC`, `--script default`,
       `--script version` and `--script safe` against the shipped `scripts/`
       stop at start-up with `nse_main:918: could not load script` and

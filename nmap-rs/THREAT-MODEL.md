@@ -169,6 +169,10 @@ Here:
 
 - **Memory.** A budget fails with a catchable "not enough memory" instead of
   aborting the process (`Lua::set_memory_limit`, patch `0009`).
+  - The command line sets **no** budget today (`nse-cli-no-memory-budget`);
+    only the gates do.
+  - So outside `stdlib::reserve`'s `try_reserve` paths, an allocation the
+    system refuses still aborts the process.
 - **Depth.** C-call depth (200), Lua stack (1,000,000 slots) and
   `__index`/`__newindex` chains (2,000) are bounded as in PUC-Lua.
 - **Runaway matching.** The pattern matcher's worst case is bounded

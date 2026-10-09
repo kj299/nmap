@@ -351,3 +351,15 @@ name = "nse_results"
 path = "fuzz_targets/nse_results.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_mac2corp"
+path = "fuzz_targets/nse_mac2corp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "nse_protocols"
+path = "fuzz_targets/nse_protocols.rs"
+test = false
+doc = false

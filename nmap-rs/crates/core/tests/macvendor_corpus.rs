@@ -78,7 +78,7 @@ fn parses_the_shipped_file_with_no_warnings() {
         eprintln!("nmap-mac-prefixes not found; skipping macvendor corpus");
         return;
     };
-    let db = MacPrefixDb::parse(&text);
+    let db = MacPrefixDb::parse(text.as_bytes());
 
     for w in db.warnings.iter().take(5) {
         eprintln!("unexpected warning at line {}: {}", w.line, w.message);
@@ -103,7 +103,7 @@ fn every_registered_prefix_resolves_the_way_the_file_says() {
         eprintln!("nmap-mac-prefixes not found; skipping macvendor corpus");
         return;
     };
-    let db = MacPrefixDb::parse(&text);
+    let db = MacPrefixDb::parse(text.as_bytes());
     let map = oracle(&text);
     if map.is_empty() {
         return;
@@ -123,7 +123,7 @@ fn every_registered_prefix_resolves_the_way_the_file_says() {
         let got = db.lookup(mac_bytes(&hex12));
         assert_eq!(
             got,
-            Some(want.as_str()),
+            Some(want.as_bytes()),
             "{prefix}: expected {want:?}, got {got:?}"
         );
         if want != vendor {
@@ -168,7 +168,7 @@ fn well_known_prefixes_resolve_to_their_registrants() {
         eprintln!("nmap-mac-prefixes not found; skipping macvendor corpus");
         return;
     };
-    let db = MacPrefixDb::parse(&text);
+    let db = MacPrefixDb::parse(text.as_bytes());
     if db.is_empty() {
         return;
     }
@@ -178,11 +178,13 @@ fn well_known_prefixes_resolve_to_their_registrants() {
         .lookup([0x08, 0x00, 0x27, 0xAB, 0xCD, 0xEF])
         .expect("080027 is registered");
     assert!(
-        vbox.to_ascii_lowercase().contains("virtualbox"),
+        String::from_utf8_lossy(vbox)
+            .to_ascii_lowercase()
+            .contains("virtualbox"),
         "080027 resolved to {vbox:?}"
     );
     // 000000 is the first line of the file.
-    assert_eq!(db.lookup([0, 0, 0, 0, 0, 0]), Some("Xerox"));
+    assert_eq!(db.lookup([0, 0, 0, 0, 0, 0]), Some(&b"Xerox"[..]));
 
     // An address in no registered block has no vendor. FFFFFF is the broadcast prefix.
     assert_eq!(db.lookup([0xFF; 6]), None);
@@ -194,7 +196,7 @@ fn find_prefix_round_trips_through_lookup_over_the_real_file() {
         eprintln!("nmap-mac-prefixes not found; skipping macvendor corpus");
         return;
     };
-    let db = MacPrefixDb::parse(&text);
+    let db = MacPrefixDb::parse(text.as_bytes());
     if db.is_empty() {
         return;
     }
@@ -227,7 +229,7 @@ fn find_prefix_round_trips_through_lookup_over_the_real_file() {
             .lookup(mac)
             .unwrap_or_else(|| panic!("{needle}: prefix {:02X?} resolves to nothing", p.bytes));
         assert!(
-            resolved
+            String::from_utf8_lossy(resolved)
                 .to_ascii_lowercase()
                 .contains(&needle.to_ascii_lowercase()),
             "{needle}: prefix {:02X?} resolved to {resolved:?}",

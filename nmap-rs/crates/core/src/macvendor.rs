@@ -52,10 +52,11 @@ pub struct MacPrefix {
 ///
 /// Keys are `(digit_count << 36) | value`, so the three assignment sizes occupy disjoint
 /// ranges and iterate MA-L, then MA-M, then MA-S — the same order the C's `std::map`
-/// yields, which [`Self::find_prefix`] depends on.
+/// yields, which [`Self::find_prefix`] depends on. Vendor names are bytes, as the C
+/// stores them: a file an operator supplies need not be UTF-8.
 #[derive(Debug, Clone, Default)]
 pub struct MacPrefixDb {
-    entries: BTreeMap<u64, String>,
+    entries: BTreeMap<u64, Vec<u8>>,
     /// Lines that could not be parsed.
     pub warnings: Vec<MacDbWarning>,
 }
@@ -66,40 +67,51 @@ fn hex_value(c: u8) -> Option<u64> {
     (c as char).to_digit(16).map(u64::from)
 }
 
+/// C's `isspace` in the C locale. Not `u8::is_ascii_whitespace`, which leaves out
+/// `\v`.
+fn is_c_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
 impl MacPrefixDb {
     /// Parse the contents of an `nmap-mac-prefixes` file.
     ///
     /// Never fails: unparseable lines become [`MacDbWarning`]s and are skipped. Where a
     /// prefix appears more than once the **first** entry wins, as the C's
     /// `std::map::insert` does.
+    ///
+    /// A line is read as `mac_prefix_init` reads it (`MACLookup.cc:109-165`), but whole
+    /// (`macvendor-no-fgets-truncation`):
+    /// - it ends at its first NUL byte, as C's string does;
+    /// - the prefix must be followed by C whitespace, `\v` and `\f` included;
+    /// - the whitespace after the prefix is skipped, `\r` included, and the vendor
+    ///   runs from there to the first `\r` or the end of the line, keeping any
+    ///   trailing spaces.
     #[must_use]
-    pub fn parse(text: &str) -> Self {
+    pub fn parse(bytes: &[u8]) -> Self {
         let mut db = MacPrefixDb::default();
 
-        for (i, raw) in text.lines().enumerate() {
+        for (i, raw) in bytes.split(|&b| b == b'\n').enumerate() {
             let lineno = i.saturating_add(1);
-            let line = raw.strip_suffix('\r').unwrap_or(raw);
-            if line.starts_with('#') {
-                continue;
-            }
-            if line.trim().is_empty() {
+            if raw.iter().all(|&b| is_c_space(b)) {
                 // The C treats a blank line as "not a hex digit" and gives up on the
                 // whole file. Skipping it costs nothing.
                 continue;
             }
-
-            let digits = line
-                .bytes()
-                .take_while(u8::is_ascii_hexdigit)
-                .count()
-                .try_into()
-                .unwrap_or(u32::MAX);
-            let Some(rest) = line.get(digits as usize..) else {
-                db.warn(lineno, "prefix is not valid UTF-8 at its boundary");
+            // What the C's string functions see of the line.
+            let line = raw
+                .iter()
+                .position(|&b| b == 0)
+                .map_or(raw, |end| &raw[..end]);
+            if line.first() == Some(&b'#') {
                 continue;
-            };
+            }
 
-            if !matches!(digits, MAL_DIGITS | MAM_DIGITS | MAS_DIGITS) {
+            let digits = line.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+            if !matches!(
+                u32::try_from(digits),
+                Ok(MAL_DIGITS | MAM_DIGITS | MAS_DIGITS)
+            ) {
                 db.warn(
                     lineno,
                     &format!(
@@ -109,38 +121,40 @@ impl MacPrefixDb {
                 );
                 continue;
             }
+            let (prefix, rest) = line.split_at(digits);
             // The C requires whitespace immediately after the prefix, so `0000001 Foo`
             // is rejected rather than silently read as a 6-digit prefix.
-            if !rest.starts_with([' ', '\t']) {
+            if !rest.first().is_some_and(|&b| is_c_space(b)) {
                 db.warn(lineno, "prefix is not followed by whitespace");
                 continue;
             }
 
             let mut value: u64 = 0;
-            let mut ok = true;
-            for c in line.bytes().take(digits as usize) {
-                match hex_value(c) {
-                    // `digits` is at most 9, so this shifts by at most 32 bits.
-                    Some(v) => value = (value << 4) | v,
-                    None => ok = false,
-                }
-            }
-            if !ok {
-                db.warn(lineno, "prefix contains a non-hex digit");
-                continue;
+            for &c in prefix {
+                // `digits` is at most 9, so this shifts by at most 32 bits.
+                value = (value << 4) | hex_value(c).unwrap_or(0);
             }
 
-            let vendor = rest.trim_start_matches([' ', '\t']);
+            let start = rest
+                .iter()
+                .position(|&b| !is_c_space(b))
+                .unwrap_or(rest.len());
+            let vendor = &rest[start..];
+            let vendor = vendor
+                .iter()
+                .position(|&b| b == b'\r')
+                .map_or(vendor, |end| &vendor[..end]);
             if vendor.is_empty() {
-                // The C `assert()`s here, aborting a debug build; with `NDEBUG` it stores
-                // an empty vendor name that would later be reported as the organisation.
+                // The C `assert()`s here, and nmap's build keeps its asserts: 7.94 aborts
+                // (`macvendor-empty-vendor-skipped`).
                 db.warn(lineno, "prefix has no vendor name");
                 continue;
             }
 
+            let digits = u64::try_from(digits).unwrap_or(0);
             db.entries
-                .entry((u64::from(digits) << TAG_SHIFT) | value)
-                .or_insert_with(|| vendor.to_owned());
+                .entry((digits << TAG_SHIFT) | value)
+                .or_insert_with(|| vendor.to_vec());
         }
 
         db
@@ -171,7 +185,7 @@ impl MacPrefixDb {
     /// inside a 36-bit assignment is attributed to that registrant rather than to the
     /// holder of the enclosing 24-bit block.
     #[must_use]
-    pub fn lookup(&self, mac: [u8; 6]) -> Option<&str> {
+    pub fn lookup(&self, mac: [u8; 6]) -> Option<&[u8]> {
         // The top 36 bits of the address: nine hex digits.
         let mas = (u64::from(mac[0]) << 28)
             | (u64::from(mac[1]) << 20)
@@ -188,7 +202,7 @@ impl MacPrefixDb {
                 .entries
                 .get(&((u64::from(digits) << TAG_SHIFT) | value))
             {
-                return Some(vendor.as_str());
+                return Some(vendor.as_slice());
             }
         }
         None
@@ -202,12 +216,15 @@ impl MacPrefixDb {
     /// decides which of several matching vendors is chosen. Used by `--spoof-mac` to
     /// turn a vendor name into an address to masquerade as.
     #[must_use]
-    pub fn find_prefix(&self, needle: &str) -> Option<MacPrefix> {
-        let needle = needle.to_ascii_lowercase();
-        let (key, _) = self
-            .entries
-            .iter()
-            .find(|(_, vendor)| vendor.to_ascii_lowercase().contains(&needle))?;
+    pub fn find_prefix(&self, needle: impl AsRef<[u8]>) -> Option<MacPrefix> {
+        let needle = needle.as_ref().to_ascii_lowercase();
+        let (key, _) = self.entries.iter().find(|(_, vendor)| {
+            needle.is_empty()
+                || vendor
+                    .to_ascii_lowercase()
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_slice())
+        })?;
 
         let digits = u32::try_from(key >> TAG_SHIFT).unwrap_or(0);
         let value = key & ((1u64 << TAG_SHIFT).wrapping_sub(1));
@@ -241,7 +258,7 @@ mod tests {
 ";
 
     fn db() -> MacPrefixDb {
-        let db = MacPrefixDb::parse(SAMPLE);
+        let db = MacPrefixDb::parse(SAMPLE.as_bytes());
         assert!(db.warnings.is_empty(), "{:?}", db.warnings);
         db
     }
@@ -252,11 +269,11 @@ mod tests {
         assert_eq!(db.len(), 4);
         assert_eq!(
             db.lookup([0x08, 0x00, 0x27, 0x12, 0x34, 0x56]),
-            Some("PCS Systemtechnik GmbH")
+            Some(&b"PCS Systemtechnik GmbH"[..])
         );
         assert_eq!(
             db.lookup([0x00, 0x00, 0x00, 0xAB, 0xCD, 0xEF]),
-            Some("Xerox")
+            Some(&b"Xerox"[..])
         );
     }
 
@@ -265,7 +282,7 @@ mod tests {
         let db = db();
         assert_eq!(
             db.lookup([0x00, 0x55, 0xDA, 0x0F, 0x00, 0x01]),
-            Some("IEEE Registration Authority")
+            Some(&b"IEEE Registration Authority"[..])
         );
     }
 
@@ -273,35 +290,35 @@ mod tests {
     fn the_most_specific_assignment_wins() {
         // 0055DA is not itself registered here, but 0055DA0 is: a 28-bit lookup must not
         // be answered by a 24-bit entry, nor the reverse.
-        let db = MacPrefixDb::parse("0055DA Wrong Answer\n0055DA0 Right Answer\n");
+        let db = MacPrefixDb::parse(b"0055DA Wrong Answer\n0055DA0 Right Answer\n");
         assert!(db.warnings.is_empty());
         assert_eq!(
             db.lookup([0x00, 0x55, 0xDA, 0x01, 0x02, 0x03]),
-            Some("Right Answer"),
+            Some(&b"Right Answer"[..]),
             "the 28-bit assignment covers 0055DA0*"
         );
         assert_eq!(
             db.lookup([0x00, 0x55, 0xDA, 0x11, 0x02, 0x03]),
-            Some("Wrong Answer"),
+            Some(&b"Wrong Answer"[..]),
             "0055DA1* falls outside the 28-bit assignment, so the 24-bit one applies"
         );
     }
 
     #[test]
     fn a_36_bit_assignment_beats_the_blocks_containing_it() {
-        let db = MacPrefixDb::parse("70B3D5 Registry\n70B3D5E Middle\n70B3D5EEF Specific\n");
+        let db = MacPrefixDb::parse(b"70B3D5 Registry\n70B3D5E Middle\n70B3D5EEF Specific\n");
         assert!(db.warnings.is_empty());
         assert_eq!(
             db.lookup([0x70, 0xB3, 0xD5, 0xEE, 0xF0, 0x00]),
-            Some("Specific")
+            Some(&b"Specific"[..])
         );
         assert_eq!(
             db.lookup([0x70, 0xB3, 0xD5, 0xEE, 0x00, 0x00]),
-            Some("Middle")
+            Some(&b"Middle"[..])
         );
         assert_eq!(
             db.lookup([0x70, 0xB3, 0xD5, 0x00, 0x00, 0x00]),
-            Some("Registry")
+            Some(&b"Registry"[..])
         );
     }
 
@@ -313,11 +330,11 @@ mod tests {
 
     #[test]
     fn lookup_is_case_insensitive_in_the_file() {
-        let db = MacPrefixDb::parse("00aAbB Lowercase Prefix\n");
+        let db = MacPrefixDb::parse(b"00aAbB Lowercase Prefix\n");
         assert!(db.warnings.is_empty());
         assert_eq!(
             db.lookup([0x00, 0xAA, 0xBB, 0x00, 0x00, 0x00]),
-            Some("Lowercase Prefix")
+            Some(&b"Lowercase Prefix"[..])
         );
     }
 
@@ -326,48 +343,48 @@ mod tests {
         // The C stops parsing the whole file at the first bad line, silently discarding
         // every vendor after it.
         let db = MacPrefixDb::parse(
-            "000000 First\nZZZZZZ junk\n00000 too short\n0000001x no space\n080027 Last\n",
+            b"000000 First\nZZZZZZ junk\n00000 too short\n0000001x no space\n080027 Last\n",
         );
         assert_eq!(db.warnings.len(), 3, "{:?}", db.warnings);
         assert_eq!(db.warnings[0].line, 2);
         assert_eq!(db.warnings[1].line, 3);
         assert_eq!(db.warnings[2].line, 4);
-        assert_eq!(db.lookup([0; 6]), Some("First"));
+        assert_eq!(db.lookup([0; 6]), Some(&b"First"[..]));
         assert_eq!(
             db.lookup([0x08, 0x00, 0x27, 0, 0, 0]),
-            Some("Last"),
+            Some(&b"Last"[..]),
             "entries after the bad lines must survive"
         );
     }
 
     #[test]
     fn a_prefix_with_no_vendor_is_skipped_rather_than_stored_empty() {
-        let db = MacPrefixDb::parse("000000\n000001   \n080027 Fine\n");
+        let db = MacPrefixDb::parse(b"000000\n000001   \n080027 Fine\n");
         assert_eq!(db.warnings.len(), 2);
         assert_eq!(db.lookup([0; 6]), None);
-        assert_eq!(db.lookup([0x08, 0x00, 0x27, 0, 0, 0]), Some("Fine"));
+        assert_eq!(db.lookup([0x08, 0x00, 0x27, 0, 0, 0]), Some(&b"Fine"[..]));
     }
 
     #[test]
     fn the_first_entry_for_a_prefix_wins() {
-        let db = MacPrefixDb::parse("000000 First\n000000 Second\n");
+        let db = MacPrefixDb::parse(b"000000 First\n000000 Second\n");
         assert!(db.warnings.is_empty());
         assert_eq!(db.len(), 1);
-        assert_eq!(db.lookup([0; 6]), Some("First"));
+        assert_eq!(db.lookup([0; 6]), Some(&b"First"[..]));
     }
 
     #[test]
     fn comments_and_blank_lines_are_ignored() {
-        let db = MacPrefixDb::parse("# header\n\n000000 Xerox\n\n# trailer\n");
+        let db = MacPrefixDb::parse(b"# header\n\n000000 Xerox\n\n# trailer\n");
         assert!(db.warnings.is_empty(), "{:?}", db.warnings);
         assert_eq!(db.len(), 1);
     }
 
     #[test]
     fn carriage_returns_do_not_end_up_in_vendor_names() {
-        let db = MacPrefixDb::parse("000000 Xerox\r\n");
+        let db = MacPrefixDb::parse(b"000000 Xerox\r\n");
         assert!(db.warnings.is_empty());
-        assert_eq!(db.lookup([0; 6]), Some("Xerox"));
+        assert_eq!(db.lookup([0; 6]), Some(&b"Xerox"[..]));
     }
 
     #[test]
@@ -402,7 +419,7 @@ mod tests {
     fn find_prefix_prefers_the_lowest_key_which_orders_by_block_size() {
         // Both entries mention "Acme"; MA-L sorts before MA-S because the digit count is
         // packed above the value, so the 24-bit assignment is returned.
-        let db = MacPrefixDb::parse("FFFFFF Acme Small Block\n000000A Acme Large Block\n");
+        let db = MacPrefixDb::parse(b"FFFFFF Acme Small Block\n000000A Acme Large Block\n");
         assert!(db.warnings.is_empty());
         let p = db.find_prefix("Acme").expect("vendor found");
         assert_eq!(p.digits, 6);
@@ -419,12 +436,71 @@ mod tests {
                 *slot = *b;
             }
             assert!(
-                db.lookup(mac).is_some_and(|v| v
+                db.lookup(mac).is_some_and(|v| String::from_utf8_lossy(v)
                     .to_ascii_lowercase()
                     .contains(&needle.to_ascii_lowercase())),
                 "{needle}: prefix bytes {:02X?} did not look up to it",
                 p.bytes
             );
         }
+    }
+
+    #[test]
+    fn a_vendor_ends_at_its_first_carriage_return_as_in_the_c() {
+        // `MACLookup.cc:157`: the vendor runs to the first `\r` or `\n`.
+        let db = MacPrefixDb::parse(b"000000 Xerox\rCorp\n080027 Spaced  \n");
+        assert!(db.warnings.is_empty(), "{:?}", db.warnings);
+        assert_eq!(db.lookup([0; 6]), Some(&b"Xerox"[..]));
+        assert_eq!(
+            db.lookup([0x08, 0x00, 0x27, 0, 0, 0]),
+            Some(&b"Spaced  "[..]),
+            "trailing spaces are the vendor's, as in the C"
+        );
+    }
+
+    #[test]
+    fn whitespace_after_the_prefix_is_cs_isspace() {
+        // `\v` and `\f` are whitespace to `isspace`; so is a `\r` before the vendor,
+        // which the C skips with the rest.
+        let db = MacPrefixDb::parse(b"000000\x0bXerox\n000001\x0cOne\n000002 \r Two\n");
+        assert!(db.warnings.is_empty(), "{:?}", db.warnings);
+        assert_eq!(db.lookup([0; 6]), Some(&b"Xerox"[..]));
+        assert_eq!(db.lookup([0, 0, 1, 0, 0, 0]), Some(&b"One"[..]));
+        assert_eq!(db.lookup([0, 0, 2, 0, 0, 0]), Some(&b"Two"[..]));
+    }
+
+    #[test]
+    fn a_nul_ends_the_line_as_it_ends_the_cs_string() {
+        let db = MacPrefixDb::parse(b"000000 Xer\0ox\n000001\0 One\n\0\n");
+        assert_eq!(db.lookup([0; 6]), Some(&b"Xer"[..]));
+        // The prefix is followed by the end of the C string, not whitespace.
+        assert_eq!(db.lookup([0, 0, 1, 0, 0, 0]), None);
+        // A line that is a NUL is not a hex digit to the C.
+        assert_eq!(
+            db.warnings.iter().map(|w| w.line).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn a_prefix_only_line_is_skipped_where_7_94_aborts() {
+        // `macvendor-empty-vendor-skipped`: 7.94 dies on `assert(*endptr)` for each of
+        // these lines; here each costs only itself.
+        for line in [&b"000000\n"[..], b"000000 \r\n", b"000000\t \x0b\n"] {
+            let mut file = line.to_vec();
+            file.extend_from_slice(b"080027 Fine\n");
+            let db = MacPrefixDb::parse(&file);
+            assert_eq!(db.warnings.len(), 1, "{line:?}");
+            assert_eq!(db.lookup([0; 6]), None, "{line:?}");
+            assert_eq!(db.lookup([0x08, 0x00, 0x27, 0, 0, 0]), Some(&b"Fine"[..]));
+        }
+    }
+
+    #[test]
+    fn vendors_are_bytes_as_the_c_stores_them() {
+        let db = MacPrefixDb::parse(b"000000 Latin\xe9 Corp\n");
+        assert!(db.warnings.is_empty());
+        assert_eq!(db.lookup([0; 6]), Some(&b"Latin\xe9 Corp"[..]));
+        assert!(db.find_prefix(b"latin\xe9").is_some());
     }
 }

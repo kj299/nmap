@@ -10,21 +10,19 @@
 // aborting a debug build outright.
 //
 // The contract enforced here: parsing is TOTAL, lookup is TOTAL, and the table's own
-// invariants hold for any input.
+// invariants hold for any input. Since M6.6 the parser reads bytes, and `nmapdb.mac2corp`
+// hands what it finds to scripts.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use nmap_core::macvendor::MacPrefixDb;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(text) = std::str::from_utf8(data) else {
-        return;
-    };
+    // The file is read as bytes, as the C reads it: no UTF-8 gate in front of the parser.
+    let db = MacPrefixDb::parse(data);
 
-    let db = MacPrefixDb::parse(text);
-
-    // Every warning must name a real 1-based line.
-    let lines = text.lines().count();
+    // Every warning must name a real 1-based line: one per `\n`, plus the last.
+    let lines = data.iter().filter(|&&b| b == b'\n').count() + 1;
     for w in &db.warnings {
         assert!(w.line >= 1 && w.line <= lines, "warning line out of range");
     }
@@ -32,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Lookup must be total over arbitrary addresses, including ones assembled from the
     // input itself so the fuzzer can steer toward addresses the table knows about.
-    let bytes = text.as_bytes();
+    let bytes = data;
     let mut mac = [0u8; 6];
     for (i, slot) in mac.iter_mut().enumerate() {
         *slot = bytes.get(i).copied().unwrap_or(0);
@@ -44,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
     // Anything the table holds must be reachable: search for a vendor name, then confirm
     // the prefix it hands back is well formed and resolves to a matching vendor. This is
     // the `--spoof-mac <vendor>` path.
-    for needle in ["", "a", text] {
+    for needle in [&b""[..], b"a", data] {
         let Some(p) = db.find_prefix(needle) else {
             continue;
         };
@@ -67,10 +65,10 @@ fuzz_target!(|data: &[u8]| {
             *slot = *b;
         }
         let resolved = db.lookup(mac).expect("a returned prefix must resolve");
+        let (resolved, needle) = (resolved.to_ascii_lowercase(), needle.to_ascii_lowercase());
         assert!(
-            resolved
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
+            needle.is_empty()
+                || resolved.windows(needle.len()).any(|w| w == needle.as_slice())
                 // A longer assignment may shadow the prefix we were handed, in which case
                 // the resolved vendor is a different (more specific) registrant.
                 || db.len() > 1,

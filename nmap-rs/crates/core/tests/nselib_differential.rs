@@ -10,10 +10,13 @@
 //! as `scripts/unittest.nse` runs it.
 //!
 //! Every library and suite must do what it does under nmap, except those that
-//! need a C module the port does not have yet — `lpeg`, `openssl`, `nmapdb`
+//! need a C module the port does not have yet — `lpeg`, `openssl`, `libssh2`
 //! (M6.5, M6.6) — which are pinned, in both directions, to fail for exactly
-//! that reason. `M64_NSELIB_GOLDEN` names a golden to use instead of the
-//! committed one; CI's differential job regenerates it live.
+//! that reason: the module they failed on, the last one no searcher found
+//! while they loaded, must be the one they are pinned to. `datafiles` and
+//! `rpc`, pinned to `nmapdb` until M6.6 step a ported it, now load.
+//! `M64_NSELIB_GOLDEN` names a golden to use instead of the committed one;
+//! CI's differential job regenerates it live.
 #![cfg(not(miri))] // reads nselib/ from disk; Miri has no filesystem
 
 mod m6_eval;
@@ -26,21 +29,22 @@ use std::path::PathBuf;
 /// Libraries that cannot load until a C module is ported, and the module.
 /// Most reach `openssl` through `stdnse.silent_require`, which raises a table
 /// rather than a message; the rest name the module they could not find.
+/// `libssh2-utility` was pinned to `openssl` until M6.6 step a; it fails on
+/// `libssh2` (`libssh2-utility.lua:15`, a `silent_require`), and
+/// [`missing`] now tells the two apart.
 const NEEDS_MODULE: &[(&str, &str)] = &[
     ("bitcoin", "openssl"),
     ("bittorrent", "openssl"),
     ("coap", "lpeg"),
-    ("datafiles", "nmapdb"),
     ("iax2", "openssl"),
     ("iscsi", "openssl"),
     ("json", "lpeg"),
-    ("libssh2-utility", "openssl"),
+    ("libssh2-utility", "libssh2"),
     ("lpeg-utility", "lpeg"),
     ("mobileme", "lpeg"),
     ("mongodb", "openssl"),
     ("pgsql", "openssl"),
     ("re", "lpeg"),
-    ("rpc", "nmapdb"),
     ("rsync", "openssl"),
     ("sip", "openssl"),
     ("ssh1", "openssl"),
@@ -67,12 +71,14 @@ fn expected(kind: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Whether `detail` is the failure a missing `module` causes.
-fn missing(detail: Option<&str>, module: &str) -> bool {
-    match detail {
-        Some(d) => d.contains(&format!("module '{module}' not found")) || d.starts_with("table: "),
-        None => false,
-    }
+/// Whether a load failed for want of `module`: the last module no searcher
+/// found while it ran is `module`, and the failure is what that causes —
+/// `require`'s "module 'X' not found" naming it, or the table
+/// `stdnse.silent_require` raises, which names nothing.
+fn missing(detail: Option<&str>, not_found: &[String], module: &str) -> bool {
+    let Some(d) = detail else { return false };
+    not_found.last().map(String::as_str) == Some(module)
+        && (d.contains(&format!("module '{module}' not found")) || d.starts_with("table: "))
 }
 
 #[test]
@@ -83,13 +89,14 @@ fn every_library_loads_as_under_nmap() {
     let mut wrong = Vec::new();
     let mut pinned = 0;
     for (lib, outcome) in &want {
-        let (got, detail) = nse_host::probe(&dir, lib, false);
+        let (got, detail, not_found) = nse_host::probe_modules(&dir, lib, false);
         match NEEDS_MODULE.iter().find(|(l, _)| l == lib) {
             Some((_, module)) => {
                 pinned += 1;
-                if got != "error" || !missing(detail.as_deref(), module) {
+                if got != "error" || !missing(detail.as_deref(), &not_found, module) {
                     wrong.push(format!(
-                        "  {lib}: pinned to fail for want of `{module}`, got {got} {detail:?}"
+                        "  {lib}: pinned to fail for want of `{module}`, got {got} {detail:?}, \
+                         modules not found {not_found:?}"
                     ));
                 }
             }
@@ -119,7 +126,7 @@ fn every_unit_test_suite_passes_as_under_nmap() {
     assert!(want.len() >= 26, "golden has {} suites", want.len());
     let mut wrong = Vec::new();
     for (lib, outcome) in &want {
-        let (got, detail) = nse_host::probe(&dir, lib, true);
+        let (got, detail, not_found) = nse_host::probe_modules(&dir, lib, true);
         match NEEDS_MODULE.iter().find(|(l, _)| l == lib) {
             Some((_, module)) => {
                 let failed_to_load = got == "fail"
@@ -130,11 +137,13 @@ fn every_unit_test_suite_passes_as_under_nmap() {
                         detail
                             .as_deref()
                             .map(|d| d.trim_start_matches("Failed to load: ")),
+                        &not_found,
                         module,
                     );
                 if !failed_to_load {
                     wrong.push(format!(
-                        "  {lib}: pinned to fail to load, got {got} {detail:?}"
+                        "  {lib}: pinned to fail to load for want of `{module}`, got {got} \
+                         {detail:?}, modules not found {not_found:?}"
                     ));
                 }
             }

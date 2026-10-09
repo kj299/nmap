@@ -140,7 +140,7 @@ pub fn datadir(tmp: &Path, fx: &Fixtures) -> PathBuf {
 }
 
 /// `nse_fetchscript` over the data directory.
-pub struct Locator(PathBuf);
+pub struct Locator(pub PathBuf);
 
 impl ScriptLocator for Locator {
     fn fetch_script(&self, name: &[u8]) -> Option<Found> {

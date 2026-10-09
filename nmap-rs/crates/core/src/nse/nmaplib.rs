@@ -306,13 +306,18 @@ pub struct NmapEnv {
     /// The `Exclude` ports of `nmap-service-probes` when `-sV` ran without
     /// `--allports`; `None` otherwise, and nothing is excluded.
     pub excluded_ports: Option<PortList>,
-    /// `nmap-services`, for names of ports with no service record.
+    /// `nmap-services`, for names of ports with no service record, and for
+    /// `nmapdb.getservbyport`.
     pub services: Option<ServiceTable>,
     pub phase: Phase,
     /// `getinterfaces()`, or its error string.
     pub interfaces: Result<Vec<Interface>, Vec<u8>>,
     /// `nmap_fetchfile`: a data file's path, if it is found.
     pub fetchfile: FetchFile,
+    /// `nmap_fetchfile`, then `fopen`: a data file read whole, as bytes.
+    /// `nmapdb` reads `nmap-mac-prefixes` and `nmap-protocols` through it,
+    /// the first time a script needs each ([`super::nmapdb`]).
+    pub read_data_file: super::nmapdb::ReadDataFile,
     /// `gettimeofday`: seconds and microseconds since the epoch.
     pub clock: Box<dyn Fn() -> (i64, i64)>,
     /// `get_random_bytes`: fill the buffer, or fail.
@@ -337,6 +342,8 @@ pub struct NmapLib {
     intensity: Option<i64>,
     /// Whether the running script was selected by name (`nse_selectedbyname`).
     pub selected_by_name: bool,
+    /// The data `nmapdb` reads on first use.
+    pub(crate) db: super::nmapdb::Tables,
 }
 
 /// The module's state, as its functions hold it.
@@ -353,6 +360,7 @@ impl NmapLib {
             queue: VecDeque::new(),
             intensity: None,
             selected_by_name: false,
+            db: super::nmapdb::Tables::default(),
         }))
     }
 
@@ -427,14 +435,19 @@ impl Fail {
     }
 
     pub(crate) fn raise<'gc>(&self, ctx: Context<'gc>, fname: &str) -> Error<'gc> {
+        lua_error_bytes(ctx, &self.message(fname))
+    }
+
+    /// The message, for a function named `fname`.
+    pub(crate) fn message(&self, fname: &str) -> Vec<u8> {
         match self.arg {
             Some(n) => {
                 let mut m = format!("bad argument #{n} to '{fname}' (").into_bytes();
                 m.extend_from_slice(&self.msg);
                 m.push(b')');
-                lua_error_bytes(ctx, &m)
+                m
             }
-            None => lua_error_bytes(ctx, &self.msg),
+            None => self.msg.clone(),
         }
     }
 }
@@ -449,7 +462,7 @@ impl From<PackError> for Fail {
 }
 
 /// The bytes of `s` before its first NUL: what C sees of a Lua string.
-fn c_str(s: &[u8]) -> &[u8] {
+pub(crate) fn c_str(s: &[u8]) -> &[u8] {
     s.iter().position(|&b| b == 0).map_or(s, |i| &s[..i])
 }
 
@@ -467,8 +480,12 @@ fn to_bytes<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Option<Vec<u8>> {
     }
 }
 
-/// `luaL_checkoption(L, arg, def, lst)`: the index of the option named.
-fn check_option(
+/// `luaL_checkoption(L, arg, def, lst)`: the index of the option named. The
+/// list is a slice, so it always ends: a name it does not hold is "invalid
+/// option", where three of the C's lists have no terminating `NULL`
+/// (`nmaplib-set-port-version-option-overread`,
+/// `nmapdb-getservbyport-option-overread`).
+pub(crate) fn check_option(
     args: &LuaArgs<'_, '_, '_>,
     arg: usize,
     def: Option<&str>,
@@ -490,8 +507,8 @@ fn check_option(
         })
 }
 
-const PROTOCOLS: [&str; 3] = ["tcp", "udp", "sctp"];
-const PROTOCOL_VALUES: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Sctp];
+pub(crate) const PROTOCOLS: [&str; 3] = ["tcp", "udp", "sctp"];
+pub(crate) const PROTOCOL_VALUES: [Protocol; 3] = [Protocol::Tcp, Protocol::Udp, Protocol::Sctp];
 
 /// `nseU_gettarget(L, 1)`: the host a host table names.
 pub(crate) fn get_target(
@@ -645,13 +662,16 @@ fn bin_ip(ip: IpAddr) -> Vec<u8> {
     }
 }
 
-/// `getServiceDeductions`: the port's record, or a table lookup.
+/// `getServiceDeductions`: the port's record, or a table lookup. The lookup
+/// is `s_name`, which C leaves `NULL` for the ports `nmap-services` names
+/// `unknown`, so a script sees no name for them, where output prints
+/// `unknown`.
 fn deductions(env: &NmapEnv, port: &ScriptPort) -> ServiceDeductions {
     port.service.clone().unwrap_or_else(|| ServiceDeductions {
         name: env
             .services
             .as_ref()
-            .and_then(|s| s.service_name(port.number, port.protocol))
+            .and_then(|s| s.stored_name(port.number, port.protocol))
             .map(|n| n.as_bytes().to_vec()),
         name_confidence: 3,
         ..ServiceDeductions::default()
@@ -1153,7 +1173,7 @@ fn l_set_port_version<'gc>(
                     .env
                     .services
                     .as_ref()
-                    .and_then(|t| t.service_name(number, protocol))
+                    .and_then(|t| t.stored_name(number, protocol))
                     .map(|n| n.as_bytes().to_vec());
             }
             (DetectionType::Table, 3)
@@ -1670,10 +1690,38 @@ mod tests {
                 },
             ]),
             fetchfile: Box::new(|_| None),
+            read_data_file: Box::new(|_| crate::nse::nmapdb::DataFile::NotFound),
             clock: Box::new(|| (0, 0)),
             random: Box::new(|_| false),
             log: Box::new(move |to, m| logs.borrow_mut().push((to, m.to_vec()))),
         }
+    }
+
+    /// `nmaplib-unknown-service-name`, fixed in M6.6 step a: a port with no
+    /// service record takes its name from `nmap-services`, and the entries
+    /// named `unknown` give none, as C stores them; the rest of the record is
+    /// the table lookup's either way.
+    #[test]
+    fn a_port_nmap_services_names_unknown_has_no_service_name() {
+        let logs = Logs::default();
+        let mut e = env(&logs);
+        e.services = Some(ServiceTable::parse(
+            "unknown\t4/tcp\t0.000477\ntcpmux\t1/tcp\t0.001\n",
+        ));
+        let port = |number| ScriptPort {
+            number,
+            protocol: Protocol::Tcp,
+            state: PortState::Closed,
+            reason: "conn-refused",
+            reason_ttl: 0,
+            service: None,
+        };
+        let sd = deductions(&e, &port(4));
+        assert_eq!(sd.name, None);
+        assert_eq!(sd.name_confidence, 3);
+        assert_eq!(sd.dtype, DetectionType::Table);
+        assert_eq!(deductions(&e, &port(1)).name, Some(b"tcpmux".to_vec()));
+        assert_eq!(deductions(&e, &port(5)).name, None);
     }
 
     fn full_host() -> ScriptHost {

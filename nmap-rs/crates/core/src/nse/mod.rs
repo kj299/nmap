@@ -19,6 +19,7 @@ pub mod choose;
 pub mod engine;
 pub mod fspolicy;
 pub mod net;
+pub mod nmapdb;
 pub mod nmaplib;
 pub mod package;
 pub mod results;

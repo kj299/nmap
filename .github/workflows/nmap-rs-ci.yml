@@ -373,7 +373,7 @@ jobs:
       - run: python3 tests/differential/m6/oracle/gen_m64_nselib.py "$RUNNER_TEMP"
       - run: M64_NSELIB_GOLDEN="$RUNNER_TEMP/m64_nselib_golden.txt" cargo test -p nmap-core --test nselib_differential
       # M6.4c2: nmap itself runs the fixture scripts in nse_scripts/ (and the
-      # shipped unittest.nse) over a scratch data directory, 36 scenarios, each
+      # shipped unittest.nse) over a scratch data directory, 37 scenarios, each
       # a connect scan of loopback listeners. Every result's normal-output
       # lines and <script> XML, and every init error, must match what the
       # port's engine produces. Regenerated live here; the test job runs the
@@ -396,6 +396,26 @@ jobs:
       # Regenerated live here; the test job runs the committed golden.
       - run: python3 tests/differential/m6/oracle/gen_m64_cli.py "$RUNNER_TEMP"
       - run: M64_CLI_GOLDEN="$RUNNER_TEMP/m64_cli_golden.txt" cargo test -p nmap-cli --test nse_cli_differential
+      # M6.6: nmap itself loads each of the 611 shipped scripts alone
+      # (--script-help), from a scratch data directory whose nse_main.lua
+      # removes the C modules the port does not have yet. Each load ends OK,
+      # LOUD (a hard require failed: nmap quits, naming file:line) or QUIET (a
+      # silent_require failed). The port loads each through its engine and must
+      # end every one the same way, and must lack exactly the modules removed.
+      # Regenerated live here; the test job runs the committed golden.
+      - run: python3 tests/differential/m6/oracle/gen_m66_scriptload.py "$RUNNER_TEMP"
+      - run: M66_SCRIPTLOAD_GOLDEN="$RUNNER_TEMP/m66_scriptload_golden.txt" cargo test -p nmap-core --test scriptload_differential
+      # M6.6: nmap's C module `nmapdb` over this tree's data files, through a
+      # prerule probe: every MAC prefix, every port of tcp, udp and sctp, and
+      # the argument edges, with the calls that abort or are undefined in 7.94
+      # listed apart. --check regenerates twice, requires the two runs to
+      # agree, and requires the committed golden to be what this nmap gives.
+      - run: bash tests/differential/m6/regen_m66_nmapdb.sh --check
+      # M6.6 step a: the port's `nmapdb` runs the same probe through its
+      # engine over the same files and must write every line of the live
+      # golden; each quarantined call must give the answer its ledger id pins.
+      - run: python3 tests/differential/m6/oracle/gen_m66_nmapdb.py "$RUNNER_TEMP"
+      - run: M66_NMAPDB_GOLDEN="$RUNNER_TEMP/m66_nmapdb_golden.txt" cargo test -p nmap-core --test nmapdb_differential
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -616,7 +636,7 @@ jobs:
       # M6.4c2 — running scripts. nse_main.lua's scheduler runs verbatim in the
       # port; the scripts, rules, runlevels and output it produces are checked
       # against the committed nmap 7.94 golden (regenerated live in the
-      # differential job): 36 scenarios, every result byte for byte.
+      # differential job): 37 scenarios, every result byte for byte.
       - run: cargo test -p nmap-core --test scripts_differential
 
       # M6.4d — sockets, timers, resolve, mutex and condvar over the tokio
@@ -628,3 +648,9 @@ jobs:
       # golden (regenerated live in the differential job); plus the stall
       # limit and the data-directory search, which have no oracle.
       - run: cargo test -p nmap-cli --test nse_cli_differential
+
+      # M6.6 — each shipped script loaded alone, and the `nmapdb` module line
+      # for line plus its quarantine pins, against the committed nmap 7.94
+      # goldens (regenerated live in the differential job).
+      - run: cargo test -p nmap-core --test scriptload_differential
+      - run: cargo test -p nmap-core --test nmapdb_differential

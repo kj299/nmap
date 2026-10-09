@@ -21,6 +21,7 @@ use nmap_core::model::Host;
 use nmap_core::nse::choose::{choose, RuleOptions};
 use nmap_core::nse::engine::{EngineOptions, PhaseResults};
 use nmap_core::nse::fspolicy::named_values;
+use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::{LogTarget, NmapEnv, NmapLib, Phase, ScriptHost, ScriptPort};
 use nmap_core::nse::runtime::{new_state, NseState, StateConfig};
 use nmap_core::nse::script::parse_script_db;
@@ -55,6 +56,8 @@ pub struct Setup {
     pub max_parallelism: i64,
     pub services: Option<ServiceTable>,
     pub excluded_ports: Option<PortList>,
+    /// `nmapdb`'s reader for its data files, which reads bytes.
+    pub read_data_file: fn(&str) -> DataFile,
 }
 
 /// The engine, started and holding the chosen scripts.
@@ -212,6 +215,7 @@ fn open(setup: Setup) -> Result<Running, String> {
             let name = std::str::from_utf8(f).ok()?;
             fetch_dirs.fetch_absolute(name).map(|p| bytes(&p))
         }),
+        read_data_file: Box::new(setup.read_data_file),
         clock: Box::new(|| {
             let d = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

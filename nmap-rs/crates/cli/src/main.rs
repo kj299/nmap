@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use nmap_core::build::PacketOverrides;
 use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
+use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::Phase;
 use nmap_core::options::{RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
@@ -1532,6 +1533,7 @@ fn nse_setup(cfg: &RunConfig, services: Option<&ServiceTable>) -> nse::Setup {
         max_parallelism: cfg.max_parallelism.map_or(0, i64::from),
         services: services.cloned(),
         excluded_ports,
+        read_data_file: read_data_bytes,
     }
 }
 
@@ -1580,6 +1582,34 @@ static DATA: std::sync::OnceLock<DataDirs> = std::sync::OnceLock::new();
 
 fn data() -> &'static DataDirs {
     DATA.get_or_init(|| DataDirs::from_env(None))
+}
+
+/// `nmap_fetchfile(name)`, then the file's bytes, for the loaders that read
+/// bytes as C does: `nmapdb`'s `nmap-mac-prefixes` and `nmap-protocols`,
+/// which the script engine reads the first time a script needs them.
+fn read_data_bytes(name: &str) -> DataFile {
+    let Some(path) = data().fetch(name) else {
+        return DataFile::NotFound;
+    };
+    let shown = path.to_string_lossy().into_owned().into_bytes();
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            nmap_core::debug!(1, "loaded {name} from {}", path.display());
+            DataFile::Read { path: shown, bytes }
+        }
+        Err(e) => {
+            // `strerror(errno)` and `errno`, as `gh_perror` prints them.
+            let mut error = e.to_string();
+            if let Some(i) = error.rfind(" (os error ") {
+                error.truncate(i);
+            }
+            let errno = e.raw_os_error().unwrap_or(0);
+            DataFile::Unreadable {
+                path: shown,
+                error: format!("{error} ({errno})").into_bytes(),
+            }
+        }
+    }
 }
 
 /// `nmap_fetchfile(name)`, read as text.

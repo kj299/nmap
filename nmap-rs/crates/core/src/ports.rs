@@ -20,6 +20,9 @@ use std::collections::HashMap;
 
 // ---- nmap-services table ---------------------------------------------------
 
+/// The name `nmap-services` gives a port it knows nothing about.
+const UNKNOWN_SERVICE: &str = "unknown";
+
 #[derive(Clone, Debug, PartialEq)]
 struct ServiceEntry {
     port: u16,
@@ -59,9 +62,23 @@ impl ServiceTable {
         table
     }
 
-    /// Service name for a port/protocol, if known.
+    /// Service name for a port/protocol, if known: what output prints, which
+    /// for the entries the file names `unknown` is `unknown`.
     pub fn service_name(&self, port: u16, protocol: Protocol) -> Option<&str> {
         self.by_port.get(&(protocol, port)).map(String::as_str)
+    }
+
+    /// The name `services.cc` stores for a port/protocol (`s_name`): the
+    /// entry's, except that the 15,316 entries named `unknown` are stored
+    /// with none (`services.cc:228-232`). This is what scripts see, through
+    /// `port.service` and `nmapdb.getservbyport`, and they see nil.
+    ///
+    /// The entries themselves stay in the table: `-p unknown` selects them
+    /// ([`parse_port_spec`]), and output prints `unknown` for them as for any
+    /// port with no name ([`Self::service_name`]).
+    pub fn stored_name(&self, port: u16, protocol: Protocol) -> Option<&str> {
+        self.service_name(port, protocol)
+            .filter(|&name| name != UNKNOWN_SERVICE)
     }
 
     /// The `n` highest-frequency ports for `protocol`, most-common first — the
@@ -420,6 +437,40 @@ domain\t53/udp\t0.213496
         assert_eq!(t.service_name(53, Protocol::Udp), Some("domain"));
         assert_eq!(t.service_name(80, Protocol::Udp), Some("http"));
         assert_eq!(t.service_name(9999, Protocol::Tcp), None);
+    }
+
+    /// `nmaplib-unknown-service-name`: C stores the entries named `unknown`
+    /// with no name, so scripts see nil; output and `-p unknown` still see the
+    /// entry.
+    #[test]
+    fn unknown_entries_have_no_stored_name_but_stay_in_the_table() {
+        let t = ServiceTable::parse(
+            "unknown\t4/tcp\t0.000477\nssh\t22/tcp\t0.18\nunknown\t4/udp\t0.0\n",
+        );
+        assert_eq!(t.service_name(4, Protocol::Tcp), Some("unknown"));
+        assert_eq!(t.stored_name(4, Protocol::Tcp), None);
+        assert_eq!(t.stored_name(22, Protocol::Tcp), Some("ssh"));
+        assert_eq!(t.stored_name(5, Protocol::Tcp), None);
+        assert_eq!(t.len(), 3);
+        let p = parse_port_spec("unknown", Some(&t)).unwrap();
+        assert_eq!((p.tcp, p.udp), (vec![4], vec![4]));
+        // The first entry for a port wins, `unknown` or not.
+        let t = ServiceTable::parse("unknown\t9/tcp\nfoo\t9/tcp\n");
+        assert_eq!(t.stored_name(9, Protocol::Tcp), None);
+    }
+
+    /// `services-port-field-hu-wrap`: C reads the port with `%hu`, which wraps
+    /// `65616` to 80 and `-65456` to 80. Here such a line is skipped, as any
+    /// port out of range is; what `%hu` reads right is read the same.
+    #[test]
+    fn a_port_field_c_would_wrap_is_skipped() {
+        let t = ServiceTable::parse(
+            "wrapped\t65616/tcp\t0.5\nnegative\t-65456/tcp\t0.5\nplus\t+81/tcp\nzeros\t0082/tcp\n",
+        );
+        assert_eq!(t.service_name(80, Protocol::Tcp), None);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.service_name(81, Protocol::Tcp), Some("plus"));
+        assert_eq!(t.service_name(82, Protocol::Tcp), Some("zeros"));
     }
 
     #[test]

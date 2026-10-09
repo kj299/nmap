@@ -1196,6 +1196,36 @@ mod tests {
         ServiceTable::parse("ssh 22/tcp 0.18\nhttp 80/tcp 0.48\n")
     }
 
+    /// `nmaplib-unknown-service-name` was fixed for scripts only: a port that
+    /// `nmap-services` names `unknown`, which scripts see with no name, is
+    /// still printed as `unknown` by every output, with the table method and
+    /// confidence 3.
+    #[test]
+    fn a_port_named_unknown_in_the_table_is_printed_unknown() {
+        let table = ServiceTable::parse("unknown\t4/tcp\t0.000477\nssh\t22/tcp\t0.18\n");
+        assert_eq!(table.stored_name(4, Protocol::Tcp), None);
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        host.ports.push(Port::new(
+            4,
+            Protocol::Tcp,
+            PortState::Closed,
+            Reason::ConnRefused,
+        ));
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
+        let normal = render_normal(&results, &meta(), Some(&table));
+        assert!(normal.contains("4/tcp closed unknown"), "{normal}");
+        let xml = render_xml(&results, &meta(), Some(&table));
+        assert!(
+            xml.contains("<service name=\"unknown\" method=\"table\" conf=\"3\"/>"),
+            "{xml}"
+        );
+        let grepable = render_grepable(&results, &meta(), Some(&table));
+        assert!(grepable.contains("4/closed/tcp//unknown///"), "{grepable}");
+    }
+
     /// **These assertions were inverted until M7.10.** They required the two
     /// closed ports to be summarized, which is what this port did
     /// unconditionally — i.e. it always behaved as though `--open` had been

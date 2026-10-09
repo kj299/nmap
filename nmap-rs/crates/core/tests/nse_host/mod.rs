@@ -4,16 +4,20 @@
 
 pub mod scenarios;
 
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
+use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::{Interface, NmapEnv, NmapLib, Phase};
 use nmap_core::nse::package::LibrarySource;
 use nmap_core::nse::runtime::{new_state, NseState, StateConfig};
 use nmap_core::nse::scriptargs::ArgTable;
 use nmap_core::nse::stdlib::iolib::{FsError, OpenMode, ScriptFile, ScriptFs, Whence};
 use nmap_core::nse::stdlib::oslib::OsEnv;
+use nmap_core::ports::ServiceTable;
 
 /// The repository root: nmap's own data directory, with `nselib/`.
 pub fn repo_root() -> PathBuf {
@@ -106,8 +110,50 @@ impl ScriptFs for ReadOnlyFs {
     }
 }
 
-/// The run's options: defaults, and data files from `dir`.
+/// `dir`'s `nmap-services`, parsed once per directory for the whole test
+/// binary: hundreds of states are built from the same one.
+fn services(dir: &Path) -> Option<ServiceTable> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<ServiceTable>>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| {
+            std::fs::read_to_string(dir.join("nmap-services"))
+                .ok()
+                .map(|t| ServiceTable::parse(&t))
+        })
+        .clone()
+}
+
+/// A data file from `dir`, as the command line reads one: found, and read
+/// as bytes.
+pub fn read_data_file(dir: &Path, name: &str) -> DataFile {
+    let p = dir.join(name);
+    if !p.is_file() {
+        return DataFile::NotFound;
+    }
+    let path = p.to_string_lossy().into_owned().into_bytes();
+    match std::fs::read(&p) {
+        Ok(bytes) => DataFile::Read { path, bytes },
+        Err(e) => {
+            // `strerror(errno)` and `errno`, as `gh_perror` prints them.
+            let e = fs_err(e);
+            DataFile::Unreadable {
+                path,
+                error: format!("{} ({})", e.message, e.errno).into_bytes(),
+            }
+        }
+    }
+}
+
+/// The run's options: defaults, and data files from `dir` — the services
+/// table the scan would hold, and `nmapdb`'s files on demand.
 pub fn env(dir: PathBuf) -> NmapEnv {
+    let services = services(&dir);
+    let data = dir.clone();
     NmapEnv {
         verbose: 0,
         debugging: 0,
@@ -121,7 +167,7 @@ pub fn env(dir: PathBuf) -> NmapEnv {
         interface: None,
         dns_servers: vec![],
         excluded_ports: None,
-        services: None,
+        services,
         phase: Phase::PreScan,
         interfaces: Ok(Vec::<Interface>::new()),
         fetchfile: Box::new(move |f| {
@@ -129,6 +175,7 @@ pub fn env(dir: PathBuf) -> NmapEnv {
             p.exists()
                 .then(|| p.to_string_lossy().into_owned().into_bytes())
         }),
+        read_data_file: Box::new(move |name| read_data_file(&data, name)),
         clock: Box::new(|| {
             let d = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -174,23 +221,43 @@ pub fn state(dir: &Path) -> Result<NseState, String> {
 /// state over `dir`: the outcome as the oracle probes print it — `ok` or
 /// `error`, `pass` or `fail` — and any detail.
 pub fn probe(dir: &Path, lib: &str, unittest: bool) -> (String, Option<String>) {
+    let (status, detail, _) = probe_modules(dir, lib, unittest);
+    (status, detail)
+}
+
+/// [`probe`], and the modules no searcher found while it ran, in the order
+/// `require` asked for them: a last searcher, which finds nothing, records
+/// each name that reaches it. The last of them is the module a load that
+/// failed for want of one failed on, whether its `require` was hard (the
+/// detail names it) or `stdnse.silent_require` (the detail is a table).
+pub fn probe_modules(
+    dir: &Path,
+    lib: &str,
+    unittest: bool,
+) -> (String, Option<String>, Vec<String>) {
     use nmap_core::nse::runtime::{run_chunk, ChunkOutcome};
     let mut st = match state(dir) {
         Ok(st) => st,
-        Err(e) => return ("error".into(), Some(format!("PRELUDE: {e}"))),
+        Err(e) => return ("error".into(), Some(format!("PRELUDE: {e}")), Vec::new()),
     };
+    // A searcher that returns nothing adds nothing to `require`'s message.
+    let record = "local nf = {}\n\
+                  rawset(_G, 'NMAP_RS_NOT_FOUND', nf)\n\
+                  local s = package.searchers\n\
+                  s[#s + 1] = function(name) nf[#nf + 1] = name end\n";
     let src = if unittest {
         format!(
-            "local u = require 'unittest'\n\
+            "{record}\
+             local u = require 'unittest'\n\
              local fails = u.run_tests({{{lib:?}}})\n\
              local f = fails[{lib:?}]\n\
              if f == nil then return 'pass' end\n\
              return 'fail', tostring(f)"
         )
     } else {
-        format!("require({lib:?}) return 'ok'")
+        format!("{record}require({lib:?}) return 'ok'")
     };
-    match run_chunk(&mut st.lua, "=probe", src.as_bytes(), 2_000_000_000) {
+    let (status, detail) = match run_chunk(&mut st.lua, "=probe", src.as_bytes(), 2_000_000_000) {
         ChunkOutcome::Returned(v) => {
             let mut v = v.into_iter();
             let status = v.next().unwrap_or_default();
@@ -198,5 +265,23 @@ pub fn probe(dir: &Path, lib: &str, unittest: bool) -> (String, Option<String>) 
         }
         ChunkOutcome::Raised(e) => ("error".into(), Some(e)),
         ChunkOutcome::OutOfFuel => ("error".into(), Some("OUT OF FUEL".into())),
-    }
+    };
+    let not_found = match run_chunk(
+        &mut st.lua,
+        "=not_found",
+        b"return table.concat(rawget(_G, 'NMAP_RS_NOT_FOUND'), ',')",
+        1_000_000,
+    ) {
+        ChunkOutcome::Returned(v) => v
+            .first()
+            .map(|s| {
+                s.split(',')
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        other => panic!("reading the modules not found: {other:?}"),
+    };
+    (status, detail, not_found)
 }

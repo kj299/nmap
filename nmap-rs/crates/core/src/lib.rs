@@ -41,6 +41,7 @@ pub mod payload;
 pub mod pcre_translate;
 pub mod ports;
 pub mod probedb;
+pub mod protocols;
 pub mod recv_validate;
 pub mod servicefp;
 pub mod servicescan;

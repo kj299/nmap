@@ -405,6 +405,7 @@ fn build_env(sc: &Scenario, logs: &Logs) -> (NmapEnv, Option<Vec<u8>>) {
         fetchfile: Box::new(|name| {
             (name == b"nmap-services").then(|| b"/usr/share/nmap/nmap-services".to_vec())
         }),
+        read_data_file: Box::new(|_| nmap_core::nse::nmapdb::DataFile::NotFound),
         clock: Box::new(|| (1_700_000_000, 123_456)),
         random: Box::new(|buf| {
             buf.fill(0x41);

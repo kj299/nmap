@@ -8,8 +8,9 @@ nmap is the installed one (7.94, as CI installs it), pointed with `--datadir` at
 a scratch data directory: this repository's data files and nselib/, with
 scripts/ holding the fixtures (their own script.db included) and the shipped
 scripts in SHIPPED. Each scenario
-is one nmap run, a connect scan of loopback listeners on fixed ports, with a
---script selection; nothing is sent beyond 127.0.0.1. Rows:
+is one nmap run, a connect scan of loopback listeners on fixed ports (or the
+ports a scenario names with its own -p), with a --script selection; nothing is
+sent beyond 127.0.0.1. Rows:
 
     scenario NAME
     args HEX              the nmap arguments after the fixed ones, NUL-separated
@@ -90,6 +91,9 @@ SCENARIOS = [
     ("shipped-unittest", ["--script", "unittest", "--script-args",
                           "unittest.run=1,unittest.tests={%s}" % SUITES]),
     ("shipped-unittest-off", ["--script", "unittest"]),
+    # M6.6: the service name a script sees from nmap-services. 4/tcp is
+    # named `unknown` there, which C stores as no name: nil to the script.
+    ("service-names", ["-p", "1,4,%d" % OPEN_PORTS[0], "--script", "s-service"]),
 ]
 
 
@@ -197,7 +201,8 @@ def main():
         for name, extra in SCENARIOS:
             xml_path = os.path.join(tmp, name + ".xml")
             nml_path = os.path.join(tmp, name + ".nmap")
-            cmd = ["nmap", "--datadir", data, "-sT", "-Pn", "-n", "-p", PORTS,
+            ports = [] if "-p" in extra else ["-p", PORTS]
+            cmd = ["nmap", "--datadir", data, "-sT", "-Pn", "-n"] + ports + [
                    "-oX", xml_path, "-oN", nml_path] + extra + ["127.0.0.1"]
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                env=dict(os.environ, NMAPDIR=data))

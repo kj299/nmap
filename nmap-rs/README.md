@@ -53,8 +53,11 @@ In brief:
     Data files and scripts come from nmap's data directories, never the
     working directory.
     **But** `-sC` and `--script default` with the shipped `scripts/` still
-    stop at start-up, because nine `default` scripts need the unported
-    `nmapdb` or `lpeg` module (`nse-sc-aborts-on-unported-modules`).
+    stop at start-up, because three `default` scripts need the unported
+    `lpeg` module (`nse-sc-aborts-on-unported-modules`);
+  - the `nmapdb` module (M6.6 step a): MAC vendors, service names and IP
+    protocols from nmap's data files, read as bytes on first use, every
+    answer as nmap 7.94 gives it over this tree's files.
 
   What remains of NSE is ledgered in `DIVERGENCES.md`: TLS, packet capture,
   raw `dnet` sends, `-sV`'s version scripts, and the unported C modules.

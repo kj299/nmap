@@ -28,9 +28,11 @@ any difference.
 | `m64_memory_*` | the memory budget, vs `ulimit -v` (M6.4b) | `regen_m64_memory.sh` | `memory_differential` | 41 |
 | `m64_stdlib_*` | `utf8`, `os`, `io`, `debug` (M6.4c1) | `regen_m64_stdlib.sh` | `stdlib_differential` | 2,012 |
 | `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
-| `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 36 scenarios |
+| `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 37 scenarios |
 | `m64_net_golden.txt` | sockets, timers, `resolve`, `mutex`, `condvar`, socket limits, shipped `http-*` scripts (M6.4d), vs nmap 7.94 | `oracle/gen_m64_net.py` (live in CI) | `nse_net_differential` (in `nmap-sys`) | 3 scenarios, 17 scripts |
 | `m64_cli_golden.txt` | `nmap-rs --script` as a whole program: every phase's results and port states in normal and XML output, script arguments, timeouts, start-up errors (M6.4e), vs nmap 7.94 | `oracle/gen_m64_cli.py` (live in CI) | `nse_cli_differential` (in `nmap-cli`) | 15 scenarios |
+| `m66_nmapdb_golden.txt`, `m66_nmapdb_quarantine.txt` | the C module `nmapdb` over this tree's data files (M6.6), vs nmap 7.94 | `regen_m66_nmapdb.sh`, `oracle/gen_m66_nmapdb.py` (live in CI) | `nmapdb_differential` | 115,064 lines; 36 calls quarantined, each pinned |
+| `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 531 OK, 33 LOUD, 47 QUIET |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -349,3 +351,83 @@ Within a block, results are sorted by id (`nse-results-sorted-by-id`).
 built binary. It also has two tests with no oracle:
 - the stall limit;
 - that a `scripts/` in the working directory is never used.
+
+## M6.6 — `nmapdb`, and how each shipped script loads
+
+Two oracles, both nmap 7.94 with `--datadir` set to this repository
+(`docs/M6.6-ANALYSIS.md` §3, step 0a).
+
+**`nmapdb`.** `oracle/gen_m66_nmapdb.py` runs `oracle/m66_probe_nmapdb.nse`
+as a prerule, `-sn` against 127.0.0.1. The probe calls the module's four
+functions and writes one line per call:
+- `mac2corp` on every prefix in `nmap-mac-prefixes` (52,085), at both ends
+  of its range, and on 50,000 addresses from a fixed LCG, each as raw bytes
+  and as hex in two spellings;
+- `getservbyport` on every port of tcp, udp and sctp;
+- 834 more: the module's shape, the counts, argument shapes and edges, and
+  calls through `datafiles`.
+
+Edge cases call through `pcall` directly, so 7.94's errors carry no position
+and name the function `'nmapdb.getservbyport'`. The generator fails unless
+the probe read this tree's data files, which differ from the installed ones:
+the paths, the prefix and protocol counts, and the services per protocol.
+`regen_m66_nmapdb.sh` runs it twice and requires byte-identical output.
+
+Calls that abort or are undefined in 7.94 are never made (LESSONS #033):
+- `getprotbynum(255)` (an assert);
+- `getservbyport` with a protocol not in its unterminated option list;
+- `mac2corp` reading a byte ≥ 0x80 as a hex digit (`isxdigit` of a
+  negative `char`).
+
+`m66_nmapdb_quarantine.txt` lists them with their ledger ids.
+
+`nmapdb_differential` (step a) runs the same probe as a prerule through the
+port's engine, with the same script arguments, over the same data files, its
+output file kept in memory, and requires every line of the golden, line for
+line; the two data files' paths are written as their names, as the generator
+writes them. No line is excused: the port names the function as
+`luaL_argerror` does for the call's shape, and raises with `luaL_where`'s
+position, so the `pcall` rows and the `datafiles.lua:127:` rows match as they
+stand. A second test runs every quarantined call and requires the answer its
+ledger id pins: the table's for `getprotbynum(255)` (nil), a clean `invalid
+option` error for an unknown protocol, and `Expected a 6-byte MAC address`
+for a high byte. `M66_NMAPDB_GOLDEN` names a live golden.
+
+**Script loads.** nmap cannot load a script without its C modules, so
+`oracle/gen_m66_scriptload.py` emulates it. The scratch data directory
+links this tree's data files, `nselib/` and `scripts/`, and holds a copy of
+`nse_main.lua` with one line added before `local REQUIRE_ERROR = {};`. That
+line removes the missing modules from `package.loaded` and `_G`, and
+`lpeg-utility` with `lpeg`, since `nse_main.lua:150-151` preloads both.
+Each script is then loaded alone, with `-v --script-help`, and ends one of
+three ways:
+- `OK`;
+- `LOUD`: a hard `require` failed and nmap quit. The detail is the first
+  `file:line: module 'X' not found`, the path cut to the file's name;
+- `QUIET`: a `silent_require` failed and the script was dropped.
+
+The header's `missing:` line is the set removed. It is the generator's
+`PORT_MISSING` unless `--missing` says otherwise, and that is the port's set:
+`openssl`, `lpeg`, `lfs`, `libssh2` and `zlib` (`nmapdb` left it in step a).
+
+`scriptload_differential` loads each script the way the command line does:
+chosen by its path, in a fresh state at `-v`, through
+`NseState::load_chosen`. It requires the same outcome and detail for every
+script, with no pins. It also checks that the port lacks exactly the
+golden's missing set. So porting a module fails the gate until the module
+leaves `PORT_MISSING` and the golden is regenerated:
+
+```sh
+python3 oracle/gen_m66_scriptload.py .
+```
+
+Measured with this generator: with every module missing, 7.94 gives
+514 / 51 / 46; once `nmapdb` leaves the set, 531 / 33 / 47 (the committed
+golden since step a, which the port matches with no pins); and once `lpeg`
+leaves it too, 560 / 2 / 49, as `docs/M6.6-ANALYSIS.md` §0 predicts.
+
+**The `unknown` service name** (step a) is gated with the M6.4c2 scripts:
+the `service-names` scenario of `m64_scripts_golden.txt` runs the fixture
+`s-service.nse` over 1/tcp, 4/tcp (which `nmap-services` names `unknown`)
+and an open port, and 7.94 and the port both see no name for 4/tcp
+(`nmaplib-unknown-service-name`).

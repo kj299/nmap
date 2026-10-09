@@ -15,6 +15,9 @@
     "core::nse::choose": [
       "nse_results"
     ],
+    "core::nse::nmapdb": [
+      "nse_mac2corp"
+    ],
     "core::nse::nmaplib": [
       "nse_scriptargs"
     ],
@@ -81,6 +84,9 @@
     ],
     "core::osprobe::tcpreply": [
       "osprobe_tcpreply"
+    ],
+    "core::protocols": [
+      "nse_protocols"
     ],
     "core::servicefp": [
       "servicefp"
@@ -224,6 +230,7 @@
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
     "core::nse::net": "unsafe_audited",
+    "core::nse::nmapdb": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",
     "core::nse::package": "unsafe_audited",
     "core::nse::results": "unsafe_audited",
@@ -258,6 +265,7 @@
     "core::payload": "unsafe_audited",
     "core::pcre_translate": "unsafe_audited",
     "core::probedb": "unsafe_audited",
+    "core::protocols": "unsafe_audited",
     "core::recv_validate": "unsafe_audited",
     "core::servicefp": "unsafe_audited",
     "core::servicescan": "unsafe_audited",

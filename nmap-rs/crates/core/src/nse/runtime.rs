@@ -4,9 +4,9 @@
 //! Every script and library shares one state. It holds the standard library
 //! the scripts are allowed (the VM's own, and the first-party half in
 //! [`super::stdlib`]), `package` and `require` ([`super::package`]), and the
-//! modules the engine provides — `nmap` ([`super::nmaplib`]) — each both in
-//! `package.loaded` and as a global, as `luaL_requiref(L, name, open, 1)`
-//! leaves them.
+//! modules the engine provides — `nmap` ([`super::nmaplib`]) and `nmapdb`
+//! ([`super::nmapdb`]) — each both in `package.loaded` and as a global, as
+//! `luaL_requiref(L, name, open, 1)` leaves them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +15,7 @@ use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, StashedTable, Value
 
 use super::engine::{load_cnse, EngineOptions, Store};
 
+use super::nmapdb::load_nmapdb;
 use super::nmaplib::{load_nmap, Shared};
 use super::package::{load_package, preload_module, LibrarySource};
 use super::scriptargs::ArgTable;
@@ -162,6 +163,9 @@ fn build(config: &StateConfig) -> Lua {
             };
             preload_module(ctx, loaded, name, module, false);
         }
+        // `set_nmap_libraries` registers `nmapdb` next (`nse_main.cc:564`).
+        let nmapdb = load_nmapdb(ctx, &config.lib);
+        preload_module(ctx, loaded, "nmapdb", Value::Table(nmapdb), true);
     });
     lua
 }

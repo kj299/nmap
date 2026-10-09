@@ -1,0 +1,40 @@
+# quarantine|call|ledger id: calls oracle/m66_probe_nmapdb.nse does not make,
+# because they abort or are undefined in Nmap version 7.94SVN.
+# Each is pinned in the port by a unit test instead (LESSONS #033).
+# Regenerate with bash tests/differential/m6/regen_m66_nmapdb.sh
+quarantine|getprotbynum(i:255)|nmapdb-getprotbynum-255-oracle-abort
+quarantine|getprotbynum(f:255)|nmapdb-getprotbynum-255-oracle-abort
+quarantine|getprotbynum(s:255)|nmapdb-getprotbynum-255-oracle-abort
+quarantine|getprotbynum(s:0xff)|nmapdb-getprotbynum-255-oracle-abort
+quarantine|getservbyport(i:80,s:foo)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:foo)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:TCP)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:TCP)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:Tcp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:Tcp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:ip)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:ip)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:icmp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:icmp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:6)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:6)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,i:6)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,i:6)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:tcp )|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:tcp )|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s: tcp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s: tcp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:sctp\x01)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:sctp\x01)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:mac2corp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:mac2corp)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:getservbyport)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:getservbyport)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:nmapdb)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:nmapdb)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:80,s:udplite)|nmapdb-getservbyport-option-overread
+quarantine|getservbyport(i:-1,s:udplite)|nmapdb-getservbyport-option-overread
+quarantine|mac2corp(s:00\x80000000000)|nmapdb-mac2corp-isxdigit-signed-char
+quarantine|mac2corp(s:\xc8\xc8\xc8\xc8\xc8\xc8\xc8\xc8\xc8\xc8\xc8\xc8)|nmapdb-mac2corp-isxdigit-signed-char

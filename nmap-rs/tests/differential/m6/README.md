@@ -719,8 +719,9 @@ measurements. 2,504 rows of 7.94's output carry a masked rule name. No row drift
 by `path`, `position` or `argname`.
 
 **What the corpus catches.** The 16 sabotaged `lpeg.c` builds of the M6.6
-sequencing review were rebuilt in scratch, each from a patched copy of
-`lpeg.c` (the tree's file is never edited). Each ran the committed cases,
+sequencing review were rebuilt from patched copies of `lpeg.c` (the tree's
+file is never edited); `lpeg_sabotage/run_sabotage.sh` rebuilds and re-runs
+them (local only, see its README). Each ran the committed cases,
 resuming after crashes, against the committed golden:
 
 | variant | rows differing | of them, fixed rows (not R or Q) | crashed or hung | fixed rows that catch it (family X first) |
@@ -752,3 +753,12 @@ as caught; S06 loops forever on `R.6687`, which was stopped after 90 s.
 Every variant differs on at least one row. The six the plan singles out are
 each caught by a fixed row of family X, not only by random rows: S05, S07,
 S08, S09, S10 and S14.
+
+**Adversarial time.** `lpeg_search/run_search.sh` (local only, see its
+README) searches for subjects that make each of the 11 network-facing
+patterns do the most LPeg work per byte: `json.parse`, the coap link format,
+lpeg-utility's `get_response`, `parse_fp` and `escaped_quote`, ntp-info's
+`kvmatch`, fingerprint-strings, and http-affiliate-id's four `re` grammars.
+Every one is linear in subject size up to 64 KiB. Step e sets each pattern's
+regression ceiling from it. Its step counter cannot see work inside a span
+instruction; the README says what that misses.

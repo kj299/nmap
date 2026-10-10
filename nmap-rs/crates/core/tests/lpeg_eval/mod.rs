@@ -65,6 +65,48 @@ pub fn step_only(lua: &mut Lua, ex: &StashedExecutor, slice: i32, max_slices: u6
     }
 }
 
+/// What [`step_traced`] saw of a run, slice by slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trace {
+    /// It finished within the slices allowed.
+    pub done: bool,
+    pub slices: u64,
+    /// The least fuel left after a slice: how far past its slice the work
+    /// done in one went, negated. A slice ends once its fuel is spent, and
+    /// what one call spends past that is taken from it too.
+    pub deepest: i32,
+    /// The most memory the state counted after a slice that did not finish
+    /// the run (`Lua::total_memory`, which counts what calls hold between
+    /// slices).
+    pub pending_peak: usize,
+}
+
+/// [`step_only`], tracing each slice.
+pub fn step_traced(lua: &mut Lua, ex: &StashedExecutor, slice: i32, max_slices: u64) -> Trace {
+    let mut t = Trace {
+        done: false,
+        slices: 0,
+        deepest: slice,
+        pending_peak: 0,
+    };
+    loop {
+        let mut fuel = Fuel::with(slice);
+        let done = lua
+            .enter(|ctx| ctx.fetch(ex).step(ctx, &mut fuel))
+            .expect("steps");
+        t.slices = t.slices.saturating_add(1);
+        t.deepest = t.deepest.min(fuel.remaining());
+        if done {
+            t.done = true;
+            return t;
+        }
+        t.pending_peak = t.pending_peak.max(lua.total_memory());
+        if t.slices >= max_slices {
+            return t;
+        }
+    }
+}
+
 /// Step `ex` in slices of `slice` fuel until it finishes or `max_slices`
 /// pass; how it ended, and the slices it took.
 pub fn step_to_end(

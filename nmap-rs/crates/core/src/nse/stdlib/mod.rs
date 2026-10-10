@@ -113,8 +113,8 @@ pub fn load_patterns<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
         ctx,
         "gsub",
         Callback::from_fn(&ctx, |ctx, _, mut stack| {
-            let seq =
-                gsub_start(ctx, &stack).map_err(|e| lua_error(ctx, &e.lua_message("gsub")))?;
+            let seq = gsub_start(ctx, &stack)
+                .map_err(|e| lua_error_bytes(ctx, &e.lua_message("gsub")))?;
             stack.clear();
             Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, seq)))
         }),
@@ -152,7 +152,7 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
         name,
         Callback::from_fn(&ctx, move |ctx, _, mut stack| match body(ctx, &mut stack) {
             Ok(()) => Ok(CallbackReturn::Return),
-            Err(e) => Err(lua_error(ctx, &e.lua_message(name))),
+            Err(e) => Err(lua_error_bytes(ctx, &e.lua_message(name))),
         }),
     );
 }
@@ -192,7 +192,7 @@ pub(crate) fn lua_error_bytes<'gc>(ctx: Context<'gc>, msg: &[u8]) -> Error<'gc> 
 fn pattern_error(e: PatternError) -> PackError {
     PackError {
         arg: None,
-        msg: e.msg,
+        msg: e.msg.into_bytes(),
     }
 }
 
@@ -259,18 +259,27 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
 }
 
 /// `luaL_typeerror`'s message for argument `arg`, which is `v` (`None` if the
-/// call passed fewer arguments). A table or userdata is named by its
-/// metatable's `__name` when that is a string — `FILE*`, `lpeg-pattern` — as
-/// `luaL_typeerror` names it (`stdlib-type-errors-ignore-name`, closed in
-/// M6.6 step b).
+/// call passed fewer arguments). A value whose metatable holds a string
+/// `__name` is named by it — `FILE*`, `lpeg-pattern`, and a string's too if
+/// the string metatable has one — read raw and printed with `%s`, so up to
+/// its first NUL and byte for byte (`stdlib-type-errors-ignore-name`,
+/// closed in M6.6 step b). There is no light userdata here, which the C
+/// calls `light userdata`.
 pub(crate) fn type_error<'gc>(
     ctx: Context<'gc>,
     v: Option<Value<'gc>>,
     arg: usize,
     expected: &str,
 ) -> PackError {
-    let got = v.map_or_else(|| "no value".to_string(), |v| meta_ops::objtypename(ctx, v));
-    PackError::bad_argument(arg, format!("{expected} expected, got {got}"))
+    let mut msg = format!("{expected} expected, got ").into_bytes();
+    match v {
+        None => msg.extend_from_slice(b"no value"),
+        Some(v) => match meta_ops::name_metafield(ctx, v) {
+            Some(name) => msg.extend_from_slice(name),
+            None => msg.extend_from_slice(v.type_name().as_bytes()),
+        },
+    }
+    PackError::bad_argument(arg, msg)
 }
 
 /// `luaL_checkinteger`. The two failure messages are the C's: a value that
@@ -682,7 +691,7 @@ impl FormatArgs for VmArgs<'_, '_> {
                 .map_or(Value::Nil, |mt| mt.get_value(self.ctx, "__tostring"));
                 Err(PackError {
                     arg: None,
-                    msg: format!("attempt to call a {} value", mm.type_name()),
+                    msg: format!("attempt to call a {} value", mm.type_name()).into_bytes(),
                 })
             }
         }
@@ -729,7 +738,7 @@ impl<'gc> FormatSeq<'gc> {
                     .filter(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
                     .and_then(|v| v.into_string(ctx))
                     .ok_or_else(|| {
-                        lua_error(
+                        lua_error_bytes(
                             ctx,
                             &type_error(ctx, v.copied(), 1, "string").lua_message("format"),
                         )

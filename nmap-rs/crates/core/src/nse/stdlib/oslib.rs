@@ -16,7 +16,7 @@ use super::osdate::{
     check_option, gmtime, invalid_conversion, localtime, mktime, strftime, Tm, TmInput,
 };
 use super::strpack::PackError;
-use super::{lua_error, LuaArgs};
+use super::{lua_error, lua_error_bytes, LuaArgs};
 
 /// What the `os` library reads from the system.
 pub struct OsEnv {
@@ -104,7 +104,7 @@ pub fn load_os<'gc>(ctx: Context<'gc>, env: Rc<OsEnv>) -> Table<'gc> {
 }
 
 fn raise<'gc>(ctx: Context<'gc>, name: &str, e: PackError) -> Error<'gc> {
-    lua_error(ctx, &e.lua_message(name))
+    lua_error_bytes(ctx, &e.lua_message(name))
 }
 
 /// `os_date`.

@@ -21,13 +21,20 @@
 //! grammar error names. Keys are 32 bits wide where the C's are 16
 //! (`lpeg-ktable-key-16bit`, D4).
 //!
-//! **Where the C is not followed.** Every size is computed with checked
-//! arithmetic and asked of the memory budget before anything is written;
-//! a size the C computes in an overflowing `int` is `not enough memory`
-//! here (`lpeg-tree-size-int-overflow`, `lpeg-pattern-string-size-overflow`).
-//! And no walker recurses on the Rust stack (E2): each is a loop over an
-//! explicit stack, and the ones that can take exponential time are
-//! resumable state machines that stop when their step budget runs out
+//! **Sizes.** The C computes a tree's size in an `int`, and hands it to
+//! `newtree`, which allocates `8 * len + 16` bytes. Here every size is
+//! computed exactly, then judged as the C's wrapped `int` would be
+//! ([`c_size`]): a size the `int` holds is allocated through the memory
+//! budget (`not enough memory` if refused); one that wraps to -3 or below is
+//! the C's `luaM_toobig`, "memory allocation error: block too big"; and one
+//! that wraps to anything else, where the C allocates too little and writes
+//! past it, is `not enough memory` — unless the C raises another error
+//! between the two, which the caller reproduces (`lpeg-tree-size-int-overflow`,
+//! `lpeg-pattern-string-size-overflow`).
+//!
+//! **No recursion.** No walker recurses on the Rust stack (E2): each is a
+//! loop over an explicit stack, and the ones that can take exponential time
+//! are resumable state machines that stop when their step budget runs out
 //! ([`walk`]).
 
 #![allow(
@@ -41,7 +48,7 @@ use crate::nse::stdlib::reserve;
 
 mod walk;
 
-pub use walk::{CheckAux, CheckLoops, FinalFix, FixedLen, Pred, VerifyGrammar};
+pub use walk::{CheckAux, CheckLoops, FinalFix, FindOpenCall, FixedLen, Pred, VerifyGrammar};
 
 /// `MAXRULES` (`lpeg.c:57`): the most rules a grammar may have, and the
 /// longest chain of left calls the verifier and `fixedlenx` follow.
@@ -60,9 +67,7 @@ pub const CHARSET_SIZE: usize = 32;
 /// `TTree` is 8 bytes).
 pub const SET_SLOTS: usize = 4;
 
-/// The largest tree, in nodes: the C counts sizes in `int`, so a larger one
-/// is an overflow there (undefined, and in practice a heap overrun) and `not
-/// enough memory` here.
+/// The largest tree, in nodes: the C counts sizes in `int` ([`c_size`]).
 pub const MAX_TREE: usize = 0x7fff_ffff;
 
 /// An index into a pattern's constant table (`ktable`); 0 is none.
@@ -230,9 +235,12 @@ impl Charset {
 /// the C's message, rendering a [`Key`] as the rule name it stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeError {
-    /// A size past [`MAX_TREE`], or refused by the memory budget or the
-    /// allocator.
+    /// A size refused by the memory budget or the allocator, or one past
+    /// [`MAX_TREE`] where the C would write past its allocation ([`c_size`]).
     NotEnoughMemory,
+    /// A size the C's `int` wraps to -3 or below: `luaM_toobig`'s "memory
+    /// allocation error: block too big", raised before anything is written.
+    BlockTooBig,
     /// `p^n`, `n >= 0`, of a pattern that can match the empty string.
     LoopBodyNullable,
     /// An open call (`lpeg.V`) outside any grammar, found by `finalfix`.
@@ -257,8 +265,53 @@ pub struct Tree {
     nodes: Vec<Node>,
 }
 
+/// What the C's `newtree(L, len)` does with a tree of `len` nodes, `len`
+/// computed exactly here and in an `int` there.
+///
+/// `newtree` allocates `(len - 1) * sizeof(TTree) + sizeof(Pattern)` bytes,
+/// `8 * len + 16` on a 64-bit host, in `size_t`. Every size the C computes
+/// is a sum or product of `int`s, so its `int` is `len` modulo 2^32: if that
+/// is the true size, the C allocates it; if it is -3 or below, the size in
+/// `size_t` is past `MAX_SIZE` and `luaS_newudata` raises `luaM_toobig`
+/// before anything is written ("memory allocation error: block too big",
+/// unpositioned; `INT_MIN` included, measured); and -2, -1, 0 or a positive
+/// size short of the tree's are an allocation of 0, 8, 16 or `8 * w + 16`
+/// bytes, which the C then writes past. Measured on the tree's oracle:
+/// `P(2^31 - 1)` (-3) and `P(-(2^30))` (`INT_MIN`) are too big,
+/// `P(-(2^31 - 1))` (-2) and `P'a'^-(2^30)` (-1) crash, `P''^(2^31 - 1)` (0)
+/// raises the check that comes before the writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CSize {
+    /// The `int` holds the size: the C allocates it.
+    Fits(usize),
+    /// The `int` wrapped to -3 or below: "block too big".
+    TooBig,
+    /// The `int` wrapped to this, in -2 to `INT_MAX`, short of the tree: the
+    /// C allocates that much and writes past it, unless a check between the
+    /// two raises first.
+    Short(i32),
+}
+
+/// [`CSize`] of a tree of `len` nodes.
+#[must_use]
+pub fn c_size(len: u64) -> CSize {
+    if let Ok(n) = usize::try_from(len) {
+        if n <= MAX_TREE {
+            return CSize::Fits(n);
+        }
+    }
+    // The low 32 bits, read as the C's `int`.
+    let low = u32::try_from(len & 0xffff_ffff).unwrap_or(0);
+    let w = i32::from_ne_bytes(low.to_ne_bytes());
+    if w <= -3 {
+        CSize::TooBig
+    } else {
+        CSize::Short(w)
+    }
+}
+
 /// A vector for `len` nodes, or `not enough memory`.
-fn alloc(len: usize) -> Result<Vec<Node>, TreeError> {
+pub fn alloc(len: usize) -> Result<Vec<Node>, TreeError> {
     if len > MAX_TREE {
         return Err(TreeError::NotEnoughMemory);
     }
@@ -269,6 +322,18 @@ fn alloc(len: usize) -> Result<Vec<Node>, TreeError> {
     Ok(v)
 }
 
+/// A vector for a tree of `len` nodes, as the C's `newtree` fares
+/// ([`c_size`]): allocated if the C's `int` holds the size, "block too big"
+/// where the C raises that, and `not enough memory` where it would write
+/// past what it allocated.
+fn alloc_c(len: u64) -> Result<Vec<Node>, TreeError> {
+    match c_size(len) {
+        CSize::Fits(n) => alloc(n),
+        CSize::TooBig => Err(TreeError::BlockTooBig),
+        CSize::Short(_) => Err(TreeError::NotEnoughMemory),
+    }
+}
+
 /// `len` zeroed nodes, to be filled by index as the C fills a `newtree`.
 fn zeroed(len: usize) -> Result<Vec<Node>, TreeError> {
     let mut v = alloc(len)?;
@@ -276,9 +341,10 @@ fn zeroed(len: usize) -> Result<Vec<Node>, TreeError> {
     Ok(v)
 }
 
-/// `a + b` in nodes, or `not enough memory`.
-fn add(a: usize, b: usize) -> Result<usize, TreeError> {
-    a.checked_add(b).ok_or(TreeError::NotEnoughMemory)
+/// A count of nodes as the exact size [`c_size`] judges. Sizes here are of
+/// trees that exist, or products of two `int`s: none reaches 2^64.
+fn wide(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 /// A size as the C's `int`: a sibling offset.
@@ -380,19 +446,39 @@ impl Tree {
         Ok(Tree { nodes })
     }
 
+    /// The size of a string pattern of `slen` bytes (`getpatt`,
+    /// `LUA_TSTRING`): `2 * (slen - 1) + 1`, computed in `size_t` and passed
+    /// as an `int` by the C.
+    #[must_use]
+    pub fn literal_size(slen: usize) -> CSize {
+        match slen {
+            0 => CSize::Fits(1),
+            n => c_size(wide(n - 1) * 2 + 1),
+        }
+    }
+
     /// A string as a pattern (`getpatt`, `LUA_TSTRING`): `""` matches
     /// always, anything else is its bytes in sequence.
     pub fn literal(s: &[u8]) -> Result<Tree, TreeError> {
         if s.is_empty() {
             return Tree::leaf(Tag::True);
         }
-        // 2 * (slen - 1) + 1, which overflows the C's `int` at 1 GiB.
-        let len = (s.len() - 1)
-            .checked_mul(2)
-            .ok_or(TreeError::NotEnoughMemory)?;
-        let mut nodes = alloc(add(len, 1)?)?;
+        let mut nodes = alloc_c(wide(s.len() - 1) * 2 + 1)?;
         fillseq(&mut nodes, Tag::Char, s.len(), Some(s));
         Ok(Tree { nodes })
+    }
+
+    /// The size of `P(n)` (`numtree`): `2 * n - 1` for `n > 0`, `2 * -n` for
+    /// `n < 0` (`-INT_MIN` is `INT_MIN` in the C, 2^31 here: the same
+    /// modulo 2^32).
+    #[must_use]
+    pub fn number_size(n: i32) -> CSize {
+        let m = u64::from(n.unsigned_abs());
+        match n {
+            0 => CSize::Fits(1),
+            n if n > 0 => c_size(2 * m - 1),
+            _ => c_size(2 * m),
+        }
     }
 
     /// A number as a pattern (`numtree`, `lpeg.c:2381`): 0 matches always,
@@ -402,19 +488,17 @@ impl Tree {
         if n == 0 {
             return Tree::leaf(Tag::True);
         }
-        let m =
-            usize::try_from(i64::from(n).unsigned_abs()).map_err(|_| TreeError::NotEnoughMemory)?;
-        let seq = m.checked_mul(2).ok_or(TreeError::NotEnoughMemory)?;
-        if n > 0 {
-            let mut nodes = alloc(seq - 1)?;
-            fillseq(&mut nodes, Tag::Any, m, None);
-            Ok(Tree { nodes })
-        } else {
-            let mut nodes = alloc(seq)?;
+        let m = usize::try_from(n.unsigned_abs()).map_err(|_| TreeError::NotEnoughMemory)?;
+        let mut nodes = match Tree::number_size(n) {
+            CSize::Fits(len) => alloc(len)?,
+            CSize::TooBig => return Err(TreeError::BlockTooBig),
+            CSize::Short(_) => return Err(TreeError::NotEnoughMemory),
+        };
+        if n < 0 {
             nodes.push(Node::new(Tag::Not));
-            fillseq(&mut nodes, Tag::Any, m, None);
-            Ok(Tree { nodes })
         }
+        fillseq(&mut nodes, Tag::Any, m, None);
+        Ok(Tree { nodes })
     }
 
     /// A charset (`newcharset`, filled).
@@ -458,7 +542,7 @@ impl Tree {
 
     /// `newroot1sib`: a `tag` node over a copy of `sib`.
     pub fn root1(tag: Tag, sib: &Tree) -> Result<Tree, TreeError> {
-        let mut nodes = alloc(add(1, sib.len())?)?;
+        let mut nodes = alloc_c(1 + wide(sib.len()))?;
         nodes.push(Node::new(tag));
         nodes.extend_from_slice(&sib.nodes);
         Ok(Tree { nodes })
@@ -467,12 +551,12 @@ impl Tree {
     /// `newroot2sib`: a `tag` node over copies of `t1` and `t2`, `t2`'s keys
     /// shifted by `correction` (what `joinktables` returned).
     pub fn root2(tag: Tag, t1: &Tree, t2: &Tree, correction: Key) -> Result<Tree, TreeError> {
-        let len = add(add(1, t1.len())?, t2.len())?;
-        let mut nodes = alloc(len)?;
+        let mut nodes = alloc_c(1 + wide(t1.len()) + wide(t2.len()))?;
         nodes.push(Node::with_u(tag, offset(1 + t1.len())?));
         nodes.extend_from_slice(&t1.nodes);
         nodes.extend_from_slice(&t2.nodes);
         let mut tree = Tree { nodes };
+        let len = tree.len();
         tree.correct_keys(1 + t1.len(), len, correction)?;
         Ok(tree)
     }
@@ -480,8 +564,7 @@ impl Tree {
     /// `lp_sub` for patterns that are not both charsets: `Seq(Not(t2), t1)`,
     /// `t2`'s keys shifted by `correction`.
     pub fn difference(t1: &Tree, t2: &Tree, correction: Key) -> Result<Tree, TreeError> {
-        let len = add(add(2, t1.len())?, t2.len())?;
-        let mut nodes = alloc(len)?;
+        let mut nodes = alloc_c(2 + wide(t1.len()) + wide(t2.len()))?;
         nodes.push(Node::with_u(Tag::Seq, offset(2 + t2.len())?));
         nodes.push(Node::new(Tag::Not));
         nodes.extend_from_slice(&t2.nodes);
@@ -518,12 +601,8 @@ impl Tree {
     /// capture per value, each with its key (0 for `nil`).
     pub fn const_group(keys: &[Key]) -> Result<Tree, TreeError> {
         let n = keys.len();
-        let len = n
-            .checked_sub(1)
-            .and_then(|m| m.checked_mul(3))
-            .and_then(|m| m.checked_add(3))
-            .ok_or(TreeError::NotEnoughMemory)?;
-        let mut nodes = alloc(len)?;
+        // `1 + 3 * (n - 1) + 2`.
+        let mut nodes = alloc_c(wide(n).saturating_mul(3))?;
         nodes.push(Node {
             cap: CapKind::Group as u8,
             ..Node::new(Tag::Capture)
@@ -554,25 +633,28 @@ impl Tree {
 
     /// The size of `p^n` for `p` of `size1` nodes (`lp_star`,
     /// `lpeg.c:2638-2660`): `(n + 1) * (size1 + 1)` for `n >= 0` and
-    /// `-n * (size1 + 3) - 1` otherwise, both `int` products in the C.
-    pub fn star_len(size1: usize, n: i32) -> Result<usize, TreeError> {
-        let big = |v: Option<usize>| v.ok_or(TreeError::NotEnoughMemory);
-        let len = if n >= 0 {
-            let reps = usize::try_from(n).map_err(|_| TreeError::NotEnoughMemory)?;
-            big(reps
-                .checked_add(1)
-                .and_then(|r| r.checked_mul(size1.checked_add(1)?)))?
+    /// `-n * (size1 + 3) - 1` otherwise, both `int` products in the C
+    /// (`-INT_MIN` is `INT_MIN` there, 2^31 here: the same modulo 2^32). A
+    /// [`CSize::Short`] size is allocated before the C checks a body for an
+    /// empty loop (`n >= 0`), and the check comes before any write.
+    #[must_use]
+    pub fn star_size(size1: usize, n: i32) -> CSize {
+        let s = wide(size1);
+        let m = u64::from(n.unsigned_abs());
+        if n >= 0 {
+            c_size((m + 1).saturating_mul(s.saturating_add(1)))
         } else {
-            let m = usize::try_from(i64::from(n).unsigned_abs())
-                .map_err(|_| TreeError::NotEnoughMemory)?;
-            big(m
-                .checked_mul(size1.checked_add(3).ok_or(TreeError::NotEnoughMemory)?)
-                .and_then(|l| l.checked_sub(1)))?
-        };
-        if len > MAX_TREE {
-            return Err(TreeError::NotEnoughMemory);
+            c_size(m.saturating_mul(s.saturating_add(3)) - 1)
         }
-        Ok(len)
+    }
+
+    /// The size of `p^n` when the C's `int` holds it ([`Tree::star_size`]).
+    pub fn star_len(size1: usize, n: i32) -> Result<usize, TreeError> {
+        match Tree::star_size(size1, n) {
+            CSize::Fits(len) => Ok(len),
+            CSize::TooBig => Err(TreeError::BlockTooBig),
+            CSize::Short(_) => Err(TreeError::NotEnoughMemory),
+        }
     }
 
     /// Room for `p^n` ([`Tree::star_len`] nodes): allocated before `p` is
@@ -630,28 +712,7 @@ impl Tree {
     /// nodes are in the walk's pre-order, so a scan of the slots that skips
     /// charset data visits exactly the same nodes, with no stack.
     pub fn correct_keys(&mut self, from: usize, to: usize, n: Key) -> Result<(), TreeError> {
-        if n == 0 {
-            return Ok(());
-        }
-        let to = to.min(self.nodes.len());
-        let mut i = from;
-        while i < to {
-            let node = &mut self.nodes[i];
-            let shifts = match node.tag {
-                Tag::OpenCall | Tag::Call | Tag::RunTime | Tag::Rule => true,
-                Tag::Capture => node.cap != CapKind::Arg as u8 && node.cap != CapKind::Num as u8,
-                _ => false,
-            };
-            if shifts && node.key > 0 {
-                node.key = node.key.checked_add(n).ok_or(TreeError::NotEnoughMemory)?;
-            }
-            i += if node.tag == Tag::Set {
-                1 + SET_SLOTS
-            } else {
-                1
-            };
-        }
-        Ok(())
+        correct_keys(&mut self.nodes, from, to, n, usize::MAX).map(|_| ())
     }
 
     /// `hascaptures` (`lpeg.c:1045`) of the whole tree: whether any node is a
@@ -690,6 +751,50 @@ impl Tree {
     pub(crate) fn nodes_mut(&mut self) -> &mut [Node] {
         &mut self.nodes
     }
+
+    /// The bytes the tree holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.nodes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Node>())
+    }
+}
+
+/// `correctkeys` over the nodes in `from..to`, at most `max` of them: the
+/// slot to go on from, which is past `to` when it is done, and always a node
+/// (never a charset's data). See [`Tree::correct_keys`].
+fn correct_keys(
+    nodes: &mut [Node],
+    from: usize,
+    to: usize,
+    n: Key,
+    max: usize,
+) -> Result<usize, TreeError> {
+    let to = to.min(nodes.len());
+    if n == 0 {
+        return Ok(to.max(from));
+    }
+    let mut i = from;
+    let mut done = 0usize;
+    while i < to && done < max {
+        let node = &mut nodes[i];
+        let shifts = match node.tag {
+            Tag::OpenCall | Tag::Call | Tag::RunTime | Tag::Rule => true,
+            Tag::Capture => node.cap != CapKind::Arg as u8 && node.cap != CapKind::Num as u8,
+            _ => false,
+        };
+        if shifts && node.key > 0 {
+            node.key = node.key.checked_add(n).ok_or(TreeError::NotEnoughMemory)?;
+        }
+        i += if node.tag == Tag::Set {
+            1 + SET_SLOTS
+        } else {
+            1
+        };
+        done += 1;
+    }
+    Ok(i)
 }
 
 /// Where each rule of a grammar goes, and the grammar's size
@@ -704,20 +809,30 @@ pub struct GrammarLayout {
 }
 
 impl GrammarLayout {
+    /// The size of a grammar of rules of `sizes` nodes (`collectrules`):
+    /// `Grammar`, each rule and its `Rule` node, and `True`.
+    #[must_use]
+    pub fn size(sizes: impl IntoIterator<Item = usize>) -> u64 {
+        sizes
+            .into_iter()
+            .fold(2, |n: u64, s| n.saturating_add(1).saturating_add(wide(s)))
+    }
+
     /// The layout for rules of `sizes` nodes, in order.
     pub fn new(sizes: &[usize]) -> Result<GrammarLayout, TreeError> {
+        let size = match c_size(GrammarLayout::size(sizes.iter().copied())) {
+            CSize::Fits(n) => n,
+            CSize::TooBig => return Err(TreeError::BlockTooBig),
+            CSize::Short(_) => return Err(TreeError::NotEnoughMemory),
+        };
         let mut positions = Vec::new();
         if !reserve(&mut positions, sizes.len()) {
             return Err(TreeError::NotEnoughMemory);
         }
-        let mut size = 1usize;
+        let mut at = 1usize;
         for &s in sizes {
-            positions.push(size);
-            size = add(add(size, 1)?, s)?;
-        }
-        let size = add(size, 1)?;
-        if size > MAX_TREE {
-            return Err(TreeError::NotEnoughMemory);
+            positions.push(at);
+            at += 1 + s;
         }
         Ok(GrammarLayout { positions, size })
     }
@@ -728,27 +843,86 @@ impl GrammarLayout {
         alloc(self.size)
     }
 
-    /// `buildgrammar` (`lpeg.c:2988`): the grammar of `rules`, each with the
-    /// shift its keys take when its constant table is appended to the
-    /// grammar's (`mergektable`). Rule `i` is numbered `i` (`cap`), its key
-    /// is 0 until a call to it is fixed, and its offset leads to the next.
-    pub fn build(&self, rules: &[(&Tree, Key)], mut space: Vec<Node>) -> Result<Tree, TreeError> {
-        let n = i32::try_from(rules.len()).map_err(|_| TreeError::NotEnoughMemory)?;
+    /// `buildgrammar` (`lpeg.c:2988`) at once: the grammar of `rules`, each
+    /// with the shift its keys take when its constant table is appended to
+    /// the grammar's. See [`GrammarBuild`], which does it a slice at a time.
+    pub fn build(&self, rules: &[(&Tree, Key)], space: Vec<Node>) -> Result<Tree, TreeError> {
+        let mut b = GrammarBuild::new(space, rules.len())?;
+        for (i, (rule, correction)) in rules.iter().enumerate() {
+            let at = b.rule(i, rule.len())?;
+            b.copy(rule, 0, usize::MAX);
+            b.correct(at, at + rule.len(), *correction, usize::MAX)?;
+        }
+        Ok(b.finish())
+    }
+}
+
+/// `buildgrammar` (`lpeg.c:2988`), in pieces a slice of fuel can do: each
+/// rule's `Rule` node, then its nodes copied, then its keys shifted by what
+/// its constant table's entries moved by when they were appended to the
+/// grammar's (`mergektable`). Rule `i` is numbered `i` (`cap`), its key is 0
+/// until a call to it is fixed, and its offset leads to the next; a `True`
+/// closes the list.
+#[derive(Debug, Clone)]
+pub struct GrammarBuild {
+    nodes: Vec<Node>,
+}
+
+impl GrammarBuild {
+    /// Start in `space` (from [`alloc`] or [`GrammarLayout::space`]) a
+    /// grammar of `rules` rules: its `Grammar` node.
+    pub fn new(mut space: Vec<Node>, rules: usize) -> Result<GrammarBuild, TreeError> {
+        let n = i32::try_from(rules).map_err(|_| TreeError::NotEnoughMemory)?;
         space.clear();
         space.push(Node::with_u(Tag::Grammar, n));
-        for (i, (rule, _)) in rules.iter().enumerate() {
-            space.push(Node {
-                cap: u8::try_from(i).map_err(|_| TreeError::Malformed)?,
-                ..Node::with_u(Tag::Rule, offset(rule.len() + 1)?)
-            });
-            space.extend_from_slice(&rule.nodes);
+        Ok(GrammarBuild { nodes: space })
+    }
+
+    /// Rule `i`'s `Rule` node, for a rule of `len` nodes: where its first
+    /// node will be.
+    pub fn rule(&mut self, i: usize, len: usize) -> Result<usize, TreeError> {
+        self.nodes.push(Node {
+            cap: u8::try_from(i).map_err(|_| TreeError::Malformed)?,
+            ..Node::with_u(Tag::Rule, offset(len + 1)?)
+        });
+        Ok(self.nodes.len())
+    }
+
+    /// Copy `rule`'s nodes from `from`, at most `max` of them: where the next
+    /// copy goes on from (`rule.len()` when it is done).
+    pub fn copy(&mut self, rule: &Tree, from: usize, max: usize) -> usize {
+        let end = rule.len().min(from.saturating_add(max));
+        if let Some(part) = rule.nodes.get(from..end) {
+            self.nodes.extend_from_slice(part);
         }
-        space.push(Node::new(Tag::True));
-        let mut tree = Tree { nodes: space };
-        for ((rule, correction), &at) in rules.iter().zip(&self.positions) {
-            tree.correct_keys(at + 1, at + 1 + rule.len(), *correction)?;
-        }
-        Ok(tree)
+        end.max(from)
+    }
+
+    /// `correctkeys(rule, n)` over the nodes `from..to`, at most `max` of
+    /// them: where to go on from (`to` or past it when it is done).
+    pub fn correct(
+        &mut self,
+        from: usize,
+        to: usize,
+        n: Key,
+        max: usize,
+    ) -> Result<usize, TreeError> {
+        correct_keys(&mut self.nodes, from, to, n, max)
+    }
+
+    /// The tree, its list of rules closed.
+    #[must_use]
+    pub fn finish(mut self) -> Tree {
+        self.nodes.push(Node::new(Tag::True));
+        Tree { nodes: self.nodes }
+    }
+
+    /// The bytes the tree being built holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.nodes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Node>())
     }
 }
 

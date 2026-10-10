@@ -26,14 +26,23 @@ error, byte for byte. Rows:
      B and ^n over it) and deep nesting
   Z  the Phase-0 corpus's rows that never call match
   Q  random construction programs
+and, from the step b review (sec_review, in the families above): left calls
+through B, which the C builds (lpeg-getfirst-unbounded-recursion); sizes past
+the C's `int` where it raises a deterministic error ("block too big", or the
+check that comes before its writes; lpeg-tree-size-int-overflow); a grammar's
+__index and locale's __newindex in their variants; __name as `%s` prints it
+(E7); and lpeg-utility's split of a string separator (U06).
 
 Rows the C answers by crashing or with undefined behaviour are never
-generated (LESSONS #033): P(n) and p^n whose sizes overflow the C's `int`,
-and the left recursions through lpeg.B and sub-grammars that the C's
-verifier misses (the port refuses them; unit tests pin that). Error
-messages are compared exactly; only the "hashorder" class (a rule name the
-grammar table's traversal order picks) is masked, by the core, except in rows
-noted `[exact]`, where one rule alone can be named.
+generated (LESSONS #033): P(n) and p^n whose sizes wrap the C's `int` to
+-2, -1 or a short size, and match-time uses of the left recursions the C's
+verifier misses. Nor are the rows where the port differs on purpose: a left
+recursion past a sub-grammar in a nullable context, which the port refuses
+(unit tests and lpeg_tree_limits pin it), and a yield from a constructor's
+callback (lpeg-callback-may-yield, pinned there too). Error messages are
+compared exactly; only the "hashorder" class (a rule name the grammar
+table's traversal order picks) is masked, by the core, except in rows noted
+`[exact]`, where one rule alone can be named.
 
 Usage: gen_m66b_trees.py > m66b_tree_cases.txt
 """
@@ -645,6 +654,191 @@ def sec_Q(seed, n):
         add("Q.%d" % i, guarded(expr), "random")
 
 
+# ------------------------------------------------------------------ the step b review
+# The rows of the step b review's probes (2026-10-10) that the C answers
+# deterministically, by area. Each is run as `[exact]`: none names a rule
+# that traversal order picks.
+REVIEW_F1 = [
+    # Left calls under a predicate in B's body: built by the C, which crashes
+    # only when a match compiles some uses of them.
+    ("D.lr.behind.0", 'return ltype(P{ "A", A = P"a" + B(#V"A" * "a") })'),
+    ("D.lr.behind.1", 'return ltype(P{ "A", A = B(P"a" - V"A") })'),
+    ("D.lr.behind.2", 'return ltype(P{ "S", S = V"A" + "z", A = B(#V"A" * "a") })'),
+    ("D.lr.behind.3", 'return ltype(P{ "A", A = B(#V"A" * "a") + "x" }), ltype(P{ "A", A = C(B(-V"A" * "a")) })'),
+    ("D.lr.behind.4", 'return ltype(P{ "A", A = V"C", C = B(#(V"A" * "b") * "c") })'),
+]
+REVIEW_F3 = [
+    # The C's `int` size wraps to -3 or below: "block too big", unpositioned.
+    ("A.size.p30p1", "return pcall(P, 2^30 + 1)"),
+    ("A.size.p31m1", "return pcall(function() return P(2^31 - 1) end)"),
+    ("A.size.m30", "return pcall(P, -(2^30))"),
+    ("A.size.m30m1", "return pcall(P, -(2^30) - 1)"),
+    ("A.size.p15e8", "return pcall(P, 1500000000)"),
+    ("A.size.m15e8", "return pcall(P, -1500000000)"),
+    ("F.size.a30", "return pcall(function() return P'a' ^ (2^30) end)"),
+    ("F.size.e30", "return pcall(function() return P'' ^ (2^30) end)"),
+    ("F.size.and31", "return pcall(function() return (#P'a') ^ (2^31 - 1) end)"),
+    ("F.size.space28", "return pcall(function() return (R'\\33\\126' + V'space') ^ (2^28) end)"),
+    ("F.size.am31", "return pcall(function() return P'a' ^ -(2^31 - 1) end)"),
+    # Wrapped to 0: the check for an empty loop comes before the C's writes.
+    ("F.size.e31", "return pcall(function() return P'' ^ (2^31 - 1) end)"),
+    # A grammar of 300 rules of 2^23 - 1 nodes wraps negative; of 520,
+    # past 2^32 to a positive size, and then the count is refused.
+    ("D.size.300", "local p = P(2^22) local g = { 'r1' } for i = 1, 300 do g['r' .. i] = p end return pcall(P, g)"),
+    ("D.size.520", "local p = P(2^22) local g = { 'r1' } for i = 1, 520 do g['r' .. i] = p end return pcall(P, g)"),
+]
+
+
+def review_rows():
+    """The probe rows, from the review's files as committed below."""
+    return REVIEW_INDEX + REVIEW_LOCALE + REVIEW_NAME
+
+
+REVIEW_INDEX = [
+    ("D.idx.nested", "local g = setmetatable({ 'S' }, { __index = setmetatable({}, { __index = function(t, k) return P'a' end }) }) return pcall(P, g)"),
+    ("D.idx.nested2", "local inner = setmetatable({}, { __index = { S = P'a' } }) return pcall(P, setmetatable({ 'S' }, { __index = inner }))"),
+    ("D.idx.num", "return pcall(P, setmetatable({ 'S' }, { __index = 5 }))"),
+    ("D.idx.str", "return pcall(P, setmetatable({ 'S' }, { __index = 'str' }))"),
+    ("D.idx.strlen", "return pcall(P, setmetatable({ 'len' }, { __index = 'str' }))"),
+    ("D.idx.bool", "return pcall(P, setmetatable({ 'S' }, { __index = true }))"),
+    ("D.idx.loop", "local t = { 'S' } setmetatable(t, { __index = t }) return pcall(P, t)"),
+    ("D.idx.loop2", "local a = {} local b = setmetatable({}, { __index = a }) setmetatable(a, { __index = b }) return pcall(P, setmetatable({ 'S' }, { __index = a }))"),
+    ("D.idx.rettable", "return pcall(P, setmetatable({ 'S' }, { __index = function() return { 'T', T = P'a' } end }))"),
+    ("D.idx.retmulti", "return ltype(P(setmetatable({ 'S' }, { __index = function() return P'a', 5 end })))"),
+    ("D.idx.retfalse", "return pcall(P, setmetatable({ 'S' }, { __index = function() return false end }))"),
+    ("D.idx.retstr", "return pcall(P, setmetatable({ 'S' }, { __index = function() return 'abc' end }))"),
+    ("D.idx.retfn", "return pcall(P, setmetatable({ 'S' }, { __index = function() return F end }))"),
+    ("D.idx.addrule", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) rawset(t, 'T', P'b') return V'T' end }))"),
+    ("D.idx.addbad", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) rawset(t, 'T', 7) return P'a' end }))"),
+    ("D.idx.add300", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) for i = 1, 300 do rawset(t, 'r' .. i, P'x') end return P'a' end }))"),
+    ("D.idx.add199", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) for i = 1, 199 do rawset(t, 'r' .. i, P'x') end return P'a' end }))"),
+    ("D.idx.add200", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) for i = 1, 200 do rawset(t, 'r' .. i, P'x') end return P'a' end }))"),
+    ("D.idx.setfirst", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) rawset(t, 1, 'Q') rawset(t, 'Q', 5) return P'a' end }))"),
+    ("D.idx.unsetfirst", "return pcall(P, setmetatable({ 'S', T = P'b' }, { __index = function(t, k) rawset(t, 1, nil) return V'T' end }))"),
+    ("D.idx.errlvl1", "return pcall(P, setmetatable({ 'S' }, { __index = function() error('boom') end }))"),
+    ("D.idx.errlvl2", "return pcall(P, setmetatable({ 'S' }, { __index = function() error('boom', 2) end }))"),
+    ("D.idx.errnil", "local ok, e = pcall(P, setmetatable({ 'S' }, { __index = function() error(nil) end })) return ok, e == nil"),
+    ("D.idx.reenter", "return ltype(P(setmetatable({ 'S' }, { __index = function() return P(setmetatable({ 'T' }, { __index = function() return P'b' end })) end })))"),
+    ("D.idx.args", "local n, a, b local g = setmetatable({ 2.5 }, { __index = function(...) n = select('#', ...) a, b = ... return P'a' end }) local p = P(g) return n, rawequal(a, g), b"),
+    ("D.idx.op2", "return pcall(function() return P'x' + setmetatable({ 'S' }, { __index = function() error('e2', 0) end }) end)"),
+    ("D.idx.op1", "return pcall(function() return setmetatable({ 'S' }, { __index = function() error('e1', 0) end }) * P'x' end)"),
+    ("D.idx.both", "local log = {} local function g(n) return setmetatable({ n }, { __index = function(t, k) log[#log + 1] = k return P(k) end }) end local r = mt.__add(g'a', g'b') return table.concat(log, ','), ltype(r)"),
+    ("D.idx.both2", "local log = {} local function g(n) return setmetatable({ n }, { __index = function(t, k) log[#log + 1] = k return P(k) end }) end local ok = pcall(mt.__sub, g'a', g'b') return table.concat(log, ','), ok"),
+    ("D.idx.div", "return pcall(function() return setmetatable({ 'S' }, { __index = function() return P'a' end }) / 'x' end)"),
+    ("D.idx.B", "return ltype(B(setmetatable({ 'S' }, { __index = function() return P'a' end })))"),
+    ("D.idx.Cmtorder", "local n = 0 local ok, e = pcall(Cmt, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), 5) return ok, e, n"),
+    ("D.idx.Cforder", "local n = 0 local ok, e = pcall(Cf, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), 5) return ok, e, n"),
+    ("D.idx.Cgorder", "local n = 0 local ok, e = pcall(Cg, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), {}) return ok, e, n"),
+    ("D.idx.poworder", "local n = 0 local ok, e = pcall(mt.__pow, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), 2) return ok, e, n"),
+    ("D.idx.divorder", "local n = 0 local ok, e = pcall(mt.__div, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), true) return ok, e, n"),
+    ("D.idx.divnumorder", "local n = 0 local ok, e = pcall(mt.__div, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end }), -1) return ok, e, n"),
+    ("D.idx.ptree", "local n = 0 local ok, e = pcall(lpeg.ptree, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end })) return ok, e, n"),
+    ("D.idx.pcode", "local n = 0 local ok, e = pcall(lpeg.pcode, setmetatable({ 'S' }, { __index = function() n = n + 1 return P'a' end })) return ok, e, n"),
+    # Re-entry without end: the C's call depth stops it.
+    ("D.idx.deep", "local d = 0 local function mk() return setmetatable({ 'S' }, { __index = function() d = d + 1 return P(mk()) end }) end local ok, e = pcall(P, mk()) return ok, e, d > 150"),
+    ("D.idx.calltbl", "return pcall(P, setmetatable({ 'S' }, { __index = setmetatable({}, { __call = function() return P'a' end }) }))"),
+    ("D.idx.pat", "return pcall(P, setmetatable({ 'S' }, { __index = P'x' }))"),
+    ("D.idx.pat2", "return pcall(P, setmetatable({ 'nosuch' }, { __index = P'x' }))"),
+    ("D.idx.lpeg", "return pcall(P, setmetatable({ 'version' }, { __index = lpeg }))"),
+    ("D.idx.co", "return pcall(P, setmetatable({ 'S' }, { __index = co }))"),
+    ("D.idx.fn2", "return pcall(P, setmetatable({ 'S' }, { __index = setmetatable({}, { __index = setmetatable({}, { __index = function(t, k) return P(k) end }) }) }))"),
+    ("D.idx.rawget", "return pcall(P, setmetatable({ 'S' }, { __index = rawget }))"),
+    ("D.idx.P", "return pcall(P, setmetatable({ 'S' }, { __index = P }))"),
+    ("D.idx.V", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) return V(k) end }))"),
+    ("D.idx.Pidx", "return pcall(P, setmetatable({ 'S' }, { __index = function(t, k) return P(t) end }))"),
+    # Keys that do or do not convert to 1, and initial rules of every kind.
+    ("D.key.s1", "return pcall(P, { 'S', S = P's', ['1'] = 5 })"),
+    ("D.key.s1sp", "return pcall(P, { 'S', S = P's', [' 1 '] = 5 })"),
+    ("D.key.s10", "return pcall(P, { 'S', S = P's', ['1.0'] = 5 })"),
+    ("D.key.s0x1", "return pcall(P, { 'S', S = P's', ['0x1'] = 5 })"),
+    ("D.key.s1e0", "return pcall(P, { 'S', S = P's', ['1e0'] = 5 })"),
+    ("D.key.splus1", "return pcall(P, { 'S', S = P's', ['+1'] = 5 })"),
+    ("D.key.s1nul", "return pcall(P, { 'S', S = P's', ['1\\0'] = 5 })"),
+    ("D.key.sinf", "return pcall(P, { 'S', S = P's', ['inf'] = 5 })"),
+    ("D.key.s0x1p0", "return pcall(P, { 'S', S = P's', ['0x1p0'] = 5 })"),
+    ("D.key.s1dot", "return pcall(P, { 'S', S = P's', ['1.'] = 5 })"),
+    ("D.key.sdot1", "return pcall(P, { 'S', S = P's', ['.1e1'] = 5 })"),
+    ("D.key.stab", "return pcall(P, { 'S', S = P's', ['\\t1\\n'] = 5 })"),
+    ("D.key.svt", "return pcall(P, { 'S', S = P's', ['\\v1\\f'] = 5 })"),
+    ("D.key.s0001", "return pcall(P, { 'S', S = P's', ['0001'] = 5 })"),
+    ("D.key.near1", "return pcall(P, { 'S', S = P's', [1 + 2^-52] = 5 })"),
+    ("D.key.firstnum", "return pcall(P, { 2, [2] = P'a', ['2'] = 5 })"),
+    ("D.key.firststr", "return pcall(P, { '2', ['2'] = P'a', [2] = 5 })"),
+    ("D.first.f2p63", "return pcall(P, { 2^63 })"),
+    ("D.first.negz", "return pcall(P, { -0.0 })"),
+    ("D.first.mininteger", "return pcall(P, { math.mininteger })"),
+    ("D.first.inf", "return pcall(P, { 1/0 })"),
+    ("D.first.tbl", "return pcall(P, { {} })"),
+    ("D.first.nul", "return pcall(P, { 'a\\0b' })"),
+    ("D.first.long", "return pcall(P, { ('x'):rep(300) })"),
+    ("D.first.pctname", "return pcall(P, { '%d%s' })"),
+    ("D.first.pi", "return pcall(P, { math.pi, [math.pi] = 5 })"),
+    ("D.first.big", "return pcall(P, { 2^53, [2^53] = 5 })"),
+    ("D.first.rawnil", "return pcall(P, setmetatable({}, { __index = function() return 'S' end }))"),
+    ("D.first.pat", "local a = P'a' local g = { a, x = V(1) } return ltype(P(g))"),
+    ("D.first.used", "return pcall(P, { V(1) * 'a' })"),
+    ("D.first.empty", "return pcall(P, { '', [''] = V'' })"),
+    ("D.undef.pct", "return pcall(P, { 'S', S = V'%s%d' })"),
+]
+REVIEW_LOCALE = [
+    ("I.loc.num", "return pcall(locale, setmetatable({}, { __newindex = 5 }))"),
+    ("I.loc.str", "return pcall(locale, setmetatable({}, { __newindex = 'abc' }))"),
+    ("I.loc.raw", "local log = {} local t = setmetatable({ alpha = 1, space = 2 }, { __newindex = function(t, k, v) log[#log + 1] = k rawset(t, k, v) end }) locale(t) return table.concat(log, ','), ltype(t.alpha), ltype(t.space)"),
+    ("I.loc.errt", "local e0 = {} local ok, e = pcall(locale, setmetatable({}, { __newindex = function() error(e0) end })) return ok, rawequal(e, e0)"),
+    ("I.loc.errlvl1", "return pcall(locale, setmetatable({}, { __newindex = function() error('x') end }))"),
+    ("I.loc.loop", "local t = {} setmetatable(t, { __newindex = t }) return pcall(locale, t)"),
+    ("I.loc.extra", "local t = {} return rawequal(locale(t, 5, 6), t), select('#', locale(t, 1))"),
+    ("I.loc.nilextra", "return type(locale(nil, 5)), select('#', locale())"),
+    ("I.loc.ret", "local t = setmetatable({}, { __newindex = function() return 1, 2, 3 end }) return rawequal(locale(t), t)"),
+    ("I.loc.deep", "local d = 0 local function f(t, k, v) d = d + 1 locale(setmetatable({}, { __newindex = f })) end local ok, e = pcall(locale, setmetatable({}, { __newindex = f })) return ok, e, d > 150"),
+    ("I.loc.mtkey", "local t = setmetatable({}, { __newindex = function(t, k, v) rawset(t, k, ltype(v)) end }) locale(t) return t.alnum, t.xdigit"),
+    ("I.loc.calltbl", "local log = {} local t = setmetatable({}, { __newindex = setmetatable({}, { __call = function() log[#log+1] = 1 end }) }) locale(t) return #log, next(t) == nil"),
+    ("I.loc.pat", "return pcall(locale, setmetatable({}, { __newindex = P'x' }))"),
+    ("I.loc.P", "return pcall(locale, setmetatable({}, { __newindex = P }))"),
+    ("I.loc.rawset", "local t = setmetatable({}, { __newindex = rawset }) locale(t) return ltype(t.alpha)"),
+]
+REVIEW_NAME = [
+    # `__name` as `%s` prints it: up to its first NUL, byte for byte, from
+    # any value's metatable in a type error.
+    ("J.name.nul", "return kind(setmetatable({}, { __name = 'a\\0b' }))"),
+    ("J.name.hi", "return kind(setmetatable({}, { __name = '\\255x' }))"),
+    ("J.name.empty", "return kind(setmetatable({}, { __name = '' }))"),
+    ("J.name.num", "return kind(setmetatable({}, { __name = 5 })), kind(setmetatable({}, { __name = true }))"),
+    ("J.name.idx", "return kind(setmetatable({}, setmetatable({}, { __index = { __name = 'X' } })))"),
+    # (Called from Lua, so that the stdlib's function is named as the C
+    # names it; stdlib-bad-argument-naming.)
+    ("J.name.te.nul", "return perr(function() return string.rep(setmetatable({}, { __name = 'a\\0b' }), 1) end)"),
+    ("J.name.te.hi", "return perr(function() return string.rep(setmetatable({}, { __name = '\\255x' }), 1) end)"),
+    ("J.name.te.num", "return perr(function() return string.rep(setmetatable({}, { __name = 5 }), 1) end)"),
+    ("J.name.te.strmt", "local smt = getmetatable('') smt.__name = 'Str' local a, b = perr(function() return string.rep('x', 'y') end) smt.__name = nil return a, b"),
+    ("J.name.te.strmt2", "local smt = getmetatable('') smt.__name = 'Str' local a, b = pcall(B, 'x', 'y') local c, d = pcall(Cmt, P'a', 'x') local e, f = pcall(locale, 'x') smt.__name = nil return a, b, c, d, e, f"),
+    ("J.name.te.lpeg", "return pcall(Cf, P'a', Named), pcall(Cmt, P'a', setmetatable({}, { __name = 'a\\0b' })), pcall(locale, P'a'), pcall(Cb, Named)"),
+    ("J.name.te.lpeg2", "return pcall(mt.__pow, Named, 1), pcall(mt.__pow, P'a', Named), pcall(B, Named), pcall(lpeg.pcode, Named)"),
+]
+REVIEW_UTILITY = [
+    ("U06", 'return pcall(U.split, "a,b,,c", ",")'),
+    ("U06b", 'return pcall(U.split, "a,b,,c", 5)'),
+    ("U.anywhere", 'return ltype(U.anywhere(P"a")), ltype(U.localize({ V"alpha" })), ltype(U.atwordboundary(P"x"))'),
+]
+
+
+def sec_review():
+    for cid, chunk in REVIEW_F1 + REVIEW_F3 + review_rows():
+        add(cid, chunk, "[exact] review")
+    # lpeg-utility.lua as nselib has it, loaded with lpeg and a stub stdnse
+    # under a fixed chunk name: `split` with a string separator builds a
+    # grammar whose `sep` rule is a string (U06).
+    here = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
+    with open(__import__("os").path.join(here, "../../../../../nselib/lpeg-utility.lua"), "rb") as fh:
+        src = fh.read().hex()
+    load = ('local src = ("%s"):gsub("%%x%%x", function(c) return string.char(tonumber(c, 16)) end) '
+            'local env = setmetatable({ require = function(n) if n == "lpeg" then return lpeg '
+            'elseif n == "stdnse" then return {} else return _G[n] end end }, { __index = _G }) '
+            'local U = load(src, "@nselib/lpeg-utility.lua", "t", env)() ' % src)
+    for cid, chunk in REVIEW_UTILITY:
+        add("D." + cid, load + chunk, "[exact] review")
+
+
 def main():
     sec_A()
     sec_B()
@@ -659,6 +853,7 @@ def main():
     sec_L()
     sec_M()
     sec_Z()
+    sec_review()
     sec_Q(66, 3000)
     out = sys.stdout
     out.write("# M6.6 step b LPeg tree corpus: id<TAB>hex(chunk)<TAB>note. "

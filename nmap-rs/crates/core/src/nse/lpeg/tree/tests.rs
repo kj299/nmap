@@ -82,9 +82,8 @@ fn fixedlen_ref(t: &Tree, i: usize, mut count: usize, len: i64) -> i64 {
 }
 
 /// `verifyerror` and `verifyrule` (`lpeg.c:3020-3088`). `fixed`: with the
-/// port's two corrections (`lpeg-getfirst-unbounded-recursion`): a
-/// look-behind's body is checked, and a sub-grammar in a nullable context
-/// is nullable. Without them, the C exactly.
+/// port's correction (`lpeg-getfirst-unbounded-recursion`): a sub-grammar
+/// in a nullable context is nullable. Without it, the C exactly.
 fn verifyrule_ref(
     t: &Tree,
     i: usize,
@@ -96,11 +95,8 @@ fn verifyrule_ref(
     let n = t.node(i).expect("in tree");
     match n.tag {
         Tag::Char | Tag::Set | Tag::Any | Tag::False => Ok(nullable),
-        Tag::True => Ok(true),
-        Tag::Behind if !fixed => Ok(true),
-        Tag::Not | Tag::And | Tag::Rep | Tag::Behind => {
-            verifyrule_ref(t, i + 1, passed, npassed, true, fixed)
-        }
+        Tag::True | Tag::Behind => Ok(true),
+        Tag::Not | Tag::And | Tag::Rep => verifyrule_ref(t, i + 1, passed, npassed, true, fixed),
         Tag::Capture | Tag::RunTime => verifyrule_ref(t, i + 1, passed, npassed, nullable, fixed),
         Tag::Call => verifyrule_ref(t, t.sib2(i).unwrap(), passed, npassed, nullable, fixed),
         Tag::Seq => {
@@ -229,20 +225,27 @@ fn finalfix_ref(
 // ------------------------------------------------------------------------
 // Driving the walkers.
 
-/// Run a walker to its answer, `slice` steps at a time (`u32::MAX`: at once).
+/// The most steps any walk in these tests takes, many times over: a walker
+/// that runs past it — a verifier that lost its bound on the rules it
+/// follows, say — fails by assertion here, not by a hang.
+const MAX_STEPS: u64 = 50_000_000;
+
+/// Run a walker to its answer, `slice` steps at a time (`u32::MAX`: at once),
+/// within [`MAX_STEPS`] steps.
 fn drive<T>(
     slice: u32,
     mut f: impl FnMut(&mut u32) -> Poll<Result<T, TreeError>>,
 ) -> Result<T, TreeError> {
-    let mut slices = 0u64;
+    let mut steps = 0u64;
     loop {
-        let mut budget = slice;
+        let asked = u64::from(slice).min(MAX_STEPS - steps).max(1);
+        let mut budget = asked as u32;
         if let Poll::Ready(r) = f(&mut budget) {
             return r;
         }
         assert_eq!(budget, 0, "pending with budget left");
-        slices += 1;
-        assert!(slices < 10_000_000, "no progress");
+        steps += asked;
+        assert!(steps < MAX_STEPS, "no answer within {MAX_STEPS} steps");
     }
 }
 
@@ -390,24 +393,139 @@ fn repetitions_have_the_cs_layout() {
     );
 }
 
+/// Sizes the C computes in an `int` (`lpeg-tree-size-int-overflow`,
+/// `lpeg-pattern-string-size-overflow`), each judged as `newtree` judges the
+/// wrapped `int`, against what the tree's oracle does with it (measured;
+/// `crate::nse::lpeg`'s tests and `lpeg_tree_limits` raise them through the
+/// VM): wrapped to -3 or below, "block too big"; to -2 or -1, or short of
+/// the tree, an allocation the C writes past, `not enough memory` here.
 #[test]
-fn sizes_the_cs_int_cannot_hold_are_not_enough_memory() {
+fn sizes_are_judged_as_the_cs_wrapped_int() {
+    use CSize::{Fits, Short, TooBig};
     let nem = Err(TreeError::NotEnoughMemory);
-    // `P(2^31 + 1)` narrows to -2147483647: 2 * 2147483647 nodes.
-    assert_eq!(Tree::number(-2_147_483_647).map(|_| ()), nem);
+    let big = Err(TreeError::BlockTooBig);
+    assert_eq!(c_size(0x7fff_ffff), Fits(MAX_TREE));
+    assert_eq!(c_size(0x8000_0000), TooBig, "INT_MIN");
+    assert_eq!(c_size(0xffff_fffd), TooBig, "-3");
+    assert_eq!(c_size(0xffff_fffe), Short(-2));
+    assert_eq!(c_size(0xffff_ffff), Short(-1));
+    assert_eq!(c_size(0x1_0000_0000), Short(0));
+    assert_eq!(c_size(0x1_0000_0005), Short(5));
+    // P(n): 2n - 1 and 2 * -n.
+    assert_eq!(Tree::number_size(0x4000_0000), Fits(0x7fff_ffff));
+    assert_eq!(Tree::number_size(0x4000_0001), TooBig, "P(2^30 + 1)");
+    assert_eq!(Tree::number_size(i32::MAX), TooBig, "P(2^31 - 1): -3");
+    assert_eq!(Tree::number_size(1_500_000_000), TooBig);
+    assert_eq!(Tree::number_size(-1_500_000_000), TooBig);
+    assert_eq!(
+        Tree::number_size(-0x4000_0000),
+        TooBig,
+        "P(-(2^30)): INT_MIN"
+    );
+    assert_eq!(Tree::number_size(-0x3fff_ffff), Fits(0x7fff_fffe));
+    assert_eq!(
+        Tree::number_size(-0x7fff_fffe),
+        TooBig,
+        "P(-(2^31 - 2)): -4"
+    );
+    // `P(2^31 + 1)` narrows to -2147483647: -2, and the C crashes.
+    assert_eq!(Tree::number_size(-0x7fff_ffff), Short(-2));
+    assert_eq!(Tree::number_size(i32::MIN), Short(0));
+    assert_eq!(Tree::number(-0x7fff_ffff).map(|_| ()), nem);
     assert_eq!(Tree::number(i32::MIN).map(|_| ()), nem);
-    assert_eq!(Tree::number(i32::MAX).map(|_| ()), nem);
+    assert_eq!(Tree::number(i32::MAX).map(|_| ()), big);
+    // A string of `slen` bytes: 2 * (slen - 1) + 1.
+    assert_eq!(Tree::literal_size(0x4000_0000), Fits(0x7fff_ffff));
+    assert_eq!(Tree::literal_size(0x4000_0001), TooBig, "1 GiB + 1");
+    assert_eq!(Tree::literal_size(0x8000_0000), Short(-1), "2 GiB");
+    assert_eq!(Tree::literal_size(0x8000_0001), Short(1), "2 GiB + 1");
     // `p^n`: (n + 1) * (size + 1) and -n * (size + 3) - 1.
+    assert_eq!(Tree::star_size(1, 3), Fits(8));
+    assert_eq!(Tree::star_size(1, -3), Fits(11));
+    assert_eq!(Tree::star_size(0, 0x3fff_ffff), Fits(0x4000_0000));
+    assert_eq!(Tree::star_size(1, 0x4000_0000), TooBig, "P'a'^(2^30)");
+    assert_eq!(
+        Tree::star_size(1, 0x3fff_ffff),
+        TooBig,
+        "P''^(2^30 - 1): INT_MIN"
+    );
+    assert_eq!(Tree::star_size(5, 0x3fff_ffff), TooBig, "P'abc'^(2^30 - 1)");
+    assert_eq!(
+        Tree::star_size(2, i32::MAX),
+        TooBig,
+        "(#P'a')^(2^31 - 1): INT_MIN"
+    );
+    assert_eq!(Tree::star_size(1, i32::MAX), Short(0), "P''^(2^31 - 1)");
+    assert_eq!(
+        Tree::star_size(3, i32::MAX),
+        Short(0),
+        "P'ab'^(2^31 - 1): crashes"
+    );
+    assert_eq!(
+        Tree::star_size(1, -0x4000_0000),
+        Short(-1),
+        "P'a'^-(2^30): crashes"
+    );
+    assert_eq!(
+        Tree::star_size(3, -0x4000_0000),
+        Short(i32::MAX),
+        "P'ab'^-(2^30)"
+    );
+    assert_eq!(
+        Tree::star_size(1, -0x7fff_ffff),
+        TooBig,
+        "P'a'^-(2^31 - 1): -5"
+    );
+    assert_eq!(
+        Tree::star_size(1, i32::MIN),
+        Short(-1),
+        "P'a'^(-2^31): crashes"
+    );
     assert_eq!(Tree::star_len(1, i32::MAX).map(|_| ()), nem);
-    assert_eq!(Tree::star_len(1, i32::MIN).map(|_| ()), nem);
+    assert_eq!(Tree::star_len(1, 0x4000_0000).map(|_| ()), big);
     assert_eq!(Tree::star_len(usize::MAX, 1).map(|_| ()), nem);
-    assert_eq!(Tree::star_len(1, 3), Ok(8));
-    assert_eq!(Tree::star_len(1, -3), Ok(11));
-    // The largest the C's `int` holds is still a size, if memory allows.
-    assert_eq!(Tree::star_len(0, 0x3fff_ffff), Ok(0x4000_0000));
-    assert_eq!(Tree::star_len(1, 0x3fff_ffff).map(|_| ()), nem);
-    assert_eq!(GrammarLayout::new(&[MAX_TREE]).map(|_| ()), nem);
+    // A grammar: 2 + the rules, each with its `Rule` node. 300 rules of
+    // 2^23 - 1 nodes wrap negative; 520 wrap past 2^32 to a positive size
+    // (the C then refuses the count, which the binding reproduces).
+    let sizes = |n: usize, s: usize| vec![s; n];
+    assert_eq!(
+        GrammarLayout::size(sizes(300, 0x7f_ffff)),
+        300 * 0x80_0000 + 2
+    );
+    assert_eq!(c_size(GrammarLayout::size(sizes(300, 0x7f_ffff))), TooBig);
+    assert!(matches!(
+        c_size(GrammarLayout::size(sizes(520, 0x7f_ffff))),
+        Short(w) if w > 0
+    ));
+    assert_eq!(c_size(GrammarLayout::size(sizes(128, 0xff_ffff))), TooBig);
+    assert_eq!(GrammarLayout::new(&[MAX_TREE]).map(|_| ()), big);
     assert_eq!(GrammarLayout::new(&[usize::MAX]).map(|_| ()), nem);
+}
+
+/// `fixedlenx`'s `len + 1` past `INT_MAX` wraps to `INT_MIN` in the C, and
+/// every caller turns a negative length into -1: a fixed length past
+/// `INT_MAX` is "variable", never a wrapped positive one. Reaching it from 0
+/// takes 2^31 steps (29 s on the oracle, a grammar doubling 31 times), so
+/// the walk starts where such a walk would be.
+#[test]
+fn a_fixed_length_past_int_max_is_variable() {
+    let ab = Tree::literal(b"ab").unwrap();
+    let at = |t: &Tree, len: i64| {
+        let mut w = FixedLen::starting_at(0, len);
+        drive(3, |b| w.step(t, b)).unwrap()
+    };
+    let max = i64::from(i32::MAX);
+    assert_eq!(at(&ab, max - 2), max);
+    assert_eq!(at(&ab, max - 1), -1);
+    assert_eq!(at(&ab, max), -1);
+    // In a choice, either side: both are measured from the same length.
+    let alt = Tree::root2(Tag::Choice, &ab, &Tree::literal(b"cd").unwrap(), 0).unwrap();
+    assert_eq!(at(&alt, max - 2), max);
+    assert_eq!(at(&alt, max - 1), -1);
+    // A sequence stops at the first wrapped length.
+    let seq = Tree::root2(Tag::Seq, &ab, &Tree::number(3).unwrap(), 0).unwrap();
+    assert_eq!(at(&seq, max - 5), max);
+    assert_eq!(at(&seq, max - 4), -1);
 }
 
 #[test]
@@ -567,6 +685,17 @@ fn random_tree(r: &mut Rng, d: u32, rules: u32) -> Tree {
             Tree::star(&t, n, Tree::star_space(t.len(), n).unwrap()).unwrap()
         }
         8 => Tree::difference(&sub(r), &sub(r), 0).unwrap(),
+        // A one-rule sub-grammar, alone or under a predicate or repetition
+        // (the hidden pass's case), of a body with no calls.
+        9 if r.below(3) == 0 => {
+            let g = grammar_of(vec![random_tree(r, d - 1, 0)]);
+            match r.below(4) {
+                0 => Tree::root1(Tag::Not, &g).unwrap(),
+                1 => Tree::root1(Tag::And, &g).unwrap(),
+                2 => Tree::star(&g, -1, Tree::star_space(g.len(), -1).unwrap()).unwrap(),
+                _ => g,
+            }
+        }
         _ => {
             let t = sub(r);
             Tree::behind(1, &t).unwrap()
@@ -577,7 +706,21 @@ fn random_tree(r: &mut Rng, d: u32, rules: u32) -> Tree {
 /// A random grammar of `n` rules (keys `1..=n`), built and fixed; `None`
 /// when `finalfix` rejects it, after checking it rejects it as the C does.
 fn random_grammar(r: &mut Rng, n: u32, d: u32) -> Option<Tree> {
-    let rules: Vec<Tree> = (0..n).map(|_| random_tree(r, d, n)).collect();
+    let mut rules: Vec<Tree> = (0..n).map(|_| random_tree(r, d, n)).collect();
+    // One in four: the shape the hidden pass exists for, a sub-grammar under
+    // a predicate or an optional repetition before a call, as an
+    // alternative of the first rule.
+    if r.below(4) == 0 {
+        let sub = grammar_of(vec![random_tree(r, 2, 0)]);
+        let pred = match r.below(3) {
+            0 => Tree::root1(Tag::Not, &sub).unwrap(),
+            1 => Tree::root1(Tag::And, &sub).unwrap(),
+            _ => Tree::star(&sub, -1, Tree::star_space(sub.len(), -1).unwrap()).unwrap(),
+        };
+        let call = open_call(1 + r.below(u64::from(n)) as Key);
+        let seq = Tree::root2(Tag::Seq, &pred, &call, 0).unwrap();
+        rules[0] = Tree::root2(Tag::Choice, &seq, &rules[0], 0).unwrap();
+    }
     let sizes: Vec<usize> = rules.iter().map(Tree::len).collect();
     let layout = GrammarLayout::new(&sizes).unwrap();
     let pairs: Vec<(&Tree, Key)> = rules.iter().map(|t| (t, 0)).collect();
@@ -674,8 +817,10 @@ fn walkers_agree_with_the_c_on_random_grammars() {
     }
     // Both kinds of answer were seen, so neither path went untested.
     assert!(verified[0] > 0 && verified[1] > 0, "{verified:?}");
+    // (Miri's 20 rounds may not: there the hidden pass is exercised by
+    // `left_recursion_past_a_sub_grammar_is_refused_and_through_behind_is_not`.)
     assert!(
-        corrected > 0,
+        corrected > 0 || cfg!(miri),
         "no random grammar reached the hidden pass's errors"
     );
 }
@@ -751,24 +896,22 @@ fn open_call(k: Key) -> Tree {
     v
 }
 
-/// The two left recursions the C's verifier lets through, each of which then
-/// recursed without bound in its `getfirst` (measured on the tree's oracle:
-/// a crash or a hang, depending on how the rule is reached), are refused
-/// here as any other left recursion is (`lpeg-getfirst-unbounded-recursion`).
+/// A left call through a look-behind is not followed, as in the C, which
+/// builds such grammars and matches with them in some uses
+/// (`lpeg-getfirst-unbounded-recursion`: its compiler is step c's); a left
+/// recursion past a sub-grammar in a nullable context, which the C's
+/// verifier misses and on which it hangs at the first match that reaches
+/// it, is refused here as any other left recursion is.
 #[test]
-fn left_recursion_through_behind_or_a_sub_grammar_is_refused() {
+fn left_recursion_past_a_sub_grammar_is_refused_and_through_behind_is_not() {
     let a = Tree::literal(b"a").unwrap();
     // `A <- B(P"a" - V"A")`: `B`'s body has fixed length 1.
     let body = Tree::difference(&a, &open_call(1), 0).unwrap();
     let behind = Tree::behind(1, &body).unwrap();
     let g = grammar_of(vec![behind]);
-    assert_eq!(
-        verifygrammar_ref(&g, 0, false),
-        Ok(()),
-        "the C lets it through"
-    );
-    assert_eq!(verify(&g, 0), Err(TreeError::LeftRecursive(1)));
-    // `A <- B(#V"A" * "a")`, which the C compiles unless a choice reaches it.
+    assert_eq!(verifygrammar_ref(&g, 0, false), Ok(()), "the C builds it");
+    assert_eq!(verify(&g, 0), Ok(()));
+    // `A <- P"a" + B(#V"A" * "a")`, which the C builds and matches.
     let and = Tree::root2(
         Tag::Seq,
         &Tree::root1(Tag::And, &open_call(1)).unwrap(),
@@ -776,8 +919,10 @@ fn left_recursion_through_behind_or_a_sub_grammar_is_refused() {
         0,
     )
     .unwrap();
-    let g = grammar_of(vec![Tree::behind(1, &and).unwrap()]);
-    assert_eq!(verify(&g, 0), Err(TreeError::LeftRecursive(1)));
+    let alt = Tree::root2(Tag::Choice, &a, &Tree::behind(1, &and).unwrap(), 0).unwrap();
+    let g = grammar_of(vec![alt]);
+    assert_eq!(verify(&g, 0), Ok(()));
+    assert_eq!(verifygrammar_ref(&g, 0, false), Ok(()));
     // `A <- -P{P"x"} * V"A"`.
     let sub = grammar_of(vec![Tree::literal(b"x").unwrap()]);
     let not = Tree::root1(Tag::Not, &sub).unwrap();

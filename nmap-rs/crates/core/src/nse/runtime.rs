@@ -435,4 +435,37 @@ mod tests {
             "the runtime registers lpeg"
         );
     }
+
+    /// Nothing calls `lpeg::register_for_tests` but the `lpeg` module's own
+    /// tests, the integration tests and the fuzz targets (E9): a search of
+    /// every crate's sources, so a caller anywhere else — the engine, the
+    /// command line — fails here, not only one in this file.
+    #[test]
+    #[cfg_attr(miri, ignore = "reads the source tree")]
+    fn only_tests_register_lpeg() {
+        let call = format!("{}(", ["register", "_for_tests"].concat());
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..")];
+        let (mut files, mut callers) = (0usize, Vec::new());
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a crate directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    let skip = path.ends_with("tests")
+                        || path.ends_with("target")
+                        || path.ends_with("nse/lpeg");
+                    if !skip {
+                        dirs.push(path);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files = files.saturating_add(1);
+                    let src = std::fs::read_to_string(&path).expect("a source file");
+                    if src.contains(&call) {
+                        callers.push(path);
+                    }
+                }
+            }
+        }
+        assert!(files > 100, "searched only {files} files");
+        assert!(callers.is_empty(), "lpeg is registered by {callers:?}");
+    }
 }

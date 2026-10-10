@@ -15,6 +15,15 @@
 //! one masked class is the rule name four grammar errors take from the
 //! grammar table's traversal order ("hashorder"), which the core masks on
 //! both sides except in rows noted `[exact]`.
+//!
+//! **Ad-hoc cases.** `LPEG_TREE_CASES=FILE` runs a cases file of the same
+//! format (`id<TAB>hex(chunk)<TAB>note`) in place of the corpus, and
+//! `LPEG_TREE_GOLDEN=FILE` compares it with that golden (the oracle's
+//! output for it: `./oracle/lua oracle/m66b_tree_driver.lua
+//! oracle/m66b_tree_core.lua FILE`). With no golden, the port's answers are
+//! written to `LPEG_TREE_OUT` (default `lpeg_tree_port.txt`) in the
+//! golden's format, for `diff`, and the test passes. The family floors apply
+//! only to the corpus.
 #![cfg(not(miri))] // reads the corpus from disk
 
 mod lpeg_eval;
@@ -41,10 +50,9 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// The non-comment rows of a corpus file, split on tabs.
-fn rows(file: &str) -> Vec<Vec<String>> {
-    let path = corpus(file);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+/// The non-comment rows of a cases or golden file, split on tabs.
+fn rows(path: &Path) -> Vec<Vec<String>> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     text.lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| l.splitn(3, '\t').map(str::to_string).collect())
@@ -73,17 +81,43 @@ const MIN_ROWS: [(&str, usize); 14] = [
 
 #[test]
 fn constructions_match_the_trees_own_lpeg() {
-    let cases = rows("m66b_tree_cases.txt");
-    let golden: HashMap<String, (String, String)> = rows("m66b_tree_golden.txt")
-        .into_iter()
-        .map(|r| (r[0].clone(), (r[1].clone(), r[2].clone())))
-        .collect();
-    assert_eq!(
-        cases.len(),
-        golden.len(),
-        "cases and golden differ in length"
+    let adhoc = std::env::var_os("LPEG_TREE_CASES").map(PathBuf::from);
+    let cases = rows(
+        &adhoc
+            .clone()
+            .unwrap_or_else(|| corpus("m66b_tree_cases.txt")),
     );
+    let golden_file = match (&adhoc, std::env::var_os("LPEG_TREE_GOLDEN")) {
+        (_, Some(g)) => Some(PathBuf::from(g)),
+        (None, None) => Some(corpus("m66b_tree_golden.txt")),
+        (Some(_), None) => None,
+    };
+    let golden: Option<HashMap<String, (String, String)>> = golden_file.map(|g| {
+        rows(&g)
+            .into_iter()
+            .map(|r| (r[0].clone(), (r[1].clone(), r[2].clone())))
+            .collect()
+    });
+    if let Some(golden) = &golden {
+        assert_eq!(
+            cases.len(),
+            golden.len(),
+            "cases and golden differ in length"
+        );
+    }
+    // The hashorder mask leaves `initial rule 'X' is not a pattern` alone:
+    // that name is the grammar's first field, not one the table's order
+    // picks, and rows not noted `[exact]` show it.
+    if let (None, Some(golden)) = (&adhoc, &golden) {
+        let shown = golden
+            .values()
+            .any(|(_, p)| String::from_utf8_lossy(&unhex(p)).contains("initial rule 'S' is not"));
+        assert!(shown, "the mask hides the initial rule's name");
+    }
     for (family, min) in MIN_ROWS {
+        if adhoc.is_some() {
+            break;
+        }
         let n = cases
             .iter()
             .filter(|r| r[0].split('.').next() == Some(family))
@@ -116,6 +150,7 @@ fn constructions_match_the_trees_own_lpeg() {
     });
 
     let mut mismatches = Vec::new();
+    let mut port_out = String::new();
     for row in &cases {
         let (id, chunk, note) = (
             &row[0],
@@ -149,6 +184,10 @@ fn constructions_match_the_trees_own_lpeg() {
                 },
             )
         };
+        let Some(golden) = &golden else {
+            port_out.push_str(&format!("{id}\t{status}\t{payload}\n"));
+            continue;
+        };
         let want = golden
             .get(id)
             .unwrap_or_else(|| panic!("{id}: in cases but not in golden"));
@@ -160,6 +199,17 @@ fn constructions_match_the_trees_own_lpeg() {
                 String::from_utf8_lossy(&unhex(&payload)),
             ));
         }
+    }
+    if golden.is_none() {
+        let out = std::env::var_os("LPEG_TREE_OUT")
+            .map_or_else(|| PathBuf::from("lpeg_tree_port.txt"), PathBuf::from);
+        std::fs::write(&out, port_out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
+        eprintln!(
+            "{} cases: the port's answers are in {}",
+            cases.len(),
+            out.display()
+        );
+        return;
     }
     assert!(
         mismatches.is_empty(),

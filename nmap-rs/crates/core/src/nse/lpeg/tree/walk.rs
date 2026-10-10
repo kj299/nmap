@@ -65,6 +65,11 @@ fn off(i: usize, u: i32) -> Result<usize, TreeError> {
         .ok_or(TreeError::Malformed)
 }
 
+/// The bytes a walker's stack holds outside the VM's heap.
+fn stack_bytes<T>(v: &Vec<T>) -> usize {
+    v.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
 /// Spend one unit of `budget`, or report it spent.
 fn spend(budget: &mut u32) -> bool {
     match budget.checked_sub(1) {
@@ -140,6 +145,12 @@ impl CheckAux {
     /// Run until the answer or until `budget` is spent.
     pub fn step(&mut self, tree: &Tree, budget: &mut u32) -> Poll<Result<bool, TreeError>> {
         poll(self.run(tree, budget))
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        stack_bytes(&self.stack)
     }
 
     /// Each node visited costs one unit of budget. Handing an answer back
@@ -219,10 +230,12 @@ enum LenCont {
 /// along any path (`count`), so a recursive rule is "variable" rather than
 /// a loop.
 ///
-/// Lengths are `i64`. The C's are `int`, which wrap past 2^31 — a length
-/// only a grammar that doubles at each of 31 levels reaches, after 2^31
-/// steps — and so could report a wrapped length where this reports the true
-/// one ("pattern too long to look behind").
+/// The C's lengths are `int`s, and a length past `INT_MAX` (a grammar that
+/// doubles at each of 31 levels, walked in 2^31 steps) is "variable" there:
+/// `len + 1` wraps to `INT_MIN`, the next sequence or choice above returns
+/// -1 for any negative length, and so does `fixedlen` itself, so the C never
+/// reports a wrapped positive length. Here lengths are `i64`, and a length
+/// past `i32::MAX` is -1 where it is made.
 #[derive(Debug, Clone)]
 pub struct FixedLen {
     at: Option<(usize, usize, i64)>,
@@ -241,8 +254,27 @@ impl FixedLen {
         }
     }
 
+    /// `fixedlenx(tree, 0, len)`: measure the subtree at `root` from `len`
+    /// bytes, as a call deep in a walk would. For the tests: a length near
+    /// `INT_MAX` takes 2^31 steps to reach from 0.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn starting_at(root: usize, len: i64) -> FixedLen {
+        FixedLen {
+            at: Some((root, 0, len)),
+            value: 0,
+            stack: Vec::new(),
+        }
+    }
+
     pub fn step(&mut self, tree: &Tree, budget: &mut u32) -> Poll<Result<i64, TreeError>> {
         poll(self.run(tree, budget))
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        stack_bytes(&self.stack)
     }
 
     /// Costs as [`CheckAux`]'s.
@@ -280,7 +312,9 @@ impl FixedLen {
             };
             let s1 = i + 1;
             let (at, value) = match node.tag {
-                Tag::Char | Tag::Set | Tag::Any => (None, len.saturating_add(1)),
+                // `len + 1`, which the C's `int` wraps past `INT_MAX`.
+                Tag::Char | Tag::Set | Tag::Any if len >= i64::from(i32::MAX) => (None, -1),
+                Tag::Char | Tag::Set | Tag::Any => (None, len + 1),
                 Tag::False | Tag::True | Tag::Not | Tag::And | Tag::Behind => (None, len),
                 Tag::Rep | Tag::RunTime | Tag::OpenCall => (None, -1),
                 Tag::Capture | Tag::Rule | Tag::Grammar => (Some((s1, count, len)), 0),
@@ -338,8 +372,8 @@ enum RuleCont {
 /// [`MAXRULES`] rules is left recursion. Answers whether the rule is
 /// nullable.
 ///
-/// `hidden`: also follow the two kinds of left call the C misses (see the
-/// `Behind` and `Grammar` arms). Without it, the C exactly.
+/// `hidden`: also follow a left call the C misses past a sub-grammar in a
+/// nullable context (see the `Grammar` arm). Without it, the C exactly.
 #[derive(Debug, Clone)]
 struct VerifyRule {
     at: Option<(usize, usize, bool)>,
@@ -413,14 +447,16 @@ impl VerifyRule {
                 // Cannot pass from here.
                 Tag::Char | Tag::Set | Tag::Any | Tag::False => (None, nullable),
                 Tag::True => (None, true),
-                // The C returns 1 here ("look-behind cannot have calls"), but a
-                // call inside a predicate inside `B` is a left call: `A <-
-                // B(P"a" - V"A")` passed the C's verifier and then recursed
-                // without bound in `getfirst` (`lpeg-getfirst-unbounded-recursion`).
-                // The hidden pass checks the body as a predicate's; the answer
-                // is 1 either way.
-                Tag::Behind if !self.hidden => (None, true),
-                Tag::Not | Tag::And | Tag::Rep | Tag::Behind => (Some((s1, npassed, true)), false),
+                // "Look-behind cannot have calls", the C says, and returns 1;
+                // a call under a predicate in `B`'s body is not followed, in
+                // either pass. Such a cycle makes the C's `getfirst` recurse
+                // without bound at compile time in some uses, but matching it
+                // terminates (each turn looks behind, at a smaller position),
+                // and the C builds and matches it in others: step c's
+                // compiler refuses it where the C's would recurse
+                // (`lpeg-getfirst-unbounded-recursion`).
+                Tag::Behind => (None, true),
+                Tag::Not | Tag::And | Tag::Rep => (Some((s1, npassed, true)), false),
                 Tag::Capture | Tag::RunTime => (Some((s1, npassed, nullable)), false),
                 Tag::Call => (Some((hot!(off(i, node.u)), npassed, nullable)), false),
                 // Only check the second child if the first is nullable.
@@ -495,6 +531,13 @@ impl CheckLoops {
         poll(self.run(tree, budget))
     }
 
+    /// The bytes it holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        stack_bytes(&self.stack)
+            .saturating_add(self.sub.as_ref().map_or(0, |(_, s)| s.heap_bytes()))
+    }
+
     fn run(&mut self, tree: &Tree, budget: &mut u32) -> Result<Option<bool>, TreeError> {
         loop {
             if let Some((rep, sub)) = &mut self.sub {
@@ -556,12 +599,13 @@ enum Phase {
 /// not 0); the first rule always is, by `initialrulename`.
 ///
 /// Then, where the C stops, a **hidden pass** looks for the left calls its
-/// verifier misses — through a look-behind, and past a sub-grammar under a
-/// predicate or a repetition — which made its `getfirst` recurse without
-/// bound (`lpeg-getfirst-unbounded-recursion`). It runs last, so that every
+/// verifier misses past a sub-grammar under a predicate or a repetition
+/// (`A <- -P{P"x"} * V"A"`), where the C hangs on any subject that reaches
+/// the cycle at a position, and its `getfirst` may recurse without bound
+/// (`lpeg-getfirst-unbounded-recursion`). It runs last, so that every
 /// grammar the C refuses is refused with the C's error, naming the C's rule,
-/// and only when the tree has a look-behind or a sub-grammar for it to find
-/// anything through. It reports "may be left recursive" like any other.
+/// and only when the tree has a sub-grammar for it to find anything past. It
+/// reports "may be left recursive" like any other.
 #[derive(Debug, Clone)]
 pub struct VerifyGrammar {
     phase: Phase,
@@ -582,6 +626,19 @@ impl VerifyGrammar {
 
     pub fn step(&mut self, tree: &Tree, budget: &mut u32) -> Poll<Result<(), TreeError>> {
         poll(self.run(tree, budget))
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        let walker = match &self.phase {
+            Phase::LeftRecursion(_, _, Some(w)) => {
+                stack_bytes(&w.stack).saturating_add(w.sub.as_ref().map_or(0, CheckAux::heap_bytes))
+            }
+            Phase::Loops(_, Some(w)) => w.heap_bytes(),
+            _ => 0,
+        };
+        stack_bytes(&self.passed).saturating_add(walker)
     }
 
     fn run(&mut self, tree: &Tree, budget: &mut u32) -> Result<Option<()>, TreeError> {
@@ -648,13 +705,13 @@ impl VerifyGrammar {
     }
 }
 
-/// Whether the grammar whose first rule is at `first` holds a look-behind
-/// or a sub-grammar: the only places the hidden pass can find a left call
-/// the C's verifier missed.
+/// Whether the grammar whose first rule is at `first` holds a sub-grammar:
+/// the only place the hidden pass can find a left call the C's verifier
+/// missed.
 fn hides_left_calls(tree: &Tree, first: usize) -> bool {
     let mut i = first;
     while let Some(node) = tree.node(i) {
-        if matches!(node.tag, Tag::Behind | Tag::Grammar) {
+        if node.tag == Tag::Grammar {
             return true;
         }
         i += if node.tag == Tag::Set {
@@ -688,6 +745,12 @@ impl FinalFix {
             at: Some(root),
             stack: Vec::new(),
         }
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        stack_bytes(&self.stack)
     }
 
     /// Run until done or until `budget` is spent. `resolve` is `fixonecall`'s
@@ -749,6 +812,52 @@ impl FinalFix {
                 _ => None,
             };
         }
+    }
+}
+
+/// What `finalfix(L, 0, NULL, tree)` — `ptree`'s, outside any grammar — can
+/// tell a script: the key of the first open call it meets, which it raises
+/// as "rule '%s' used outside a grammar", or none. `finalfix` visits nodes in
+/// pre-order, which is the order of the slots of a tree built here (see
+/// [`Tree::correct_keys`]); its rotations keep the order of the leaves; and
+/// a sub-grammar, which it skips, holds no open call (each was fixed when
+/// the grammar was built). So the first open call in slot order is the one
+/// it raises for, and this finds it by a scan that changes and allocates
+/// nothing. One unit of budget per node.
+#[derive(Debug, Clone)]
+pub struct FindOpenCall {
+    at: usize,
+}
+
+impl FindOpenCall {
+    #[must_use]
+    pub fn new() -> FindOpenCall {
+        FindOpenCall { at: 0 }
+    }
+
+    pub fn step(&mut self, tree: &Tree, budget: &mut u32) -> Poll<Result<Option<Key>, TreeError>> {
+        loop {
+            let Some(node) = tree.node(self.at) else {
+                return Poll::Ready(Ok(None));
+            };
+            if !spend(budget) {
+                return Poll::Pending;
+            }
+            if node.tag == Tag::OpenCall {
+                return Poll::Ready(Ok(Some(node.key)));
+            }
+            self.at += if node.tag == Tag::Set {
+                1 + super::SET_SLOTS
+            } else {
+                1
+            };
+        }
+    }
+}
+
+impl Default for FindOpenCall {
+    fn default() -> Self {
+        FindOpenCall::new()
     }
 }
 

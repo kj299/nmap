@@ -17,13 +17,17 @@
 //! can `require` it (E9). [`register_for_tests`] installs it for the test
 //! suites only, with a `match` that says it is not there yet.
 //!
-//! **Calls take time.** Building a grammar runs the verifier, `B` measures
-//! its pattern and `+` and `^n` ask whether one can match the empty string;
-//! each can take time exponential in a grammar's depth (§1.1). A call first
-//! tries to finish with the fuel the VM has left; if it cannot, it returns a
+//! **Calls take time.** Building a grammar copies its rules and their
+//! constant tables and runs the verifier, `B` measures its pattern and `+`
+//! and `^n` ask whether one can match the empty string; the analyses can
+//! take time exponential in a grammar's depth (§1.1). A call first tries to
+//! finish with the fuel the VM has left; if it cannot, it returns a
 //! [`Sequence`] that goes on from where it stopped, one slice of fuel at a
 //! time, so the interpreter — and the stall watchdog above it — sees every
-//! slice (D3). Nothing is held across slices but indices and GC handles.
+//! slice (D3). What cannot stop part-way — reading a grammar table, which
+//! the C reads at one instant, and a constructor's copy of its operands — is
+//! charged to the fuel in full after it is done. Nothing is held across
+//! slices but indices, GC handles and the call's own buffers.
 //!
 //! **Errors** are raised as `luaL_error` and `luaL_argerror` raise them: the
 //! C's words, after the position of the Lua code that made the call
@@ -33,10 +37,15 @@
 //! otherwise as `pushglobalfuncname` finds it, `'lpeg.P'`, and a metamethod,
 //! which is in no table it searches, `'?'`.
 //!
-//! **`not enough memory`** is raised, without a position, for any tree past
-//! the C's `int` sizes and for any growth the memory budget refuses. A
-//! pattern's tree is accounted to the VM's heap for as long as the pattern
-//! lives, so the budget and the collector both see it (E4).
+//! **Memory.** "memory allocation error: block too big" is raised, without a
+//! position, where the C's `int` size wraps to what `luaM_toobig` refuses,
+//! and `not enough memory` for any other size the C cannot hold
+//! ([`tree::c_size`]) and any growth the memory budget refuses. A pattern's
+//! tree is accounted to the VM's heap for as long as the pattern lives, and
+//! what a call holds between slices — a grammar being built, `p^n`'s tree, a
+//! walker's stack — for as long as it holds it, so the budget and the
+//! collector see both (E4). Near the budget, whether a call fails can depend
+//! on where the slices fell (`lpeg-memory-errors-depend-on-slicing`).
 
 pub mod tree;
 
@@ -51,8 +60,8 @@ use piccolo::{
 };
 
 use self::tree::{
-    CapKind, Charset, CheckAux, FinalFix, FixedLen, GrammarLayout, Key, Pred, Tag, Tree, TreeError,
-    VerifyGrammar, MAXBEHIND, MAXRULES, SHRT_MAX,
+    CSize, CapKind, Charset, CheckAux, FinalFix, FindOpenCall, FixedLen, GrammarBuild, Key, Pred,
+    Tag, Tree, TreeError, VerifyGrammar, MAXBEHIND, MAXRULES, SHRT_MAX,
 };
 use super::nmaplib::{c_str, Fail};
 use super::stdlib::{check_integer, lua_error_bytes, type_error};
@@ -103,6 +112,82 @@ impl Drop for Accounted {
     fn drop(&mut self) {
         self.metrics.mark_external_deallocation(self.bytes);
     }
+}
+
+/// Bytes a call holds outside the VM's heap between slices — a grammar being
+/// built, `p^n`'s tree, a walker's stack — accounted to the heap as a
+/// pattern's tree is ([`Accounted`]), so that the memory budget and the
+/// collector see them: brought up to date after every slice, and given back
+/// when the call ends.
+struct Held {
+    metrics: Metrics,
+    bytes: usize,
+}
+
+impl Held {
+    fn new(metrics: Metrics) -> Held {
+        Held { metrics, bytes: 0 }
+    }
+
+    fn set(&mut self, bytes: usize) {
+        if bytes > self.bytes {
+            self.metrics
+                .mark_external_allocation(bytes.saturating_sub(self.bytes));
+        } else {
+            self.metrics
+                .mark_external_deallocation(self.bytes.saturating_sub(bytes));
+        }
+        self.bytes = bytes;
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.metrics.mark_external_deallocation(self.bytes);
+    }
+}
+
+/// What one slice of a call may spend — `budget`, in walker steps, which
+/// is the VM's fuel — and what it spent past that (`over`) on work that
+/// cannot stop part-way: reading a grammar table, and a constructor's copy
+/// of its operands. Both are taken from the VM's fuel. `work` counts what
+/// the slice did besides walking, in sixteenths of a unit of fuel
+/// ([`take_most_work_per_fuel`]).
+struct Spend {
+    budget: u32,
+    over: u64,
+    work: u64,
+}
+
+impl Spend {
+    fn charge(&mut self, units: u64) {
+        self.over = self.over.saturating_add(units);
+    }
+
+    /// `n` units of work at `per` a unit of fuel.
+    fn did(&mut self, n: usize, per: usize) {
+        let sixteenths =
+            u64::try_from(n.saturating_mul(16).checked_div(per).unwrap_or(0)).unwrap_or(u64::MAX);
+        self.work = self.work.saturating_add(sixteenths);
+    }
+}
+
+thread_local! {
+    /// [`take_most_work_per_fuel`]'s record.
+    static MOST_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// For the tests of D3: the most work one slice of one call has done per
+/// unit of fuel it took, since this was last asked on this thread, in
+/// sixteenths of what a unit buys — copying [`COPY_PER_FUEL`] nodes,
+/// shifting the keys of [`SHIFT_PER_FUEL`], appending one table entry,
+/// reading one grammar table entry. A call that keeps to its fuel stays at
+/// 16 or under, however large its operands; one that copied a tree without
+/// counting it would not.
+#[doc(hidden)]
+#[must_use]
+pub fn take_most_work_per_fuel() -> u64 {
+    MOST_WORK.with(|c| c.replace(0))
 }
 
 /// A pattern (`Pattern`, `lpeg.c:198`): its tree, and its constant table,
@@ -324,6 +409,9 @@ enum Failure<'gc> {
     Lua(Fail),
     /// A memory error, which carries no position.
     Memory,
+    /// `luaM_toobig`: "memory allocation error: block too big", raised by
+    /// `luaG_runerror` from a C function, so with no position.
+    TooBig,
     /// An error already made (a metamethod's, or a call's).
     Raised(Error<'gc>),
 }
@@ -364,6 +452,7 @@ fn tree_failure<'gc>(ctx: Context<'gc>, ktable: Option<Table<'gc>>, e: TreeError
     };
     match e {
         TreeError::NotEnoughMemory => Failure::Memory,
+        TreeError::BlockTooBig => Failure::TooBig,
         TreeError::LoopBodyNullable => Failure::Lua(Fail::err("loop body may accept empty string")),
         TreeError::UsedOutsideGrammar(k) => rule(b"rule '", k, b"' used outside a grammar"),
         TreeError::UndefinedRule(k) => rule(b"rule '", k, b"' undefined in given grammar"),
@@ -371,6 +460,14 @@ fn tree_failure<'gc>(ctx: Context<'gc>, ktable: Option<Table<'gc>>, e: TreeError
         TreeError::TooManyLeftCalls => Failure::Lua(Fail::err("too many left calls in grammar")),
         TreeError::EmptyLoop(k) => rule(b"empty loop in rule '", k, b"'"),
         TreeError::Malformed => Failure::Lua(Fail::err("lpeg: malformed pattern tree")),
+    }
+}
+
+/// A constructor's [`TreeError`], which is only ever about size.
+fn size_failure<'gc>(e: TreeError) -> Failure<'gc> {
+    match e {
+        TreeError::BlockTooBig => Failure::TooBig,
+        _ => Failure::Memory,
     }
 }
 
@@ -477,17 +574,83 @@ enum GStage {
     First,
     /// Its `__index` was called for the initial rule.
     AwaitFirst,
-    /// `collectrules`, `buildgrammar`.
+    /// `collectrules`: read the table, at one instant.
     Collect,
+    /// `buildgrammar`: rule `i`, at this step.
+    Build(usize, BuildStep),
     /// `finalfix`.
     Fix,
     /// `verifygrammar`.
     Verify,
 }
 
+/// Where `buildgrammar` is in a rule (`at`: where its first node goes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildStep {
+    /// Its `Rule` node.
+    Start,
+    /// Copying its nodes, from this one.
+    Copy { at: usize, from: usize },
+    /// Appending its constant table to the grammar's, from this entry, at
+    /// `base` plus the entry's index (`concattable`).
+    Merge { at: usize, next: Key, base: Key },
+    /// Shifting its keys by `by`, from this node (`correctkeys`).
+    Shift { at: usize, from: usize, by: Key },
+}
+
+/// A rule, as `collectrules` read it.
+#[derive(Collect, Clone, Copy)]
+#[collect(no_drop)]
+struct Rule<'gc> {
+    key: Value<'gc>,
+    /// The pattern (a userdata), which holds its tree.
+    pattern: Value<'gc>,
+    /// Its constant table and that table's length then. The table can grow
+    /// between slices — `p / x` appends to the table `p` shares, from any
+    /// thread — and the C reads it at the instant the grammar is built;
+    /// entries already there never change.
+    ktable: Option<Table<'gc>>,
+    #[collect(require_static)]
+    klen: Key,
+    #[collect(require_static)]
+    size: usize,
+}
+
+impl<'gc> Rule<'gc> {
+    fn new(ctx: Context<'gc>, key: Value<'gc>, pattern: Value<'gc>) -> Result<Self, Failure<'gc>> {
+        let p = self::pattern(ctx, pattern).ok_or(Failure::Lua(Fail::err("lpeg: rule lost")))?;
+        Ok(Rule {
+            key,
+            pattern,
+            ktable: p.ktable(),
+            klen: klen(p.ktable()).map_err(|_| Failure::Memory)?,
+            size: p.tree().len(),
+        })
+    }
+}
+
+/// Nodes one unit of fuel copies, and nodes it shifts the keys of: a copy is
+/// a `memcpy`, a shift a scan, and a walker's step, which visits one node and
+/// may push, costs one unit.
+const COPY_PER_FUEL: usize = 16;
+const SHIFT_PER_FUEL: usize = 8;
+
+/// `n` units of work done at `per` a unit of fuel, in fuel, rounded up.
+fn fuel_for(n: usize, per: usize) -> u32 {
+    u32::try_from(n.div_ceil(per.max(1))).unwrap_or(u32::MAX)
+}
+
+/// `testpattern` (`lpeg.c:2251`) leaves two metatables on the stack when it
+/// is given a userdata with a metatable of its own — the userdata's and the
+/// pattern metatable — so the error that follows names what is at -2 then:
+/// that userdata's metatable (`lpeg-testpattern-leaves-metatables`).
+fn leaves_metatables(v: Value<'_>) -> bool {
+    matches!(v, Value::UserData(u) if u.metatable().is_some())
+}
+
 /// `newgrammar` (`lpeg.c:3140`) of the table at argument `arg`, as a
 /// resumable job: reading the initial rule may call an `__index`
-/// metamethod, and fixing and verifying take steps.
+/// metamethod, and copying the rules, fixing and verifying take steps.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct GrammarJob<'gc> {
@@ -496,12 +659,25 @@ struct GrammarJob<'gc> {
     arg: usize,
     #[collect(require_static)]
     stage: GStage,
-    /// The initial rule's key (`frule`), and then every rule, in order.
+    /// The initial rule's key (`frule`).
     first_key: Value<'gc>,
-    rules: Vec<(Value<'gc>, Value<'gc>)>,
+    /// Every rule, the initial one first; past [`MAXRULES`] + 1, only
+    /// counted (the grammar is refused).
+    rules: Vec<Rule<'gc>>,
     /// The position table: rule name to the index of its `Rule` node.
     postab: Option<Table<'gc>>,
     ktable: Option<Table<'gc>>,
+    /// `ktable`'s length.
+    #[collect(require_static)]
+    klen: Key,
+    /// Each rule table appended so far, and the shift its keys took. A rule
+    /// table that another rule shares is appended once: the C appends a copy
+    /// per rule, but the grammar's table is the pattern's own, which nothing
+    /// outside this module reads (`lpeg-uservalue-type-confusion`), and its
+    /// keys reach the same values either way.
+    merged: Vec<(Table<'gc>, Key)>,
+    #[collect(require_static)]
+    build: Option<GrammarBuild>,
     #[collect(require_static)]
     tree: Option<Tree>,
     #[collect(require_static)]
@@ -529,6 +705,9 @@ impl<'gc> GrammarJob<'gc> {
             rules: Vec::new(),
             postab: None,
             ktable: None,
+            klen: 0,
+            merged: Vec::new(),
+            build: None,
             tree: None,
             fix: None,
             verify: None,
@@ -543,14 +722,39 @@ impl<'gc> GrammarJob<'gc> {
         Ok(())
     }
 
+    /// The bytes it holds outside the VM's heap.
+    fn heap_bytes(&self) -> usize {
+        [
+            self.rules
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Rule<'_>>()),
+            self.merged
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(Table<'_>, Key)>()),
+            self.build.as_ref().map_or(0, GrammarBuild::heap_bytes),
+            self.tree.as_ref().map_or(0, Tree::heap_bytes),
+            self.fix.as_ref().map_or(0, FinalFix::heap_bytes),
+            self.verify.as_ref().map_or(0, VerifyGrammar::heap_bytes),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
     /// The end of `getfirstrule`: the initial rule must be a pattern.
     fn first_rule(&mut self, ctx: Context<'gc>, rule: Value<'gc>) -> Result<(), Failure<'gc>> {
         if pattern(ctx, rule).is_none() {
             if rule.is_nil() {
                 return Err(Fail::err("grammar has no initial rule").into());
             }
+            // `lua_tostring(L, -2)`, the key — or, over a userdata's
+            // metatables, that userdata's metatable, which is no string:
+            // `%s` of NULL.
             let mut m = b"initial rule '".to_vec();
-            m.extend_from_slice(&val2str(ctx, self.first_key));
+            if leaves_metatables(rule) {
+                m.extend_from_slice(b"(null)");
+            } else {
+                m.extend_from_slice(&val2str(ctx, self.first_key));
+            }
             m.extend_from_slice(b"' is not a pattern");
             return Err(Fail::err(m).into());
         }
@@ -559,7 +763,7 @@ impl<'gc> GrammarJob<'gc> {
             .set_raw(&ctx, self.first_key, Value::Integer(1))
             .map_err(|e| key_failure(ctx, e))?;
         self.postab = Some(postab);
-        self.rules.push((self.first_key, rule));
+        self.rules.push(Rule::new(ctx, self.first_key, rule)?);
         self.stage = GStage::Collect;
         Ok(())
     }
@@ -567,7 +771,7 @@ impl<'gc> GrammarJob<'gc> {
     fn advance(
         &mut self,
         ctx: Context<'gc>,
-        budget: &mut u32,
+        spend: &mut Spend,
     ) -> Result<Flow<'gc, Value<'gc>>, Failure<'gc>> {
         loop {
             match self.stage {
@@ -592,7 +796,12 @@ impl<'gc> GrammarJob<'gc> {
                     }
                 }
                 GStage::AwaitFirst => return Err(Fail::err("lpeg: grammar call lost").into()),
-                GStage::Collect => self.collect(ctx, budget)?,
+                GStage::Collect => self.collect(ctx, spend)?,
+                GStage::Build(i, step) => {
+                    if self.build_step(ctx, i, step, spend)? {
+                        return Ok(Flow::Pending);
+                    }
+                }
                 GStage::Fix => {
                     let (Some(tree), Some(fix), Some(ktable), Some(postab)) = (
                         self.tree.as_mut(),
@@ -611,7 +820,7 @@ impl<'gc> GrammarJob<'gc> {
                             _ => 0,
                         }
                     };
-                    match fix.step(tree, &resolve, budget) {
+                    match fix.step(tree, &resolve, &mut spend.budget) {
                         std::task::Poll::Pending => return Ok(Flow::Pending),
                         std::task::Poll::Ready(r) => {
                             r.map_err(|e| tree_failure(ctx, Some(ktable), e))?;
@@ -620,11 +829,11 @@ impl<'gc> GrammarJob<'gc> {
                     // `initialrulename`: an initial rule no call names is named
                     // by its key, for the errors that name it.
                     if tree.node(1).is_some_and(|n| n.key == 0) {
-                        let n = klen(Some(ktable)).map_err(|_| Failure::Memory)?;
-                        let k = n.checked_add(1).ok_or(Failure::Memory)?;
+                        let k = self.klen.checked_add(1).ok_or(Failure::Memory)?;
                         ktable
                             .set_raw(&ctx, Value::Integer(i64::from(k)), self.first_key)
                             .map_err(|e| key_failure(ctx, e))?;
+                        self.klen = k;
                         tree.set_key(1, k);
                     }
                     self.fix = None;
@@ -636,7 +845,7 @@ impl<'gc> GrammarJob<'gc> {
                     else {
                         return Err(Fail::err("lpeg: grammar state lost").into());
                     };
-                    match verify.step(tree, budget) {
+                    match verify.step(tree, &mut spend.budget) {
                         std::task::Poll::Pending => return Ok(Flow::Pending),
                         std::task::Poll::Ready(r) => {
                             r.map_err(|e| tree_failure(ctx, self.ktable, e))?
@@ -649,77 +858,191 @@ impl<'gc> GrammarJob<'gc> {
         }
     }
 
-    /// `collectrules` and `buildgrammar`: every other rule, in the table's
-    /// order, then the tree.
-    fn collect(&mut self, ctx: Context<'gc>, budget: &mut u32) -> Result<(), Failure<'gc>> {
-        let postab = self.postab.ok_or(Failure::Memory)?;
-        let mut sizes = Vec::new();
-        let first_size = self
-            .rules
-            .first()
-            .and_then(|&(_, r)| pattern(ctx, r))
-            .map_or(0, |p| p.tree().len());
-        sizes.push(first_size);
-        let mut size = 2usize.checked_add(first_size).ok_or(Failure::Memory)?;
+    /// `collectrules`: every other rule, in the table's order, its name in the
+    /// position table, and the grammar's size; then `newtree` for it, and the
+    /// count of rules checked. One pass over the table, which no Lua code can
+    /// change while it runs: the C reads it at one instant, and so does this.
+    /// It costs a unit of fuel per entry, taken whatever the slice had left.
+    fn collect(&mut self, ctx: Context<'gc>, spend: &mut Spend) -> Result<(), Failure<'gc>> {
+        let postab = self
+            .postab
+            .ok_or(Failure::Lua(Fail::err("lpeg: grammar state lost")))?;
+        let first_size = self.rules.first().map_or(0, |r| r.size);
+        // `size`, the C's running `int`, as an exact count: `TGrammar`,
+        // `TRule` and the initial rule, then each rule and its `TRule`.
+        let mut size = 2u64.saturating_add(u64::try_from(first_size).unwrap_or(u64::MAX));
+        let mut count = 1usize;
         for (k, v) in self.table.iter() {
-            *budget = budget.saturating_sub(1);
+            spend.charge(1);
+            spend.did(1, 1);
             // A key that converts to 1 is the initial rule's slot, and so is
             // the initial rule's name.
             if k.to_number() == Some(1.0) || raw_equal(k, self.first_key) {
                 continue;
             }
             let Some(p) = pattern(ctx, v) else {
+                // `val2str(L, -2)`: the key, or over a userdata's
+                // metatables, that userdata's metatable (a table).
                 let mut m = b"rule '".to_vec();
-                m.extend_from_slice(&val2str(ctx, k));
+                if leaves_metatables(v) {
+                    m.extend_from_slice(b"(a table)");
+                } else {
+                    m.extend_from_slice(&val2str(ctx, k));
+                }
                 m.extend_from_slice(b"' is not a pattern");
                 return Err(Fail::err(m).into());
             };
-            let pos = i64::try_from(size).map_err(|_| Failure::Memory)?;
-            postab
-                .set_raw(&ctx, k, Value::Integer(pos))
-                .map_err(|e| key_failure(ctx, e))?;
-            let s = p.tree().len();
-            size = size
-                .checked_add(1)
-                .and_then(|n| n.checked_add(s))
-                .ok_or(Failure::Memory)?;
-            if !super::stdlib::reserve(&mut sizes, 1) || !super::stdlib::reserve(&mut self.rules, 1)
-            {
-                return Err(Failure::Memory);
+            count = count.saturating_add(1);
+            // Past `MAXRULES` the grammar is refused, after its size is
+            // judged: what else the C records of a rule is never read.
+            if count <= MAXRULES.saturating_add(1) {
+                let pos = i64::try_from(size).map_err(|_| Failure::Memory)?;
+                postab
+                    .set_raw(&ctx, k, Value::Integer(pos))
+                    .map_err(|e| key_failure(ctx, e))?;
+                if !super::stdlib::reserve(&mut self.rules, 1) {
+                    return Err(Failure::Memory);
+                }
+                self.rules.push(Rule::new(ctx, k, v)?);
             }
-            sizes.push(s);
-            self.rules.push((k, v));
+            size = size
+                .saturating_add(1)
+                .saturating_add(u64::try_from(p.tree().len()).unwrap_or(u64::MAX));
         }
-        let layout = GrammarLayout::new(&sizes).map_err(|_| Failure::Memory)?;
-        let space = layout.space().map_err(|_| Failure::Memory)?;
-        if self.rules.len() > MAXRULES {
+        // `newtree(L, size + 1)`, then the count: a size the C's `int` cannot
+        // hold is "block too big" where it wraps to -3 or below; where it
+        // wraps short, the C's allocation is what the count check finds
+        // past `MAXRULES`, and is written past otherwise.
+        let total = size.saturating_add(1);
+        let space = match tree::c_size(total) {
+            CSize::TooBig => return Err(Failure::TooBig),
+            CSize::Fits(len) => Some(tree::alloc(len).map_err(size_failure)?),
+            CSize::Short(w) if w >= 0 && count > MAXRULES => None,
+            CSize::Short(_) => return Err(Failure::Memory),
+        };
+        if count > MAXRULES {
             return Err(Fail::arg(self.arg, "grammar has too many rules").into());
         }
-        // `buildgrammar`: each rule's table appended to the grammar's
-        // (`mergektable`), and its keys shifted by what was there before.
-        let ktable = Table::new(&ctx);
-        let mut parts: Vec<(&Tree, Key)> = Vec::new();
-        for &(_, r) in &self.rules {
-            let p = pattern(ctx, r).ok_or(Failure::Memory)?;
-            let correction = match p.ktable() {
-                Some(rk) if rk.length() > 0 => {
-                    let n2 = klen(Some(ktable)).map_err(|_| Failure::Memory)?;
-                    concat_ktable(ctx, rk, ktable)?;
-                    n2
-                }
-                _ => 0,
-            };
-            parts.push((p.tree(), correction));
-        }
-        let tree = layout
-            .build(&parts, space)
-            .map_err(|e| tree_failure(ctx, Some(ktable), e))?;
-        *budget = budget.saturating_sub(u32::try_from(tree.len() / 16).unwrap_or(u32::MAX));
-        self.tree = Some(tree);
-        self.ktable = Some(ktable);
-        self.fix = Some(FinalFix::new(Some(0), 1));
-        self.stage = GStage::Fix;
+        let space = space.ok_or(Failure::Memory)?;
+        self.build = Some(GrammarBuild::new(space, self.rules.len()).map_err(size_failure)?);
+        self.ktable = Some(Table::new(&ctx));
+        self.stage = GStage::Build(0, BuildStep::Start);
         Ok(())
+    }
+
+    /// One step of `buildgrammar` for rule `i`, within `budget`: whether the
+    /// budget ran out first.
+    fn build_step(
+        &mut self,
+        ctx: Context<'gc>,
+        i: usize,
+        step: BuildStep,
+        spend: &mut Spend,
+    ) -> Result<bool, Failure<'gc>> {
+        let budget = &mut spend.budget;
+        let lost = || Failure::Lua(Fail::err("lpeg: grammar state lost"));
+        let Some(&rule) = self.rules.get(i) else {
+            // `nd->tag = TTrue`: the list of rules is closed.
+            let b = self.build.take().ok_or_else(lost)?;
+            self.tree = Some(b.finish());
+            self.fix = Some(FinalFix::new(Some(0), 1));
+            self.stage = GStage::Fix;
+            return Ok(false);
+        };
+        let rtree = pattern(ctx, rule.pattern).ok_or_else(lost)?.tree();
+        let b = self.build.as_mut().ok_or_else(lost)?;
+        let next_rule = GStage::Build(i.saturating_add(1), BuildStep::Start);
+        self.stage = match step {
+            BuildStep::Start => {
+                let at = b.rule(i, rtree.len()).map_err(size_failure)?;
+                GStage::Build(i, BuildStep::Copy { at, from: 0 })
+            }
+            BuildStep::Copy { at, from } => {
+                if *budget == 0 {
+                    return Ok(true);
+                }
+                let max = usize::try_from(*budget)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(COPY_PER_FUEL);
+                let next = b.copy(rtree, from, max);
+                *budget = budget.saturating_sub(fuel_for(next.saturating_sub(from), COPY_PER_FUEL));
+                spend.did(next.saturating_sub(from), COPY_PER_FUEL);
+                if next < rtree.len() {
+                    GStage::Build(i, BuildStep::Copy { at, from: next })
+                } else {
+                    GStage::Build(
+                        i,
+                        BuildStep::Merge {
+                            at,
+                            next: 1,
+                            base: self.klen,
+                        },
+                    )
+                }
+            }
+            BuildStep::Merge { at, next, base } => {
+                let Some(from) = rule.ktable.filter(|_| rule.klen > 0) else {
+                    // `concattable` of an empty table: nothing to shift.
+                    self.stage = next_rule;
+                    return Ok(false);
+                };
+                if next == 1 {
+                    if let Some(&(_, by)) = self.merged.iter().find(|(t, _)| *t == from) {
+                        self.stage = GStage::Build(i, BuildStep::Shift { at, from: at, by });
+                        return Ok(false);
+                    }
+                }
+                let to = self.ktable.ok_or_else(lost)?;
+                let mut j = next;
+                while j <= rule.klen {
+                    if spend.budget == 0 {
+                        self.stage = GStage::Build(i, BuildStep::Merge { at, next: j, base });
+                        return Ok(true);
+                    }
+                    spend.budget = spend.budget.saturating_sub(1);
+                    spend.did(1, 1);
+                    let v = from.get_raw(Value::Integer(i64::from(j)));
+                    let k = base.checked_add(j).ok_or(Failure::Memory)?;
+                    to.set_raw(&ctx, Value::Integer(i64::from(k)), v)
+                        .map_err(|e| key_failure(ctx, e))?;
+                    j = j.saturating_add(1);
+                }
+                self.klen = base.checked_add(rule.klen).ok_or(Failure::Memory)?;
+                if !super::stdlib::reserve(&mut self.merged, 1) {
+                    return Err(Failure::Memory);
+                }
+                self.merged.push((from, base));
+                GStage::Build(
+                    i,
+                    BuildStep::Shift {
+                        at,
+                        from: at,
+                        by: base,
+                    },
+                )
+            }
+            BuildStep::Shift { at, from, by } => {
+                let end = at.saturating_add(rtree.len());
+                if by == 0 || from >= end {
+                    next_rule
+                } else {
+                    if *budget == 0 {
+                        return Ok(true);
+                    }
+                    let max = usize::try_from(*budget)
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(SHIFT_PER_FUEL);
+                    let next = b
+                        .correct(from, end, by, max)
+                        .map_err(|e| tree_failure(ctx, self.ktable, e))?;
+                    *budget =
+                        budget.saturating_sub(fuel_for(next.saturating_sub(from), SHIFT_PER_FUEL));
+                    spend.did(next.saturating_sub(from), SHIFT_PER_FUEL);
+                    GStage::Build(i, BuildStep::Shift { at, from: next, by })
+                }
+            }
+        };
+        Ok(false)
     }
 }
 
@@ -761,8 +1084,20 @@ enum Stage {
 enum Walk {
     Check(CheckAux),
     Fixed(FixedLen),
-    /// `ptree`'s `finalfix`, on a copy of the pattern's tree.
-    Fix(FinalFix, Tree),
+    /// `ptree`'s `finalfix`, outside any grammar: all it can tell a script
+    /// is the first open call it meets, which a scan finds without copying
+    /// or changing the tree ([`FindOpenCall`]).
+    OpenCall(FindOpenCall),
+}
+
+impl Walk {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Walk::Check(w) => w.heap_bytes(),
+            Walk::Fixed(w) => w.heap_bytes(),
+            Walk::OpenCall(_) => 0,
+        }
+    }
 }
 
 /// One call of a library function or metamethod, from its arguments to its
@@ -789,6 +1124,11 @@ struct Job<'gc> {
     /// `p^n`'s tree, allocated before the empty-loop check.
     #[collect(require_static)]
     space: Option<Vec<tree::Node>>,
+    /// `p^n`'s size wrapped short in the C's `int` ([`CSize::Short`]): the C
+    /// allocates too little, then checks for an empty loop, then writes
+    /// past what it allocated.
+    #[collect(require_static)]
+    short: bool,
     /// `locale`: the table, and the next class.
     #[collect(require_static)]
     class: usize,
@@ -797,10 +1137,13 @@ struct Job<'gc> {
     /// A call was made: its result is on the stack.
     #[collect(require_static)]
     awaiting: bool,
+    /// What it holds outside the VM's heap.
+    #[collect(require_static)]
+    held: Held,
 }
 
 impl<'gc> Job<'gc> {
-    fn new(func: Func, args: Vec<Value<'gc>>) -> Self {
+    fn new(ctx: Context<'gc>, func: Func, args: Vec<Value<'gc>>) -> Self {
         Job {
             func,
             args,
@@ -810,9 +1153,43 @@ impl<'gc> Job<'gc> {
             answer: 0,
             n: 0,
             space: None,
+            short: false,
             class: 0,
             call: None,
             awaiting: false,
+            held: Held::new(ctx.metrics().clone()),
+        }
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    fn heap_bytes(&self) -> usize {
+        [
+            self.args
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Value<'_>>()),
+            self.space.as_ref().map_or(0, |s| {
+                s.capacity()
+                    .saturating_mul(std::mem::size_of::<tree::Node>())
+            }),
+            self.walk.as_ref().map_or(0, Walk::heap_bytes),
+            self.grammar.as_ref().map_or(0, GrammarJob::heap_bytes),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
+    /// Charge `spend` for the patterns in `vs` that were made, not passed
+    /// through: a unit of fuel per [`COPY_PER_FUEL`] nodes copied or filled.
+    fn charge_made(&self, ctx: Context<'gc>, spend: &mut Spend, vs: &[Value<'gc>]) {
+        for &v in vs {
+            let passed = self.args.iter().any(|&a| match (a, v) {
+                (Value::UserData(a), Value::UserData(v)) => a == v,
+                _ => false,
+            });
+            if let (false, Some(p)) = (passed, pattern(ctx, v)) {
+                spend.charge(u64::from(fuel_for(p.tree().len(), COPY_PER_FUEL)));
+                spend.did(p.tree().len(), COPY_PER_FUEL);
+            }
         }
     }
 
@@ -850,7 +1227,7 @@ impl<'gc> Job<'gc> {
     fn advance(
         &mut self,
         ctx: Context<'gc>,
-        budget: &mut u32,
+        spend: &mut Spend,
     ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         loop {
             match self.stage {
@@ -871,7 +1248,7 @@ impl<'gc> Job<'gc> {
                         continue;
                     };
                     if let Some(g) = &mut self.grammar {
-                        match g.advance(ctx, budget)? {
+                        match g.advance(ctx, spend)? {
                             Flow::Done(p) => {
                                 self.grammar = None;
                                 self.set_arg(idx, p);
@@ -889,6 +1266,9 @@ impl<'gc> Job<'gc> {
                         }
                         v => {
                             let p = getpatt(ctx, v, idx)?;
+                            if !matches!(v, Some(Value::UserData(_))) {
+                                self.charge_made(ctx, spend, &[p]);
+                            }
                             self.set_arg(idx, p);
                             self.stage = Stage::Convert(i.saturating_add(1));
                         }
@@ -905,12 +1285,16 @@ impl<'gc> Job<'gc> {
                 Stage::Walk => {
                     let p = self.pat(ctx, 1)?;
                     let t = p.tree();
+                    let budget = &mut spend.budget;
                     let ready = match self.walk.as_mut() {
                         Some(Walk::Check(w)) => w.step(t, budget).map(|r| r.map(i64::from)),
                         Some(Walk::Fixed(w)) => w.step(t, budget),
-                        Some(Walk::Fix(w, copy)) => {
-                            w.step(copy, &|_| 0, budget).map(|r| r.map(|()| 0))
-                        }
+                        Some(Walk::OpenCall(w)) => w.step(t, budget).map(|r| {
+                            r.and_then(|k| match k {
+                                Some(k) => Err(TreeError::UsedOutsideGrammar(k)),
+                                None => Ok(0),
+                            })
+                        }),
                         None => std::task::Poll::Ready(Ok(0)),
                     };
                     match ready {
@@ -922,7 +1306,13 @@ impl<'gc> Job<'gc> {
                     self.walk = None;
                     self.stage = Stage::Finish;
                 }
-                Stage::Finish => return self.finish(ctx),
+                Stage::Finish => {
+                    let r = self.finish(ctx)?;
+                    if let Flow::Done(vs) = &r {
+                        self.charge_made(ctx, spend, vs);
+                    }
+                    return Ok(r);
+                }
             }
         }
     }
@@ -1004,7 +1394,7 @@ impl<'gc> Job<'gc> {
             Func::S => {
                 let s = self.check_lstring(ctx, 1)?;
                 let mut cs = Charset::empty();
-                for &b in &s {
+                for &b in s.as_bytes() {
                     cs.add(b);
                 }
                 let t = Tree::charset(&cs).map_err(|_| Failure::Memory)?;
@@ -1014,7 +1404,7 @@ impl<'gc> Job<'gc> {
                 let mut cs = Charset::empty();
                 for i in 1..=self.args.len() {
                     let r = self.check_lstring(ctx, i)?;
-                    let [lo, hi] = r[..] else {
+                    let [lo, hi] = r.as_bytes()[..] else {
                         return Err(Fail::arg(i, "range must have two characters").into());
                     };
                     for c in lo..=hi {
@@ -1062,12 +1452,15 @@ impl<'gc> Job<'gc> {
         Ok(None)
     }
 
-    /// `luaL_checklstring`.
-    fn check_lstring(&self, ctx: Context<'gc>, i: usize) -> Result<Vec<u8>, Failure<'gc>> {
-        Ok(self
-            .check_string(ctx, i)?
-            .into_string(ctx)
-            .map_or_else(Vec::new, |s| s.as_bytes().to_vec()))
+    /// `luaL_checklstring`: the string, not a copy of it.
+    fn check_lstring(
+        &self,
+        ctx: Context<'gc>,
+        i: usize,
+    ) -> Result<piccolo::String<'gc>, Failure<'gc>> {
+        let v = self.check_string(ctx, i)?;
+        v.into_string(ctx)
+            .ok_or_else(|| type_error(ctx, Some(v), i, "string").into())
     }
 
     /// `luaL_checkstring`, which converts a number to a string in place.
@@ -1102,7 +1495,7 @@ impl<'gc> Job<'gc> {
                 Tree::const_group(&keys)
             }
         }
-        .map_err(|_| Failure::Memory)?;
+        .map_err(size_failure)?;
         Ok(vec![new_pattern(ctx, tree, kt)])
     }
 
@@ -1122,14 +1515,24 @@ impl<'gc> Job<'gc> {
                 }
             }
             Func::Star => {
+                // `newtree` comes before the empty-loop check: a size the
+                // C's `int` wraps short is allocated (too small), then
+                // checked, then written past.
                 let size1 = self.pat(ctx, 1)?.tree().len();
-                self.space = Some(Tree::star_space(size1, self.n).map_err(|_| Failure::Memory)?);
+                match Tree::star_size(size1, self.n) {
+                    CSize::TooBig => return Err(Failure::TooBig),
+                    CSize::Fits(_) => {
+                        self.space = Some(Tree::star_space(size1, self.n).map_err(size_failure)?);
+                    }
+                    CSize::Short(w) if w >= 0 && self.n >= 0 => self.short = true,
+                    CSize::Short(_) => return Err(Failure::Memory),
+                }
                 (self.n >= 0).then(|| Walk::Check(CheckAux::new(0, Pred::Nullable)))
             }
             Func::B => Some(Walk::Fixed(FixedLen::new(0))),
             Func::Ptree if self.arg(2).is_some_and(Value::to_bool) => {
-                let copy = self.pat(ctx, 1)?.tree().clone();
-                Some(Walk::Fix(FinalFix::new(None, 0), copy))
+                self.pat(ctx, 1)?;
+                Some(Walk::OpenCall(FindOpenCall::new()))
             }
             _ => None,
         })
@@ -1137,7 +1540,7 @@ impl<'gc> Job<'gc> {
 
     /// Build the result, once the analysis (if any) has answered.
     fn finish(&mut self, ctx: Context<'gc>) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
-        let mem = |_| Failure::Memory;
+        let mem = size_failure;
         let one = |v| Ok(Flow::Done(vec![v]));
         match self.func {
             Func::P => one(self.arg(1).unwrap_or(Value::Nil)),
@@ -1174,6 +1577,10 @@ impl<'gc> Job<'gc> {
             Func::Star => {
                 if self.n >= 0 && self.answer != 0 {
                     return Err(Fail::err("loop body may accept empty string").into());
+                }
+                if self.short {
+                    // The C writes past what it allocated.
+                    return Err(Failure::Memory);
                 }
                 let p = self.pat(ctx, 1)?;
                 let space = self.space.take().unwrap_or_default();
@@ -1290,7 +1697,8 @@ impl<'gc> Job<'gc> {
     }
 
     /// [`Job::advance`] with the fuel the VM has left, at least
-    /// [`MIN_STEPS`] steps; what it spent is taken from that fuel.
+    /// [`MIN_STEPS`] steps; what it spent is taken from that fuel, and what
+    /// it holds between slices accounted to the heap.
     fn run(
         &mut self,
         ctx: Context<'gc>,
@@ -1298,9 +1706,18 @@ impl<'gc> Job<'gc> {
     ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         let fuel = exec.fuel();
         let start = u32::try_from(fuel.remaining()).unwrap_or(0).max(MIN_STEPS);
-        let mut budget = start;
-        let r = self.advance(ctx, &mut budget);
-        fuel.consume(i32::try_from(start.saturating_sub(budget)).unwrap_or(i32::MAX));
+        let mut spend = Spend {
+            budget: start,
+            over: 0,
+            work: 0,
+        };
+        let r = self.advance(ctx, &mut spend);
+        let used = u64::from(start.saturating_sub(spend.budget)).saturating_add(spend.over);
+        fuel.consume(i32::try_from(used).unwrap_or(i32::MAX));
+        let per = spend.work.checked_div(used).unwrap_or(spend.work);
+        MOST_WORK.with(|c| c.set(c.get().max(per)));
+        let held = self.heap_bytes();
+        self.held.set(held);
         r
     }
 
@@ -1308,6 +1725,7 @@ impl<'gc> Job<'gc> {
     fn raise(&self, ctx: Context<'gc>, exec: &Execution<'gc, '_>, e: Failure<'gc>) -> Error<'gc> {
         match e {
             Failure::Memory => ctx.not_enough_memory(),
+            Failure::TooBig => lua_error_bytes(ctx, b"memory allocation error: block too big"),
             Failure::Raised(e) => e,
             Failure::Lua(f) => {
                 let lua_caller = exec.frame_info(1).is_some_and(|f| f.lua.is_some());
@@ -1325,7 +1743,7 @@ impl<'gc> Job<'gc> {
         tag: Tag,
     ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         let p = self.pat(ctx, 1)?;
-        let t = Tree::root1(tag, p.tree()).map_err(|_| Failure::Memory)?;
+        let t = Tree::root1(tag, p.tree()).map_err(size_failure)?;
         Ok(Flow::Done(vec![new_pattern(ctx, t, p.ktable())]))
     }
 
@@ -1333,7 +1751,7 @@ impl<'gc> Job<'gc> {
     fn two(&self, ctx: Context<'gc>, tag: Tag) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         let (p1, p2) = (self.pat(ctx, 1)?, self.pat(ctx, 2)?);
         let (kt, n) = join_ktables(ctx, p1.ktable(), p2.ktable())?;
-        let t = Tree::root2(tag, p1.tree(), p2.tree(), n).map_err(|_| Failure::Memory)?;
+        let t = Tree::root2(tag, p1.tree(), p2.tree(), n).map_err(size_failure)?;
         Ok(Flow::Done(vec![new_pattern(ctx, t, kt)]))
     }
 
@@ -1352,7 +1770,7 @@ impl<'gc> Job<'gc> {
         } else {
             add_to_ktable(ctx, &mut kt, self.arg(label))?
         };
-        let t = Tree::capture(cap, key, p.tree()).map_err(|_| Failure::Memory)?;
+        let t = Tree::capture(cap, key, p.tree()).map_err(size_failure)?;
         Ok(Flow::Done(vec![new_pattern(ctx, t, kt)]))
     }
 }
@@ -1363,7 +1781,7 @@ fn getpatt<'gc>(
     v: Option<Value<'gc>>,
     idx: usize,
 ) -> Result<Value<'gc>, Failure<'gc>> {
-    let mem = |_| Failure::Memory;
+    let mem = size_failure;
     let tree = match v {
         Some(Value::String(s)) => Tree::literal(s.as_bytes()).map_err(mem)?,
         Some(n @ (Value::Integer(_) | Value::Number(_))) => {
@@ -1404,7 +1822,7 @@ const CLASSES: [(&str, Class); 11] = [
 /// A library function or metamethod as a Lua function.
 fn callback<'gc>(ctx: Context<'gc>, func: Func) -> Callback<'gc> {
     Callback::from_fn_with(&ctx, func, |&func, ctx, mut exec, mut stack| {
-        let mut job = Job::new(func, stack.drain(..).collect());
+        let mut job = Job::new(ctx, func, stack.drain(..).collect());
         match job.run(ctx, &mut exec) {
             Ok(Flow::Done(vs)) => {
                 stack.extend(vs);
@@ -1510,7 +1928,23 @@ mod tests {
     //! oracle's answers; these pin what the corpus cannot reach.
     use super::*;
     use crate::nse::stdlib::{load_format, load_patterns, load_tail};
-    use piccolo::{Closure, Executor, Lua, Variadic};
+    use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, Variadic};
+
+    /// Step `ex` to its end in slices of fuel, at most 1,000 of them: a
+    /// construction that runs past that (a verifier that lost its bound on the
+    /// rules it follows, say) fails here by assertion, not by a hang.
+    fn finish(lua: &mut Lua, ex: &StashedExecutor) {
+        for _ in 0..1_000 {
+            let mut fuel = Fuel::with(100_000);
+            if lua
+                .enter(|ctx| ctx.fetch(ex).step(ctx, &mut fuel))
+                .expect("steps")
+            {
+                return;
+            }
+        }
+        panic!("not finished within 1,000 slices of fuel");
+    }
 
     fn run(src: &str) -> Vec<String> {
         let mut lua = Lua::core();
@@ -1522,7 +1956,7 @@ mod tests {
             let c = Closure::load(ctx, Some("=t"), src.as_bytes()).expect("compiles");
             ctx.stash(Executor::start(ctx, c.into(), ()))
         });
-        lua.finish(&ex).expect("finishes");
+        finish(&mut lua, &ex);
         lua.enter(|ctx| {
             let vs: Variadic<Vec<Value>> = ctx
                 .fetch(&ex)
@@ -1536,6 +1970,60 @@ mod tests {
                 })
                 .collect()
         })
+    }
+
+    /// Rules that share a constant table: the grammar's table holds each
+    /// once, and every key in the grammar still reaches the value it reached
+    /// in its rule — each constant, and each call's rule, by name.
+    #[test]
+    fn shared_rule_tables_are_merged_once_and_keys_keep_their_values() {
+        let mut lua = Lua::core();
+        let ex = lua.enter(|ctx| {
+            ctx.set_global("lpeg", register_for_tests(ctx, None));
+            let c = Closure::load(
+                ctx,
+                Some("=t"),
+                &b"local P, V, Cc = lpeg.P, lpeg.V, lpeg.Cc \
+                   local one = P'x' * Cc('one') * V'B' \
+                   local two = P'y' * Cc('two') * V'A' \
+                   return lpeg.P{ 'A', A = one * 'a', B = one * 'b' + 'q', \
+                                  C = two * 'c', D = two + 'd', E = P'e' * Cc('three') }"[..],
+            )
+            .expect("compiles");
+            ctx.stash(Executor::start(ctx, c.into(), ()))
+        });
+        finish(&mut lua, &ex);
+        lua.enter(|ctx| {
+            let v: Value = ctx
+                .fetch(&ex)
+                .take_result(ctx)
+                .expect("done")
+                .expect("no error");
+            let p = pattern(ctx, v).expect("a pattern");
+            let (t, kt) = (p.tree(), p.ktable().expect("a constant table"));
+            let at = |k: Key| match kt.get_raw(Value::Integer(i64::from(k))) {
+                Value::String(s) => String::from_utf8_lossy(s.as_bytes()).into_owned(),
+                v => v.type_name().to_string(),
+            };
+            // `A` and `B` share `one`'s table, `C` and `D` `two`'s, two
+            // entries each, and `E` has one: 5, where the C has 9.
+            assert_eq!(kt.length(), 5, "each shared table once");
+            let (mut consts, mut calls) = (Vec::new(), Vec::new());
+            for (i, n) in t.nodes().iter().enumerate() {
+                if n.tag == Tag::Capture && n.cap == CapKind::Const as u8 {
+                    consts.push(at(n.key));
+                }
+                if n.tag == Tag::Call {
+                    let rule = t.sib2(i).and_then(|r| t.node(r)).expect("a rule");
+                    calls.push(at(rule.key));
+                }
+            }
+            // The rules after the first come in the table's order.
+            consts.sort();
+            calls.sort();
+            assert_eq!(consts, ["one", "one", "three", "two", "two"]);
+            assert_eq!(calls, ["A", "A", "B", "B"]);
+        });
     }
 
     #[test]

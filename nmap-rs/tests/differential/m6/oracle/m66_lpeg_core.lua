@@ -535,4 +535,7 @@ local function run(cases_path, out, opts)
   return n
 end
 
-return { run = run, render = render, make_env = make_env }
+-- `run_row` runs one case ({ id, tags, chunk }, the chunk unescaped) and
+-- returns its status, values and log: the port's corpus gate
+-- (crates/core/tests/lpeg_corpus_differential.rs) calls it row by row.
+return { run = run, run_row = run_row, render = render, make_env = make_env }

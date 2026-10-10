@@ -28,7 +28,7 @@ use piccolo::{
 
 use super::strpack::PackError;
 use super::strrep::rep;
-use super::{lua_error, string_table, type_error, LoadError, LuaArgs};
+use super::{lua_error, lua_error_bytes, string_table, type_error, LoadError, LuaArgs};
 
 /// Installs `_G`, `rawequal`, `xpcall`, `load`, `coroutine.wrap` and
 /// `string.rep` into `ctx`'s globals, replacing anything already there.
@@ -52,7 +52,7 @@ pub fn load_tail<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
 
 /// Raise `e` as `luaL_argerror`/`luaL_error` would from function `name`.
 fn raise<'gc>(ctx: Context<'gc>, name: &str, e: PackError) -> Error<'gc> {
-    lua_error(ctx, &e.lua_message(name))
+    lua_error_bytes(ctx, &e.lua_message(name))
 }
 
 /// The address of a value the collector owns, for identity comparison.

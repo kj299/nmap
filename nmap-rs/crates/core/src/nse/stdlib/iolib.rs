@@ -446,7 +446,7 @@ fn handle_of<'gc>(meta: Table<'gc>, v: Value<'gc>) -> Option<&'gc Handle> {
 }
 
 fn raise<'gc>(ctx: Context<'gc>, name: &str, e: PackError) -> Error<'gc> {
-    lua_error(ctx, &e.lua_message(name))
+    lua_error_bytes(ctx, &e.lua_message(name))
 }
 
 /// `tolstream` then `tofile`: argument 1 as an open file.

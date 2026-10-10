@@ -34,7 +34,7 @@
 //!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
-//! * Inherits `validate-ipv4-only-for-now` from [`crate::recv_validate`].
+//! * Inherits `recv-validate-ipv4-only-for-now` from [`crate::recv_validate`].
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_icmp, classify_tcp, PortState, ScanType, TH_ACK};

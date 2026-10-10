@@ -57,19 +57,19 @@ pub struct NseState {
     pub lua: Lua,
     /// What the prelude returned: the engine's own values (`NSE_YIELD_VALUE`,
     /// `REQUIRE_ERROR`, `print_debug`, ...) and its entry points (`main`,
-    /// `load_scripts`, `render`).
+    /// `load_script`, `scripts_loaded`, `render`).
     pub engine: StashedTable,
     /// The `nmap` module's state, which the engine shares.
     pub(crate) lib: super::nmaplib::Shared,
     /// Results the scripts stored, until a phase renders them.
     pub(crate) store: Rc<RefCell<Store>>,
     /// Run between slices of every call into the engine.
-    pub(crate) watchdog: Option<super::engine::Watchdog>,
+    pub(crate) watchdog: Option<Box<dyn super::engine::Watchdog>>,
 }
 
 impl NseState {
     /// Set the check run between slices of VM work ([`super::engine::Watchdog`]).
-    pub fn set_watchdog(&mut self, watchdog: Option<super::engine::Watchdog>) {
+    pub fn set_watchdog(&mut self, watchdog: Option<Box<dyn super::engine::Watchdog>>) {
         self.watchdog = watchdog;
     }
 }
@@ -283,8 +283,9 @@ mod tests {
     /// removed (`oracle/gen_m66_scriptload.py`, `PORT_MISSING`). Porting a
     /// module, or stubbing one, means changing this list as well as that one
     /// (M6.6 review, sabotages S24 and S27).
-    #[test]
-    fn the_registered_c_modules_are_exactly_the_ported_ones() {
+    /// The state `new_state` builds, before the prelude, with no libraries,
+    /// files or data.
+    fn bare_state() -> piccolo::Lua {
         use super::*;
         use crate::nse::nmaplib::{NmapEnv, NmapLib, Phase};
         use crate::nse::stdlib::iolib::{FsError, OpenMode, ScriptFile, Whence};
@@ -361,7 +362,13 @@ mod tests {
             engine: EngineOptions::default(),
             net: Rc::new(RefCell::new(crate::nse::net::NoNet)),
         };
-        let mut lua = build(&config);
+        build(&config)
+    }
+
+    #[test]
+    fn the_registered_c_modules_are_exactly_the_ported_ones() {
+        use super::*;
+        let mut lua = bare_state();
         // Every `package.loaded` entry that is not one of Lua's own libraries,
         // and which of them are globals too.
         let out = run_chunk(
@@ -394,5 +401,71 @@ mod tests {
             );
             assert_eq!(out, ChunkOutcome::Returned(vec!["nil".to_string()]));
         }
+    }
+
+    /// `lpeg` is built only partly (M6.6 step b: patterns, not matching), and
+    /// is registered only at step e (E9): until then no script can reach it.
+    /// Its test-only registration (`lpeg::register_for_tests`) is not called
+    /// by the runtime.
+    #[test]
+    fn lpeg_is_not_registered() {
+        use super::*;
+        let mut lua = bare_state();
+        let out = run_chunk(
+            &mut lua,
+            "=t",
+            b"local ok, e = pcall(require, 'lpeg') \
+              return ok, (tostring(e):match(\"^module 'lpeg' not found\")), \
+                     rawget(_G, 'lpeg'), package.loaded.lpeg",
+            1_000_000,
+        );
+        assert_eq!(
+            out,
+            ChunkOutcome::Returned(vec![
+                "false".to_string(),
+                "module 'lpeg' not found".to_string(),
+                "nil".to_string(),
+                "nil".to_string()
+            ])
+        );
+        let src = include_str!("runtime.rs");
+        let call = ["register", "_for_tests"].concat();
+        assert!(
+            !src.contains(&format!("{call}(")),
+            "the runtime registers lpeg"
+        );
+    }
+
+    /// Nothing calls `lpeg::register_for_tests` but the `lpeg` module's own
+    /// tests, the integration tests and the fuzz targets (E9): a search of
+    /// every crate's sources, so a caller anywhere else — the engine, the
+    /// command line — fails here, not only one in this file.
+    #[test]
+    #[cfg_attr(miri, ignore = "reads the source tree")]
+    fn only_tests_register_lpeg() {
+        let call = format!("{}(", ["register", "_for_tests"].concat());
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..")];
+        let (mut files, mut callers) = (0usize, Vec::new());
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a crate directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    let skip = path.ends_with("tests")
+                        || path.ends_with("target")
+                        || path.ends_with("nse/lpeg");
+                    if !skip {
+                        dirs.push(path);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files = files.saturating_add(1);
+                    let src = std::fs::read_to_string(&path).expect("a source file");
+                    if src.contains(&call) {
+                        callers.push(path);
+                    }
+                }
+            }
+        }
+        assert!(files > 100, "searched only {files} files");
+        assert!(callers.is_empty(), "lpeg is registered by {callers:?}");
     }
 }

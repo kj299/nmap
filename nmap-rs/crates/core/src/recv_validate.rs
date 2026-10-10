@@ -11,11 +11,12 @@
 //!
 //! ## Scope / divergence
 //!
-//! `validate-ipv4-only-for-now` — the C `validatepkt` also validates IPv6 (walking the
-//! extension-header chain via `ipv6_get_data`). This port handles IPv4 and rejects
-//! IPv6 with [`Reject::Ipv6Unsupported`], deferring IPv6 receive-validation to the
-//! same milestone that lands the IPv6 extension-header parser (M5+), consistent with
-//! `packet-parser-ported-subset-degrades-to-raw`. Ledgered in `DIVERGENCES.md`.
+//! `recv-validate-ipv4-only-for-now` — the C `validatepkt` also validates IPv6 (walking
+//! the extension-header chain via `ipv6_get_data`). This port handles IPv4 and rejects
+//! IPv6 with [`Reject::Ipv6Unsupported`], deferring IPv6 receive-validation to the IPv6
+//! scan path. The extension-header parser it once waited on has landed
+//! (`core::headers::ipv6ext`), so this is a scope boundary that closes with the IPv6
+//! driver. Ledgered in `DIVERGENCES.md`.
 //!
 //! Total on all input: every path returns; no panic, no unchecked index, no unsigned
 //! underflow (the exact class the C `OPTLEN_IS` macro guards against by hand).

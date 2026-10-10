@@ -139,7 +139,7 @@ impl From<PackError> for FormatError {
     fn from(e: PackError) -> Self {
         Self {
             arg: e.arg,
-            msg: e.msg.into_bytes(),
+            msg: e.msg,
         }
     }
 }

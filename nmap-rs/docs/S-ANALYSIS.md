@@ -53,7 +53,7 @@ The data exists in-process; nothing captures it.
 > `core::osscan::submission_reason` (porting `OmitSubmissionFP`) and
 > `FingerPrint::render_tests` (porting `fp2ascii`) both landed in M5. It is
 > **false for service**: `service_scan.cc`'s `addServiceChar` /
-> `addServiceString` / `addToServiceFingerprint` (`:1663–1720`) were never
+> `addServiceString` / `addToServiceFingerprint` (`:1663–1771`) were never
 > ported in M3, and a search of `crates/` finds no service-fingerprint builder
 > at all. The service half of collection therefore needs a *port*, not a
 > capture — and unlike the rest of this workstream it has a real C oracle,
@@ -104,7 +104,7 @@ the surrounding code found more than the grep did:
 1. **TOCTOU on every database path (CWE-367).** `file_is_readable()`
    (`nbase/nbase_misc.c:707`) is a `stat()`; the file is opened later, by a
    different call, with no handle carried between them. All six
-   `file_is_readable` call sites inside `nmap_fetchfile_sub` (`:2687`, `:2694`,
+   `file_is_readable` call sites inside `nmap_fetchfile_sub` (`nmap.cc:2687`, `:2694`,
    `:2712`, `:2719`, `:2730`, `:2738`) have this shape, as does the
    `--servicedb`-style early return at `:2623`. The window is small and local,
    but it is structural.

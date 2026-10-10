@@ -14,7 +14,7 @@ use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
 use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::Phase;
-use nmap_core::options::{RunConfig, ScanKind};
+use nmap_core::options::{is_stdout_dest, RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
@@ -128,7 +128,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     // Target specs from `-iL`, appended AFTER the positional ones. That order is
-    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3783) returns argv
+    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv
     // entries while `optind < argc` and only then reads the input file.
     if let Some(path) = cfg.input_file.clone() {
         match read_host_list(&path) {
@@ -255,7 +255,8 @@ async fn main() -> ExitCode {
         nmap_core::verbose!(1, "nmap-services not found; service names limited");
     }
 
-    // Ports to scan (TCP): -p spec, else top-N, else a small default range.
+    // Ports to scan, for the scan's protocol: -p spec, else top-N, else a
+    // small default range.
     let ports = match select_ports(&cfg, services.as_ref()) {
         Ok(p) => p,
         Err(e) => {
@@ -263,6 +264,10 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let port_notes = port_warnings(&cfg, &ports);
+    for w in &port_notes {
+        eprintln!("{w}");
+    }
 
     // Resolve every target expression into (ip, optional hostname).
     let mut targets = resolve_targets(&cfg).await;
@@ -418,13 +423,17 @@ async fn main() -> ExitCode {
         debugging: cfg.debugging,
     };
 
-    if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref(), start_epoch) {
+    if let Err(e) = emit_outputs(
+        &cfg,
+        &results,
+        &meta,
+        services.as_ref(),
+        &os_block,
+        &port_notes,
+        start_epoch,
+    ) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
-    }
-    // The OS block follows the port table, as nmap orders it.
-    if !os_block.is_empty() {
-        print!("{os_block}");
     }
     ExitCode::SUCCESS
 }
@@ -1257,22 +1266,29 @@ fn select_ports(
     cfg: &RunConfig,
     services: Option<&ServiceTable>,
 ) -> Result<Vec<u16>, nmap_core::PortSpecError> {
+    // The scan's own protocol's list: `-sU` scans the UDP ports of `-p` and
+    // the top UDP ports, as nmap does, not the TCP ones.
+    let proto = scan_protocol(cfg.scan);
+    let pick = |l: nmap_core::ports::PortList| match proto {
+        nmap_core::Protocol::Udp => l.udp,
+        _ => l.tcp,
+    };
     // The candidate set, before any top-N cut.
     let explicit: Option<Vec<u16>> = match &cfg.port_spec {
-        Some(spec) => Some(parse_port_spec(spec, services)?.tcp),
+        Some(spec) => Some(pick(parse_port_spec(spec, services)?)),
         None => None,
     };
 
     // `--exclude-ports` applies to the candidates, whatever they are.
     let excluded: Option<Vec<u16>> = match &cfg.exclude_ports {
-        Some(spec) => Some(parse_port_spec(spec, services)?.tcp),
+        Some(spec) => Some(pick(parse_port_spec(spec, services)?)),
         None => None,
     };
     let keep = |p: &u16| excluded.as_ref().is_none_or(|ex| !ex.contains(p));
 
     let Some(table) = services else {
         // No nmap-services: fall back to the historical 1-1024 sweep, which is
-        // what C does for an old-style file without ratios (`services.cc:411`).
+        // what C does for an old-style file without ratios (`services.cc:410`).
         let base: Vec<u16> = explicit.unwrap_or_else(|| (1u16..=1024).collect());
         return Ok(base.into_iter().filter(keep).collect());
     };
@@ -1292,11 +1308,11 @@ fn select_ports(
 
     // A ratio (0, 1) selects by frequency; 1 or more is a count.
     let ranked: Vec<u16> = if level < 1.0 {
-        table.ports_above_ratio(nmap_core::Protocol::Tcp, level)
+        table.ports_above_ratio(proto, level)
     } else {
         // Take the whole ranking and cut after filtering, so that an excluded
         // port does not consume one of the N slots -- step 2 above.
-        table.top_ports(nmap_core::Protocol::Tcp, usize::MAX)
+        table.top_ports(proto, usize::MAX)
     };
 
     let mut out: Vec<u16> = ranked
@@ -1316,6 +1332,61 @@ fn select_ports(
         return Ok((1u16..=1024).collect());
     }
     Ok(out)
+}
+
+/// The protocol a scan kind's ports come from: `-sU` is nmap's only UDP scan
+/// type (`UDPScan()`); every other port scan here is a TCP one (`TCPScan()`).
+fn scan_protocol(kind: ScanKind) -> nmap_core::Protocol {
+    match kind {
+        ScanKind::Udp => nmap_core::Protocol::Udp,
+        _ => nmap_core::Protocol::Tcp,
+    }
+}
+
+/// The warnings nmap gives about the port list before it scans, in its
+/// order: a protocol prefix in `-p` whose scan type was not requested
+/// (`nmap.cc:1596-1618`), then a requested scan type left with no ports
+/// (`nmap.cc:1711-1716`). nmap writes them with `error()`, to standard error
+/// and to the normal output file. `P:` is refused before this, and no scan
+/// here is an SCTP one, so `S:` always warns.
+fn port_warnings(cfg: &RunConfig, ports: &[u16]) -> Vec<String> {
+    if cfg.scan == ScanKind::List {
+        return Vec::new();
+    }
+    let udp = scan_protocol(cfg.scan) == nmap_core::Protocol::Udp;
+    let mut out = Vec::new();
+    if let Some(spec) = &cfg.port_spec {
+        let b = spec.as_bytes();
+        for (i, &c) in b.iter().enumerate() {
+            if b.get(i.saturating_add(1)) != Some(&b':') {
+                continue;
+            }
+            let msg = match c {
+                b'T' if udp => {
+                    "WARNING: Your ports include \"T:\" but you haven't specified any TCP scan type."
+                }
+                b'U' if !udp => {
+                    "WARNING: Your ports include \"U:\" but you haven't specified UDP scan with -sU."
+                }
+                b'S' => {
+                    "WARNING: Your ports include \"S:\" but you haven't specified any SCTP scan type."
+                }
+                _ => continue,
+            };
+            out.push(msg.to_string());
+        }
+    }
+    if ports.is_empty() {
+        out.push(
+            if udp {
+                "WARNING: UDP scan was requested, but no udp ports were specified.  Skipping this scan type."
+            } else {
+                "WARNING: a TCP scan type was requested, but no tcp ports were specified.  Skipping this scan type."
+            }
+            .to_string(),
+        );
+    }
+    out
 }
 
 /// Build the IP-layer overrides (`--ttl`, `--badsum`, `-S`) from the parsed
@@ -1457,17 +1528,33 @@ async fn resolve_targets(cfg: &RunConfig) -> Vec<(IpAddr, Option<String>)> {
 /// Emit the requested output formats. With no `-o` flag, normal output goes to
 /// stdout; otherwise each specified format goes to its destination (`-` =
 /// stdout, else a file).
+/// Write the report: the normal output to stdout, and each format to its
+/// `-o` destination.
+///
+/// The normal output goes to stdout whatever files are also written, because
+/// nmap's `LOG_PLAIN` is `LOG_NORMAL|LOG_SKID|LOG_STDOUT` (`output.h:84`);
+/// only `-v0` or a `-` destination discards it ([`RunConfig::stdout_is_null`]).
+/// The OS block is part of the normal output (`printosscanoutput` writes
+/// `LOG_PLAIN`), so it goes wherever the report goes, after the port table.
+/// `notes` are the `error()` lines printed to standard error before the scan,
+/// which nmap also writes at the top of the normal output file
+/// (`LOG_NORMAL|LOG_STDERR`); stdout does not repeat them.
 fn emit_outputs(
     cfg: &RunConfig,
     results: &nmap_core::ScanResults,
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
+    os_block: &str,
+    notes: &[String],
     start_epoch: i64,
 ) -> std::io::Result<()> {
-    let none = cfg.out_normal.is_none() && cfg.out_xml.is_none() && cfg.out_grep.is_none();
-    if none {
-        print!("{}", render_normal(results, meta, services));
-        return Ok(());
+    let normal = || {
+        let mut s = render_normal(results, meta, services);
+        s.push_str(os_block);
+        s
+    };
+    if !cfg.stdout_is_null() {
+        print!("{}", normal());
     }
     // Expand the strftime escapes here rather than in `parse_args`, which is
     // pure and has no clock. One expansion point for all four options, against
@@ -1475,10 +1562,13 @@ fn emit_outputs(
     // same command cannot disagree about the date, even across midnight.
     let stamp = start_epoch;
     if let Some(dest) = &cfg.out_normal {
-        write_to(
-            &expand_dest(dest, stamp),
-            &render_normal(results, meta, services),
-        )?;
+        let mut text = String::new();
+        for n in notes {
+            text.push_str(n);
+            text.push('\n');
+        }
+        text.push_str(&normal());
+        write_to(&expand_dest(dest, stamp), &text)?;
     }
     if let Some(dest) = &cfg.out_xml {
         write_to(
@@ -1498,7 +1588,7 @@ fn emit_outputs(
 /// Expand a destination's strftime escapes; `-` (stdout) passes through
 /// untouched so it can never become a file named after the clock.
 fn expand_dest(dest: &str, epoch: i64) -> String {
-    if dest == "-" || dest.is_empty() {
+    if is_stdout_dest(dest) {
         return dest.to_string();
     }
     nmap_core::logfile::expand(dest, epoch)
@@ -1506,7 +1596,7 @@ fn expand_dest(dest: &str, epoch: i64) -> String {
 
 /// Write `content` to `dest` (`-` = stdout, else a file).
 fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
-    if dest == "-" || dest.is_empty() {
+    if is_stdout_dest(dest) {
         print!("{content}");
         Ok(())
     } else {
@@ -1543,6 +1633,7 @@ fn nse_setup(cfg: &RunConfig, services: Option<&ServiceTable>) -> nse::Setup {
         stall,
         verbose: i64::from(cfg.verbose),
         debugging: i64::from(cfg.debugging),
+        stdout_null: cfg.stdout_is_null(),
         timing_level: i64::from(
             cfg.timing_template
                 .unwrap_or(TimingTemplate::Normal)
@@ -1760,6 +1851,25 @@ mod port_selection_tests {
                 "--port-ratio {r}"
             );
         }
+    }
+
+    /// `-sU` takes the top UDP ports, as nmap does. Until the M6.6 cleanup it
+    /// took the top TCP ports and scanned them over UDP. The goldens are
+    /// 7.94's `scaninfo` for `-sU --top-ports N` with `--datadir` this tree.
+    #[test]
+    fn udp_top_ports_match_c_nmap() {
+        for n in [1usize, 10, 100, 1000] {
+            assert_eq!(
+                selected(&["-sU", "--top-ports", &n.to_string(), "127.0.0.1"]),
+                golden(&format!("udp-top-{n}.txt")),
+                "-sU --top-ports {n}"
+            );
+        }
+        // `-p`'s prefixes pick the scan's protocol's list.
+        assert_eq!(selected(&["-sU", "-p", "T:80,U:53", "127.0.0.1"]), vec![53]);
+        assert_eq!(selected(&["-sT", "-p", "T:80,U:53", "127.0.0.1"]), vec![80]);
+        assert_eq!(selected(&["-sU", "-p", "53", "127.0.0.1"]), vec![53]);
+        assert!(selected(&["-sU", "-p", "T:80", "127.0.0.1"]).is_empty());
     }
 
     /// `-F` is exactly `--top-ports 100` — verified against the reference

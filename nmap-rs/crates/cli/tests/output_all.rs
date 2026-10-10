@@ -211,3 +211,125 @@ fn every_output_option_shares_one_timestamp() {
     assert!(!date_of("a-").is_empty(), "files: {files:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Like [`run_in`], but returns stdout too.
+fn run_out(dir: &std::path::Path, args: &[&str]) -> (String, String, bool) {
+    let out = Command::new(bin())
+        .current_dir(dir)
+        .env("NMAP_RS_DATADIR", datadir())
+        .args(args)
+        .output()
+        .expect("nmap-rs runs");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+/// The report goes to stdout whatever files are also written: nmap's
+/// `LOG_PLAIN` includes `LOG_STDOUT` (`output.h:84`). Until this was fixed,
+/// any `-o` option silenced stdout, so `nmap-rs -oX scan.xml host` showed the
+/// operator nothing. Compared against 7.94 for each option below.
+#[test]
+fn the_report_goes_to_stdout_alongside_output_files() {
+    let dir = scratch("tee");
+    for opts in [
+        &["-oN", "n.txt"][..],
+        &["-oX", "x.xml"],
+        &["-oG", "g.txt"],
+        &["-oA", "all"],
+        &["-d0"],
+    ] {
+        let mut args = vec!["-sL", "-n"];
+        args.extend_from_slice(opts);
+        args.push("127.0.0.1");
+        let (stdout, stderr, ok) = run_out(&dir, &args);
+        assert!(ok, "{opts:?}: {stderr}");
+        assert!(
+            stdout.contains("Nmap scan report for 127.0.0.1"),
+            "{opts:?}: stdout {stdout:?}"
+        );
+        assert!(!stdout.contains("<nmaprun"), "{opts:?}: stdout {stdout:?}");
+    }
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
+    assert!(read("n.txt").contains("Nmap scan report for 127.0.0.1"));
+    assert!(read("x.xml").contains("<nmaprun"));
+    assert!(read("g.txt").contains("Host: 127.0.0.1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `-` destination takes stdout over, and `-v0` discards it; a later `-v`
+/// does not bring it back (`log_open`, `output.cc:1061-1063`;
+/// `nmap.cc:1418-1421`).
+#[test]
+fn a_stdout_destination_or_v0_replaces_the_report() {
+    let dir = scratch("null");
+    let run = |args: &[&str]| {
+        let mut all = vec!["-sL", "-n"];
+        all.extend_from_slice(args);
+        all.push("127.0.0.1");
+        let (stdout, stderr, ok) = run_out(&dir, &all);
+        assert!(ok, "{args:?}: {stderr}");
+        stdout
+    };
+
+    // Only the XML, so it parses.
+    let xml = run(&["-oX", "-"]);
+    assert!(xml.contains("<nmaprun"), "{xml:?}");
+    assert!(!xml.contains("Nmap scan report"), "{xml:?}");
+    let grep = run(&["-oG", "-"]);
+    assert!(grep.contains("Host: 127.0.0.1"), "{grep:?}");
+    assert!(!grep.contains("Nmap scan report"), "{grep:?}");
+    // The normal output once, not twice.
+    let normal = run(&["-oN", "-", "-oX", "x.xml"]);
+    assert_eq!(normal.matches("Nmap scan report").count(), 1, "{normal:?}");
+    assert!(std::fs::read_to_string(dir.join("x.xml"))
+        .unwrap_or_default()
+        .contains("<nmaprun"));
+
+    for args in [&["-v0"][..], &["-v0", "-v"], &["-v0", "-oN", "n.txt"]] {
+        assert_eq!(run(args), "", "{args:?}");
+    }
+    // `-v0` silences stdout, not the files.
+    assert!(std::fs::read_to_string(dir.join("n.txt"))
+        .unwrap_or_default()
+        .contains("Nmap scan report for 127.0.0.1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a script logs to stdout goes through the same stream: it reaches the
+/// terminal normally, and is discarded under `-oX -` (where it would break
+/// the XML) and `-v0`. It is `LOG_STDOUT` only, so `-oN` files never carry
+/// it. 7.94 gives the same for this script.
+#[test]
+fn a_scripts_stdout_log_follows_the_report() {
+    let dir = scratch("nselog");
+    std::fs::write(
+        dir.join("logmark.nse"),
+        "categories = {'safe'}\nprerule = function() return true end\n\
+         action = function() nmap.log_write('stdout', 'LOGMARK') return 'done' end\n",
+    )
+    .expect("script");
+    let run = |args: &[&str]| {
+        let mut all = vec!["-sT", "-Pn", "-n", "-p", "1", "--script", "./logmark.nse"];
+        all.extend_from_slice(args);
+        all.push("127.0.0.1");
+        let (stdout, stderr, ok) = run_out(&dir, &all);
+        assert!(ok, "{args:?}: {stderr}");
+        stdout
+    };
+    let plain = run(&["-oN", "n.txt"]);
+    assert!(plain.contains("NSE: LOGMARK"), "{plain:?}");
+    assert!(plain.contains("|_logmark: done"), "{plain:?}");
+    let n = std::fs::read_to_string(dir.join("n.txt")).unwrap_or_default();
+    assert!(
+        n.contains("|_logmark: done") && !n.contains("LOGMARK"),
+        "{n:?}"
+    );
+    let xml = run(&["-oX", "-"]);
+    assert!(xml.contains("<script id=\"logmark\""), "{xml:?}");
+    assert!(!xml.contains("LOGMARK"), "{xml:?}");
+    assert_eq!(run(&["-v0"]), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}

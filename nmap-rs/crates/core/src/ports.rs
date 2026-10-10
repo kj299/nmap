@@ -97,7 +97,7 @@ impl ServiceTable {
     /// `ratio` — nmap's `--port-ratio`.
     ///
     /// C expresses this as the same loop as `top_ports` with the count limit
-    /// removed and a `break` when `current->ratio < level` (`services.cc:478`),
+    /// removed and a `break` when `current->ratio < level` (`services.cc:479-481`),
     /// which is why the comparison is `>=` and not `>`: a port whose ratio
     /// exactly equals the requested level is included. `--port-ratio 0` would
     /// therefore select everything, which is why C refuses it — the accepted

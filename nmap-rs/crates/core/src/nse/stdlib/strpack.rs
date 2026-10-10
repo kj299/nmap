@@ -116,19 +116,20 @@ const NATIVE_LITTLE: bool = cfg!(target_endian = "little");
 pub struct PackError {
     /// The 1-based Lua argument number, for an argument error.
     pub arg: Option<usize>,
-    /// The message, as the C words it.
-    pub msg: String,
+    /// The message, as the C words it. Bytes: a type error names a value by
+    /// its metatable's `__name`, which is any Lua string.
+    pub msg: Vec<u8>,
 }
 
 impl PackError {
-    fn arg(arg: usize, msg: impl Into<String>) -> Self {
+    fn arg(arg: usize, msg: impl Into<Vec<u8>>) -> Self {
         Self {
             arg: Some(arg),
             msg: msg.into(),
         }
     }
 
-    fn plain(msg: impl Into<String>) -> Self {
+    fn plain(msg: impl Into<Vec<u8>>) -> Self {
         Self {
             arg: None,
             msg: msg.into(),
@@ -138,25 +139,36 @@ impl PackError {
     /// Argument error for a value that could not be converted, for use by
     /// [`PackArgs`] implementations. `msg` is the parenthesised part:
     /// `"number expected, got table"`.
-    pub fn bad_argument(arg: usize, msg: impl Into<String>) -> Self {
+    pub fn bad_argument(arg: usize, msg: impl Into<Vec<u8>>) -> Self {
         Self::arg(arg, msg)
     }
 
     /// The whole message as `luaL_argerror` would build it, given the name the
     /// function was called by.
-    pub fn lua_message(&self, fname: &str) -> String {
+    pub fn lua_message(&self, fname: &str) -> Vec<u8> {
         match self.arg {
-            Some(n) => format!("bad argument #{n} to '{fname}' ({})", self.msg),
+            Some(n) => {
+                let mut m = format!("bad argument #{n} to '{fname}' (").into_bytes();
+                m.extend_from_slice(&self.msg);
+                m.push(b')');
+                m
+            }
             None => self.msg.clone(),
         }
+    }
+
+    /// The message, for a test or a log: lossily, where it is not UTF-8.
+    #[must_use]
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.msg)
     }
 }
 
 impl fmt::Display for PackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.arg {
-            Some(n) => write!(f, "bad argument #{n} ({})", self.msg),
-            None => f.write_str(&self.msg),
+            Some(n) => write!(f, "bad argument #{n} ({})", self.text()),
+            None => f.write_str(&self.text()),
         }
     }
 }
@@ -847,11 +859,11 @@ mod tests {
         assert_eq!(p("i1", vec![V::I(128)]).unwrap_err().arg, Some(2));
         assert_eq!(p("i1", vec![V::I(-129)]).unwrap_err().arg, Some(2));
         assert_eq!(
-            p("I1", vec![V::I(-1)]).unwrap_err().msg,
+            p("I1", vec![V::I(-1)]).unwrap_err().text(),
             "unsigned overflow"
         );
         assert_eq!(
-            p("I1", vec![V::I(256)]).unwrap_err().msg,
+            p("I1", vec![V::I(256)]).unwrap_err().text(),
             "unsigned overflow"
         );
         // No overflow check at eight bytes and above.
@@ -863,7 +875,7 @@ mod tests {
     fn integral_size_limits() {
         for bad in ["i0", "i17", "I0", "s17", "!17", "!0"] {
             let e = p(bad, vec![V::I(0)]).unwrap_err();
-            assert!(e.msg.starts_with("integral size"), "{bad}: {e:?}");
+            assert!(e.text().starts_with("integral size"), "{bad}: {e:?}");
         }
     }
 
@@ -879,22 +891,22 @@ mod tests {
         // `!4` makes alignment matter; `Xi4` pads to four and packs nothing.
         assert_eq!(p("!4 b Xi4", vec![V::I(1)]).unwrap(), [1, 0, 0, 0]);
         assert_eq!(
-            p("X", vec![]).unwrap_err().msg,
+            p("X", vec![]).unwrap_err().text(),
             "invalid next option for option 'X'"
         );
         assert_eq!(
-            p("Xc1", vec![]).unwrap_err().msg,
+            p("Xc1", vec![]).unwrap_err().text(),
             "invalid next option for option 'X'"
         );
         // An invalid option after X reports itself, not X.
-        assert!(p("Xq", vec![]).unwrap_err().msg.contains("'q'"));
+        assert!(p("Xq", vec![]).unwrap_err().text().contains("'q'"));
     }
 
     #[test]
     fn alignment_is_power_of_two_checked_after_clamping() {
         // `!3` is a legal maxalign; an `i4` then clamps to 3 and fails the check.
         assert_eq!(
-            p("!3 i4", vec![V::I(0)]).unwrap_err().msg,
+            p("!3 i4", vec![V::I(0)]).unwrap_err().text(),
             "format asks for alignment not power of 2"
         );
         // But `i3` alone never aligns: the default maxalign is 1.
@@ -910,9 +922,9 @@ mod tests {
         // under Miri it does not finish. The end-to-end `pack` case is in the
         // differential corpus, which runs natively.
         let e = packsize(b"c99999999999").unwrap_err();
-        assert_eq!(e.msg, "invalid format option '9'");
+        assert_eq!(e.text(), "invalid format option '9'");
         assert_eq!(
-            packsize(b"c").unwrap_err().msg,
+            packsize(b"c").unwrap_err().text(),
             "missing size for format option 'c'"
         );
         // Nine digits that stay under the limit are read whole.
@@ -926,12 +938,12 @@ mod tests {
         assert_eq!(p("<s1", vec![V::S(b"hi".to_vec())]).unwrap(), b"\x02hi");
         assert_eq!(p("z", vec![V::S(b"hi".to_vec())]).unwrap(), b"hi\0");
         assert_eq!(
-            p("z", vec![V::S(b"h\0i".to_vec())]).unwrap_err().msg,
+            p("z", vec![V::S(b"h\0i".to_vec())]).unwrap_err().text(),
             "string contains zeros"
         );
         let long = vec![b'x'; 256];
         assert_eq!(
-            p("s1", vec![V::S(long)]).unwrap_err().msg,
+            p("s1", vec![V::S(long)]).unwrap_err().text(),
             "string length does not fit in given size"
         );
     }
@@ -940,11 +952,11 @@ mod tests {
     fn packsize_rejects_variable_length() {
         assert_eq!(packsize(b"i4i8").unwrap(), 12);
         assert_eq!(packsize(b"!8 b i8").unwrap(), 16);
-        assert_eq!(packsize(b"s").unwrap_err().msg, "variable-length format");
-        assert_eq!(packsize(b"z").unwrap_err().msg, "variable-length format");
+        assert_eq!(packsize(b"s").unwrap_err().text(), "variable-length format");
+        assert_eq!(packsize(b"z").unwrap_err().text(), "variable-length format");
         // Each `c` stays under MAXSIZE; together they do not.
         assert_eq!(
-            packsize(b"c2000000000c2000000000").unwrap_err().msg,
+            packsize(b"c2000000000c2000000000").unwrap_err().text(),
             "format result too large"
         );
     }
@@ -959,17 +971,17 @@ mod tests {
     #[test]
     fn unpack_never_reads_past_the_data() {
         assert_eq!(
-            unpack(b"i4", &[1, 2, 3], 1).unwrap_err().msg,
+            unpack(b"i4", &[1, 2, 3], 1).unwrap_err().text(),
             "data string too short"
         );
         // `s1` whose length byte claims more than remains.
         assert_eq!(
-            unpack(b"s1", &[9, b'a'], 1).unwrap_err().msg,
+            unpack(b"s1", &[9, b'a'], 1).unwrap_err().text(),
             "data string too short"
         );
         // `z` with no terminator: the C's `strlen` would stop at the hidden NUL.
         assert_eq!(
-            unpack(b"z", b"abc", 1).unwrap_err().msg,
+            unpack(b"z", b"abc", 1).unwrap_err().text(),
             "unfinished string for format 'z'"
         );
         let (v, next) = unpack(b"z", b"ab\0cd", 1).unwrap();
@@ -1000,7 +1012,7 @@ mod tests {
         let mut bad = ok;
         bad[15] = 1;
         assert_eq!(
-            unpack(b"<i16", &bad, 1).unwrap_err().msg,
+            unpack(b"<i16", &bad, 1).unwrap_err().text(),
             "16-byte integer does not fit into Lua Integer"
         );
         // A negative value must be followed by 0xff, not 0.

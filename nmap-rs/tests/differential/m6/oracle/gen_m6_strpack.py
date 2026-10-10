@@ -25,8 +25,9 @@ decision the C makes, not to be large:
 
 Each row is `name<TAB>chunk_hex<TAB>note`. The golden records the returned
 values with their subtype, or that the call raised — not the message, which in
-PUC-Lua carries the caller's position (ledgered as `error_string_gets_position`)
-and, for a missing argument, artefacts of the C's own stack layout.
+PUC-Lua carries the caller's position (which the first-party stdlib does not
+add: `stdlib-errors-have-no-position`) and, for a missing argument, artefacts
+of the C's own stack layout.
 """
 from __future__ import annotations
 

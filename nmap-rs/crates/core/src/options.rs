@@ -93,6 +93,10 @@ pub struct RunConfig {
     pub out_xml: Option<String>,
     /// `-oG <file>` grepable output destination (`"-"` = stdout).
     pub out_grep: Option<String>,
+    /// `-v0` was given. nmap then points `o.nmap_stdout` at the null device
+    /// (`nmap.cc:1418-1421`), and nothing later points it back: `-v0 -v`
+    /// scans at verbosity 1 with stdout still discarded.
+    pub verbose_zero: bool,
     /// `--min-rate <n>`: floor on probes/sec (`None` ⇒ unset).
     pub min_rate: Option<f64>,
     /// `--max-rate <n>`: ceiling on probes/sec (`None` ⇒ unset).
@@ -210,6 +214,21 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
+    /// Whether the interactive output (`LOG_STDOUT`) is discarded. nmap
+    /// discards it by pointing `o.nmap_stdout` at the null device, in two
+    /// cases: after `-v0` (`nmap.cc:1418`), and when an output option writes
+    /// to stdout (`-oX -`; `log_open`, `output.cc:1061-1063`), so that stdout
+    /// carries only the format asked for. Otherwise the report goes to stdout
+    /// whatever files `-oN`/`-oX`/`-oG` also write, since `LOG_PLAIN` includes
+    /// `LOG_STDOUT` (`output.h:84`).
+    pub fn stdout_is_null(&self) -> bool {
+        self.verbose_zero
+            || [&self.out_normal, &self.out_xml, &self.out_grep]
+                .into_iter()
+                .flatten()
+                .any(|d| is_stdout_dest(d))
+    }
+
     /// Resolve `-T` and the explicit timing knobs into one set of parameters.
     ///
     /// The order is nmap's, from the block at `nmap.cc:1472-1500` that runs
@@ -345,6 +364,7 @@ impl Default for RunConfig {
             out_normal: None,
             out_xml: None,
             out_grep: None,
+            verbose_zero: false,
             min_rate: None,
             max_rate: None,
             ttl: None,
@@ -510,6 +530,9 @@ fn leading_int_0_9(s: &str) -> Option<u8> {
 fn apply_v(cfg: &mut RunConfig, rest: &str) {
     if let Some(level) = leading_level(rest) {
         cfg.verbose = level;
+        if level == 0 {
+            cfg.verbose_zero = true;
+        }
     } else if rest.bytes().all(|b| b == b'v') {
         cfg.verbose = bump(cfg.verbose);
         for _ in rest.bytes() {
@@ -760,6 +783,11 @@ fn parse_timing_template(cfg: &mut RunConfig, raw: &str) {
 ///
 /// A refusal is recorded and the destination left unset, so the CLI reports it
 /// and exits rather than writing to a name the operator did not intend.
+/// Whether an output destination is stdout: `-`, or empty.
+pub fn is_stdout_dest(dest: &str) -> bool {
+    dest == "-" || dest.is_empty()
+}
+
 fn output_file(invalid: &mut Vec<String>, raw: &str, option: &str) -> Option<String> {
     match crate::logfile::validate(raw, option) {
         Err(e) => {
@@ -1553,6 +1581,29 @@ mod tests {
         assert_eq!(cfg(&["-v0"]).verbose, 0);
         assert_eq!(cfg(&["-v12"]).verbose, 10); // clamp to 10
         assert_eq!(cfg(&["-v3x"]).verbose, 3); // atoi-style leading digits
+    }
+
+    #[test]
+    fn stdout_is_null_after_v0_or_a_stdout_destination() {
+        // The report goes to stdout alongside files (`LOG_PLAIN` includes
+        // `LOG_STDOUT`).
+        assert!(!cfg(&[]).stdout_is_null());
+        assert!(!cfg(&["-oN", "n.txt", "-oX", "x.xml", "-oG", "g.txt"]).stdout_is_null());
+        assert!(!cfg(&["-oA", "base"]).stdout_is_null());
+        // A destination of `-` takes stdout over (`log_open`).
+        assert!(cfg(&["-oX", "-"]).stdout_is_null());
+        assert!(cfg(&["-oG-"]).stdout_is_null());
+        assert!(cfg(&["-oN", "-", "-oX", "x.xml"]).stdout_is_null());
+        // `-v0` discards it, and a later `-v` does not restore it; `-d0` and
+        // a non-zero `-vN` do not discard it.
+        assert!(cfg(&["-v0"]).stdout_is_null());
+        assert!(cfg(&["-v00"]).stdout_is_null());
+        let c = cfg(&["-v0", "-v"]);
+        assert_eq!(c.verbose, 1);
+        assert!(c.stdout_is_null());
+        assert!(!cfg(&["-d0"]).stdout_is_null());
+        assert!(!cfg(&["-v1"]).stdout_is_null());
+        assert!(!cfg(&["-v", "0"]).stdout_is_null()); // `0` is a target here
     }
 
     #[test]

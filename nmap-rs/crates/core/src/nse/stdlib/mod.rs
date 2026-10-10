@@ -113,8 +113,8 @@ pub fn load_patterns<'gc>(ctx: Context<'gc>) -> Result<(), LoadError> {
         ctx,
         "gsub",
         Callback::from_fn(&ctx, |ctx, _, mut stack| {
-            let seq =
-                gsub_start(ctx, &stack).map_err(|e| lua_error(ctx, &e.lua_message("gsub")))?;
+            let seq = gsub_start(ctx, &stack)
+                .map_err(|e| lua_error_bytes(ctx, &e.lua_message("gsub")))?;
             stack.clear();
             Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, seq)))
         }),
@@ -152,24 +152,27 @@ fn install<'gc>(ctx: Context<'gc>, table: Table<'gc>, name: &'static str, body: 
         name,
         Callback::from_fn(&ctx, move |ctx, _, mut stack| match body(ctx, &mut stack) {
             Ok(()) => Ok(CallbackReturn::Return),
-            Err(e) => Err(lua_error(ctx, &e.lua_message(name))),
+            Err(e) => Err(lua_error_bytes(ctx, &e.lua_message(name))),
         }),
     );
 }
 
-/// Make room for `additional` more bytes in a buffer whose size a script
+/// Make room for `additional` more items in a buffer whose size a script
 /// chooses, or say why not: `luaL_Buffer` raises "not enough memory" when
 /// its allocator refuses. The buffer is not on the VM's heap, so the memory
-/// budget is asked for the whole capacity it grows to, before the allocator
-/// is — which, overcommitting, would grant gigabytes it cannot back.
-pub(crate) fn reserve(out: &mut Vec<u8>, additional: usize) -> bool {
+/// budget is asked for the whole capacity it grows to, in bytes, before the
+/// allocator is — which, overcommitting, would grant gigabytes it cannot
+/// back. LPeg's trees and its walkers' stacks grow through this too
+/// (`docs/M6.6-ANALYSIS.md`, E4).
+pub(crate) fn reserve<T>(out: &mut Vec<T>, additional: usize) -> bool {
     if out.capacity().saturating_sub(out.len()) >= additional {
         return true;
     }
     let grown = out
         .len()
         .saturating_add(additional)
-        .max(out.capacity().saturating_mul(2));
+        .max(out.capacity().saturating_mul(2))
+        .saturating_mul(std::mem::size_of::<T>());
     piccolo::budget::allows(grown) && out.try_reserve(additional).is_ok()
 }
 
@@ -189,7 +192,7 @@ pub(crate) fn lua_error_bytes<'gc>(ctx: Context<'gc>, msg: &[u8]) -> Error<'gc> 
 fn pattern_error(e: PatternError) -> PackError {
     PackError {
         arg: None,
-        msg: e.msg,
+        msg: e.msg.into_bytes(),
     }
 }
 
@@ -209,7 +212,7 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     }
 
     fn type_error(&self, arg: usize, expected: &str) -> PackError {
-        type_error(self.get(arg), arg, expected)
+        type_error(self.ctx, self.get(arg), arg, expected)
     }
 
     /// `luaL_checklstring` for an argument that must be present.
@@ -251,21 +254,42 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     /// that *is* a number but not an integral one says so, and anything else is
     /// a type error.
     pub(crate) fn check_integer(&self, arg: usize) -> Result<i64, PackError> {
-        check_integer(self.get(arg), arg)
+        check_integer(self.ctx, self.get(arg), arg)
     }
 }
 
 /// `luaL_typeerror`'s message for argument `arg`, which is `v` (`None` if the
-/// call passed fewer arguments).
-pub(crate) fn type_error(v: Option<Value<'_>>, arg: usize, expected: &str) -> PackError {
-    let got = v.map_or("no value", |v| v.type_name());
-    PackError::bad_argument(arg, format!("{expected} expected, got {got}"))
+/// call passed fewer arguments). A value whose metatable holds a string
+/// `__name` is named by it — `FILE*`, `lpeg-pattern`, and a string's too if
+/// the string metatable has one — read raw and printed with `%s`, so up to
+/// its first NUL and byte for byte (`stdlib-type-errors-ignore-name`,
+/// closed in M6.6 step b). There is no light userdata here, which the C
+/// calls `light userdata`.
+pub(crate) fn type_error<'gc>(
+    ctx: Context<'gc>,
+    v: Option<Value<'gc>>,
+    arg: usize,
+    expected: &str,
+) -> PackError {
+    let mut msg = format!("{expected} expected, got ").into_bytes();
+    match v {
+        None => msg.extend_from_slice(b"no value"),
+        Some(v) => match meta_ops::name_metafield(ctx, v) {
+            Some(name) => msg.extend_from_slice(name),
+            None => msg.extend_from_slice(v.type_name().as_bytes()),
+        },
+    }
+    PackError::bad_argument(arg, msg)
 }
 
 /// `luaL_checkinteger`. The two failure messages are the C's: a value that
 /// *is* a number but not an integral one says so, and anything else is a type
 /// error.
-fn check_integer(v: Option<Value<'_>>, arg: usize) -> Result<i64, PackError> {
+pub(crate) fn check_integer<'gc>(
+    ctx: Context<'gc>,
+    v: Option<Value<'gc>>,
+    arg: usize,
+) -> Result<i64, PackError> {
     let val = v.unwrap_or(Value::Nil);
     match val.to_integer() {
         Some(i) => Ok(i),
@@ -273,14 +297,18 @@ fn check_integer(v: Option<Value<'_>>, arg: usize) -> Result<i64, PackError> {
             arg,
             "number has no integer representation",
         )),
-        None => Err(type_error(v, arg, "number")),
+        None => Err(type_error(ctx, v, arg, "number")),
     }
 }
 
 /// `luaL_checknumber`.
-fn check_number(v: Option<Value<'_>>, arg: usize) -> Result<f64, PackError> {
+fn check_number<'gc>(
+    ctx: Context<'gc>,
+    v: Option<Value<'gc>>,
+    arg: usize,
+) -> Result<f64, PackError> {
     v.and_then(Value::to_number)
-        .ok_or_else(|| type_error(v, arg, "number"))
+        .ok_or_else(|| type_error(ctx, v, arg, "number"))
 }
 
 impl PackArgs for LuaArgs<'_, '_, '_> {
@@ -289,7 +317,7 @@ impl PackArgs for LuaArgs<'_, '_, '_> {
     }
 
     fn number(&mut self, arg: usize) -> Result<f64, PackError> {
-        check_number(self.get(arg), arg)
+        check_number(self.ctx, self.get(arg), arg)
     }
 
     fn bytes(&mut self, arg: usize) -> Result<Cow<'_, [u8]>, PackError> {
@@ -630,11 +658,11 @@ impl FormatArgs for VmArgs<'_, '_> {
     }
 
     fn integer(&mut self, arg: usize) -> Result<i64, PackError> {
-        check_integer(self.get(arg), arg)
+        check_integer(self.ctx, self.get(arg), arg)
     }
 
     fn number(&mut self, arg: usize) -> Result<f64, PackError> {
-        check_number(self.get(arg), arg)
+        check_number(self.ctx, self.get(arg), arg)
     }
 
     /// `luaL_tolstring`: the VM's own `tostring`, so that `%s` and `tostring`
@@ -663,7 +691,7 @@ impl FormatArgs for VmArgs<'_, '_> {
                 .map_or(Value::Nil, |mt| mt.get_value(self.ctx, "__tostring"));
                 Err(PackError {
                     arg: None,
-                    msg: format!("attempt to call a {} value", mm.type_name()),
+                    msg: format!("attempt to call a {} value", mm.type_name()).into_bytes(),
                 })
             }
         }
@@ -710,9 +738,9 @@ impl<'gc> FormatSeq<'gc> {
                     .filter(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
                     .and_then(|v| v.into_string(ctx))
                     .ok_or_else(|| {
-                        lua_error(
+                        lua_error_bytes(
                             ctx,
-                            &type_error(v.copied(), 1, "string").lua_message("format"),
+                            &type_error(ctx, v.copied(), 1, "string").lua_message("format"),
                         )
                     })?;
                 self.args[0] = Value::String(s);

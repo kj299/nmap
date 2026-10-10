@@ -3,15 +3,16 @@
 Gate 2 of the kit's six (`ported → differential → …`): every module is compared
 with the C it replaces, run as an oracle. Each directory holds a milestone's
 corpora, the oracles that produced them, and the scripts that regenerate them.
-The Rust side of each is a test in `crates/core/tests/` (or a CI job, where
-the comparison needs the whole binary).
+The Rust side of each is a test in `crates/core/tests/` (m6 also has some in
+`crates/cli/tests/` and `crates/sys/tests/`), or a CI job, where the
+comparison needs the whole binary.
 
 | directory | what it gates | oracle |
 |---|---|---|
 | this one | M1: `-sT` end to end (`run_differential.sh`, below) | installed nmap, on a loopback fixture |
 | [`m4/`](m4/README.md) | M4: packet headers, builder, parser, validation, classification | C harnesses compiled from this tree's sources |
 | `m5/` | M5: OS-detection expressions, probes and IPv6 fingerprinting; `run_os_differential.sh` runs `-O` on the wire | C harnesses from this tree, and installed nmap |
-| [`m6/`](m6/README.md) | M6: NSE — script metadata, selection, the Lua VM and stdlib, `--script-args`, the `nmap` module, the NSE state, running scripts, sockets, `--script` | `liblua/` and `lpeg.c` from this tree; installed nmap 7.94 |
+| [`m6/`](m6/README.md) | M6: NSE — script metadata, selection, the Lua VM and stdlib, `--script-args`, the `nmap` module, the NSE state, running scripts, sockets, `--script`; M6.6: `nmapdb`, per-script loads, LPeg pattern trees | `liblua/` and `lpeg.c` from this tree; installed nmap 7.94 |
 | `m7/` | M7: log-file output, time-value parsing, and the `--top-ports`/`-F`/`--port-ratio` port sets | C harnesses from this tree; installed nmap (`--packet-trace`, `--datadir` this tree) |
 | `s/` | Workstream S: SHA-256, minisign verification, service fingerprints | OpenSSL CLI; a C++ harness over this tree's service-fingerprint code |
 

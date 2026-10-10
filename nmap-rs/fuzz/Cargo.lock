@@ -312,6 +312,7 @@ dependencies = [
  "ed25519-dalek",
  "libfuzzer-sys",
  "nmap-core",
+ "piccolo",
 ]
 
 [[package]]

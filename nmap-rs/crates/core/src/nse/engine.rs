@@ -520,11 +520,18 @@ fn l_rendered<'gc>(
 /// is nmap's behaviour, no limit.
 pub type Budget = Option<u64>;
 
-/// A check the engine runs between slices of VM work: `Some(reason)` stops
-/// the call there, as a spent [`Budget`] does, and the phase is reported
-/// aborted with `reason`. The command line's stall limit is one
-/// (`nse-stall-limit`).
-pub type Watchdog = Box<dyn FnMut() -> Option<String>>;
+/// A check the engine runs between slices of VM work. The command line's
+/// stall limit is one (`nse-stall-limit`).
+pub trait Watchdog {
+    /// `Some(reason)` stops the call there, as a spent [`Budget`] does, and
+    /// the phase is reported aborted with `reason`.
+    fn check(&mut self) -> Option<String>;
+
+    /// The engine is about to load one script. Loading is not scheduled, so
+    /// no scheduler pass marks progress through it; this does, so that a
+    /// limit bounds each script's top-level code rather than the whole load.
+    fn progress(&mut self) {}
+}
 
 /// Step `ex` until it finishes, the budget is spent, or the watchdog stops
 /// it.
@@ -532,11 +539,23 @@ pub(crate) fn finish(
     lua: &mut Lua,
     ex: &StashedExecutor,
     budget: Budget,
-    mut watchdog: Option<&mut Watchdog>,
+    watchdog: Option<&mut Box<dyn Watchdog>>,
+    what: &str,
+) -> Result<(), String> {
+    finish_spending(lua, ex, budget, &mut 0, watchdog, what)
+}
+
+/// [`finish`], counting into `spent`, so that several calls can share one
+/// budget.
+fn finish_spending(
+    lua: &mut Lua,
+    ex: &StashedExecutor,
+    budget: Budget,
+    spent: &mut u64,
+    mut watchdog: Option<&mut Box<dyn Watchdog>>,
     what: &str,
 ) -> Result<(), String> {
     const SLICE: i32 = 4096;
-    let mut spent: u64 = 0;
     loop {
         let mut f = Fuel::with(SLICE);
         match lua.enter(|ctx| ctx.fetch(ex).step(ctx, &mut f)) {
@@ -544,11 +563,11 @@ pub(crate) fn finish(
             Ok(false) => {}
             Err(e) => return Err(e.to_string()),
         }
-        spent = spent.saturating_add(u64::from(SLICE.unsigned_abs()));
-        if budget.is_some_and(|b| spent > b) {
+        *spent = spent.saturating_add(u64::from(SLICE.unsigned_abs()));
+        if budget.is_some_and(|b| *spent > b) {
             return Err(format!("{what}: out of fuel"));
         }
-        if let Some(reason) = watchdog.as_mut().and_then(|w| w()) {
+        if let Some(reason) = watchdog.as_mut().and_then(|w| w.check()) {
             return Err(format!("{what}: {reason}"));
         }
     }
@@ -614,11 +633,17 @@ impl super::runtime::NseState {
     /// Load the chosen scripts (`Script.new` on each) and compute their
     /// runlevels: `get_chosen_scripts`' second half. An error is nmap's
     /// "failed to initialize the script engine".
+    ///
+    /// One call into the engine per script, with the watchdog told of each
+    /// ([`Watchdog::progress`]); `budget` is for the whole load.
     pub fn load_scripts(&mut self, chosen: &[ChosenScript], budget: Budget) -> Result<(), String> {
-        let ex = self.lua.enter(|ctx| {
-            let engine = ctx.fetch(&self.engine);
-            let list = Table::new(&ctx);
-            for (i, c) in chosen.iter().enumerate() {
+        let mut spent = 0;
+        for c in chosen {
+            if let Some(w) = self.watchdog.as_mut() {
+                w.progress();
+            }
+            let ex = self.lua.enter(|ctx| {
+                let engine = ctx.fetch(&self.engine);
                 let params = Table::new(&ctx);
                 params.set_field(ctx, "selection", c.selection);
                 params.set_field(ctx, "verbosity", c.verbosity);
@@ -626,18 +651,36 @@ impl super::runtime::NseState {
                 let entry = Table::new(&ctx);
                 entry.set_field(ctx, "path", ctx.intern(&c.path));
                 entry.set_field(ctx, "params", params);
-                let n = i64::try_from(i).unwrap_or(i64::MAX).saturating_add(1);
-                let _ = list.set(ctx, n, entry);
-            }
+                let f: piccolo::Function = engine
+                    .get(ctx, "load_script")
+                    .expect("the prelude returns load_script");
+                ctx.stash(Executor::start(ctx, f, entry))
+            });
+            finish_spending(
+                &mut self.lua,
+                &ex,
+                budget,
+                &mut spent,
+                self.watchdog.as_mut(),
+                "loading scripts",
+            )?;
+            outcome(&mut self.lua, &ex)?;
+        }
+        if let Some(w) = self.watchdog.as_mut() {
+            w.progress();
+        }
+        let ex = self.lua.enter(|ctx| {
+            let engine = ctx.fetch(&self.engine);
             let f: piccolo::Function = engine
-                .get(ctx, "load_scripts")
-                .expect("the prelude returns load_scripts");
-            ctx.stash(Executor::start(ctx, f, list))
+                .get(ctx, "scripts_loaded")
+                .expect("the prelude returns scripts_loaded");
+            ctx.stash(Executor::start(ctx, f, ()))
         });
-        finish(
+        finish_spending(
             &mut self.lua,
             &ex,
             budget,
+            &mut spent,
             self.watchdog.as_mut(),
             "loading scripts",
         )?;

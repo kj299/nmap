@@ -13,14 +13,14 @@
 //! its fully-parsed typed header rather than a bare `(type, length)` pair, so callers
 //! get the TCP flags / ICMP type / addresses directly without re-parsing.
 //!
-//! ## Scope (the ported-header subset)
+//! ## Scope
 //!
-//! This walks only the headers M4 has ported: Ethernet, ARP, IPv4, IPv6, TCP, UDP,
-//! ICMPv4. Where the C would descend into a header this port does not yet have
-//! (ICMPv6, the IPv6 extension-header chain, SCTP, …), the remainder degrades to a
-//! single [`Header::Raw`] rather than being sub-parsed. That is a conservative,
-//! *safer* divergence — never a parse of un-audited bytes — logged in
-//! `DIVERGENCES.md` and to be tightened as those modules land (M5+).
+//! This walks Ethernet, ARP, IPv4, IPv6 and its extension-header chain, TCP, UDP,
+//! ICMPv4 and ICMPv6: every chain the C walk can follow. A protocol the C itself has
+//! no case for (SCTP, ESP, AH, …) ends the walk as a single [`Header::Raw`], on both
+//! sides. M4 walked only a subset; M5's `core::headers::icmpv6` and
+//! `core::headers::ipv6ext` closed the gap (`DIVERGENCES.md`,
+//! `packet-parser-ported-subset-degrades-to-raw`, resolved).
 //!
 //! Like the C, the walk is bounded at [`MAX_HEADERS_IN_PACKET`] headers (a hostile
 //! IP-in-IP-in-IP… nest cannot spin the loop) and is TOTAL on any input: a truncated

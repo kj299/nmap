@@ -350,8 +350,8 @@ fn socket<'gc>(a: &LuaArgs<'_, 'gc, '_>, n: usize) -> Result<&'gc Socket, Fail> 
     match a.get(n) {
         Some(Value::UserData(u)) => u
             .downcast_static::<Socket>()
-            .map_err(|_| type_error(Some(Value::UserData(u)), n, "nsock").into()),
-        v => Err(type_error(v, n, "nsock").into()),
+            .map_err(|_| type_error(a.ctx, Some(Value::UserData(u)), n, "nsock").into()),
+        v => Err(type_error(a.ctx, v, n, "nsock").into()),
     }
 }
 
@@ -781,9 +781,9 @@ fn nse_check_integer(a: &LuaArgs<'_, '_, '_>, n: usize) -> Result<i32, Fail> {
         Some(Value::Number(f)) => f,
         Some(v @ Value::String(_)) => match v.to_number() {
             Some(f) => f,
-            None => return Err(type_error(Some(v), n, "number").into()),
+            None => return Err(type_error(a.ctx, Some(v), n, "number").into()),
         },
-        v => return Err(type_error(v, n, "number").into()),
+        v => return Err(type_error(a.ctx, v, n, "number").into()),
     };
     let f = v.floor();
     // `lua_numbertointeger`'s range: [LUA_MININTEGER, -LUA_MININTEGER).
@@ -873,8 +873,8 @@ fn l_sleep<'gc>(
         Some(Value::Number(f)) => f,
         Some(v @ Value::String(_)) => v
             .to_number()
-            .ok_or_else(|| Fail::from(type_error(Some(v), 1, "number")))?,
-        v => return Err(type_error(v, 1, "number").into()),
+            .ok_or_else(|| Fail::from(type_error(ctx, Some(v), 1, "number")))?,
+        v => return Err(type_error(ctx, v, 1, "number").into()),
     };
     if secs < 0.0 {
         let shown = Value::Number(secs).display().to_string();

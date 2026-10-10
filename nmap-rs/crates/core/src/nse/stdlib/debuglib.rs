@@ -20,7 +20,7 @@ use piccolo::{
 };
 
 use super::strpack::PackError;
-use super::{lua_error, LuaArgs};
+use super::{lua_error_bytes, LuaArgs};
 use piccolo::chunk_id::chunk_id;
 use piccolo::compiler::FunctionRef;
 
@@ -47,7 +47,7 @@ pub fn load_debug<'gc>(ctx: Context<'gc>, loaded: Table<'gc>) -> Table<'gc> {
 }
 
 fn raise<'gc>(ctx: Context<'gc>, name: &str, e: PackError) -> Error<'gc> {
-    lua_error(ctx, &e.lua_message(name))
+    lua_error_bytes(ctx, &e.lua_message(name))
 }
 
 /// `funcinfo` and the rest of `lua_getinfo`, for one function.

@@ -16,7 +16,7 @@
 use piccolo::{Callback, CallbackReturn, Context, Error, Stack, Table, Value};
 
 use super::strpack::PackError;
-use super::{lua_error, LuaArgs};
+use super::{lua_error, lua_error_bytes, LuaArgs};
 
 /// `MAXUNICODE`.
 const MAX_UNICODE: u32 = 0x10_FFFF;
@@ -125,7 +125,7 @@ pub fn load_utf8<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 }
 
 fn raise<'gc>(ctx: Context<'gc>, name: &str, e: PackError) -> Error<'gc> {
-    lua_error(ctx, &e.lua_message(name))
+    lua_error_bytes(ctx, &e.lua_message(name))
 }
 
 /// `luaL_argcheck`.

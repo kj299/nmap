@@ -10,9 +10,9 @@ Every count below was measured against the C tree in this repository, not
 recalled; the commands are reproducible from the paths cited.
 
 > **Status (after M6.4e).** The port order was approved in M7.5 (Decision 3,
-> *the M6.0 port order*, below). M6.0–M6.3 and M6.4a/b/c1/c2/d are merged
-> (#109–#125). M6.4, sketched as one step in the build order below, was split
-> into five PRs:
+> *the M6.0 port order*, below). M6.0–M6.3 and all of M6.4 are merged
+> (#109–#127). M6.4, sketched as one step in the build order below, was split
+> into six PRs:
 >
 > - (a) VM errors;
 > - (b) limits and the memory budget;
@@ -21,7 +21,7 @@ recalled; the commands are reproducible from the paths cited.
 > - (d) sockets;
 > - (e) `--script` on the command line.
 >
-> e, the last, is in review. Decision 2's sandbox shipped in c1, and its
+> e, the last, merged as #127, so M6.4 is complete. Decision 2's sandbox shipped in c1, and its
 > last piece, `HOME`, in e: the host resolves it, `os.getenv` answers it
 > alone, and the two `~/.ssh` files `ssh1.lua` reads are readable
 > (`os-getenv-home-only`). PLAN.md's tracker is the live record; this
@@ -382,13 +382,13 @@ The proposed exit criterion instead, in increasing order of strength:
    `scripts/unittest.nse` — and **26 of the 133 libraries define a
    `test_suite`**. That is a ready-made conformance oracle sitting in the tree,
    and it exercises the stdlib far harder than the scripts do.
-2. **The 125 `default`-category scripts run.** That is precisely what a bare
+2. **The 127 `default`-category scripts run.** That is precisely what a bare
    `nmap -sC` executes, so it is the user-visible baseline.
-3. The remaining 486 become a **tracked coverage number that must not
+3. The remaining 484 become a **tracked coverage number that must not
    regress**, not a merge gate.
 
-For reference, the category distribution over all 611 scripts: `safe` 350,
-`discovery` 312, `intrusive` 213, `default` 125, `vuln` 105, `brute` 73,
+For reference, the category distribution over all 611 scripts: `safe` 352,
+`discovery` 315, `intrusive` 217, `default` 127, `vuln` 105, `brute` 75,
 `version` 48, `broadcast` 47, `exploit` 45, `auth` 38, `external` 33, `dos` 11,
 `malware` 10, `fuzzer` 3, `info` 1.
 
@@ -535,7 +535,7 @@ Three details that are load-bearing and non-obvious:
    crates do not.
 2. **The vendored crate goes under `crates/`, where the unsafe-audit gate can
    see it.** `audit_unsafe.py` has no `--exclude`: the path argument *is* the
-   exclusion, and CI hardcodes `nmap-rs/crates/` (`nmap-rs-ci.yml:132`). Putting
+   exclusion, and CI hardcodes `nmap-rs/crates/` (`b52b5d2d2:.github/workflows/nmap-rs-ci.yml:132`). Putting
    vendored code anywhere else is therefore not configuration, it is
    gate-dodging. Cost of doing it honestly: **30 unsafe blocks, 14 already
    documented, 16 to write.**
@@ -627,7 +627,7 @@ On the first: `cargo clippy --all-targets --all-features -D
 clippy::undocumented_unsafe_blocks` — the repo's exact escalation — reports
 **14 missing-safety-comment errors** when piccolo is a vendored *workspace
 member*, and **0** when it is a registry dependency. The project already
-recorded this failure mode for `ffi.rs` (`nmap-rs-ci.yml:186-190`: *"cargo
+recorded this failure mode for `ffi.rs` (`2aa550437:.github/workflows/nmap-rs-ci.yml:186-190`: *"cargo
 clippy mentioned ffi.rs 0 times, so the `-D clippy::undocumented_unsafe_blocks`
 escalation above was a hard error aimed at code it never saw"*). Vendoring as a
 member is what converts that gate from vacuous to firing. Depending on the
@@ -637,7 +637,8 @@ its own answer.
 
 On the second, the attack is right and the decision was incomplete. The
 sanitizer job is `cargo +nightly test -p nmap-sys --all-features`
-(`nmap-rs-ci.yml:235`), scoped to the one crate that holds first-party `unsafe`.
+(`2aa550437:.github/workflows/nmap-rs-ci.yml:235`), scoped to the one crate that holds
+first-party `unsafe` (M6.0 extended it to `-p piccolo`).
 The VM will not live in `nmap-sys`, so **ASan would execute none of it** — in a
 job whose own header comment exists because a sanitizer gate that does not
 execute the unsafe is vacuous. That is precisely the failure this project keeps

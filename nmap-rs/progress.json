@@ -15,6 +15,9 @@
     "core::nse::choose": [
       "nse_results"
     ],
+    "core::nse::lpeg::tree": [
+      "nse_lpeg_build"
+    ],
     "core::nse::nmapdb": [
       "nse_mac2corp"
     ],
@@ -120,14 +123,11 @@
     "congestion": {
       "fuzzed": "AIMD congestion-window arithmetic over our own scheduler state. Replies are classified and validated by core before any number reaches here, so no attacker-controlled bytes are parsed."
     },
-    "connect_scan": {
-      "fuzzed": "Async TCP connect driver. What it observes are connect(2) results - success, refused, timeout - not attacker-supplied buffers."
-    },
     "core::log": {
       "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
     },
     "core::nse::engine": {
-      "fuzzed": "Drives the VM through nse_main.lua's own scheduler and stores results; the bytes a script returns reach output only through core::nse::results, which nse_results fuzzes against transliterations of the C. Exercised end to end by scripts_differential (34 scenarios against nmap 7.94), including the cnse functions' argument checks."
+      "fuzzed": "Drives the VM through nse_main.lua's own scheduler and stores results; the bytes a script returns reach output only through core::nse::results, which nse_results fuzzes against transliterations of the C. Exercised end to end by scripts_differential (37 scenarios against nmap 7.94), including the cnse functions' argument checks."
     },
     "core::nse::fspolicy": {
       "fuzzed": "A pure predicate over canonical paths the host has already resolved (component-wise prefix and equality). It parses nothing. Pinned by unit tests, including the prefix-is-a-component case, and by sabotage."
@@ -199,13 +199,11 @@
   "modules": {
     "cli": "unsafe_audited",
     "congestion": "unsafe_audited",
-    "connect_scan": "unsafe_audited",
     "core::build": "unsafe_audited",
     "core::build6": "unsafe_audited",
     "core::bytes": "unsafe_audited",
     "core::checksum": "unsafe_audited",
     "core::classify": "unsafe_audited",
-    "core::cli": "unsafe_audited",
     "core::fingerprint_store": "unsafe_audited",
     "core::flagscan": "unsafe_audited",
     "core::fp6": "unsafe_audited",
@@ -229,6 +227,7 @@
     "core::nse::choose": "unsafe_audited",
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
+    "core::nse::lpeg::tree": "unsafe_audited",
     "core::nse::net": "unsafe_audited",
     "core::nse::nmapdb": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",

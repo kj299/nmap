@@ -550,6 +550,21 @@ pub fn len<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Result<MetaResult<'gc, 1>, 
     }
 }
 
+/// `luaL_getmetafield(L, idx, "__name")`, as the auxiliary library's
+/// `luaL_tolstring` and `luaL_typeerror` read it and print it with `%s`: the
+/// `__name` of `v`'s metatable when that is a string — read raw, from the
+/// metatable of any value that has one, the string metatable included — up to
+/// its first NUL, as bytes.
+pub fn name_metafield<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Option<&'gc [u8]> {
+    match metatable_of(ctx, v)?.get_value(ctx, "__name") {
+        Value::String(name) => {
+            let b = name.as_bytes();
+            Some(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())])
+        }
+        _ => None,
+    }
+}
+
 pub fn tostring<'gc>(
     ctx: Context<'gc>,
     v: Value<'gc>,
@@ -566,6 +581,21 @@ pub fn tostring<'gc>(
                     .map_err(|e| MetaOperatorError::Call(MetaMethod::ToString, e))?,
                 args: [v],
             }));
+        }
+    }
+
+    // `luaL_tolstring`'s default case: a metatable's `__name`, when it is a
+    // string, names the kind in place of the type, `"%s: %p"` all the same.
+    let named = match v {
+        Value::Table(t) => Some(gc_arena::Gc::as_ptr(t.into_inner()) as *const ()),
+        Value::UserData(u) => Some(gc_arena::Gc::as_ptr(u.into_inner()) as *const ()),
+        _ => None,
+    };
+    if let Some(ptr) = named {
+        if let Some(name) = name_metafield(ctx, v) {
+            let mut out = name.to_vec();
+            out.extend_from_slice(format!(": {ptr:p}").as_bytes());
+            return Ok(MetaResult::Value(ctx.intern(&out).into()));
         }
     }
 

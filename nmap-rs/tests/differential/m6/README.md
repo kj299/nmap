@@ -33,6 +33,7 @@ any difference.
 | `m64_cli_golden.txt` | `nmap-rs --script` as a whole program: every phase's results and port states in normal and XML output, script arguments, timeouts, start-up errors (M6.4e), vs nmap 7.94 | `oracle/gen_m64_cli.py` (live in CI) | `nse_cli_differential` (in `nmap-cli`) | 15 scenarios |
 | `m66_nmapdb_golden.txt`, `m66_nmapdb_quarantine.txt` | the C module `nmapdb` over this tree's data files (M6.6), vs nmap 7.94 | `regen_m66_nmapdb.sh`, `oracle/gen_m66_nmapdb.py` (live in CI) | `nmapdb_differential` | 115,064 lines; 36 calls quarantined, each pinned |
 | `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `regen_m66_scriptload.sh`, `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 531 OK, 33 LOUD, 47 QUIET |
+| `m66_lpeg_*` | the C module `lpeg` (LPeg 0.12) with `re` and `lpeg-utility` (M6.6 step 0b), vs this tree's Lua + LPeg, and nmap 7.94 | `regen_m66_lpeg.sh` (`--check`; `--check-794` live in CI) | none yet (steps b–e) | 62,599 rows; 164 quarantined |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -462,3 +463,292 @@ mtime: a restore that brings back the file's original, older timestamp leaves
 the build made from the sabotaged file looking up to date, and the next run
 tests that stale, still-sabotaged binary (the M6.6 review's first S25 run did
 exactly that).
+
+## M6.6 step 0b — the LPeg oracle
+
+The corpus every LPeg step (b to e) is gated on (`docs/M6.6-ANALYSIS.md` §3,
+§11 row 0b). It holds 62,599 rows of LPeg 0.12 (`lpeg.c`), `nselib/re.lua` and
+`nselib/lpeg-utility.lua`, from one seeded generator, and two oracles run the
+same case runner over them:
+
+- **the spec:** this tree's `liblua/` plus `lpeg.c` (`oracle/build_lua_oracle.sh`,
+  M6.5 D1(c)), through `oracle/m66_lpeg_driver.lua`;
+- **nmap 7.94:** a prerule probe, `oracle/m66_lpeg_probe.nse`, with
+  `--datadir` set to this tree, so `re` and `lpeg-utility` are this tree's.
+
+```sh
+./regen_m66_lpeg.sh               # regenerate cases, golden and step map; check 7.94 (needs nmap)
+./regen_m66_lpeg.sh --check       # CI, beside regen_m62.sh: two runs agree, files are current
+./regen_m66_lpeg.sh --check-794   # CI, differential job: 7.94 drifts only in named classes
+python3 oracle/gen_m66_lpeg_cases.py --self-test
+```
+
+| file | what it is |
+|---|---|
+| `oracle/gen_m66_lpeg_cases.py` | the generator: seed 1, families A–K, Q, R and X; `--self-test` checks its infix translator, its determinism and its lint |
+| `oracle/m66_lpeg_core.lua` | the case runner both oracles load, under one chunk name: the wrappers, the rendering, and the census mode |
+| `oracle/m66_lpeg_driver.lua`, `oracle/m66_lpeg_probe.nse` | the standalone driver and the 7.94 probe |
+| `oracle/classify_m66_lpeg.py` | reads, canonicalises and compares outputs; names each difference's class; maps rows to steps |
+| `oracle/gen_m66_lpeg.py` | what `regen_m66_lpeg.sh` runs |
+| `oracle/screen_m66_lpeg.py` | the sanitizer screen, **local only** |
+| `m66_lpeg_cases.txt` | `id<TAB>tags<TAB>chunk`, 8.1 MB |
+| `m66_lpeg_golden.txt` | `id<TAB>status<TAB>values<TAB>log`, 1.8 MB |
+| `m66_lpeg_steps.txt` | `id<TAB>step<TAB>census flags`, 1.2 MB |
+| `m66_lpeg_quarantine.txt` | `id<TAB>reason<TAB>chunk`, 164 rows, input to the regeneration |
+
+**Every LPeg call is a direct `pcall` (E6).** In a case's environment `P`, `S`,
+`R`, `V`, `B`, `C`, `Cc`, `Cmt`, `Cb`, `Carg`, `Cp`, `Cs`, `Ct`, `Cf`, `Cg`,
+`locale`, `match`, `setmaxstack`, `version`, `ptree`, `pcode` and `ltype` are
+wrappers that call the C function as `pcall(lpeg.f, ...)`. The operators are
+the metatable's own functions, the same way: `mul`, `add`, `sub`, `div`,
+`pow`, `unm`, `len`, and `mcall(p, "match", ...)` for a method. `re.*` and
+`U.*` (lpeg-utility) are wrapped too. So `luaL_where(L, 1)` names `pcall`,
+a C function, and no message carries `chunk:N:`. `luaL_argerror` names the
+function as the C finds it: `lpeg.P` through `package.loaded`, `?` for a
+metamethod. A failure is re-raised as a marker object and reported as `err`.
+`xerr` would mean an error that passed through no wrapper; the corpus has
+none. The generator writes the operator rows in ordinary infix Lua and
+translates them (`T()`), and its lint refuses a chunk that calls the raw
+`lpeg` module.
+
+**Rendering.** Values are typed: `i3`, `f2.5`, `s"..."`, `true`, `nil`, and
+tables with their keys sorted. A pattern renders as `<pattern>`. No table,
+userdata or function is ever passed to `tostring`, because addresses differ
+from run to run. Bytes outside printable ASCII, and `"` and `\`, are written
+`\xHH`. A string over 512 bytes, or a table over 4 KiB rendered, becomes its
+length and an FNV-1a digest. The fourth column logs the deterministic
+callbacks (`Fcat`, `Mkeep`, `K`, `IDXF`, ...) in the order LPeg called them.
+Paths are cut to the file name: `.../nselib/re.lua:270:` becomes
+`re.lua:270:`, and a position inside the runner loses its line.
+
+**Families** (rows in the golden; quarantined rows excluded):
+
+| family | what | rows | `ok` | `err` | quarantined | step b | step c | step d |
+|---|---|---|---|---|---|---|---|---|
+| A | constructors | 595 | 402 | 193 | 4 | 213 | 380 | 2 |
+| B | operators | 2,264 | 1,236 | 1,028 | 0 | 1,031 | 1,071 | 162 |
+| C | captures, every kind | 764 | 631 | 133 | 12 | 44 | 336 | 384 |
+| D | grammars and their errors | 700 | 195 | 505 | 0 | 523 | 165 | 12 |
+| E | `match` arguments | 74 | 57 | 17 | 2 | 0 | 72 | 2 |
+| F | `p / string`, `/ number`, `/ table`, `/ function` | 501 | 384 | 117 | 4 | 30 | 340 | 131 |
+| G | `setmaxstack` | 269 | 127 | 142 | 0 | 40 | 229 | 0 |
+| H | Lua-stack and C-stack limits | 33 | 33 | 0 | 8 | 0 | 16 | 17 |
+| I | `locale` | 18 | 16 | 2 | 0 | 7 | 11 | 0 |
+| J | `re`: corpus grammars, features, errors | 980 | 859 | 121 | 0 | 0 | 0 | 980 |
+| K | lpeg-utility | 33 | 29 | 4 | 0 | 0 | 0 | 33 |
+| Q | random `re` strings | 6,000 | 5,166 | 834 | 0 | 0 | 0 | 6,000 |
+| R | random pattern trees | 49,880 | 37,321 | 12,559 | 120 | 10,657 | 21,839 | 17,384 |
+| X | fixed rows | 488 | 282 | 206 | 14 | 96 | 267 | 125 |
+| all | | 62,599 | 46,738 | 15,861 | 164 | 12,641 | 24,726 | 25,232 |
+
+No row is `xerr` or `loaderr`. The generator writes 62,763 rows; 164 are
+quarantined.
+
+Family X holds the fixed rows the plan asks for (§11 row 0b, §5):
+- `Cb` with two differently named groups (S14);
+- `Cc('k') * Carg(2)` after a ktable join (S16). `correctkeys` runs only when
+  both sides have a ktable, so the right side carries a constant of its own:
+  `Cc("k") * (Carg(2) * Cc("j"))`;
+- dynamic captures discarded on backtrack at n = 10^6, in a table and in a
+  substitution (S08);
+- `Cmt` returning integers, integral and non-integral floats, numeric strings,
+  `"0x3"`, `"3e0"`, tables, `true` with values, nothing, backward and
+  past-the-end positions, and error values (S06, S07);
+- `MAXSTRCAPS` at 8–12 nested captures (S10);
+- the backtrack ceiling at the boundary depth for 19 `setmaxstack` values
+  plus the floor (S04, S05, S12);
+- the §5 edges: a trailing `%`, `%N` in pre-order, group names as strings,
+  grammar keys `'1'` and `'1.0'`, table queries giving `false`, nil and NaN,
+  `/table` through `__index` (S09), `initposition` 0 and `-0.0`, 32-bit
+  narrowing, the identity constructors through `rawequal`, `ptree`/`pcode`
+  argument processing, `setmaxstack` details, `locale(t)` writing through
+  `__newindex` in class order, `Cf`, and error objects;
+- a grammar table's `__index`, which `getfirstrule` reads the initial rule
+  through (`lpeg.c:2932`), the one place construction calls Lua;
+- each message LPeg raises;
+- `__name` in type errors;
+- the 16-bit truncations on both sides of their thresholds. The row below the
+  runtime-capture threshold first fills and drops 4n ordinary captures, so
+  the C never grows its capture list from the runtime-capture path, where
+  `doublecap` over-reads (`lpeg-doublecap-stack-overread`).
+
+**Classes** (`oracle/classify_m66_lpeg.py`). A row that differs between two
+outputs gets the smallest set of normalisations under which it agrees:
+- **`hashorder`:** the rule name in LPeg's four grammar errors follows table
+  iteration order, which Lua salts per process. It is masked to `'?'`, and the
+  golden is stored masked. `initial rule 'X' is not a pattern` is not masked:
+  that name is the grammar's first field, so it is deterministic.
+- **`path`:** an nselib path.
+- **`position`:** a `name:N:` prefix (`stdlib-errors-have-no-position`).
+- **`argname`:** the name in `bad argument #N to 'NAME'`
+  (`stdlib-bad-argument-naming`).
+
+Three classes come from the row, not its text:
+- **`cdepth`:** rows tagged `cdepth` in the cases file. Their answer is the
+  embedding's depth: the C-call depth of re-entry, or the Lua-stack ceiling
+  on captures. Only rows near a ceiling are tagged.
+- **`drift794`:** rows where 7.94 answers differently from every standalone
+  Lua measured. Only the 7.94 agreement check accepts the class; a port gate
+  holds these rows to the golden.
+- **`quarantine`:** rows in the quarantine list.
+
+Anything else is `other`, and nothing accepts it. Each regeneration runs the
+standalone oracle twice. A row that differs between the runs outside
+`hashorder` fails the regeneration, and so does a row 7.94 gives differently
+outside the named classes.
+
+**What the classes cover, measured.** The C-call ceiling on re-entry is 195 in
+the standalone oracle and 194 in 7.94. Rows below 190 give the same answer
+under standalone Lua 5.4.4, 5.4.6 and 5.4.8 and under 7.94, so only
+`H.reenter.190` and deeper are `cdepth`. 7.94's `gsub` re-enters 195 deep in
+the same probe, so the pin relative to `gsub` (`H.reenter.rel`) is 0 under
+every standalone Lua and -1 under 7.94. It is `drift794`: the port is held to
+0. Why 7.94's LPeg re-entry costs one C level more than its `gsub` is
+**unverified**; it is not the Lua version. The Lua-stack ceiling on captures is 999,934 standalone and
+999,945 under 7.94, so the probe has 11 more free slots (measured; that
+fewer frames lie below its call is [INFERRED]).
+Relative to `table.unpack`'s ceiling in the same frame, it is -5 in both, so
+`H.stackcaps.rel` is an untagged pin. The ceiling for dynamic captures (two
+slots each) is not relative-pinned, because the 11-slot difference is odd.
+
+**Steps** (`m66_lpeg_steps.txt`). The map is measured, not guessed from the
+row's text. A census run (`oracle/m66_lpeg_core.lua`, census mode) puts a
+debug hook on every call and return, and records four things per row:
+- whether `lpeg.match` ran, directly, as a method, or from `re` or
+  lpeg-utility;
+- whether any pattern given to `match` contains a capture that calls Lua.
+  Taint flows from every constructor's and operator's arguments to its
+  result. `Cmt`, `P(function)`, `p / function`, `Cf` and `p / table` taint;
+  a grammar is tainted by its rules; `Cc`'s constants never taint;
+- whether `lpeg.locale` got a table;
+- whether code from `re.lua` or `lpeg-utility.lua` ran.
+
+It also records which LPeg function, if any, called a Lua function: `match`
+(a capture), or another (`locale`'s `__newindex`, a grammar's `__index`).
+
+From these:
+- **b:** the row never calls `match` and runs no `re`/lpeg-utility code (the
+  plan runs those libraries from step d). A constructor may call Lua, through
+  a grammar's `__index` or `locale(t)`'s `__newindex`: step b implements both;
+- **c:** every pattern it matches is free of Lua-calling captures, `match`
+  itself calls no Lua, and it runs no `re`/lpeg-utility code;
+- **d:** everything else.
+
+Steps d and e run every row. A row mapped to c in which `match` did call Lua
+fails the regeneration, which keeps the taint tracking honest.
+
+So step b can run 12,641 rows, step c 37,367 (step b's and its own 24,726),
+and steps d and e all 62,599.
+
+**The quarantine.** `oracle/screen_m66_lpeg.py` runs every generated row
+through four harnesses, resuming after each row that kills one:
+- the standalone oracle;
+- the same in census mode (its hook moves the heap);
+- an ASan/UBSan build with `-fno-sanitize-recover` and `LUA_USE_APICHECK`,
+  so the first report, or a push past the stack space a C function was given
+  or checked for, ends the process;
+- 7.94.
+
+It then repeats uninterrupted passes, as CI runs them, until one is clean. A
+row that crashes, trips a sanitizer or hangs anywhere is quarantined. So is a
+row the generator tags `q=LEDGERID`, without being run: the C is undefined or
+knowingly wrong there (the 16-bit truncations, D4), or the row would allocate
+gigabytes. The reason names each harness, and the ledger id where the
+report's first `lpeg.c` frame falls in a §7 defect.
+
+The screen needs an ASan build and about six minutes, so CI does not
+run it. The list's header records the SHA-256 of the corpus it screened, and
+`gen_m66_lpeg.py` refuses any other corpus. Changing the generator therefore
+means re-running the screen locally. Quarantined rows never reach an oracle
+in CI or a golden, and each needs a port pin with the semantic answer by step
+e (§11).
+
+| ledger id (§7) | rows |
+|---|---|
+| `lpeg-cc-nil-without-ktable` | 105 |
+| `lpeg-codegen-jump-out-of-code` | 33 |
+| `lpeg-doublecap-stack-overread` | 6 |
+| `lpeg-tree-size-int-overflow` | 5 |
+| `lpeg-nested-capture-lua-stack-overflow` | 5 |
+| `lpeg-initposition-negation-overflow` | 4 |
+| `lpeg-ktable-key-16bit` | 2 |
+| `lpeg-runtime-capture-index-16bit` | 1 |
+| `lpeg-getfirst-unbounded-recursion` | 1 |
+| `lpeg-pattern-string-size-overflow` | 1 |
+| `lpeg-code-freed-during-match` | 1 |
+
+18 rows are tagged by the generator. Of the 146 found, the standalone oracle
+crashes on 115, the census run on 114, 7.94 on 114, and the sanitizer build
+flags all 146. Every crash in the other three harnesses is also a sanitizer
+report. Every report's first `lpeg.c` frame falls in a §7 defect, so every
+quarantined row carries a ledger id.
+
+Two of the defects shaped the corpus:
+- **`lpeg-nested-capture-lua-stack-overflow`.** Nested captures 40 to 299
+  deep push past the stack space LPeg checked for, but still inside the Lua
+  stack's allocation, so ASan alone stays silent. A screen without
+  `LUA_USE_APICHECK` let `H.nestC.299` through, and the uninterrupted census
+  pass then crashed on it. `H.nestC.10` and `H.nestC.16` stay in the golden.
+- **`lpeg-doublecap-stack-overread`.** `Cmt(1, f)^0` with one value per call
+  steps the capture count by three past the 32-entry stack array, so the C
+  grows the array from the runtime-capture path and over-reads it. That is
+  why `X.rtcap.30000` fills the capture list with ordinary captures first.
+
+**For the port's gates (steps b–e).** Run `oracle/m66_lpeg_core.lua`
+unchanged in the port's VM, with the port's `lpeg` and this tree's `re.lua`
+and `lpeg-utility.lua`, over the rows the step can run
+(`m66_lpeg_steps.txt`). Then compare the output with the golden:
+
+```sh
+python3 oracle/classify_m66_lpeg.py compare m66_lpeg_golden.txt PORT_OUTPUT \
+  --cases m66_lpeg_cases.txt --quarantine m66_lpeg_quarantine.txt --allow CLASSES
+```
+
+A Rust harness can parse the same four-column format. Each class a step
+accepts must be ledgered (`position` and `argname` already are). Each
+quarantined row needs a unit-test pin by step e.
+
+**Agreement with 7.94** (`--check-794`): the committed golden is what 7.94
+gives on 62,591 of 62,599 rows (99.987%) once the rule names are masked. Of the 8 drift rows, 7 are
+`cdepth` (`H.reenter.195` to `.200` and `H.reenter.250`) and 1 is `drift794` (`H.reenter.rel`).
+
+Raw against a standalone run (`./regen_m66_lpeg.sh`), 62,584 rows agree
+(99.976%), with `cdepth` 7, `drift794` 1 and `hashorder` 7. The `hashorder` count moves
+from run to run: two standalone runs differed on 0 to 27 rows in this step's
+measurements. 2,504 rows of 7.94's output carry a masked rule name. No row drifts
+by `path`, `position` or `argname`.
+
+**What the corpus catches.** The 16 sabotaged `lpeg.c` builds of the M6.6
+sequencing review were rebuilt in scratch, each from a patched copy of
+`lpeg.c` (the tree's file is never edited). Each ran the committed cases,
+resuming after crashes, against the committed golden:
+
+| variant | rows differing | of them, fixed rows (not R or Q) | crashed or hung | fixed rows that catch it (family X first) |
+|---|---|---|---|---|
+| S00 unpatched | 0 | 0 | 0 | — |
+| S01 `C` pushes the whole match last | 126 | 12 | 0 | `X.group.15` |
+| S02 `Ct` multi-value order reversed | 38 | 17 | 0 | `X.dyncap.bt.small`, `X.group.24` |
+| S03 `Cf` arguments swapped | 3,385 | 475 | 0 | `X.fold.3`, `X.fold.5`, `X.fold.6`, `X.fold.7` |
+| S04 backtrack limit removed | 215 | 215 | 0 | 66 X rows, e.g. `X.limit.100.50`, `X.narrow.sms.1.500` |
+| S05 backtrack limit + 1 | 11 | 11 | 0 | 10 X rows: `X.limit.101.50`, `.103.51`, `.151.75`, `.199.99`, `.201.100`, ... |
+| S06 `Cmt` accepts backward positions | 156 | 45 | 1 (a hang) | 30 X rows, e.g. `X.cmt.res.back.0` |
+| S07 `Cmt` accepts 3.5 | 15 | 15 | 0 | 10 X rows: `X.cmt.res.h0.*`, `.h1.*`, `.str25.*`, `.f35.*`, `.f45.*` |
+| S08 dynamic captures kept on backtrack | 2 | 2 | 0 | `X.dyncap.bt.1000000`, `X.dyncap.bt.cs.1000000` |
+| S09 `/table` through `rawget` | 19 | 19 | 0 | 7 X rows: `X.query.4` to `.8`, `.10`, `.11` |
+| S10 `MAXSTRCAPS` 9 | 22 | 22 | 0 | 21 X rows, e.g. `X.maxstrcaps.9.0`, `X.maxstrcaps.nested.9` |
+| S11 `codechoice` off | 19 | 8 | 10 | `G.none`, `G.choice.101`, `J.nest.paren.16`, ... (the crashing rows, such as `B.bin.343`, move with the memory layout) |
+| S12 `INITBACK` 32 | 25 | 25 | 0 | 6 X rows: `X.limit.5.49`, `.50.49`, `.99.49`, `.nil.49`, `X.narrow.sms.1.49`, `.2.49` |
+| S13 `init` past the end cropped to len−1 | 245 | 28 | 0 | `X.init.8.0`, `.9.0`, `.10.0`, `.14.0` |
+| S14 `Cb` ignores the group name | 24 | 17 | 0 | 9 X rows: `X.cb.names.0` to `.6`, `.8`, `X.group.7` |
+| S15 a named group keeps its last value | 17 | 14 | 0 | `X.group.21`, `X.query.6`, `X.query.12` |
+| S16 `correctkeys` shifts `Carg` | 3,358 | 211 | 0 | 6 X rows: `X.carg.join.8`, `.10`–`.13`, `.15` |
+
+The 22 rows then tagged `cdepth` are left out of the count, because another
+build of the same sources may answer differently there (step 0b's review
+narrowed the tag: 17 rows are `cdepth` now and 1 is `drift794`). The unpatched build does differ on
+one of them, `H.stackcaps.999925`. A row that killed or hung a variant counts
+as caught; S06 loops forever on `R.6687`, which was stopped after 90 s.
+
+Every variant differs on at least one row. The six the plan singles out are
+each caught by a fixed row of family X, not only by random rows: S05, S07,
+S08, S09, S10 and S14.

@@ -431,6 +431,12 @@ jobs:
       # golden; each quarantined call must give the answer its ledger id pins.
       - run: python3 tests/differential/m6/oracle/gen_m66_nmapdb.py "$RUNNER_TEMP"
       - run: M66_NMAPDB_GOLDEN="$RUNNER_TEMP/m66_nmapdb_golden.txt" cargo test -p nmap-core --test nmapdb_differential
+      # M6.6 step 0b: the LPeg corpus (~62k rows) under nmap 7.94's own LPeg,
+      # through a prerule probe with --datadir set to this tree, against the
+      # committed golden (which this tree's liblua + lpeg.c give: the spec).
+      # Every row where 7.94 differs must fall in a named class (hashorder,
+      # cdepth, drift794, path, position, argname); untagged drift fails.
+      - run: bash tests/differential/m6/regen_m66_lpeg.sh --check-794
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -533,6 +539,21 @@ jobs:
       - run: bash tests/differential/m6/regen_m62.sh --check
       - run: cargo test -p nmap-core --test selection_differential
       - run: cargo test -p nmap-core --test selection_corpus
+
+      # M6.6 step 0b — the LPeg oracle. The same standalone liblua + lpeg.c
+      # runs ~62k seeded rows (constructors, operators, every capture kind,
+      # grammars, match arguments, setmaxstack, limits, locale, re,
+      # lpeg-utility, random trees and random re, and fixed rows for each
+      # sabotage the plan names) twice: the runs must agree outside the
+      # hash-ordered rule names, and the cases, golden and per-step map must be
+      # what is committed. The sanitizer quarantine is screened locally and
+      # checked here by digest.
+      - run: bash tests/differential/m6/regen_m66_lpeg.sh --check
+      # M6.6 step b — LPeg pattern construction. The same oracle builds every
+      # case's pattern and prints its tree (ptree) or the construction error;
+      # the cases and golden must be what is committed. The port is compared
+      # with the golden by lpeg_tree_differential (in `cargo test --all`).
+      - run: bash tests/differential/m6/regen_m66b_trees.sh --check
 
       # M6.0 — the Lua VM itself. Same oracle as M6.1 and M6.2, used
       # differently: those gate parsers this port wrote, this one gates an

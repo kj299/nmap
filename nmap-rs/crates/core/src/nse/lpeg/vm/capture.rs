@@ -26,6 +26,13 @@
 //! and its errors never raised — a named group outside `Ct` and `Cb`, a
 //! `/0`, a `/string` slot past 9 or never referenced.
 //!
+//! **Fuel.** A frame step is a unit of the budget, and so is each
+//! [`BYTES_PER_FUEL`] bytes a step copies into a buffer, moves or compares: a
+//! copy goes on from where it stopped in the next slice (`Frame::Copy`),
+//! as does the move of a `C`'s whole match below its nested values. A
+//! growth that takes the heap past the memory budget ends the slice
+//! (`lpeg::grow`).
+//!
 //! Captures that call Lua (`/f`, `/table`, `Cf`, match-time captures) are
 //! step d's: [`CapError::CallsLua`] until then.
 
@@ -40,7 +47,7 @@ use std::borrow::Cow;
 
 use super::Capture;
 use crate::nse::lpeg::tree::{CapKind, Key};
-use crate::nse::stdlib::reserve;
+use crate::nse::lpeg::{did_bytes, did_steps, grow as grow_by, Grown, BYTES_PER_FUEL};
 
 /// `LUAI_MAXSTACK` (`luaconf.h`): the most slots a Lua stack may use.
 pub const LUAI_MAXSTACK: usize = 1_000_000;
@@ -52,6 +59,14 @@ pub const MAXSTRCAPS: usize = 10;
 /// `FIXEDARGS` (`lpeg.c:69`): `match`'s arguments before the extra ones
 /// `Carg` reads.
 pub const FIXEDARGS: usize = 3;
+
+/// Assignments in one chunk of a table capture's list: a list grows a chunk
+/// at a time, so the binding gives it back a chunk at a time as it fills
+/// the table ([`CapCursor::give_back`]), with nothing moved.
+pub const TABLE_CHUNK: usize = 4096;
+
+/// One assignment a table capture makes.
+pub type Entry = (TableKey, CapVal);
 
 /// One slot of the mirrored Lua stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +119,9 @@ pub trait CapEnv {
     /// `match`'s `n`-th extra argument (`n >= 1`, present).
     fn argument(&self, n: u32) -> View<'_>;
     /// Whether the constants at `a` and `b` are raw-equal (group names, which
-    /// are always strings). Key 0 is `nil`.
-    fn same_constant(&self, a: Key, b: Key) -> bool;
+    /// are always strings), and how many bytes deciding it compared. Key 0 is
+    /// `nil`.
+    fn same_constant(&self, a: Key, b: Key) -> (bool, usize);
 }
 
 /// Why evaluation failed. The binding words each as the C does.
@@ -162,8 +178,10 @@ enum Frame {
         addextra: bool,
         started: bool,
     },
-    /// `Csimple` after `pushnestedvalues(1)`: the whole match goes first.
-    SimpleEnd,
+    /// `Csimple` after `pushnestedvalues(1)`: the whole match, pushed last,
+    /// goes first (`lua_insert`), moved down a chunk a step: `k` values, the
+    /// whole match now at `cur`.
+    SimpleEnd { k: usize, cur: usize, started: bool },
     /// A string or substitution capture after `stringcap`/`substcap`: its
     /// buffer becomes its value.
     BufEnd,
@@ -203,15 +221,43 @@ enum Frame {
         adding: Option<(u32, usize)>,
         stage: StrStage,
     },
-    /// `substcap`: the position text resumes at, and while a nested
-    /// capture is being added, where it starts.
-    Subst {
-        curr: usize,
-        next: Option<usize>,
-        started: bool,
+    /// `substcap`: the position text resumes at, and where it is.
+    Subst { curr: usize, stage: SubstStage },
+    /// `addonestring`; `n`, the values the capture had, once known.
+    AddOne {
+        what: &'static str,
+        stage: u8,
+        n: usize,
     },
-    /// `addonestring`.
-    AddOne { what: &'static str, stage: u8 },
+    /// `luaL_addlstring` of `src[at..end]` into the buffer being built, as
+    /// much a step as the budget pays for.
+    Copy { src: Src, at: usize, end: usize },
+}
+
+/// Where a [`Frame::Copy`] copies from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Src {
+    Subject,
+    /// A string the cursor built.
+    String(u32),
+    /// A constant's text (a string's, or a number's as `lua_tolstring`
+    /// writes it).
+    Const(Key),
+    /// An extra argument's text.
+    Arg(u32),
+}
+
+/// Where `substcap` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubstStage {
+    /// About to start at `pos`.
+    Start,
+    /// The text before the nested capture at `next` is in: its value next.
+    Replace { next: usize },
+    /// Back from the nested capture at `next`.
+    Replaced { next: usize },
+    /// The last text is in: done.
+    End,
 }
 
 /// Where `stringcap` is.
@@ -245,8 +291,9 @@ pub struct CapCursor {
     bufs: Vec<Vec<u8>>,
     /// The strings built.
     strings: Vec<Vec<u8>>,
-    /// The tables made, as their assignments in order.
-    tables: Vec<Vec<(TableKey, CapVal)>>,
+    /// The tables made, as their assignments in order, in chunks of
+    /// [`TABLE_CHUNK`].
+    tables: Vec<Vec<Vec<Entry>>>,
     /// `/string`'s capture arrays, [`MAXSTRCAPS`] slots each.
     strcaps: Vec<StrAux>,
     /// The last returned count.
@@ -259,6 +306,11 @@ pub struct CapCursor {
     ptop: usize,
     done: bool,
     steps: u64,
+    /// A growth took the heap past the memory budget: end the slice.
+    stop: bool,
+    /// Units a step took past the budget, on work it could not stop
+    /// part-way ([`CapCursor::take_over`]).
+    over: u64,
 }
 
 impl CapCursor {
@@ -283,7 +335,17 @@ impl CapCursor {
             ptop,
             done: false,
             steps: 0,
+            stop: false,
+            over: 0,
         }
+    }
+
+    /// Units of budget a step took past the budget it was given, on work
+    /// that cannot stop part-way (comparing two group names whose hashes are
+    /// equal), since this was last asked: the binding charges them to the
+    /// slice's fuel.
+    pub fn take_over(&mut self) -> u64 {
+        std::mem::take(&mut self.over)
     }
 
     /// The values, once done: what `match` returns.
@@ -300,12 +362,24 @@ impl CapCursor {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The assignments of the table a [`CapVal::Table`] refers to, in order.
+    /// The assignments of the table a [`CapVal::Table`] refers to, in order
+    /// (a copy, for the tests).
     #[must_use]
-    pub fn table(&self, i: u32) -> &[(TableKey, CapVal)] {
+    pub fn table(&self, i: u32) -> Vec<Entry> {
         self.tables
             .get(usize::try_from(i).unwrap_or(usize::MAX))
-            .map_or(&[], Vec::as_slice)
+            .map_or(Vec::new(), |chunks| chunks.concat())
+    }
+
+    /// Assignment `e` of table `i`, in order; `None` past the last (or in a
+    /// chunk given back).
+    #[must_use]
+    pub fn table_entry(&self, i: u32, e: usize) -> Option<Entry> {
+        self.tables
+            .get(usize::try_from(i).ok()?)?
+            .get(e / TABLE_CHUNK)?
+            .get(e % TABLE_CHUNK)
+            .copied()
     }
 
     /// How many tables were made: [`CapVal::Table`] indices are below this,
@@ -313,6 +387,30 @@ impl CapCursor {
     #[must_use]
     pub fn tables(&self) -> usize {
         self.tables.len()
+    }
+
+    /// Give back the assignments of table `i`, once they are made: it reads
+    /// as empty from then on.
+    pub fn free_table(&mut self, i: u32) {
+        if let Some(t) = self
+            .tables
+            .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
+        {
+            *t = Vec::new();
+        }
+    }
+
+    /// Give back the chunks of table `i` whose assignments are all below
+    /// `e`, once they are made.
+    pub fn give_back(&mut self, i: u32, e: usize) {
+        if let Some(chunks) = self
+            .tables
+            .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
+        {
+            for chunk in chunks.iter_mut().take(e / TABLE_CHUNK) {
+                *chunk = Vec::new();
+            }
+        }
     }
 
     /// Frame steps taken, for the tests.
@@ -339,7 +437,10 @@ impl CapCursor {
                 .iter()
                 .map(Vec::capacity)
                 .fold(0, usize::saturating_add),
-            self.tables.iter().map(b).fold(0, usize::saturating_add),
+            self.tables
+                .iter()
+                .map(|chunks| chunks.iter().map(b).fold(b(chunks), usize::saturating_add))
+                .fold(0, usize::saturating_add),
             b(&self.bufs),
             b(&self.strings),
             b(&self.tables),
@@ -358,6 +459,19 @@ impl CapCursor {
         env: &dyn CapEnv,
         budget: &mut u32,
     ) -> Result<Option<()>, CapError> {
+        let start = self.steps;
+        let r = self.run(caps, subj, env, budget);
+        did_steps(self.steps - start);
+        r
+    }
+
+    fn run(
+        &mut self,
+        caps: &[Capture],
+        subj: &[u8],
+        env: &dyn CapEnv,
+        budget: &mut u32,
+    ) -> Result<Option<()>, CapError> {
         while !self.done {
             if *budget == 0 {
                 return Ok(None);
@@ -369,6 +483,9 @@ impl CapCursor {
                 break;
             };
             self.frame(frame, caps, subj, env, budget)?;
+            if std::mem::take(&mut self.stop) {
+                *budget = 0;
+            }
         }
         Ok(Some(()))
     }
@@ -380,7 +497,7 @@ impl CapCursor {
     }
 
     fn push(&mut self, v: CapVal) -> Result<(), CapError> {
-        grow(&mut self.vs)?;
+        grow(&mut self.vs, 1, &mut self.stop)?;
         self.vs.push(v);
         Ok(())
     }
@@ -390,7 +507,7 @@ impl CapCursor {
     }
 
     fn call(&mut self, f: Frame) -> Result<(), CapError> {
-        grow(&mut self.frames)?;
+        grow(&mut self.frames, 1, &mut self.stop)?;
         self.frames.push(f);
         Ok(())
     }
@@ -413,59 +530,45 @@ impl CapCursor {
         self.bufs.last_mut().ok_or(CapError::Malformed)
     }
 
-    /// Append bytes to the buffer being built (`luaL_addlstring`).
+    /// Append a few bytes — a format's escaped byte, a number's text — to
+    /// the buffer being built (`luaL_addlstring`); the step's unit pays.
     fn add(&mut self, bytes: &[u8]) -> Result<(), CapError> {
-        let buf = self.buf()?;
-        if !reserve(buf, bytes.len()) {
-            return Err(CapError::NotEnoughMemory);
-        }
+        let buf = self.bufs.last_mut().ok_or(CapError::Malformed)?;
+        grow(buf, bytes.len(), &mut self.stop)?;
         buf.extend_from_slice(bytes);
+        did_bytes(bytes.len());
         Ok(())
     }
 
     /// `luaL_addlstring(b, curr, next - curr)`: the subject between two
-    /// positions. Out of order — a capture an and-predicate kept from a
-    /// called rule can start before the last one ended — the C's length is
-    /// a huge `size_t`, and `newbuffsize` raises "buffer too large" when the
-    /// buffer holds at least the difference, or else asks for that much
-    /// memory and is refused (`lua_error`, "not enough memory").
+    /// positions, through a [`Frame::Copy`]. Out of order — a capture an
+    /// and-predicate kept from a called rule can start before the last one
+    /// ended — the C's length is a huge `size_t`, and `newbuffsize` raises
+    /// "buffer too large" when the buffer holds at least the difference, or
+    /// else asks for that much memory and is refused (`lua_error`, "not
+    /// enough memory").
     fn add_range(&mut self, subj: &[u8], curr: usize, next: usize) -> Result<(), CapError> {
-        match subj.get(curr..next) {
-            Some(part) => self.add(part),
-            None if next < curr => {
-                if self.buf()?.len() >= curr - next {
-                    Err(CapError::BufferTooLarge)
-                } else {
-                    Err(CapError::NotEnoughMemory)
-                }
-            }
-            None => Err(CapError::Malformed),
+        if next < curr {
+            return if self.buf()?.len() >= curr - next {
+                Err(CapError::BufferTooLarge)
+            } else {
+                Err(CapError::NotEnoughMemory)
+            };
         }
+        if next > subj.len() {
+            return Err(CapError::Malformed);
+        }
+        self.copy(Src::Subject, curr, next)
     }
 
-    /// What `lua_tolstring` gives for a value, if it is a string or a
-    /// number (`lua_isstring`).
-    fn text<'a>(
-        &'a self,
-        v: CapVal,
-        subj: &'a [u8],
-        env: &'a dyn CapEnv,
-    ) -> Result<Option<Cow<'a, [u8]>>, CapError> {
-        Ok(match v {
-            CapVal::Int(i) => Some(Cow::Owned(i.to_string().into_bytes())),
-            CapVal::Str(a, b) => Some(Cow::Borrowed(subj.get(a..b).ok_or(CapError::Malformed)?)),
-            CapVal::Bytes(i) => Some(Cow::Borrowed(self.string(i))),
-            CapVal::K(k) => match env.constant(k) {
-                View::Str(s) | View::Num(s) => Some(s),
-                _ => None,
-            },
-            CapVal::Arg(n) => match env.argument(n) {
-                View::Str(s) | View::Num(s) => Some(s),
-                _ => None,
-            },
-            CapVal::Nil | CapVal::Table(_) => None,
-            CapVal::Buf => return Err(CapError::Malformed),
-        })
+    /// Copy `src[at..end]` into the buffer being built: a [`Frame::Copy`]
+    /// called, unless there is nothing to copy.
+    fn copy(&mut self, src: Src, at: usize, end: usize) -> Result<(), CapError> {
+        if end > at {
+            self.call(Frame::Copy { src, at, end })
+        } else {
+            Ok(())
+        }
     }
 
     /// `luaL_typename` of a value.
@@ -481,8 +584,8 @@ impl CapCursor {
             CapVal::Int(_) => "number",
             CapVal::Str(..) | CapVal::Bytes(_) => "string",
             CapVal::Table(_) => "table",
-            CapVal::K(k) => view(env.constant(k)),
-            CapVal::Arg(n) => view(env.argument(n)),
+            CapVal::K(k) => view(seen(env.constant(k))),
+            CapVal::Arg(n) => view(seen(env.argument(n))),
             CapVal::Buf => "userdata",
         }
     }
@@ -553,22 +656,13 @@ impl CapCursor {
                 }
                 self.nested_loop(caps, co, n + self.ret, addextra)
             }
-            // `lua_insert(L, -k)`: the whole match, pushed last, goes first.
-            Frame::SimpleEnd => {
-                let k = self.ret;
-                let at = self.vs.len().checked_sub(k).ok_or(CapError::Malformed)?;
-                let v = self.pop()?;
-                self.vs.insert(at, v);
-                *budget = budget.saturating_sub(u32::try_from(k / 64).unwrap_or(u32::MAX));
-                self.ret(k);
-                Ok(())
-            }
+            Frame::SimpleEnd { k, cur, started } => self.simple_end(k, cur, started, budget),
             // `luaL_pushresult`: the string replaces the buffer's slot.
             Frame::BufEnd => {
                 let s = self.bufs.pop().ok_or(CapError::Malformed)?;
                 let id =
                     u32::try_from(self.strings.len()).map_err(|_| CapError::NotEnoughMemory)?;
-                grow(&mut self.strings)?;
+                grow(&mut self.strings, 1, &mut self.stop)?;
                 self.strings.push(s);
                 match self.vs.last_mut() {
                     Some(v @ CapVal::Buf) => *v = CapVal::Bytes(id),
@@ -612,13 +706,114 @@ impl CapCursor {
                 adding,
                 stage,
             } => self.string_cap(caps, subj, env, fmt, base, n, i, adding, stage, budget),
-            Frame::Subst {
-                curr,
-                next,
-                started,
-            } => self.subst_cap(caps, subj, curr, next, started),
-            Frame::AddOne { what, stage } => self.add_one(caps, subj, env, what, stage),
+            Frame::Subst { curr, stage } => self.subst_cap(caps, subj, curr, stage),
+            Frame::AddOne { what, stage, n } => self.add_one(caps, env, what, stage, n, budget),
+            Frame::Copy { src, at, end } => self.copy_step(subj, env, src, at, end, budget),
         }
+    }
+
+    /// `lua_insert(L, -k)` after a simple capture's nested values: the whole
+    /// match, pushed last, goes below them, moved down a chunk of values a
+    /// step — the bytes the step's unit and the budget pay for,
+    /// [`BYTES_PER_FUEL`] a unit, two values at least — so `C` nested `d`
+    /// deep, `d²/2` values moved, takes slices in proportion.
+    fn simple_end(
+        &mut self,
+        k: usize,
+        cur: usize,
+        started: bool,
+        budget: &mut u32,
+    ) -> Result<(), CapError> {
+        let (k, cur) = if started {
+            (k, cur)
+        } else {
+            let last = self.vs.len().checked_sub(1).ok_or(CapError::Malformed)?;
+            (self.ret, last)
+        };
+        let at = self.vs.len().checked_sub(k).ok_or(CapError::Malformed)?;
+        let size = std::mem::size_of::<CapVal>();
+        let room = (BYTES_PER_FUEL.saturating_mul(
+            usize::try_from(*budget)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+        ) / size)
+            .max(2);
+        let lo = (cur + 1).saturating_sub(room).max(at);
+        self.vs
+            .get_mut(lo..=cur)
+            .ok_or(CapError::Malformed)?
+            .rotate_right(1);
+        let bytes = (cur - lo + 1).saturating_mul(size);
+        did_bytes(bytes);
+        let units = bytes.div_ceil(BYTES_PER_FUEL).saturating_sub(1);
+        *budget = budget.saturating_sub(u32::try_from(units).unwrap_or(u32::MAX));
+        if lo == at {
+            self.ret(k);
+        } else {
+            self.set(Frame::SimpleEnd {
+                k,
+                cur: lo,
+                started: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// A step of a [`Frame::Copy`]: as many bytes as the step's unit and the
+    /// budget pay for, [`BYTES_PER_FUEL`] a unit. The first step makes room
+    /// for all of them, as `luaL_addlstring` does.
+    fn copy_step(
+        &mut self,
+        subj: &[u8],
+        env: &dyn CapEnv,
+        src: Src,
+        at: usize,
+        end: usize,
+        budget: &mut u32,
+    ) -> Result<(), CapError> {
+        let remaining = end.checked_sub(at).ok_or(CapError::Malformed)?;
+        let room = BYTES_PER_FUEL.saturating_mul(
+            usize::try_from(*budget)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+        );
+        let n = remaining.min(room);
+        let buf = self.bufs.last_mut().ok_or(CapError::Malformed)?;
+        grow(buf, remaining, &mut self.stop)?;
+        let view;
+        let from: &[u8] = match src {
+            Src::Subject => subj,
+            Src::String(i) => self
+                .strings
+                .get(usize::try_from(i).unwrap_or(usize::MAX))
+                .ok_or(CapError::Malformed)?,
+            Src::Const(_) | Src::Arg(_) => {
+                view = match src {
+                    Src::Const(k) => seen(env.constant(k)),
+                    Src::Arg(m) => seen(env.argument(m)),
+                    _ => View::Nil,
+                };
+                match &view {
+                    View::Str(s) | View::Num(s) => s,
+                    _ => return Err(CapError::Malformed),
+                }
+            }
+        };
+        let part = from.get(at..at + n).ok_or(CapError::Malformed)?;
+        buf.extend_from_slice(part);
+        did_bytes(n);
+        let units = n.div_ceil(BYTES_PER_FUEL).saturating_sub(1);
+        *budget = budget.saturating_sub(u32::try_from(units).unwrap_or(u32::MAX));
+        if n == remaining {
+            self.frames.pop();
+        } else {
+            self.set(Frame::Copy {
+                src,
+                at: at + n,
+                end,
+            });
+        }
+        Ok(())
     }
 
     /// `pushcapture` (`lpeg.c:831`) of the capture at `pos`.
@@ -659,23 +854,23 @@ impl CapCursor {
                 self.ret(1);
             }
             k if k == CapKind::Simple as u8 => {
-                self.set(Frame::SimpleEnd);
+                self.set(Frame::SimpleEnd {
+                    k: 0,
+                    cur: 0,
+                    started: false,
+                });
                 self.call(nested(true))?;
             }
             k if k == CapKind::String as u8 || k == CapKind::Subst as u8 => {
                 // `luaL_buffinit`'s slot.
                 self.push(CapVal::Buf)?;
-                grow(&mut self.bufs)?;
+                grow(&mut self.bufs, 1, &mut self.stop)?;
                 self.bufs.push(Vec::new());
                 self.set(Frame::BufEnd);
                 if k == CapKind::String as u8 {
                     self.call(string_cap(c.idx))?;
                 } else {
-                    self.call(Frame::Subst {
-                        curr: 0,
-                        next: None,
-                        started: false,
-                    })?;
+                    self.call(subst())?;
                 }
             }
             // An anonymous group gives its values; a named one gives none,
@@ -837,11 +1032,22 @@ impl CapCursor {
                 }
             }
             let c = self.cap(caps, cap)?;
-            if c.kind == CapKind::Group as u8 && c.idx != 0 && env.same_constant(c.idx, name) {
-                // The reference's name off the stack.
-                self.pop()?;
-                self.ret(cap);
-                return Ok(());
+            if c.kind == CapKind::Group as u8 && c.idx != 0 {
+                // Names whose hashes differ compare in no time; equal ones
+                // byte by byte, [`BYTES_PER_FUEL`] a unit, all at once: what
+                // the budget cannot pay is charged past it.
+                let (same, compared) = env.same_constant(c.idx, name);
+                did_bytes(compared);
+                let units = u32::try_from(compared / BYTES_PER_FUEL).unwrap_or(u32::MAX);
+                let paid = units.min(*budget);
+                *budget -= paid;
+                self.over = self.over.saturating_add(u64::from(units - paid));
+                if same {
+                    // The reference's name off the stack.
+                    self.pop()?;
+                    self.ret(cap);
+                    return Ok(());
+                }
             }
         }
     }
@@ -859,7 +1065,7 @@ impl CapCursor {
         match wait {
             TableWait::Start => {
                 t = u32::try_from(self.tables.len()).map_err(|_| CapError::NotEnoughMemory)?;
-                grow(&mut self.tables)?;
+                grow(&mut self.tables, 1, &mut self.stop)?;
                 self.tables.push(Vec::new());
                 self.push(CapVal::Table(t))?;
                 let full = self.cap(caps, self.pos)?.is_full();
@@ -923,12 +1129,23 @@ impl CapCursor {
     }
 
     fn assign(&mut self, t: u32, k: TableKey, v: CapVal) -> Result<(), CapError> {
-        let entries = self
+        let chunks = self
             .tables
             .get_mut(usize::try_from(t).unwrap_or(usize::MAX))
             .ok_or(CapError::Malformed)?;
-        grow(entries)?;
-        entries.push((k, v));
+        if chunks.last().is_none_or(|c| c.len() == TABLE_CHUNK) {
+            // The first chunk grows as a list does; the others are made
+            // whole, so no chunk is ever moved.
+            let mut chunk = Vec::new();
+            if !chunks.is_empty() {
+                grow(&mut chunk, TABLE_CHUNK, &mut self.stop)?;
+            }
+            grow(chunks, 1, &mut self.stop)?;
+            chunks.push(chunk);
+        }
+        let chunk = chunks.last_mut().ok_or(CapError::Malformed)?;
+        grow(chunk, 1, &mut self.stop)?;
+        chunk.push((k, v));
         Ok(())
     }
 
@@ -1107,7 +1324,7 @@ impl CapCursor {
                 // The capture array, then the slots.
                 let base = self.strcaps.len();
                 for _ in 0..MAXSTRCAPS {
-                    grow(&mut self.strcaps)?;
+                    grow(&mut self.strcaps, 1, &mut self.stop)?;
                     self.strcaps.push(StrAux::Str(0, 0));
                 }
                 self.set(Frame::StringCap {
@@ -1138,31 +1355,38 @@ impl CapCursor {
             self.pos = saved;
             i += 1;
         }
-        let fmt_bytes = match env.constant(fmt) {
+        // The format's own bytes: a string constant's are borrowed, so
+        // reading it again each time the frame resumes costs nothing.
+        let view = seen(env.constant(fmt));
+        let fmt_bytes: &[u8] = match &view {
             View::Str(s) | View::Num(s) => s,
-            _ => Cow::Borrowed(&[][..]),
+            _ => &[],
         };
         let len = fmt_bytes.len();
-        let mut first = true;
+        let mut credit = Credit(BYTES_PER_FUEL);
         while i < len {
-            // A format byte a unit, the frame's step paying for the first.
-            if !first {
-                if *budget == 0 {
-                    self.set(frame(n, i, None));
-                    return Ok(());
-                }
-                *budget -= 1;
+            if credit.room(*budget) == 0 {
+                self.set(frame(n, i, None));
+                return Ok(());
             }
-            first = false;
             let c = fmt_bytes[i];
             if c != b'%' {
-                self.add(&[c])?;
-                i += 1;
+                // Text, up to the next `%` or as far as the budget pays.
+                let stop_at = len.min(i.saturating_add(credit.room(*budget)));
+                let end = fmt_bytes
+                    .get(i..stop_at)
+                    .and_then(|run| memchr::memchr(b'%', run))
+                    .map_or(stop_at, |p| i + p);
+                self.add(fmt_bytes.get(i..end).ok_or(CapError::Malformed)?)?;
+                credit.spend(budget, end - i);
+                i = end;
                 continue;
             }
+            credit.spend(budget, 1);
             i += 1;
             let d = fmt_bytes.get(i).copied().unwrap_or(0);
             if !d.is_ascii_digit() {
+                credit.spend(budget, 1);
                 self.add(&[d])?;
                 i += 1;
                 continue;
@@ -1178,18 +1402,17 @@ impl CapCursor {
                 .ok_or(CapError::Malformed)?
             {
                 StrAux::Str(s, e) => {
-                    let part = subj.get(s..e).ok_or(CapError::Malformed)?;
-                    self.add(part)?;
-                    i += 1;
+                    if e < s || e > subj.len() {
+                        return Err(CapError::Malformed);
+                    }
+                    self.set(frame(n, i + 1, None));
+                    return self.copy(Src::Subject, s, e);
                 }
                 StrAux::Capture(cp) => {
                     let saved = self.pos;
                     self.pos = cp;
                     self.set(frame(n, i, Some((u32::from(d - b'0'), saved))));
-                    return self.call(Frame::AddOne {
-                        what: "capture",
-                        stage: 0,
-                    });
+                    return self.call(add_one("capture"));
                 }
             }
         }
@@ -1200,52 +1423,58 @@ impl CapCursor {
     }
 
     /// `substcap` (`lpeg.c:780`): the match, each nested capture's value in
-    /// place of what it matched (or the text, if it has none).
+    /// place of what it matched (or the text, if it has none). The text
+    /// between goes in through [`Frame::Copy`]s.
     fn subst_cap(
         &mut self,
         caps: &[Capture],
         subj: &[u8],
         curr: usize,
-        next: Option<usize>,
-        started: bool,
+        stage: SubstStage,
     ) -> Result<(), CapError> {
         let mut curr = curr;
-        if !started {
-            let c = *self.cap(caps, self.pos)?;
-            curr = c.s;
-            if c.is_full() {
-                self.add_range(subj, curr, c.close_addr())?;
+        match stage {
+            SubstStage::Start => {
+                let c = *self.cap(caps, self.pos)?;
+                if c.is_full() {
+                    self.set(Frame::Subst {
+                        curr: c.s,
+                        stage: SubstStage::End,
+                    });
+                    return self.add_range(subj, c.s, c.close_addr());
+                }
+                curr = c.s;
+                self.pos += 1;
+            }
+            SubstStage::Replace { next } => {
+                self.set(Frame::Subst {
+                    curr,
+                    stage: SubstStage::Replaced { next },
+                });
+                return self.call(add_one("replacement"));
+            }
+            SubstStage::Replaced { next } => {
+                curr = if self.ret > 0 {
+                    self.cap(caps, self.pos.checked_sub(1).ok_or(CapError::Malformed)?)?
+                        .close_addr()
+                } else {
+                    next
+                };
+            }
+            SubstStage::End => {
                 self.pos += 1;
                 self.ret(1);
                 return Ok(());
             }
-            self.pos += 1;
-        } else if let Some(next) = next {
-            curr = if self.ret > 0 {
-                self.cap(caps, self.pos.checked_sub(1).ok_or(CapError::Malformed)?)?
-                    .close_addr()
-            } else {
-                next
-            };
         }
         let c = *self.cap(caps, self.pos)?;
-        if c.is_close() {
-            self.add_range(subj, curr, c.s)?;
-            self.pos += 1;
-            self.ret(1);
-            return Ok(());
-        }
-        let next = c.s;
-        self.add_range(subj, curr, next)?;
-        self.set(Frame::Subst {
-            curr,
-            next: Some(next),
-            started: true,
-        });
-        self.call(Frame::AddOne {
-            what: "replacement",
-            stage: 0,
-        })
+        let (next, stage) = if c.is_close() {
+            (c.s, SubstStage::End)
+        } else {
+            (c.s, SubstStage::Replace { next: c.s })
+        };
+        self.set(Frame::Subst { curr, stage });
+        self.add_range(subj, curr, next)
     }
 
     /// `addonestring` (`lpeg.c:804`): the capture's first value into the
@@ -1254,26 +1483,23 @@ impl CapCursor {
     fn add_one(
         &mut self,
         caps: &[Capture],
-        subj: &[u8],
         env: &dyn CapEnv,
         what: &'static str,
         stage: u8,
+        n: usize,
+        budget: &mut u32,
     ) -> Result<(), CapError> {
         match stage {
             0 => {
                 let c = *self.cap(caps, self.pos)?;
                 if c.kind == CapKind::String as u8 {
-                    self.set(Frame::AddOne { what, stage: 1 });
+                    self.set(Frame::AddOne { what, stage: 1, n });
                     self.call(string_cap(c.idx))
                 } else if c.kind == CapKind::Subst as u8 {
-                    self.set(Frame::AddOne { what, stage: 1 });
-                    self.call(Frame::Subst {
-                        curr: 0,
-                        next: None,
-                        started: false,
-                    })
+                    self.set(Frame::AddOne { what, stage: 1, n });
+                    self.call(subst())
                 } else {
-                    self.set(Frame::AddOne { what, stage: 2 });
+                    self.set(Frame::AddOne { what, stage: 2, n });
                     self.call(Frame::Push)
                 }
             }
@@ -1281,28 +1507,56 @@ impl CapCursor {
                 self.ret(1);
                 Ok(())
             }
-            _ => {
+            // The values are on the stack: the first, if any, into the
+            // buffer (`luaL_addvalue`), a string or a number's text.
+            2 => {
                 let n = self.ret;
-                if n > 0 {
-                    let keep = self
-                        .vs
-                        .len()
-                        .checked_sub(n - 1)
-                        .ok_or(CapError::Malformed)?;
-                    self.vs.truncate(keep);
-                    let v = *self.vs.last().ok_or(CapError::Malformed)?;
-                    let text = match self.text(v, subj, env)? {
-                        Some(t) => t.into_owned(),
-                        None => {
-                            return Err(CapError::InvalidValue {
-                                what,
-                                type_name: Self::type_name(v, env),
-                            });
-                        }
-                    };
-                    self.add(&text)?;
-                    self.pop()?;
+                if n == 0 {
+                    self.ret(0);
+                    return Ok(());
                 }
+                let keep = self
+                    .vs
+                    .len()
+                    .checked_sub(n - 1)
+                    .ok_or(CapError::Malformed)?;
+                self.vs.truncate(keep);
+                let v = *self.vs.last().ok_or(CapError::Malformed)?;
+                let invalid = || CapError::InvalidValue {
+                    what,
+                    type_name: Self::type_name(v, env),
+                };
+                let text_len = |w: View<'_>| match w {
+                    View::Str(s) | View::Num(s) => Ok(s.len()),
+                    _ => Err(invalid()),
+                };
+                self.set(Frame::AddOne { what, stage: 3, n });
+                match v {
+                    CapVal::Int(i) => {
+                        let text = i.to_string();
+                        Credit(BYTES_PER_FUEL).spend(budget, text.len());
+                        self.add(text.as_bytes())
+                    }
+                    CapVal::Str(a, b) => self.copy(Src::Subject, a, b),
+                    CapVal::Bytes(i) => {
+                        let len = self.string(i).len();
+                        self.copy(Src::String(i), 0, len)
+                    }
+                    CapVal::K(k) => {
+                        let len = text_len(seen(env.constant(k)))?;
+                        self.copy(Src::Const(k), 0, len)
+                    }
+                    CapVal::Arg(m) => {
+                        let len = text_len(seen(env.argument(m)))?;
+                        self.copy(Src::Arg(m), 0, len)
+                    }
+                    CapVal::Nil | CapVal::Table(_) => Err(invalid()),
+                    CapVal::Buf => Err(CapError::Malformed),
+                }
+            }
+            // The value is in: off the stack.
+            _ => {
+                self.pop()?;
                 self.ret(n);
                 Ok(())
             }
@@ -1320,6 +1574,47 @@ const fn nested(addextra: bool) -> Frame {
     }
 }
 
+/// `substcap`, about to start.
+const fn subst() -> Frame {
+    Frame::Subst {
+        curr: 0,
+        stage: SubstStage::Start,
+    }
+}
+
+/// `addonestring`, about to start.
+const fn add_one(what: &'static str) -> Frame {
+    Frame::AddOne {
+        what,
+        stage: 0,
+        n: 0,
+    }
+}
+
+/// Bytes a step may still spend: what its unit paid for, then the budget's
+/// units, [`BYTES_PER_FUEL`] each.
+struct Credit(usize);
+
+impl Credit {
+    fn room(&self, budget: u32) -> usize {
+        BYTES_PER_FUEL
+            .saturating_mul(usize::try_from(budget).unwrap_or(usize::MAX))
+            .saturating_add(self.0)
+    }
+
+    /// Spend `k` bytes of [`Credit::room`], taking the units from `budget`.
+    fn spend(&mut self, budget: &mut u32, k: usize) {
+        if k <= self.0 {
+            self.0 -= k;
+            return;
+        }
+        let rest = k - self.0;
+        let units = rest.div_ceil(BYTES_PER_FUEL);
+        *budget = budget.saturating_sub(u32::try_from(units).unwrap_or(u32::MAX));
+        self.0 = units.saturating_mul(BYTES_PER_FUEL) - rest;
+    }
+}
+
 /// `stringcap` of the format at key `fmt`, about to start.
 const fn string_cap(fmt: Key) -> Frame {
     Frame::StringCap {
@@ -1332,10 +1627,24 @@ const fn string_cap(fmt: Key) -> Frame {
     }
 }
 
-/// Room for one more, through the memory budget.
-fn grow<T>(v: &mut Vec<T>) -> Result<(), CapError> {
-    if v.len() == v.capacity() && !reserve(v, 1) {
-        return Err(CapError::NotEnoughMemory);
+/// A view the environment gave: a text it copied to give it (where a string
+/// is not borrowed) counted as work, for `lpeg::take_work`.
+fn seen(v: View<'_>) -> View<'_> {
+    if let View::Str(Cow::Owned(b)) | View::Num(Cow::Owned(b)) = &v {
+        did_bytes(b.len());
     }
-    Ok(())
+    v
+}
+
+/// Room for `n` more, through the memory budget and accounted to the heap
+/// at once; `stop` set when the heap is then past the budget.
+fn grow<T>(v: &mut Vec<T>, n: usize, stop: &mut bool) -> Result<(), CapError> {
+    match grow_by(v, n) {
+        Grown::Ok => Ok(()),
+        Grown::PastBudget => {
+            *stop = true;
+            Ok(())
+        }
+        Grown::Refused => Err(CapError::NotEnoughMemory),
+    }
 }

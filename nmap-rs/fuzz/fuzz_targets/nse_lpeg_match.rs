@@ -1,13 +1,23 @@
 // cargo-fuzz target for LPeg matching (M6.6 step c):
 // `nmap_core::nse::lpeg::code` (the compiler), `nmap_core::nse::lpeg::vm`
-// (the matching machine) and `vm::capture` (capture evaluation).
+// (the matching machine) and `vm::capture` (capture evaluation), pure and
+// through the binding.
 //
 // The network controls subjects; scripts control patterns. The input is a
 // pattern, written as a small prefix program over the pure constructors —
 // literals, sets, numbers, sequences, choices, repetitions, predicates,
 // look-behinds, grammars with calls, and every capture that calls no Lua —
-// then a subject. Checked:
+// then a subject. The first byte picks the slice (its low six bits) and,
+// with its top three bits set, the binding as well (an eighth of inputs: a
+// run through a Lua state costs some ten pure ones).
+//
+// Pure, on every input (the program as a tree, a subject of up to 48 bytes
+// of `a`/`b`/`c`, constants of a few bytes). Checked:
 //   * nothing panics or aborts, whatever the pattern and subject;
+//   * the compiler refuses only what the C refuses at compile time — a left
+//     call through `B`, whose `getfirst` recursion the C never ends, and
+//     "not enough memory" — and nothing else (an open call outside a
+//     grammar is `finalfix`'s, run first); the machine never fails;
 //   * compiling, matching and evaluating in slices of 1 to 64 units of
 //     budget gives what one slice gives (a slice boundary is invisible);
 //   * the answer — no match, or the match's end and its values, or the
@@ -17,22 +27,46 @@
 //     pattern with no captures is one entry placed after it; an
 //     and-predicate of one keeps a called rule's captures, `hascaptures`
 //     following no call), evaluated by a transliteration of `lpcap.c`.
-// Where either side runs past its bound — the interpreter's recursion or
-// step count, the machine's budget (an exponential grammar), a compile that
-// refuses a left call through `B` — the case is not compared.
+//   Where either side runs past its bound — the interpreter's recursion or
+//   step count, the machine's budget (an exponential grammar), a compile
+//   that refuses a left call through `B` — the case is not compared.
+//
+// Through the binding, when the first byte's top three bits are set (the same
+// program as Lua, built by the constructors and run by `lpeg.match` in a
+// Lua state with the test-only registration: `getpatt`, the binding's
+// `MatchJob` and `LuaEnv`, `init`, extra arguments, the values' conversion,
+// what a match holds accounted to the heap). Constants are larger here:
+// strings of up to 3,600 bytes by repetition, `/string` formats of up to
+// 128 copies of theirs (256 `%n`), a subject repeated up to 64 times (3 KiB),
+// `init` from -3 to 3, a backtrack ceiling of 100 or 150, a memory budget of
+// 16 MiB. Checked:
+//   * the same chunk run in one slice and in slices of 64 to 4,096 units of
+//     fuel (a match takes 1,024 at least), one after the other in one state,
+//     with a full collection before each and every 64th slice, gives the
+//     same answer — what `pcall` of the match returns, serialised here, a
+//     table by its sorted pairs — or "not enough memory" on either side
+//     (`lpeg-memory-errors-depend-on-slicing`);
+//   * no error the binding raises for its own defects ("lpeg: malformed
+//     program", "lpeg: ... lost", the step d refusal) is ever seen.
+//   A run past 300,000 units of fuel is not compared. Seeds
+//   `close_after_kept_capture_binding` and `binding_table_of_many_captures`
+//   reach the two checks.
 #![no_main]
 
 use std::borrow::Cow;
 use std::task::Poll;
 
 use libfuzzer_sys::fuzz_target;
-use nmap_core::nse::lpeg::code::Compiler;
+use nmap_core::nse::lpeg::code::{CodeError, Compiler};
+use nmap_core::nse::lpeg::register_for_tests;
 use nmap_core::nse::lpeg::tree::{
     CapKind, Charset, CheckAux, FinalFix, FixedLen, GrammarLayout, Key, Pred, Tag, Tree,
     VerifyGrammar,
 };
 use nmap_core::nse::lpeg::vm::capture::{CapCursor, CapEnv, CapError, CapVal, TableKey, View};
 use nmap_core::nse::lpeg::vm::{Capture, Vm, VmPoll};
+use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
+use piccolo::{Closure, Executor, Fuel, Lua, Value, Variadic};
 
 /// The most budget a match may take, in units.
 const BUDGET: u64 = 400_000;
@@ -81,8 +115,8 @@ impl CapEnv for Env {
             _ => View::Nil,
         }
     }
-    fn same_constant(&self, a: Key, b: Key) -> bool {
-        a != 0 && a == b
+    fn same_constant(&self, a: Key, b: Key) -> (bool, usize) {
+        (a != 0 && a == b, 0)
     }
 }
 
@@ -111,9 +145,35 @@ fn fixedlen_of(t: &Tree, i: usize) -> i64 {
     drive(u32::MAX, |b| w.step(t, b)).unwrap_or(-1)
 }
 
-/// A pattern of depth at most `d` from the input; open calls name rules
-/// `1..=rules`.
-fn pattern(inp: &mut Input, d: u32, rules: u32) -> Tree {
+/// The constant a `Cc` with key byte `b` makes, as Lua: key `b % 7` as
+/// `Env` has it, a string of up to 3,600 bytes for key 1 when the rest of
+/// the byte is large.
+fn const_lua(b: u8) -> String {
+    let r = usize::from(b / 7);
+    match b % 7 {
+        0 => "nil".to_string(),
+        1 if r > 18 => format!("('a'):rep({})", r * 100),
+        1 => "'a'".to_string(),
+        2 => "'k'".to_string(),
+        3 => "'%1-%0%%'".to_string(),
+        4 => "'<%2%9>'".to_string(),
+        5 => "7".to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
+/// A group's name, as Lua (keys 1 and 2 as `Env` has them).
+fn name_lua(k: Key) -> &'static str {
+    if k == 1 {
+        "'a'"
+    } else {
+        "'k'"
+    }
+}
+
+/// A pattern of depth at most `d` from the input, as a tree and as the Lua
+/// that builds it; open calls name rules `1..=rules`.
+fn pattern(inp: &mut Input, d: u32, rules: u32) -> (Tree, String) {
     let op = inp.byte();
     if d == 0 || op < 40 {
         return match op % 12 {
@@ -122,78 +182,182 @@ fn pattern(inp: &mut Input, d: u32, rules: u32) -> Tree {
                 let s: Vec<u8> = (0..n)
                     .map(|_| b"abc"[usize::from(inp.byte() % 3)])
                     .collect();
-                lit(&s)
+                let lua = format!("P'{}'", String::from_utf8_lossy(&s));
+                (lit(&s), lua)
             }
-            1 => Tree::number(i32::from(inp.byte() % 5) - 2).unwrap(),
-            2 => Tree::leaf(Tag::True).unwrap(),
-            3 => Tree::leaf(Tag::False).unwrap(),
+            1 => {
+                let n = i32::from(inp.byte() % 5) - 2;
+                (Tree::number(n).unwrap(), format!("P({n})"))
+            }
+            2 => (Tree::leaf(Tag::True).unwrap(), "P(true)".to_string()),
+            3 => (Tree::leaf(Tag::False).unwrap(), "P(false)".to_string()),
             4 if rules > 0 => {
                 let mut v = Tree::leaf(Tag::OpenCall).unwrap();
-                v.set_key(0, 1 + Key::from(inp.byte()) % rules);
-                v
+                let k = 1 + Key::from(inp.byte()) % rules;
+                v.set_key(0, k);
+                (v, format!("V({k})"))
             }
             5 => {
                 let mut cs = Charset::empty();
+                let mut chars = String::new();
                 for _ in 0..inp.byte() % 3 {
-                    cs.add(b'a' + inp.byte() % 3);
+                    let c = b'a' + inp.byte() % 3;
+                    cs.add(c);
+                    chars.push(char::from(c));
                 }
-                Tree::charset(&cs).unwrap()
+                (Tree::charset(&cs).unwrap(), format!("S'{chars}'"))
             }
-            6 => Tree::empty_capture(CapKind::Position, 0).unwrap(),
-            7 => Tree::empty_capture(CapKind::Const, Key::from(inp.byte() % 7)).unwrap(),
-            8 => Tree::empty_capture(CapKind::Arg, 1 + Key::from(inp.byte() % 3)).unwrap(),
-            9 => Tree::empty_capture(CapKind::Backref, 1 + Key::from(inp.byte() % 2)).unwrap(),
-            10 => Tree::charset(&Charset([0xff; 32])).unwrap(),
-            _ => lit(b"b"),
+            6 => (
+                Tree::empty_capture(CapKind::Position, 0).unwrap(),
+                "Cp()".to_string(),
+            ),
+            7 => {
+                let b = inp.byte();
+                (
+                    Tree::empty_capture(CapKind::Const, Key::from(b % 7)).unwrap(),
+                    format!("Cc({})", const_lua(b)),
+                )
+            }
+            8 => {
+                let n = 1 + Key::from(inp.byte() % 3);
+                (
+                    Tree::empty_capture(CapKind::Arg, n).unwrap(),
+                    format!("Carg({n})"),
+                )
+            }
+            9 => {
+                let k = 1 + Key::from(inp.byte() % 2);
+                (
+                    Tree::empty_capture(CapKind::Backref, k).unwrap(),
+                    format!("Cb({})", name_lua(k)),
+                )
+            }
+            10 => (
+                Tree::charset(&Charset([0xff; 32])).unwrap(),
+                "P(1)".to_string(),
+            ),
+            _ => (lit(b"b"), "P'b'".to_string()),
         };
     }
     let sub = |inp: &mut Input| pattern(inp, d - 1, rules);
     match op % 16 {
-        0 | 1 => Tree::root2(Tag::Seq, &sub(inp), &sub(inp), 0).unwrap(),
-        2 | 3 => Tree::root2(Tag::Choice, &sub(inp), &sub(inp), 0).unwrap(),
-        4 => Tree::root1(Tag::Not, &sub(inp)).unwrap(),
-        5 => Tree::root1(Tag::And, &sub(inp)).unwrap(),
+        0 | 1 => {
+            let ((a, la), (b, lb)) = (sub(inp), sub(inp));
+            (
+                Tree::root2(Tag::Seq, &a, &b, 0).unwrap(),
+                format!("({la} * {lb})"),
+            )
+        }
+        2 | 3 => {
+            let ((a, la), (b, lb)) = (sub(inp), sub(inp));
+            (
+                Tree::root2(Tag::Choice, &a, &b, 0).unwrap(),
+                format!("({la} + {lb})"),
+            )
+        }
+        4 => {
+            let (a, la) = sub(inp);
+            (Tree::root1(Tag::Not, &a).unwrap(), format!("(-{la})"))
+        }
+        5 => {
+            let (a, la) = sub(inp);
+            (Tree::root1(Tag::And, &a).unwrap(), format!("(#{la})"))
+        }
         6 => {
-            let t = sub(inp);
+            let (t, lt) = sub(inp);
             let mut n = i32::from(inp.byte() % 5) - 2;
             if n >= 0 && nullable(&t) {
                 n = -1 - n;
             }
-            Tree::star(&t, n, Tree::star_space(t.len(), n).unwrap()).unwrap()
+            (
+                Tree::star(&t, n, Tree::star_space(t.len(), n).unwrap()).unwrap(),
+                format!("({lt} ^ ({n}))"),
+            )
         }
-        7 => Tree::difference(&sub(inp), &sub(inp), 0).unwrap(),
-        8 => Tree::capture(CapKind::Simple, 0, &sub(inp)).unwrap(),
-        9 => Tree::capture(CapKind::Table, 0, &sub(inp)).unwrap(),
-        10 => Tree::capture(CapKind::Subst, 0, &sub(inp)).unwrap(),
+        7 => {
+            let ((a, la), (b, lb)) = (sub(inp), sub(inp));
+            (
+                Tree::difference(&a, &b, 0).unwrap(),
+                format!("({la} - {lb})"),
+            )
+        }
+        8 => {
+            let (a, la) = sub(inp);
+            (
+                Tree::capture(CapKind::Simple, 0, &a).unwrap(),
+                format!("C({la})"),
+            )
+        }
+        9 => {
+            let (a, la) = sub(inp);
+            (
+                Tree::capture(CapKind::Table, 0, &a).unwrap(),
+                format!("Ct({la})"),
+            )
+        }
+        10 => {
+            let (a, la) = sub(inp);
+            (
+                Tree::capture(CapKind::Subst, 0, &a).unwrap(),
+                format!("Cs({la})"),
+            )
+        }
         11 => {
             let k = Key::from(inp.byte() % 3);
-            Tree::capture(CapKind::Group, k, &sub(inp)).unwrap()
+            let (a, la) = sub(inp);
+            let lua = if k == 0 {
+                format!("Cg({la})")
+            } else {
+                format!("Cg({la}, {})", name_lua(k))
+            };
+            (Tree::capture(CapKind::Group, k, &a).unwrap(), lua)
         }
+        // A format, as `Env` has it; to Lua, up to 128 copies of it.
         12 => {
-            let k = 3 + Key::from(inp.byte() % 2);
-            Tree::capture(CapKind::String, k, &sub(inp)).unwrap()
+            let b = inp.byte();
+            let k = 3 + Key::from(b % 2);
+            let (a, la) = sub(inp);
+            let fmt = if k == 3 { "%1-%0%%" } else { "<%2%9>" };
+            (
+                Tree::capture(CapKind::String, k, &a).unwrap(),
+                format!("({la} / ('{fmt}'):rep({}))", 1 + b / 2),
+            )
         }
         13 => {
             let k = Key::from(inp.byte() % 4);
-            Tree::capture(CapKind::Num, k, &sub(inp)).unwrap()
+            let (a, la) = sub(inp);
+            (
+                Tree::capture(CapKind::Num, k, &a).unwrap(),
+                format!("({la} / {k})"),
+            )
         }
         // `lpeg.B`: a fixed length up to 255 and no captures, or refused.
         14 => {
-            let t = sub(inp);
+            let (t, lt) = sub(inp);
             match fixedlen_of(&t, 0) {
-                n @ 1..=255 if !t.has_captures() => Tree::behind(n as i32, &t).unwrap(),
-                _ => Tree::root1(Tag::And, &t).unwrap(),
+                n @ 1..=255 if !t.has_captures() => {
+                    (Tree::behind(n as i32, &t).unwrap(), format!("B({lt})"))
+                }
+                _ => (Tree::root1(Tag::And, &t).unwrap(), format!("(#{lt})")),
             }
         }
-        _ => grammar(inp, d - 1).unwrap_or_else(|| lit(b"c")),
+        _ => grammar(inp, d - 1).unwrap_or_else(|| (lit(b"c"), "P'c'".to_string())),
     }
 }
 
 /// A grammar of one to three rules, built, fixed and verified as `lpeg.P`
-/// builds one; `None` if refused.
-fn grammar(inp: &mut Input, d: u32) -> Option<Tree> {
+/// builds one, and its Lua; `None` if refused.
+fn grammar(inp: &mut Input, d: u32) -> Option<(Tree, String)> {
     let n = 1 + u32::from(inp.byte() % 3);
-    let rules: Vec<Tree> = (0..n).map(|_| pattern(inp, d, n)).collect();
+    let made: Vec<(Tree, String)> = (0..n).map(|_| pattern(inp, d, n)).collect();
+    let lua = format!(
+        "P{{ {} }}",
+        made.iter()
+            .map(|(_, l)| l.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let rules: Vec<Tree> = made.into_iter().map(|(t, _)| t).collect();
     let sizes: Vec<usize> = rules.iter().map(Tree::len).collect();
     let layout = GrammarLayout::new(&sizes).ok()?;
     let pairs: Vec<(&Tree, Key)> = rules.iter().map(|t| (t, 0)).collect();
@@ -211,7 +375,7 @@ fn grammar(inp: &mut Input, d: u32) -> Option<Tree> {
     for _ in 0..64 {
         let mut b = 1 << 14;
         if let Poll::Ready(r) = v.step(&g, &mut b) {
-            return r.ok().map(|()| g);
+            return r.ok().map(|()| (g, lua));
         }
     }
     None
@@ -569,7 +733,7 @@ impl Eval<'_> {
                     continue;
                 }
                 let g = self.caps[cap];
-                if g.kind == CapKind::Group as u8 && Env.same_constant(g.idx, c.idx) {
+                if g.kind == CapKind::Group as u8 && Env.same_constant(g.idx, c.idx).0 {
                     break cap;
                 }
             };
@@ -769,8 +933,8 @@ fn port_value(c: &CapCursor, s: &[u8], v: CapVal) -> Val {
         CapVal::Arg(n) => Val::Arg(n),
         CapVal::Table(t) => Val::Table(
             c.table(t)
-                .iter()
-                .map(|&(k, v)| (k, port_value(c, s, v)))
+                .into_iter()
+                .map(|(k, v)| (k, port_value(c, s, v)))
                 .collect(),
         ),
     }
@@ -791,7 +955,7 @@ fn port_error(e: CapError) -> Err {
 }
 
 /// Compile, match and evaluate in slices of `slice`: `None` past the budget
-/// or where the compiler refuses (a left call through `B`).
+/// or where the compiler refuses what the C refuses at compile time.
 fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>> {
     let mut spent = 0u64;
     let mut c = Compiler::new();
@@ -799,7 +963,15 @@ fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>>
         let mut b = slice;
         match c.step(t, &mut b) {
             Poll::Ready(Ok(p)) => break p,
-            Poll::Ready(Err(_)) => return None,
+            // The compile-time errors the C raises: `getfirst`'s recursion
+            // on a left call through `B` (which never ends in the C:
+            // `lpeg-getfirst-unbounded-recursion`) and `reallocprog`'s "not
+            // enough memory". `finalfix`'s "used outside a grammar" was
+            // ruled out before; anything else is a compiler defect.
+            Poll::Ready(Err(CodeError::LeftRecursive(_) | CodeError::NotEnoughMemory)) => {
+                return None
+            }
+            Poll::Ready(Err(e)) => panic!("the compiler failed: {e:?}"),
             Poll::Pending => {}
         }
         spent += u64::from(slice);
@@ -843,22 +1015,160 @@ fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>>
     )))
 }
 
+// ---------------------------------------------------------------- the binding
+
+/// The binding's run's fuel cap, in units: past it, not compared.
+const LUA_FUEL: i32 = 300_000;
+/// The binding's memory budget, past what the state holds before the chunk.
+const LUA_BUDGET: usize = 16 << 20;
+
+/// A state with the first-party stdlib and the test-only registration.
+fn new_lua() -> Lua {
+    let mut lua = Lua::core();
+    lua.enter(|ctx| {
+        load_patterns(ctx).expect("string table");
+        load_strpack(ctx).expect("string table");
+        load_format(ctx).expect("string table");
+        load_tail(ctx).expect("string and coroutine tables");
+        ctx.set_global("lpeg", register_for_tests(ctx, None));
+    });
+    lua
+}
+
+/// Run `src` in `lua`, after a full collection, in slices of `slice` fuel
+/// (a full collection every 64th), with [`LUA_BUDGET`] more than the state
+/// holds, at most [`LUA_FUEL`] in all: what it returned, or raised; `None`
+/// past the cap.
+fn run_lua(lua: &mut Lua, src: &str, slice: i32) -> Option<String> {
+    lua.set_memory_limit(usize::MAX);
+    lua.gc_collect();
+    let ex = lua.enter(|ctx| {
+        let c = Closure::load(ctx, Some("=fuzz"), src.as_bytes()).expect("the chunk compiles");
+        ctx.stash(Executor::start(ctx, c.into(), ()))
+    });
+    lua.set_memory_limit(lua.total_memory() + LUA_BUDGET);
+    let (mut used, mut slices) = (0i64, 0u64);
+    loop {
+        let mut fuel = Fuel::with(slice);
+        let done = lua
+            .enter(|ctx| ctx.fetch(&ex).step(ctx, &mut fuel))
+            .expect("steps");
+        used += i64::from(slice) - i64::from(fuel.remaining());
+        slices += 1;
+        if done {
+            break;
+        }
+        if slices % 64 == 0 {
+            lua.gc_collect();
+        }
+        if used > i64::from(LUA_FUEL) {
+            return None;
+        }
+    }
+    Some(lua.enter(|ctx| {
+        match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
+            Ok(Ok(vs)) => {
+                vs.0.iter()
+                    .map(|&v| ser(v, 0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+            Ok(Err(e)) => format!("raised: {e:#}"),
+            Err(e) => format!("result: {e}"),
+        }
+    }))
+}
+
+/// A value as the comparison sees it: a string by its length and bytes, a
+/// table by its pairs in the order of their keys so rendered, four deep.
+/// Done here, not in the chunk, so the fuel cap bounds the matching only.
+fn ser(v: Value, d: u32) -> String {
+    match v {
+        Value::String(s) => format!("{}:{}", s.len(), String::from_utf8_lossy(s.as_bytes())),
+        Value::Table(t) if d < 4 => {
+            let mut kv: Vec<(String, String)> = t
+                .iter()
+                .map(|(k, v)| (ser(k, d + 1), ser(v, d + 1)))
+                .collect();
+            kv.sort();
+            let parts: Vec<String> = kv.into_iter().map(|(k, v)| format!("[{k}]={v}")).collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Table(_) => "{...}".to_string(),
+        Value::UserData(_) => "<userdata>".to_string(),
+        Value::Function(_) => "<function>".to_string(),
+        Value::Thread(_) => "<thread>".to_string(),
+        v => v.display().to_string(),
+    }
+}
+
+/// The chunk that builds `expr` and matches it against `subject`, repeated
+/// `times`, from `init`, with two extra arguments, under `setmaxstack(max)`;
+/// it returns what `pcall` of the match returns (or "build" and the error
+/// building it raised).
+fn chunk(expr: &str, subject: &[u8], times: usize, init: i64, max: u32) -> String {
+    format!(
+        r#"local L = lpeg
+local P, S, V, B, C, Cc, Cp, Carg, Cb, Cg, Ct, Cs =
+  L.P, L.S, L.V, L.B, L.C, L.Cc, L.Cp, L.Carg, L.Cb, L.Cg, L.Ct, L.Cs
+L.setmaxstack({max})
+local ok, p = pcall(function() return {expr} end)
+if not ok then return "build", p end
+return pcall(L.match, p, ("{subject}"):rep({times}), {init}, "x", 2.5)
+"#,
+        subject = String::from_utf8_lossy(subject),
+    )
+}
+
+/// The same chunk in one slice and in slices of `slice`, one after the
+/// other in one state (each chunk sets the backtrack ceiling it uses): the
+/// same answer, or "not enough memory" on either side; never the binding's
+/// own defects.
+fn binding(src: &str, slice: i32) {
+    let mut lua = new_lua();
+    let Some(whole) = run_lua(&mut lua, src, LUA_FUEL) else {
+        return;
+    };
+    let internal = |s: &str| s.contains("lpeg: ");
+    assert!(!internal(&whole), "the binding failed:\n{src}\n{whole}");
+    let Some(sliced) = run_lua(&mut lua, src, slice) else {
+        return;
+    };
+    assert!(!internal(&sliced), "the binding failed:\n{src}\n{sliced}");
+    let nem = |s: &str| s.contains("not enough memory");
+    let cut = |s: &str| s.chars().take(2_000).collect::<String>();
+    assert!(
+        whole == sliced || nem(&whole) || nem(&sliced),
+        "the answer depends on the fuel slice:\n{src}\n  whole: {}\n sliced: {}",
+        cut(&whole),
+        cut(&sliced)
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut inp = Input { data, at: 0 };
-    let slice = 1 + u32::from(inp.byte() % 64);
-    let t = pattern(&mut inp, 5, 0);
+    let first = inp.byte();
+    let slice = 1 + u32::from(first % 64);
+    let (t, lua) = pattern(&mut inp, 5, 0);
+    let rest = data.get(inp.at.min(data.len())..).unwrap_or(&[]);
+    let subject: Vec<u8> = rest
+        .iter()
+        .take(48)
+        .map(|b| b"abc"[usize::from(b % 3)])
+        .collect();
+    if first >= 224 {
+        // The subject repeated, `init` and the ceiling from what is at hand.
+        let sum: usize = rest.iter().take(4).map(|&b| usize::from(b)).sum();
+        let init = i64::from(first % 7) - 3;
+        let max = if first & 16 != 0 { 150 } else { 100 };
+        let src = chunk(&lua, &subject, 1 + sum % 64, init, max);
+        binding(&src, i32::try_from(64 * slice).unwrap_or(4096));
+    }
     let mut fixed = t.clone();
     let mut w = FinalFix::new(None, 0);
     if drive(u32::MAX, |b| w.step(&mut fixed, &|_| 0, b)).is_err() {
         return;
     }
-    let subject: Vec<u8> = data
-        .get(inp.at.min(data.len())..)
-        .unwrap_or(&[])
-        .iter()
-        .take(48)
-        .map(|b| b"abc"[usize::from(b % 3)])
-        .collect();
     let whole = port(&fixed, &subject, BUDGET as u32);
     let sliced = port(&fixed, &subject, slice);
     if let (Some(a), Some(b)) = (&whole, &sliced) {

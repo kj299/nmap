@@ -47,8 +47,17 @@
 use std::collections::HashMap;
 
 use super::super::tree::{Charset, Tag, Tree, TreeError, CHARSET_SIZE, MAXRULES, SET_SLOTS};
+use super::super::{did_bytes, grow, Grown, BYTES_PER_FUEL};
 use super::CodeError;
-use crate::nse::stdlib::reserve;
+
+/// Room for `n` more, through the memory budget, the growth accounted at
+/// once.
+fn reserve<T>(v: &mut Vec<T>, n: usize) -> bool {
+    grow(v, n) != Grown::Refused
+}
+
+/// The bytes the memo tables take a node.
+const MEMO_BYTES: usize = 5 + std::mem::size_of::<FirstMemo>() + std::mem::size_of::<LenMemo>();
 
 /// A memo state: not asked yet, being computed, or answered. In the
 /// `hascaptures` pass, `NODE` marks a slot that is a node, not yet answered.
@@ -302,6 +311,67 @@ impl Analyses {
             self.follow = filled(n, UNKNOWN)?;
         }
         Ok(())
+    }
+
+    /// [`Analyses::ensure_memos`] a slice at a time, for the compiler: the
+    /// tables filled from node `from`, [`BYTES_PER_FUEL`] bytes a unit of
+    /// `budget` (a tree of millions of nodes fills tens of megabytes). Room
+    /// for all of it is made first. `Some(at)` to go on from `at` when the
+    /// budget runs out.
+    pub(crate) fn fill_memos(
+        &mut self,
+        n: usize,
+        from: usize,
+        budget: &mut u32,
+    ) -> Result<Option<usize>, CodeError> {
+        if from == 0 {
+            if self.sets.is_empty() {
+                self.intern(Charset([0xff; CHARSET_SIZE]))?;
+                self.intern(Charset::empty())?;
+            }
+            self.nullable.clear();
+            self.nofail.clear();
+            self.head.clear();
+            self.first.clear();
+            self.len.clear();
+            self.len_free.clear();
+            self.follow.clear();
+            let room = reserve(&mut self.nullable, n)
+                && reserve(&mut self.nofail, n)
+                && reserve(&mut self.head, n)
+                && reserve(&mut self.first, n)
+                && reserve(&mut self.len, n)
+                && reserve(&mut self.len_free, n)
+                && reserve(&mut self.follow, n);
+            if !room {
+                return Err(CodeError::NotEnoughMemory);
+            }
+        }
+        if *budget == 0 {
+            return Ok(Some(from));
+        }
+        let room = BYTES_PER_FUEL.saturating_mul(usize::try_from(*budget).unwrap_or(usize::MAX));
+        let end = n.min(from.saturating_add((room / MEMO_BYTES).max(1)));
+        let unknown = FirstMemo {
+            first: First {
+                x: EMPTY,
+                y: EMPTY,
+                e: 0,
+            },
+            state: UNKNOWN,
+        };
+        self.nullable.resize(end, UNKNOWN);
+        self.nofail.resize(end, UNKNOWN);
+        self.head.resize(end, UNKNOWN);
+        self.first.resize(end, unknown);
+        self.len.resize(end, LEN_NONE);
+        self.len_free.resize(end, 0);
+        self.follow.resize(end, UNKNOWN);
+        let bytes = end.saturating_sub(from).saturating_mul(MEMO_BYTES);
+        did_bytes(bytes);
+        let units = u32::try_from(bytes.div_ceil(BYTES_PER_FUEL)).unwrap_or(u32::MAX);
+        *budget = budget.saturating_sub(units);
+        Ok((end < n).then_some(end))
     }
 
     /// The id of `cs`, interning it.
@@ -1130,8 +1200,11 @@ impl Analyses {
     }
 
     fn len_set(&mut self, t: usize, count: u8, v: i64, dep: bool) -> Next {
-        // A length the C's `int` cannot hold is -1, as its wrapped `len + 1`
-        // makes it.
+        // A length the C's `int` cannot hold is treated as variable (-1).
+        // The C's sum overflows its `int`, which is undefined; as gcc wraps
+        // it, a length past `INT_MAX` reads as negative, which is variable
+        // too, and only one of 2^32 or more could read otherwise (2^32 as
+        // 0): a difference that needs a pattern of 4 GiB.
         let v = if v > i64::from(i32::MAX) { -1 } else { v };
         if let (Some(m), Some(f)) = (self.len.get_mut(t), self.len_free.get_mut(t)) {
             let c = i16::from(count);

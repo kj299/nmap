@@ -43,7 +43,9 @@
 //! program is kept only when whole, E13), the machine (a unit per
 //! instruction, per byte a span scans, per entry a failure pops) and the
 //! captures (a unit per frame of evaluation, per table and per value it
-//! makes) — on a program it took a handle to when it started (E3).
+//! makes) — on a program it took a handle to when it started (E3). Where a
+//! stage copies, hashes, compares, moves or fills bytes, a unit pays for
+//! [`BYTES_PER_FUEL`] of them, and a long copy goes on in the next slice.
 //!
 //! **Errors** are raised as `luaL_error` and `luaL_argerror` raise them: the
 //! C's words, after the position of the Lua code that made the call
@@ -60,8 +62,10 @@
 //! tree is accounted to the VM's heap for as long as the pattern lives, and
 //! what a call holds between slices — a grammar being built, `p^n`'s tree, a
 //! walker's stack — for as long as it holds it, so the budget and the
-//! collector see both (E4). Near the budget, whether a call fails can depend
-//! on where the slices fell (`lpeg-memory-errors-depend-on-slicing`).
+//! collector see both (E4); what a match grows is accounted as it grows, and
+//! a growth past the budget ends the slice (`grow`). Near the budget,
+//! whether a call fails can depend on where the slices fell
+//! (`lpeg-memory-errors-depend-on-slicing`).
 
 pub mod code;
 #[cfg(test)]
@@ -87,7 +91,7 @@ use self::tree::{
     Tag, Tree, TreeError, VerifyGrammar, MAXBEHIND, MAXRULES, SHRT_MAX,
 };
 use self::vm::capture::{
-    CapCursor, CapEnv, CapError, CapVal, TableKey, View, FIXEDARGS, LUAI_MAXSTACK,
+    CapCursor, CapEnv, CapError, CapVal, TableKey, View, FIXEDARGS, LUAI_MAXSTACK, TABLE_CHUNK,
 };
 use self::vm::{Capture, Vm, VmError, VmPoll};
 use super::nmaplib::{c_str, Fail};
@@ -142,10 +146,11 @@ impl Drop for Accounted {
 }
 
 /// Bytes a call holds outside the VM's heap between slices — a grammar being
-/// built, `p^n`'s tree, a walker's stack — accounted to the heap as a
-/// pattern's tree is ([`Accounted`]), so that the memory budget and the
-/// collector see them: brought up to date after every slice, and given back
-/// when the call ends.
+/// built, `p^n`'s tree, a walker's stack, a match's machine and captures —
+/// accounted to the heap as a pattern's tree is ([`Accounted`]), so that the
+/// memory budget and the collector see them: brought up to date after every
+/// slice (and, for a match, at every growth: [`grow`]), and given back when
+/// the call ends.
 struct Held {
     metrics: Metrics,
     bytes: usize,
@@ -165,6 +170,12 @@ impl Held {
                 .mark_external_deallocation(self.bytes.saturating_sub(bytes));
         }
         self.bytes = bytes;
+    }
+
+    /// Take over `bytes` that a run marked on the heap as it grew
+    /// ([`grow`]), before [`Held::set`] brings the count up to date.
+    fn absorb(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_add(bytes);
     }
 }
 
@@ -191,6 +202,14 @@ impl Spend {
         self.over = self.over.saturating_add(units);
     }
 
+    /// `units` for work that cannot stop part-way: from the budget, and past
+    /// it what the budget cannot pay.
+    fn pay(&mut self, units: u32) {
+        let paid = units.min(self.budget);
+        self.budget = self.budget.saturating_sub(paid);
+        self.charge(u64::from(units.saturating_sub(paid)));
+    }
+
     /// `n` units of work at `per` a unit of fuel.
     fn did(&mut self, n: usize, per: usize) {
         let sixteenths =
@@ -202,6 +221,163 @@ impl Spend {
 thread_local! {
     /// [`take_most_work_per_fuel`]'s record.
     static MOST_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`take_work`]'s count.
+    static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bytes one unit of fuel pays for where a match copies, hashes, compares,
+/// moves or fills bytes: text into a capture's buffer, a value into a Lua
+/// string, a group's name against a back-reference's, the values a `C`
+/// moves below its nested ones, the compiler's copy of the tree and its memo
+/// tables. A step of the machine, of capture evaluation or of the compiler
+/// is a unit; so is this many bytes, and a copy longer than one slice can
+/// pay for goes on in the next. What cannot stop part-way — a Lua string
+/// made whole, two equal names compared — is charged in full before it is
+/// done, past the slice's fuel if it must be.
+///
+/// **Measured** (release build, a shared 4-core host, slices of 100,000
+/// units; `lpeg_slice_times` in `tests/lpeg_match_limits.rs`, run with
+/// `--ignored`). The machine's instructions take 3.6-4.8 ns a unit (2^20
+/// attempts of `S <- 'a' S 'b' / 'a' S 'c' / ''`; `(P'a' * 'b' + 1)^0` over
+/// 4 MiB), capture evaluation's frames 9.1 (nested back-references). Byte
+/// work takes 0.04 ns a byte (moving values), 0.2 (hashing and comparing a
+/// 2 MiB value with the string the subject is), 0.6 (copying into a buffer
+/// that grows into fresh memory) and 0.8 (that, and a 200 MiB string made of
+/// it): at 32 bytes a unit the last was 25.8 ns a unit, five times the
+/// machine's. At 4 bytes a unit every byte-bound slice measured takes
+/// 0.14-3.3 ns a unit, no longer than the machine's fastest. (A string made
+/// whole is one slice however long: 229 ms for the 200 MiB one, charged in
+/// full past the slice's fuel.)
+pub const BYTES_PER_FUEL: usize = 4;
+
+/// Count `bytes` of byte work (copied, hashed, compared, moved, filled), for
+/// [`take_work`].
+pub(crate) fn did_bytes(bytes: usize) {
+    let n = u64::try_from(bytes).unwrap_or(u64::MAX);
+    WORK.with(|w| w.set(w.get().saturating_add(n)));
+}
+
+/// Count `steps` steps — instructions, frames of capture evaluation, the
+/// compiler's jobs, analysis steps and jumps followed — for [`take_work`]:
+/// [`BYTES_PER_FUEL`] bytes each, what a unit of fuel buys.
+pub(crate) fn did_steps(steps: u64) {
+    let per = u64::try_from(BYTES_PER_FUEL).unwrap_or(u64::MAX);
+    WORK.with(|w| w.set(w.get().saturating_add(steps.saturating_mul(per))));
+}
+
+/// For the tests of D3: the work `lpeg.match` did on this thread since this
+/// was last asked, in bytes, a step counting [`BYTES_PER_FUEL`]. Counted
+/// where the work is done, apart from the fuel it is charged: a slice that
+/// did more than a few times its fuel's worth did work it did not pay for.
+#[doc(hidden)]
+#[must_use]
+pub fn take_work() -> u64 {
+    WORK.with(|w| w.replace(0))
+}
+
+/// What a match grows outside the VM's heap, accounted to the heap as it
+/// grows (E4). The binding enters a meter for each run of a match
+/// ([`meter_enter`]); the pure parts — the compiler, the machine, capture
+/// evaluation — grow their buffers through [`grow`], which asks the memory
+/// budget (`stdlib::reserve`), marks the growth on the heap at once, so the
+/// next request sees it, and says when the heap is past the budget: the
+/// slice then ends, and the collection the VM runs before Lua goes on
+/// decides whether the match fails. So within a slice the heap passes the
+/// budget by at most the growth that crossed it. Outside a run (the pure
+/// tests, the fuzz targets) nothing is marked.
+struct Meter {
+    metrics: Metrics,
+    limit: usize,
+    /// Bytes marked during this run.
+    marked: usize,
+}
+
+thread_local! {
+    static METER: RefCell<Option<Meter>> = const { RefCell::new(None) };
+    /// [`take_peak_accounted`]'s record.
+    static PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A run's meter, taken down when dropped.
+struct MeterGuard {
+    previous: Option<Meter>,
+}
+
+fn meter_enter(ctx: Context<'_>) -> MeterGuard {
+    let m = Meter {
+        metrics: ctx.metrics().clone(),
+        limit: ctx.memory_limit(),
+        marked: 0,
+    };
+    MeterGuard {
+        previous: METER.with(|c| c.replace(Some(m))),
+    }
+}
+
+impl MeterGuard {
+    /// End the run: the bytes marked during it.
+    fn finish(mut self) -> usize {
+        let previous = self.previous.take();
+        METER.with(|c| c.replace(previous)).map_or(0, |m| m.marked)
+    }
+}
+
+impl Drop for MeterGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        METER.with(|c| *c.borrow_mut() = previous);
+    }
+}
+
+/// How a [`grow`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grown {
+    /// There was room, or it was made.
+    Ok,
+    /// It was made, and the heap is now past the memory budget: end the
+    /// slice.
+    PastBudget,
+    /// The memory budget or the allocator refused: "not enough memory".
+    Refused,
+}
+
+/// Room for `additional` more in `v`, through the memory budget, the growth
+/// accounted to the heap at once ([`Meter`]).
+pub(crate) fn grow<T>(v: &mut Vec<T>, additional: usize) -> Grown {
+    let before = v.capacity();
+    if !super::stdlib::reserve(v, additional) {
+        return Grown::Refused;
+    }
+    let delta = v
+        .capacity()
+        .saturating_sub(before)
+        .saturating_mul(std::mem::size_of::<T>());
+    if delta == 0 {
+        return Grown::Ok;
+    }
+    METER.with(|c| match &mut *c.borrow_mut() {
+        Some(m) => {
+            m.metrics.mark_external_allocation(delta);
+            m.marked = m.marked.saturating_add(delta);
+            let total = m.metrics.total_allocation();
+            PEAK.with(|p| p.set(p.get().max(total)));
+            if total > m.limit {
+                Grown::PastBudget
+            } else {
+                Grown::Ok
+            }
+        }
+        None => Grown::Ok,
+    })
+}
+
+/// For the tests of E4: the largest heap, as the memory budget counts it,
+/// that a growth of a match's buffers left since this was last asked on this
+/// thread.
+#[doc(hidden)]
+#[must_use]
+pub fn take_peak_accounted() -> usize {
+    PEAK.with(|p| p.replace(0))
 }
 
 /// For the tests of D3: the most work one slice of one call has done per
@@ -1119,9 +1295,9 @@ impl<'gc> GrammarJob<'gc> {
 }
 
 /// `lua_rawequal`, which for a string or number key is `lua_equal`.
-fn raw_equal(a: Value<'_>, b: Value<'_>) -> bool {
+fn raw_equal<'gc>(a: Value<'gc>, b: Value<'gc>) -> bool {
     match (a, b) {
-        (Value::String(x), Value::String(y)) => x.as_bytes() == y.as_bytes(),
+        (Value::String(x), Value::String(y)) => same_string(x, y).0,
         (Value::Integer(x), Value::Integer(y)) => x == y,
         #[allow(clippy::float_cmp, reason = "Lua's raw equality of two floats is ==")]
         (Value::Number(x), Value::Number(y)) => x == y,
@@ -1131,6 +1307,20 @@ fn raw_equal(a: Value<'_>, b: Value<'_>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether two strings are equal, and how many bytes deciding it compared:
+/// none for the same string (piccolo interns them) or for two whose stored
+/// hashes or lengths differ; their bytes otherwise.
+fn same_string<'gc>(x: piccolo::String<'gc>, y: piccolo::String<'gc>) -> (bool, usize) {
+    if gc_arena::Gc::ptr_eq(x.into_inner(), y.into_inner()) {
+        return (true, 0);
+    }
+    let (a, b) = (x.as_bytes(), y.as_bytes());
+    if x.stored_hash() != y.stored_hash() || a.len() != b.len() {
+        return (false, 0);
+    }
+    (a == b, a.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -1952,14 +2142,17 @@ struct LuaEnv<'a, 'gc> {
 }
 
 impl<'gc> LuaEnv<'_, 'gc> {
-    fn view(&self, v: Value<'gc>) -> View<'static> {
+    /// A value as capture evaluation sees it, its text borrowed from the
+    /// Lua string, never copied: `/string` reads its format again each time
+    /// its frame resumes, a `%n` at a time, and a copy there would cost the
+    /// whole format each time (quadratic in it). A number's text is a string
+    /// made for it (`lua_tolstring`).
+    fn view(&self, v: Value<'gc>) -> View<'gc> {
         match v {
             Value::Nil => View::Nil,
-            Value::String(s) => View::Str(std::borrow::Cow::Owned(s.as_bytes().to_vec())),
-            Value::Integer(_) | Value::Number(_) => View::Num(std::borrow::Cow::Owned(
-                v.into_string(self.ctx)
-                    .map(|s| s.as_bytes().to_vec())
-                    .unwrap_or_default(),
+            Value::String(s) => View::Str(std::borrow::Cow::Borrowed(s.as_bytes())),
+            Value::Integer(_) | Value::Number(_) => View::Num(std::borrow::Cow::Borrowed(
+                v.into_string(self.ctx).map_or(&[][..], |s| s.as_bytes()),
             )),
             v => View::Other(v.type_name()),
         }
@@ -1989,8 +2182,11 @@ impl CapEnv for LuaEnv<'_, '_> {
         )
     }
 
-    fn same_constant(&self, a: Key, b: Key) -> bool {
-        raw_equal(self.constant_value(a), self.constant_value(b))
+    fn same_constant(&self, a: Key, b: Key) -> (bool, usize) {
+        match (self.constant_value(a), self.constant_value(b)) {
+            (Value::String(x), Value::String(y)) => same_string(x, y),
+            (x, y) => (raw_equal(x, y), 0),
+        }
     }
 }
 
@@ -2015,6 +2211,12 @@ enum MStage {
     Values(usize),
 }
 
+/// The refusal of a match whose pattern holds a capture that calls Lua
+/// (`lpeg-lua-calling-captures-refused`). The program-level check raises it
+/// before the match runs; the machine's and capture evaluation's checks
+/// behind it say the same.
+const STEP_D: &str = "lpeg: match-time and function captures are not implemented until M6.6 step d";
+
 /// One call of `lpeg.match` (`lp_match`, `lpeg.c:3201`), from its arguments
 /// to its results: resumable at every stage (D3), inline when it fits in the
 /// fuel the VM has left.
@@ -2037,10 +2239,14 @@ struct MatchJob<'gc> {
     #[collect(require_static)]
     vm: Option<Box<Vm>>,
     /// `setmaxstack`'s value, read once the subject is known. The C reads it
-    /// at every growth of the backtrack stack, but no Lua runs inside a
-    /// match that calls none, so one read is the C's value throughout; a
-    /// read per slice would let another script's `setmaxstack` reach a match
-    /// it pre-empted.
+    /// at every growth of the backtrack stack. In a match that calls no Lua
+    /// nothing can change it in between, except a `__gc` finalizer that a
+    /// collection during the growth runs and that calls `setmaxstack`; the
+    /// port never runs a `__gc` metamethod (`vm-gc-metamethods-never-run`),
+    /// so no Lua runs inside a match at step c, and one read is the C's
+    /// value throughout. A read per slice would let another script's
+    /// `setmaxstack` reach a match it pre-empted. (Step d re-reads it after
+    /// each call a callback makes: `docs/M6.6-ANALYSIS.md` §1.3.)
     #[collect(require_static)]
     maxstack: vm::MaxStack,
     #[collect(require_static)]
@@ -2192,10 +2398,7 @@ impl<'gc> MatchJob<'gc> {
                     // Captures that call Lua are step d's: refuse rather than
                     // guess.
                     if self.program.as_ref().is_some_and(|c| c.program.calls_lua()) {
-                        return Err(Fail::err(
-                            "lpeg: match-time and function captures are not implemented until M6.6 step d",
-                        )
-                        .into());
+                        return Err(Fail::err(STEP_D).into());
                     }
                     self.stage = MStage::Subject;
                 }
@@ -2260,7 +2463,9 @@ impl<'gc> MatchJob<'gc> {
                         .cursor
                         .as_mut()
                         .ok_or(Failure::Lua(Fail::err("lpeg: captures lost")))?;
-                    match cursor.step(&self.caps, subj.as_bytes(), &env, &mut spend.budget) {
+                    let r = cursor.step(&self.caps, subj.as_bytes(), &env, &mut spend.budget);
+                    spend.charge(cursor.take_over());
+                    match r {
                         Ok(None) => return Ok(Flow::Pending),
                         Ok(Some(())) => {
                             self.caps = Vec::new();
@@ -2275,12 +2480,13 @@ impl<'gc> MatchJob<'gc> {
                     let n = self.cursor.as_ref().map_or(0, |c| c.tables());
                     let mut i = i;
                     while i < n {
-                        if spend.budget == 0 {
+                        if spend.budget == 0 || ctx.collection_requested() {
                             self.stage = MStage::Tables(i);
                             return Ok(Flow::Pending);
                         }
                         spend.budget = spend.budget.saturating_sub(1);
-                        if !super::stdlib::reserve(&mut self.tables, 1) {
+                        did_steps(1);
+                        if grow(&mut self.tables, 1) == Grown::Refused {
                             return Err(Failure::Memory);
                         }
                         self.tables.push(Table::new(&ctx));
@@ -2288,36 +2494,43 @@ impl<'gc> MatchJob<'gc> {
                     }
                     self.stage = MStage::Fill(0, 0);
                 }
+                // Each table's contents, in order. What the cursor holds for a
+                // table goes as the table fills, a chunk at a time, so the
+                // cursor's list and the Lua table are not both whole at once.
                 MStage::Fill(t, e) => {
                     let (mut t, mut e) = (t, e);
                     let p = self.pattern(ctx)?;
                     let subj = self.subject()?;
-                    let Some(cursor) = self.cursor.as_ref() else {
+                    let Some(cursor) = self.cursor.as_mut() else {
                         return Err(Fail::err("lpeg: captures lost").into());
                     };
                     while t < self.tables.len() {
-                        let entries = cursor.table(u32::try_from(t).unwrap_or(u32::MAX));
-                        let Some(&(k, v)) = entries.get(e) else {
+                        let id = u32::try_from(t).unwrap_or(u32::MAX);
+                        let Some((k, v)) = cursor.table_entry(id, e) else {
+                            cursor.free_table(id);
                             t = t.saturating_add(1);
                             e = 0;
                             continue;
                         };
-                        if spend.budget == 0 {
+                        if spend.budget == 0 || ctx.collection_requested() {
                             self.stage = MStage::Fill(t, e);
                             return Ok(Flow::Pending);
                         }
-                        spend.budget = spend.budget.saturating_sub(1);
                         let key = match k {
                             TableKey::Int(i) => Value::Integer(i),
                             TableKey::K(k) => constant(p, k),
                         };
-                        let value = self.value(ctx, p, subj, cursor, v);
+                        let value =
+                            Self::value(ctx, p, subj, cursor, &self.args, &self.tables, v, spend);
                         // `lua_rawseti` and `lua_settable` on a fresh table:
                         // raw, and `nil` removes.
                         self.tables[t]
                             .set_raw(&ctx, key, value)
                             .map_err(|e| key_failure(ctx, e))?;
                         e = e.saturating_add(1);
+                        if e % TABLE_CHUNK == 0 {
+                            cursor.give_back(id, e);
+                        }
                     }
                     self.stage = MStage::Values(0);
                 }
@@ -2330,15 +2543,13 @@ impl<'gc> MatchJob<'gc> {
                     let vals = cursor.values();
                     let mut i = i;
                     while let Some(&v) = vals.get(i) {
-                        if spend.budget == 0 {
+                        if spend.budget == 0 || ctx.collection_requested() {
                             self.stage = MStage::Values(i);
                             return Ok(Flow::Pending);
                         }
-                        spend.budget = spend.budget.saturating_sub(1);
-                        let value = self.value(ctx, p, subj, cursor, v);
-                        if self.out.len() == self.out.capacity()
-                            && !super::stdlib::reserve(&mut self.out, 1)
-                        {
+                        let value =
+                            Self::value(ctx, p, subj, cursor, &self.args, &self.tables, v, spend);
+                        if grow(&mut self.out, 1) == Grown::Refused {
                             return Err(Failure::Memory);
                         }
                         self.out.push(value);
@@ -2351,33 +2562,49 @@ impl<'gc> MatchJob<'gc> {
         }
     }
 
-    /// A capture value as a Lua value.
+    /// A capture value as a Lua value: a unit, and a string made of text a
+    /// unit per [`BYTES_PER_FUEL`] bytes more (hashed, compared with the
+    /// strings of its hash, copied), charged in full before it is made — a
+    /// string is made whole, past the budget if it must ([`Spend::over`]).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the job's fields, borrowed apart"
+    )]
     fn value(
-        &self,
         ctx: Context<'gc>,
         p: &'gc Pattern<'gc>,
         subj: piccolo::String<'gc>,
         cursor: &CapCursor,
+        args: &[Value<'gc>],
+        tables: &[Table<'gc>],
         v: CapVal,
+        spend: &mut Spend,
     ) -> Value<'gc> {
+        let text = match v {
+            CapVal::Str(a, b) => Some(subj.as_bytes().get(a..b).unwrap_or(&[])),
+            CapVal::Bytes(i) => Some(cursor.string(i)),
+            _ => None,
+        };
+        let bytes = text.map_or(0, <[u8]>::len);
+        spend.pay(1u32.saturating_add(u32::try_from(bytes / BYTES_PER_FUEL).unwrap_or(u32::MAX)));
+        did_steps(1);
+        did_bytes(bytes);
+        if let Some(text) = text {
+            return Value::String(ctx.intern(text));
+        }
         match v {
-            CapVal::Nil | CapVal::Buf => Value::Nil,
             CapVal::Int(i) => Value::Integer(i),
-            CapVal::Str(a, b) => {
-                Value::String(ctx.intern(subj.as_bytes().get(a..b).unwrap_or(&[])))
-            }
-            CapVal::Bytes(i) => Value::String(ctx.intern(cursor.string(i))),
             CapVal::K(k) => constant(p, k),
             CapVal::Arg(n) => usize::try_from(n)
                 .ok()
                 .and_then(|n| n.checked_add(FIXEDARGS - 1))
-                .and_then(|i| self.args.get(i))
+                .and_then(|i| args.get(i))
                 .copied()
                 .unwrap_or(Value::Nil),
-            CapVal::Table(t) => self
-                .tables
+            CapVal::Table(t) => tables
                 .get(usize::try_from(t).unwrap_or(usize::MAX))
                 .map_or(Value::Nil, |t| Value::Table(*t)),
+            CapVal::Nil | CapVal::Buf | CapVal::Str(..) | CapVal::Bytes(_) => Value::Nil,
         }
     }
 
@@ -2395,7 +2622,9 @@ impl<'gc> MatchJob<'gc> {
             over: 0,
             work: 0,
         };
+        let meter = meter_enter(ctx);
         let r = self.advance(ctx, &mut spend);
+        self.held.absorb(meter.finish());
         let used = u64::from(start.saturating_sub(spend.budget)).saturating_add(spend.over);
         fuel.consume(i32::try_from(used).unwrap_or(i32::MAX));
         let held = self.heap_bytes();
@@ -2473,9 +2702,7 @@ fn vm_failure<'gc>(e: VmError) -> Failure<'gc> {
         VmError::TooManyPending => Failure::Lua(Fail::err("too many pending calls/choices")),
         VmError::TooManyCaptures => Failure::Lua(Fail::err("too many captures")),
         VmError::NotEnoughMemory => Failure::Memory,
-        VmError::RunTime => Failure::Lua(Fail::err(
-            "lpeg: match-time captures are not implemented until M6.6 step d",
-        )),
+        VmError::RunTime => Failure::Lua(Fail::err(STEP_D)),
         VmError::Malformed => Failure::Lua(Fail::err("lpeg: malformed program")),
     }
 }
@@ -2504,9 +2731,7 @@ fn cap_failure<'gc>(ctx: Context<'gc>, env: &LuaEnv<'_, 'gc>, e: CapError) -> Fa
         }
         CapError::BufferTooLarge => f("buffer too large".into()),
         CapError::NotEnoughMemory => Failure::Memory,
-        CapError::CallsLua => {
-            f("lpeg: function captures are not implemented until M6.6 step d".into())
-        }
+        CapError::CallsLua => Failure::Lua(Fail::err(STEP_D)),
         CapError::Malformed => f("lpeg: malformed capture list".into()),
     }
 }
@@ -2640,8 +2865,11 @@ pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) ->
 }
 
 /// The value `setmaxstack` stored (`lpeg-maxstack`), as given: `100.0` until
-/// a script calls it. A match reads it once, when it starts (the C reads it
-/// at every growth of the backtrack stack, with no Lua run in between).
+/// a script calls it. A match reads it once, when it starts. The C reads it
+/// at every growth of the backtrack stack, where the only Lua that can run
+/// in between in a match that calls none is a `__gc` finalizer the growth's
+/// allocation collects for, which the port never runs
+/// (`vm-gc-metamethods-never-run`).
 #[must_use]
 pub fn max_stack_value<'gc>(ctx: Context<'gc>) -> Value<'gc> {
     registry(ctx).store.get_value(ctx, "maxstack")
@@ -2749,6 +2977,28 @@ mod tests {
             calls.sort();
             assert_eq!(consts, ["one", "one", "three", "two", "two"]);
             assert_eq!(calls, ["A", "A", "B", "B"]);
+        });
+    }
+
+    /// Group names compare by their stored hashes first (`Cb`'s scan,
+    /// F3): the same string, and two whose hashes differ, in no time; equal
+    /// bytes in two strings that are not the same one, byte by byte, the
+    /// bytes counted for the fuel.
+    #[test]
+    fn group_names_compare_by_hash_first() {
+        let mut lua = Lua::core();
+        lua.enter(|ctx| {
+            let name = [b'n'; 10_000];
+            let mut other = name;
+            other[9_999] = b'm';
+            let a = ctx.intern(&name);
+            assert_eq!(same_string(a, a), (true, 0));
+            assert_eq!(same_string(a, ctx.intern(&name)), (true, 0));
+            assert_eq!(same_string(a, ctx.intern(&other)), (false, 0));
+            assert_eq!(same_string(a, ctx.intern(b"n")), (false, 0));
+            let copy = piccolo::String::from_slice(&ctx, &name[..]);
+            assert_eq!(same_string(a, copy), (true, 10_000));
+            assert!(raw_equal(Value::String(a), Value::String(copy)));
         });
     }
 

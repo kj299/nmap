@@ -467,3 +467,75 @@ fn charsets_classify_by_their_members() {
         Err(CodeError::Tree(TreeError::UsedOutsideGrammar(5)))
     );
 }
+
+/// `Xₖ = (Xₖ₋₁ + cₖ) * true`, `d` deep over `X₀ = 'a'`, then `'z'`. Every
+/// level fails at its head, so each choice is coded `test; <Xₖ₋₁>; jmp L2;
+/// L1: cₖ; L2:`, and the `true` after it codes nothing: each level's `jmp`
+/// lands on the next level's, a chain of jumps as long as the nesting, to
+/// the `'z'`. (A choice nested in a choice directly is re-associated by
+/// `finalfix`, and a chain never forms.) Built directly: through the
+/// constructors each level copies the tree, and `x * true` is `x`.
+fn left_choices(d: usize) -> Tree {
+    use super::super::tree::Node;
+    let node = |tag: Tag, u: usize| Node {
+        u: i32::try_from(u).unwrap(),
+        ..Node::new(tag)
+    };
+    let mut nodes = Vec::with_capacity(4 * d + 3);
+    nodes.push(node(Tag::Seq, 4 * d + 2));
+    for k in (1..=d).rev() {
+        nodes.push(node(Tag::Seq, 4 * k));
+        nodes.push(node(Tag::Choice, 4 * k - 2));
+    }
+    nodes.push(node(Tag::Char, usize::from(b'a')));
+    for k in 1..=d {
+        nodes.push(node(Tag::Char, usize::from(b'a' + (k % 25) as u8)));
+        nodes.push(node(Tag::True, 0));
+    }
+    nodes.push(node(Tag::Char, usize::from(b'z')));
+    Tree::from_nodes(nodes)
+}
+
+/// `finaltarget`'s walk along a chain of jumps outlasts a slice of budget
+/// and goes on in the next, a unit a jump: the peephole over a chain `d`
+/// long follows `d²/2` jumps, and no step of the compiler does more than a
+/// few times the work its budget pays for (`lpeg::take_work`). The program
+/// is the one a single slice makes.
+#[test]
+fn a_chain_of_jumps_is_walked_across_slices() {
+    use super::super::{take_work, BYTES_PER_FUEL};
+    let d = if cfg!(miri) { 40 } else { 2_000 };
+    let slice = if cfg!(miri) { 8 } else { 256 };
+    let t = left_choices(d);
+    let whole = compile(&t, u32::MAX).expect("compiles");
+    // A jump a level, each made to land on the `'z'`.
+    assert!(
+        whole.dump().matches("jmp").count() >= d - 1,
+        "{}",
+        whole.dump()
+    );
+    let per = u64::try_from(BYTES_PER_FUEL).unwrap();
+    let mut c = Compiler::new();
+    let _ = take_work();
+    let mut steps = 0u64;
+    let program = loop {
+        let mut b = slice;
+        let r = c.step(&t, &mut b);
+        let used = u64::from(slice - b).max(1);
+        let work = take_work();
+        assert!(
+            work <= 4 * per * used + 8 * per,
+            "step {steps} did {work} bytes' work on {used} units"
+        );
+        steps += 1;
+        if let Poll::Ready(p) = r {
+            break p.expect("compiles");
+        }
+    };
+    assert_eq!(program, whole);
+    let hops = (d * d / 2) as u64;
+    assert!(
+        steps > hops / u64::from(slice),
+        "{steps} steps for some {hops} jumps"
+    );
+}

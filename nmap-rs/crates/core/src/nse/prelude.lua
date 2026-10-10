@@ -11,8 +11,9 @@
 --     debug.getregistry, and only the engine reads these slots;
 --   * the glue that replaces the halves done in Rust (core::nse::engine):
 --     choosing scripts and parsing --script-args happen there, and here
---     `load_scripts` loads what was chosen; `render` hands each result's
---     text and XML to Rust, which prints them as output.cc does.
+--     `load_script` and `scripts_loaded` load what was chosen; `render`
+--     hands each result's text and XML to Rust, which prints them as
+--     output.cc does.
 --
 -- What the chunk is called with, as nse_main.lua is: `cnse`, the engine's
 -- functions written in Rust (nse_main.cc's `open_cnse`).
@@ -1307,17 +1308,20 @@ end
 _R[FORMAT_XML] = format_xml
 -- <<<
 
--- The scripts chosen by core::nse::engine, loaded by `load_scripts`.
+-- The scripts chosen by core::nse::engine, loaded by `load_script`.
 local chosen_scripts = {};
 
--- Load the scripts Rust chose (get_chosen_scripts's selection, done in
--- core::nse::engine), each `{path = ..., params = {...}}` with the script
--- selection parameters `Script.new` takes, in the order chosen; then their
--- runlevels.
-local function load_scripts (list)
-  for i, chosen in ipairs(list) do
-    chosen_scripts[#chosen_scripts+1] = Script.new(chosen.path, chosen.params);
-  end
+-- Load one script Rust chose (get_chosen_scripts's selection, done in
+-- core::nse::engine): `{path = ..., params = {...}}`, with the script
+-- selection parameters `Script.new` takes. Rust calls it once per script, in
+-- the order chosen, so that the stall limit bounds each script's load
+-- (`nse-stall-limit`); then `scripts_loaded`.
+local function load_script (chosen)
+  chosen_scripts[#chosen_scripts+1] = Script.new(chosen.path, chosen.params);
+end
+
+-- The scripts are loaded: compute their runlevels.
+local function scripts_loaded ()
   calculate_runlevels(chosen_scripts);
 -- >>> nse_main.lua
 print_verbose(1, "Loaded %d scripts for scanning.", #chosen_scripts);
@@ -1491,7 +1495,8 @@ return {
   print_verbose = print_verbose,
   print_debug = print_debug,
   log_error = log_error,
-  load_scripts = load_scripts,
+  load_script = load_script,
+  scripts_loaded = scripts_loaded,
   main = main,
   render = render,
 }

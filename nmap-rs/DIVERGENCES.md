@@ -102,6 +102,27 @@ narrower *rendering* of the same result.
   banner/`Nmap done:` line. `project.py` and the format's comment convention make
   this invisible to the semantic diff.
 
+- [x] `cli-stdout-silenced-by-output-files` (`cli`, owner `core::options`) —
+      **a port defect, from M1; found by the M6.6 drift audit and fixed after
+      step b.**
+      - **In C.** The report is written with `LOG_PLAIN`, which is
+        `LOG_NORMAL|LOG_SKID|LOG_STDOUT` (`output.h:84`), so it reaches the
+        terminal whatever files `-oN`/`-oX`/`-oG`/`-oA` also write. Only two
+        things discard it, both by pointing `o.nmap_stdout` at the null
+        device: an output destination of `-` (`log_open`,
+        `output.cc:1061-1063`), so that stdout carries only that format; and
+        `-v0` (`nmap.cc:1418-1421`), which a later `-v` does not undo.
+      - **Was here.** `emit_outputs` printed the report to stdout only when no
+        `-o` option was given, so `nmap-rs -oX scan.xml host` showed nothing.
+        The OS block and the scripts' `LOG_STDOUT` lines were printed whatever
+        the destinations, so `-oX -` with `-O` or a script that logs gave XML
+        with plain text in it; and `-v0` silenced nothing.
+      - **Fix.** `RunConfig::stdout_is_null` is C's rule. The report and the
+        OS block go to stdout unless it holds; the OS block also goes to the
+        `-oN` destination now, as part of the normal output; and the NSE log
+        sink drops stdout lines when it holds. Pinned against 7.94 by
+        `crates/cli/tests/output_all.rs` (each `-o` option, `-` destinations,
+        `-v0`, `-v0 -v`, `-d0`, and a script's `nmap.log_write("stdout")`).
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets
@@ -3677,7 +3698,12 @@ of ten points is caught:
       so far, and the scan carries on. The limit is `--script-timeout` when
       that is set (at least one second), else ten minutes. A script yields
       on every socket call, so a legitimate one does not compute for ten
-      minutes without a pass.
+      minutes without a pass. While the scripts load, each script's start
+      counts as a pass, so the limit bounds one script's top-level code and
+      not the whole load. Until the cleanup after M6.6 step b the whole load
+      was timed, and `-sC --script-timeout 1` failed to start in 3 of 5 runs:
+      the 124 `default` scripts take about a second to load in a debug
+      build, where 7.94 takes 0.33 s.
 - [x] `nse-script-db-required` — when `scripts/script.db` is missing or
       unreadable, nmap writes a new one into its data directory. The port
       does not write into a data directory unasked: it fails to start the
@@ -3729,8 +3755,9 @@ of ten points is caught:
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
 - [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
-      `LOG_PLAIN`) go to the terminal as they happen. nmap also copies
-      `LOG_PLAIN` lines into an `-oN` file.
+      `LOG_PLAIN`) go to the terminal as they happen, unless `-v0` or a `-`
+      destination discards stdout (`cli-stdout-silenced-by-output-files`).
+      nmap also copies `LOG_PLAIN` lines into an `-oN` file.
 - [ ] `nse-env-subset` — what scripts read of the run is incomplete:
       - `nmap.is_privileged()` is false;
       - `-e`, `--dns-servers` and `--data-length` are not passed (the port
@@ -3742,9 +3769,21 @@ of ten points is caught:
       the real and then the effective user.
 - [ ] `nse-script-help-trace-updatedb-refused` — `--script-help`,
       `--script-trace` and `--script-updatedb` are refused, failing closed.
+- [ ] `nse-stall-limit-times-a-pass` — the stall limit times one pass of
+      the scheduler's loop, and only its network poll marks progress. A
+      pass creates up to 1,000 threads and resumes every running one before
+      it polls. A thread's first resume runs the script's top-level code and
+      its rule, so many hosts, ports or scripts can keep a pass longer than
+      a small `--script-timeout` with every thread behaving. Measured: five
+      scripts each spending 0.3 s in their top-level code abort the
+      pre-scan phase under `--script-timeout 1`, where 7.94 runs them in
+      1.6 s. Counting each resume as a pass needs a Rust call before
+      `Thread:resume`, in what is verbatim `nse_main.lua` today.
 - [ ] `nse-os-block-after-scripts` — with `-O`, the OS block is printed
       after the whole report, as before M6.4e, so it comes after `Host
-      script results:` where nmap prints it before.
+      script results:` where nmap prints it before. Since
+      `cli-stdout-silenced-by-output-files` it goes wherever the normal
+      output goes, the `-oN` destination included, in that same place.
 
 ## Milestone 6.6 step a — `nmapdb` (`core::nse::nmapdb`, `core::protocols`, `core::macvendor`, `cli`)
 

@@ -101,6 +101,102 @@ fn a_script_that_never_yields_ends_its_phase_at_the_stall_limit() {
     assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
 }
 
+/// Run `nmap-rs --datadir D -sT -Pn -n -p 1 ARGS 127.0.0.1`, killing it if
+/// it runs past a minute: a load the stall limit fails to stop must fail
+/// the test, not hang it.
+fn run_bounded(d: &std::path::Path, args: &[&str]) -> (std::process::Output, std::time::Duration) {
+    use std::process::Stdio;
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
+        .arg("--datadir")
+        .arg(d)
+        .args(["-sT", "-Pn", "-n", "-p", "1"])
+        .args(args)
+        .arg("127.0.0.1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("nmap-rs runs");
+    while child.try_wait().expect("wait").is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("nmap-rs {args:?} ran for more than a minute");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    (child.wait_with_output().expect("output"), started.elapsed())
+}
+
+/// Loading is held to the stall limit one script at a time: each script's
+/// start counts as a pass. Five scripts whose top-level code computes for
+/// 0.3 s when loaded load under `--script-timeout 1`, as 7.94 loads them.
+/// Before this, the whole load was timed, so `-sC --script-timeout 1`
+/// failed to start (about a second for the 124 `default` scripts in a debug
+/// build). Each thread runs a script's top-level code again; the scripts
+/// compute only the first time, because the scheduler's first resume of
+/// five such threads is timed as one pass (`nse-stall-limit-times-a-pass`).
+#[test]
+fn the_stall_limit_bounds_each_script_load_not_the_whole_load() {
+    let slow = "if not nmap.registry[SCRIPT_NAME] then\n\
+                  nmap.registry[SCRIPT_NAME] = true\n\
+                  local t = os.clock() while os.clock() - t < 0.3 do end\n\
+                end\n\
+                categories = {'safe'}\nprerule = function() return true end\n\
+                action = function() return 'loaded' end\n";
+    let names = [
+        "slow1.nse",
+        "slow2.nse",
+        "slow3.nse",
+        "slow4.nse",
+        "slow5.nse",
+    ];
+    let files: Vec<(&str, &str)> = names.iter().map(|n| (*n, slow)).collect();
+    let d = datadir("loadslice", &files);
+    let (out, _) = run_bounded(
+        &d,
+        &[
+            "--script",
+            "slow1,slow2,slow3,slow4,slow5",
+            "--script-timeout",
+            "1",
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&d);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(!stderr.contains("stall limit"), "{stderr}");
+    for n in names {
+        let id = n.trim_end_matches(".nse");
+        assert!(stdout.contains(&format!("{id}: loaded")), "{id}: {stdout}");
+    }
+}
+
+/// And a script whose top-level code never finishes is still stopped at
+/// the limit: the engine fails to start, with the stall message, in bounded
+/// time. 7.94 hangs.
+#[test]
+fn a_script_that_spins_at_load_is_stopped_at_the_stall_limit() {
+    let d = datadir(
+        "loadspin",
+        &[(
+            "spinload.nse",
+            "local x = 0 while true do x = x + 1 end\n\
+             categories = {'safe'}\nprerule = function() return true end\n\
+             action = function() return 'unreachable' end\n",
+        )],
+    );
+    let (out, elapsed) = run_bounded(&d, &["--script", "spinload", "--script-timeout", "1"]);
+    let _ = std::fs::remove_dir_all(&d);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("NSE: failed to initialize the script engine:\nloading scripts: no script thread yielded for 1 seconds (the stall limit; see --script-timeout)"),
+        "{stderr}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
 /// Data files and scripts are never taken from the working directory
 /// (`datadir-no-working-directory`): a `scripts/` there is passed over, with
 /// nmap's warning, and its script cannot be selected by name.

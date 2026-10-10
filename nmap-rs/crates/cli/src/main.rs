@@ -14,7 +14,7 @@ use nmap_core::matcher::CompiledDb;
 use nmap_core::model::{HostState, PortState, ServiceInfo};
 use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::Phase;
-use nmap_core::options::{RunConfig, ScanKind};
+use nmap_core::options::{is_stdout_dest, RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
@@ -418,13 +418,16 @@ async fn main() -> ExitCode {
         debugging: cfg.debugging,
     };
 
-    if let Err(e) = emit_outputs(&cfg, &results, &meta, services.as_ref(), start_epoch) {
+    if let Err(e) = emit_outputs(
+        &cfg,
+        &results,
+        &meta,
+        services.as_ref(),
+        &os_block,
+        start_epoch,
+    ) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
-    }
-    // The OS block follows the port table, as nmap orders it.
-    if !os_block.is_empty() {
-        print!("{os_block}");
     }
     ExitCode::SUCCESS
 }
@@ -1457,17 +1460,29 @@ async fn resolve_targets(cfg: &RunConfig) -> Vec<(IpAddr, Option<String>)> {
 /// Emit the requested output formats. With no `-o` flag, normal output goes to
 /// stdout; otherwise each specified format goes to its destination (`-` =
 /// stdout, else a file).
+/// Write the report: the normal output to stdout, and each format to its
+/// `-o` destination.
+///
+/// The normal output goes to stdout whatever files are also written, because
+/// nmap's `LOG_PLAIN` is `LOG_NORMAL|LOG_SKID|LOG_STDOUT` (`output.h:84`);
+/// only `-v0` or a `-` destination discards it ([`RunConfig::stdout_is_null`]).
+/// The OS block is part of the normal output (`printosscanoutput` writes
+/// `LOG_PLAIN`), so it goes wherever the report goes, after the port table.
 fn emit_outputs(
     cfg: &RunConfig,
     results: &nmap_core::ScanResults,
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
+    os_block: &str,
     start_epoch: i64,
 ) -> std::io::Result<()> {
-    let none = cfg.out_normal.is_none() && cfg.out_xml.is_none() && cfg.out_grep.is_none();
-    if none {
-        print!("{}", render_normal(results, meta, services));
-        return Ok(());
+    let normal = || {
+        let mut s = render_normal(results, meta, services);
+        s.push_str(os_block);
+        s
+    };
+    if !cfg.stdout_is_null() {
+        print!("{}", normal());
     }
     // Expand the strftime escapes here rather than in `parse_args`, which is
     // pure and has no clock. One expansion point for all four options, against
@@ -1475,10 +1490,7 @@ fn emit_outputs(
     // same command cannot disagree about the date, even across midnight.
     let stamp = start_epoch;
     if let Some(dest) = &cfg.out_normal {
-        write_to(
-            &expand_dest(dest, stamp),
-            &render_normal(results, meta, services),
-        )?;
+        write_to(&expand_dest(dest, stamp), &normal())?;
     }
     if let Some(dest) = &cfg.out_xml {
         write_to(
@@ -1498,7 +1510,7 @@ fn emit_outputs(
 /// Expand a destination's strftime escapes; `-` (stdout) passes through
 /// untouched so it can never become a file named after the clock.
 fn expand_dest(dest: &str, epoch: i64) -> String {
-    if dest == "-" || dest.is_empty() {
+    if is_stdout_dest(dest) {
         return dest.to_string();
     }
     nmap_core::logfile::expand(dest, epoch)
@@ -1506,7 +1518,7 @@ fn expand_dest(dest: &str, epoch: i64) -> String {
 
 /// Write `content` to `dest` (`-` = stdout, else a file).
 fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
-    if dest == "-" || dest.is_empty() {
+    if is_stdout_dest(dest) {
         print!("{content}");
         Ok(())
     } else {
@@ -1543,6 +1555,7 @@ fn nse_setup(cfg: &RunConfig, services: Option<&ServiceTable>) -> nse::Setup {
         stall,
         verbose: i64::from(cfg.verbose),
         debugging: i64::from(cfg.debugging),
+        stdout_null: cfg.stdout_is_null(),
         timing_level: i64::from(
             cfg.timing_template
                 .unwrap_or(TimingTemplate::Normal)

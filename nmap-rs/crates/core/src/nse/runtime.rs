@@ -57,19 +57,19 @@ pub struct NseState {
     pub lua: Lua,
     /// What the prelude returned: the engine's own values (`NSE_YIELD_VALUE`,
     /// `REQUIRE_ERROR`, `print_debug`, ...) and its entry points (`main`,
-    /// `load_scripts`, `render`).
+    /// `load_script`, `scripts_loaded`, `render`).
     pub engine: StashedTable,
     /// The `nmap` module's state, which the engine shares.
     pub(crate) lib: super::nmaplib::Shared,
     /// Results the scripts stored, until a phase renders them.
     pub(crate) store: Rc<RefCell<Store>>,
     /// Run between slices of every call into the engine.
-    pub(crate) watchdog: Option<super::engine::Watchdog>,
+    pub(crate) watchdog: Option<Box<dyn super::engine::Watchdog>>,
 }
 
 impl NseState {
     /// Set the check run between slices of VM work ([`super::engine::Watchdog`]).
-    pub fn set_watchdog(&mut self, watchdog: Option<super::engine::Watchdog>) {
+    pub fn set_watchdog(&mut self, watchdog: Option<Box<dyn super::engine::Watchdog>>) {
         self.watchdog = watchdog;
     }
 }

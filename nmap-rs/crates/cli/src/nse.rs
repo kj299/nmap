@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use nmap_core::model::Host;
 use nmap_core::nse::choose::{choose, RuleOptions};
-use nmap_core::nse::engine::{EngineOptions, PhaseResults};
+use nmap_core::nse::engine::{EngineOptions, PhaseResults, Watchdog};
 use nmap_core::nse::fspolicy::named_values;
 use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::{LogTarget, NmapEnv, NmapLib, Phase, ScriptHost, ScriptPort};
@@ -48,6 +48,11 @@ pub struct Setup {
     pub stall: Duration,
     pub verbose: i64,
     pub debugging: i64,
+    /// `o.nmap_stdout` is the null device ([`RunConfig::stdout_is_null`]):
+    /// what the scripts log to stdout is discarded.
+    ///
+    /// [`RunConfig::stdout_is_null`]: nmap_core::options::RunConfig::stdout_is_null
+    pub stdout_null: bool,
     pub timing_level: i64,
     pub version_intensity: i64,
     pub ttl: i64,
@@ -194,6 +199,7 @@ fn open(setup: Setup) -> Result<Running, String> {
     let fs = PolicyFs::new(&data.existing(), &[], &named_values(&args)).with_read_files(&read_only);
 
     let fetch_dirs = data.clone();
+    let stdout_null = setup.stdout_null;
     let started = Instant::now();
     let env = NmapEnv {
         verbose: setup.verbose,
@@ -226,9 +232,13 @@ fn open(setup: Setup) -> Result<Running, String> {
             )
         }),
         random: Box::new(nsehost::random_bytes),
-        log: Box::new(|to, line| {
+        log: Box::new(move |to, line| {
             use std::io::Write as _;
             match to {
+                // nmap writes these through `o.nmap_stdout`, which `-v0` and
+                // a `-` output destination point at the null device; a
+                // script's debug line must not land in `-oX -`'s XML.
+                LogTarget::Stdout | LogTarget::Plain if stdout_null => {}
                 LogTarget::Stdout | LogTarget::Plain => {
                     let mut out = std::io::stdout().lock();
                     let _ = out.write_all(line);
@@ -267,19 +277,37 @@ fn open(setup: Setup) -> Result<Running, String> {
         },
         net: Rc::new(RefCell::new(net)),
     })?;
-    let watched = last_pass.clone();
-    let stall = setup.stall;
-    state.set_watchdog(Some(Box::new(move || {
-        (watched.get().elapsed() > stall).then(|| {
-            format!(
-                "no script thread yielded for {} seconds (the stall limit; see --script-timeout)",
-                stall.as_secs()
-            )
-        })
+    state.set_watchdog(Some(Box::new(StallWatch {
+        last_pass: last_pass.clone(),
+        stall: setup.stall,
     })));
-    last_pass.set(Instant::now());
     state.load_chosen(&chosen, None)?;
     Ok(Running { state, last_pass })
+}
+
+/// The stall limit (`nse-stall-limit`): stop when the scheduler has made no
+/// pass for `stall`. While the scripts load, each script's start counts as
+/// a pass, so the limit bounds one script's top-level code, not the whole
+/// load: 124 `default` scripts take about a second to load here, which
+/// `--script-timeout 1` would otherwise refuse.
+struct StallWatch {
+    last_pass: Rc<std::cell::Cell<Instant>>,
+    stall: Duration,
+}
+
+impl Watchdog for StallWatch {
+    fn check(&mut self) -> Option<String> {
+        (self.last_pass.get().elapsed() > self.stall).then(|| {
+            format!(
+                "no script thread yielded for {} seconds (the stall limit; see --script-timeout)",
+                self.stall.as_secs()
+            )
+        })
+    }
+
+    fn progress(&mut self) {
+        self.last_pass.set(Instant::now());
+    }
 }
 
 /// A scanned host as `set_hostinfo` sees it. The port does no reverse DNS,

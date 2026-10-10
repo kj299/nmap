@@ -177,6 +177,54 @@ fn the_selection_reaches_the_scan() {
     );
 }
 
+/// nmap's warnings about the port list (`nmap.cc:1596-1618`, `:1711-1716`):
+/// a `-p` prefix whose scan type was not requested, then a requested scan
+/// type left with no ports. Both go to standard error and to the top of the
+/// `-oN` file, not to stdout, in this order. Each line and its placement
+/// were compared against 7.94 with `--datadir` this tree.
+#[test]
+fn port_list_warnings_match_c() {
+    const NO_TCP: &str = "WARNING: a TCP scan type was requested, but no tcp ports were specified.  Skipping this scan type.";
+    const NO_UDP: &str = "WARNING: UDP scan was requested, but no udp ports were specified.  Skipping this scan type.";
+    const HAS_U: &str =
+        "WARNING: Your ports include \"U:\" but you haven't specified UDP scan with -sU.";
+    const HAS_T: &str =
+        "WARNING: Your ports include \"T:\" but you haven't specified any TCP scan type.";
+    const HAS_S: &str =
+        "WARNING: Your ports include \"S:\" but you haven't specified any SCTP scan type.";
+    let dir = std::env::temp_dir().join(format!("nmap-rs-portwarn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let normal = dir.join("n.txt");
+    for (args, want) in [
+        (
+            &["-sT", "-p", "1", "--exclude-ports", "1"][..],
+            &[NO_TCP][..],
+        ),
+        (&["-sT", "-p", "U:53"], &[HAS_U, NO_TCP]),
+        (&["-sU", "-p", "T:80"], &[HAS_T, NO_UDP]),
+        (&["-sT", "-p", "T:80,S:9"], &[HAS_S]),
+        (&["-sT", "-p", "1"], &[]),
+        (&["-sU", "-p", "53"], &[]),
+    ] {
+        let mut all = vec!["-Pn", "-n"];
+        all.extend_from_slice(args);
+        let n = normal.to_string_lossy().into_owned();
+        all.extend_from_slice(&["-oN", &n, "127.0.0.1"]);
+        let (stdout, stderr, ok) = run(&all);
+        assert!(ok, "{args:?}: {stderr}");
+        let warned: Vec<&str> = stderr
+            .lines()
+            .filter(|l| l.starts_with("WARNING:"))
+            .collect();
+        assert_eq!(warned, want, "{args:?}: stderr {stderr}");
+        let file = std::fs::read_to_string(&normal).unwrap_or_default();
+        let head: Vec<&str> = file.lines().take(want.len()).collect();
+        assert_eq!(head, want, "{args:?}: -oN {file}");
+        assert!(!stdout.contains("WARNING:"), "{args:?}: stdout {stdout}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- the nmap-service-probes Exclude directive -----------------------------
 
 /// `nmap-service-probes` opens with `Exclude T:9100-9107`. Those are JetDirect

@@ -487,6 +487,24 @@ the driver-specific choices.
       `scan_engine_raw.cc` looks the host up by `encaps_hdr.dst` (the quoted destination)
       and then computes `from_target` against the outer ICMP source, which is exactly the
       rule above. No behavioral divergence.
+- [x] `udpscan-tcp-port-list` (`cli`) — **a port defect, from M4; found in the
+      M6.6 cleanup and fixed there.**
+      - **In C.** A scan takes its own protocol's ports: `-sU` scans the
+        `U:` (or unprefixed) ports of `-p`, and `--top-ports`, `--port-ratio`
+        and `-F` rank `nmap-services` by UDP frequency (`gettoppts`).
+      - **Was here.** `select_ports` read the TCP list and the TCP ranking for
+        every scan. So `-sU` with no `-p` probed the top 1,000 *TCP* ports over
+        UDP (7.94's top three UDP ports are 137, 161 and 631; TCP's are 80, 23
+        and 443), `-sU -p T:80` probed UDP port 80, and `-sU -p U:53` probed
+        nothing.
+      - **Fix.** The list and the ranking follow the scan's protocol. Pinned
+        by `udp_top_ports_match_c_nmap` against 7.94's `-sU --top-ports N`
+        (`tests/differential/m7/topports/udp-top-*.txt`).
+      - Alongside it, nmap's port-list warnings, which the port never gave:
+        a `-p` prefix whose scan type was not requested (`nmap.cc:1596-1618`)
+        and a requested scan type left with no ports (`nmap.cc:1711-1716`),
+        to standard error and the top of the `-oN` file, as 7.94 writes them
+        (`port_list_warnings_match_c`).
 
 ## Milestone 4 — TCP flag scans (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`)
 

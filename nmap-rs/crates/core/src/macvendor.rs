@@ -27,16 +27,50 @@ const MAS_DIGITS: u32 = 9;
 /// Where the digit count is packed into a table key, matching the C's `(len << 36)`.
 const TAG_SHIFT: u32 = 36;
 
+/// What was wrong with a line of `nmap-mac-prefixes`. A value, not a string:
+/// a malformed file of millions of lines costs no allocation per line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacDbProblem {
+    /// The line does not start with 6, 7 or 9 hex digits; how many it has.
+    PrefixLength {
+        /// The number of hex digits the line starts with.
+        digits: usize,
+    },
+    /// The prefix runs straight into something other than whitespace.
+    NoWhitespace,
+    /// The prefix is followed by no vendor name.
+    NoVendor,
+}
+
+impl std::fmt::Display for MacDbProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MacDbProblem::PrefixLength { digits } => write!(
+                f,
+                "expected a {MAL_DIGITS}, {MAM_DIGITS} or {MAS_DIGITS} digit prefix, \
+                 found {digits} hex digits"
+            ),
+            MacDbProblem::NoWhitespace => f.write_str("prefix is not followed by whitespace"),
+            MacDbProblem::NoVendor => f.write_str("prefix has no vendor name"),
+        }
+    }
+}
+
 /// A non-fatal problem encountered while parsing, with the line it occurred on. The C
 /// prints these and then **abandons the rest of the file**; we collect them and keep
-/// going.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// going (`macvendor-parse-degrade`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacDbWarning {
     /// 1-based line number.
     pub line: usize,
     /// What went wrong.
-    pub message: String,
+    pub problem: MacDbProblem,
 }
+
+/// How many warnings a parse keeps; the rest are only counted
+/// ([`MacPrefixDb::warning_count`]), so a malformed file of any size costs no
+/// memory for its warnings beyond these (`macvendor-parse-degrade`).
+pub const KEPT_WARNINGS: usize = 10;
 
 /// A registered prefix, as returned by [`MacPrefixDb::find_prefix`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,8 +91,10 @@ pub struct MacPrefix {
 #[derive(Debug, Clone, Default)]
 pub struct MacPrefixDb {
     entries: BTreeMap<u64, Vec<u8>>,
-    /// Lines that could not be parsed.
+    /// The first [`KEPT_WARNINGS`] lines that could not be parsed.
     pub warnings: Vec<MacDbWarning>,
+    /// How many lines could not be parsed, kept or not.
+    pub warning_count: usize,
 }
 
 /// Value of a hex digit. The C's `nibble()` does this with bit tricks that quietly accept
@@ -112,20 +148,14 @@ impl MacPrefixDb {
                 u32::try_from(digits),
                 Ok(MAL_DIGITS | MAM_DIGITS | MAS_DIGITS)
             ) {
-                db.warn(
-                    lineno,
-                    &format!(
-                        "expected a {MAL_DIGITS}, {MAM_DIGITS} or {MAS_DIGITS} digit prefix, \
-                         found {digits} hex digits"
-                    ),
-                );
+                db.warn(lineno, MacDbProblem::PrefixLength { digits });
                 continue;
             }
             let (prefix, rest) = line.split_at(digits);
             // The C requires whitespace immediately after the prefix, so `0000001 Foo`
             // is rejected rather than silently read as a 6-digit prefix.
             if !rest.first().is_some_and(|&b| is_c_space(b)) {
-                db.warn(lineno, "prefix is not followed by whitespace");
+                db.warn(lineno, MacDbProblem::NoWhitespace);
                 continue;
             }
 
@@ -147,7 +177,7 @@ impl MacPrefixDb {
             if vendor.is_empty() {
                 // The C `assert()`s here, and nmap's build keeps its asserts: 7.94 aborts
                 // (`macvendor-empty-vendor-skipped`).
-                db.warn(lineno, "prefix has no vendor name");
+                db.warn(lineno, MacDbProblem::NoVendor);
                 continue;
             }
 
@@ -160,11 +190,11 @@ impl MacPrefixDb {
         db
     }
 
-    fn warn(&mut self, line: usize, message: &str) {
-        self.warnings.push(MacDbWarning {
-            line,
-            message: message.to_owned(),
-        });
+    fn warn(&mut self, line: usize, problem: MacDbProblem) {
+        self.warning_count = self.warning_count.saturating_add(1);
+        if self.warnings.len() < KEPT_WARNINGS {
+            self.warnings.push(MacDbWarning { line, problem });
+        }
     }
 
     /// Number of registered prefixes.
@@ -502,5 +532,34 @@ mod tests {
         assert!(db.warnings.is_empty());
         assert_eq!(db.lookup([0; 6]), Some(&b"Latin\xe9 Corp"[..]));
         assert!(db.find_prefix(b"latin\xe9").is_some());
+    }
+
+    /// `macvendor-parse-degrade`: every bad line is counted, the first
+    /// [`KEPT_WARNINGS`] are kept, as values, and the good lines still load.
+    #[test]
+    fn warnings_past_the_cap_are_counted_not_kept() {
+        let mut file = b"x\n".repeat(30);
+        file.extend_from_slice(b"0000001Glued\n000001   \n080027 Fine\n");
+        let db = MacPrefixDb::parse(&file);
+        assert_eq!(db.warning_count, 32);
+        assert_eq!(db.warnings.len(), KEPT_WARNINGS);
+        assert_eq!(
+            db.warnings[0],
+            MacDbWarning {
+                line: 1,
+                problem: MacDbProblem::PrefixLength { digits: 0 }
+            }
+        );
+        assert_eq!(
+            db.warnings[0].problem.to_string(),
+            "expected a 6, 7 or 9 digit prefix, found 0 hex digits"
+        );
+        assert_eq!(db.lookup([8, 0, 0x27, 0, 0, 0]), Some(&b"Fine"[..]));
+        let db = MacPrefixDb::parse(b"0000001Glued\n000001   \n");
+        assert_eq!(
+            db.warnings.iter().map(|w| w.problem).collect::<Vec<_>>(),
+            [MacDbProblem::NoWhitespace, MacDbProblem::NoVendor]
+        );
+        assert_eq!(db.warning_count, 2);
     }
 }

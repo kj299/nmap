@@ -171,6 +171,51 @@ fn read_golden(path: &Path, header: &mut Vec<String>) -> Vec<String> {
     rows
 }
 
+/// The fewest rows of each kind the golden may hold. The probe is shared by
+/// the oracle and the port, so a probe weakened and regenerated in place
+/// would pass a total alone (M6.6 review, sabotage S32: dropping the
+/// `mac2corp` argument edges lost 67 rows of 115,064 and the only checks of
+/// three parser sabotages). The argument-edge counts are the probe's, exact
+/// as floors; the sweeps depend on the data files and get round floors.
+const MIN_ROWS: &[(&str, usize)] = &[
+    ("mac_arg", 70),
+    ("gsp_arg", 129),
+    ("gpn_arg", 23),
+    ("gpna_arg", 33),
+    ("gpn", 257),
+    ("gpna", 150),
+    ("gpna_uc", 150),
+    ("gsp_extra", 1),
+    ("nret", 1),
+    ("global", 1),
+    ("types", 1),
+    ("shape", 1),
+    ("df", 10),
+    ("mac_rand", 50_000),
+    ("mac_pfx", 50_000),
+    ("gsp_sweep", 12_000),
+];
+
+fn assert_rows_per_tag(rows: &[String]) {
+    let mut count: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for r in rows {
+        let tag = r.split('|').next().unwrap_or_default();
+        let n = count.entry(tag).or_default();
+        *n = n.saturating_add(1);
+    }
+    let short: Vec<String> = MIN_ROWS
+        .iter()
+        .filter(|(tag, min)| count.get(tag).copied().unwrap_or(0) < *min)
+        .map(|(tag, min)| format!("{tag}: {} < {min}", count.get(tag).copied().unwrap_or(0)))
+        .collect();
+    assert!(short.is_empty(), "the golden is short of rows: {short:?}");
+    assert_eq!(
+        count.get("mac_rand").copied(),
+        Some(50_000),
+        "mac_rand rows"
+    );
+}
+
 #[test]
 fn nmapdb_matches_nmap_itself() {
     let mut header = Vec::new();
@@ -184,6 +229,7 @@ fn nmapdb_matches_nmap_itself() {
         "only {} lines in the golden",
         want.len()
     );
+    assert_rows_per_tag(&want);
     let (got, logged) = run_probe();
     // The shipped files read cleanly: nothing to report.
     assert!(
@@ -256,15 +302,10 @@ fn argument(r: &str) -> (String, Vec<u8>) {
 fn pinned(id: &str, args: &[Vec<u8>]) -> String {
     match id {
         // This tree's table has a slot for 255 (`efa0dc36f`), and its file
-        // names no protocol 255.
-        "nmapdb-getprotbynum-255-oracle-abort" => {
-            let text = std::fs::read(nse_host::repo_root().join("nmap-protocols"))
-                .expect("nmap-protocols");
-            match ProtocolTable::parse(&text).by_number(255) {
-                Some(name) => format!("s:{}", esc(name)),
-                None => "nil".into(),
-            }
-        }
+        // names no protocol 255 ([`the_shipped_protocols_file_names_no_255`]):
+        // a constant, not the port's own parse of the file, which would agree
+        // with itself whatever it answered (M6.6 review, sabotage S33).
+        "nmapdb-getprotbynum-255-oracle-abort" => PROTOCOL_255.into(),
         // A terminated list: `luaL_checkoption`'s own error, the name cut at
         // its first NUL, before the port is looked at.
         "nmapdb-getservbyport-option-overread" => {
@@ -282,6 +323,43 @@ fn pinned(id: &str, args: &[Vec<u8>]) -> String {
         "nmapdb-mac2corp-isxdigit-signed-char" => "E:Expected a 6-byte MAC address".into(),
         other => panic!("the quarantined id {other} has no pin in this test"),
     }
+}
+
+/// What `getprotbynum(255)` answers over the shipped `nmap-protocols`.
+const PROTOCOL_255: &str = "nil";
+
+/// [`PROTOCOL_255`] holds because the shipped file has no line for 255,
+/// read here without the port's parser: any line whose second field is
+/// `255`, as `sscanf("%127s %hu")` would read it.
+#[test]
+fn the_shipped_protocols_file_names_no_255() {
+    let text = std::fs::read(nse_host::repo_root().join("nmap-protocols")).expect("nmap-protocols");
+    let text: String = text.iter().map(|&b| char::from(b)).collect();
+    let mut lines = 0;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(name), Some(number)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if name.starts_with('#') {
+            continue;
+        }
+        lines += 1;
+        let digits: String = number
+            .trim_start_matches('+')
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        assert_ne!(
+            digits.trim_start_matches('0'),
+            "255",
+            "nmap-protocols names protocol 255 ({line:?}): update PROTOCOL_255"
+        );
+    }
+    assert!(lines > 100, "only {lines} protocol lines");
+    // And the port agrees, over the shipped file.
+    let bytes = std::fs::read(nse_host::repo_root().join("nmap-protocols")).expect("read");
+    assert_eq!(ProtocolTable::parse(&bytes).by_number(255), None);
 }
 
 #[test]

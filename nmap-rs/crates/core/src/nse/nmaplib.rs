@@ -1724,6 +1724,53 @@ mod tests {
         assert_eq!(deductions(&e, &port(5)).name, None);
     }
 
+    /// `set_port_version` with no name and a state that is not a match falls
+    /// back to the table (`portlist.cc:337-341`), which is `s_name` again: no
+    /// name for a port `nmap-services` names `unknown`, dtype "table", conf 3.
+    /// 7.94 gives the same (`m64_scripts_golden.txt`, scenario
+    /// `service-names`, the `set` lines).
+    #[test]
+    fn set_port_version_falls_back_to_the_stored_name() {
+        let logs = Logs::default();
+        let mut e = env(&logs);
+        e.services = Some(ServiceTable::parse(
+            "unknown\t4/tcp\t0.000477\ntcpmux\t1/tcp\t0.001\n",
+        ));
+        let lib = NmapLib::new(e);
+        let mut h = ScriptHost::new("192.0.2.7".parse().unwrap());
+        for number in [1, 4] {
+            h.ports.push(ScriptPort {
+                number,
+                protocol: Protocol::Tcp,
+                state: PortState::Closed,
+                reason: "conn-refused",
+                reason_ttl: 0,
+                service: None,
+            });
+        }
+        lib.borrow_mut().set_hosts(vec![h]);
+        let got = run(
+            &lib,
+            r#"
+            local out = {}
+            for _, state in ipairs({"incomplete", "nomatch"}) do
+              for _, n in ipairs({1, 4}) do
+                nmap.set_port_version(host, {number = n, protocol = "tcp", version = {}}, state)
+                local v = nmap.get_port_state(host, {number = n, protocol = "tcp"}).version
+                out[#out + 1] = ("%s %d %s %s %s"):format(state, n, tostring(v.name),
+                  tostring(v.name_confidence), v.service_dtype)
+              end
+            end
+            return table.concat(out, ",")
+            "#,
+        );
+        assert_eq!(
+            got,
+            ["incomplete 1 tcpmux 3.0 table,incomplete 4 nil 3.0 table,\
+              nomatch 1 tcpmux 3.0 table,nomatch 4 nil 3.0 table"]
+        );
+    }
+
     fn full_host() -> ScriptHost {
         let mut h = ScriptHost::new("192.0.2.7".parse().unwrap());
         h.hostname = b"a.example".to_vec();

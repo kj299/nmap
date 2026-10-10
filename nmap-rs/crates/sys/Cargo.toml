@@ -39,7 +39,7 @@ default = []
 # `getifaddrs(3)` backend (`interfaces_ffi`) used to (a) cross-check that `netdev`
 # agrees with the raw OS call, and (b) reach a field `netdev` might not expose. The
 # only place `unsafe` re-enters the OS-query layer, and always audited.
-raw-ffi = ["dep:libc"]
+raw-ffi = []
 # The real libpcap/Npcap capture backend. Off by default (needs libpcap at build
 # time). The OS-agnostic capture plumbing (blocking-thread -> tokio mpsc, per spike
 # S1) is always built and tested against a mock source; this feature swaps in the
@@ -47,7 +47,11 @@ raw-ffi = ["dep:libc"]
 pcap = ["dep:pcap"]
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2", optional = true }
+# Always on for unix since M6.6 step a, for a constant: `O_NONBLOCK`, with which
+# `datadir::read_data_file` opens a data file so that a FIFO in its place cannot
+# block the scan (`datafile-special-file-refused`). No `unsafe` comes with it; the
+# FFI calls stay behind `raw-ffi`. Already in the tree through tokio and socket2.
+libc = "0.2"
 
 [lints]
 workspace = true

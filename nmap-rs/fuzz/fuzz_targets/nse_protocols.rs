@@ -13,7 +13,15 @@
 //     number a name has has a name;
 //   * FIRST WINS, on both tables: the file followed by itself gives the same
 //     tables, and a line put in front of it is what its name and its number
-//     look up to.
+//     look up to;
+//   * THE MODEL: an independent reading of each line — the name, then the
+//     number field as a token ending at whitespace or `#`, which must be an
+//     optional sign and decimal digits, 0 to 255, `-0` allowed — gives exactly
+//     the parser's two tables, and exactly its warnings: every line the model
+//     reads is in the tables (or lost to first-wins), every line it rejects is
+//     warned of, and nothing else is. A parser that wraps `x 65542` to 6,
+//     reads `8abc` as 8, or keeps only the first entry fails here (M6.6
+//     review, security D4).
 //
 // Input layout: the whole input is the file; its first bytes also make the
 // line put in front.
@@ -34,8 +42,100 @@ fn tables(t: &ProtocolTable) -> (Vec<(Vec<u8>, u8)>, Vec<Option<Vec<u8>>>) {
     (names, numbers)
 }
 
+/// The model's reading of one line.
+enum Line<'a> {
+    Blank,
+    Entry(&'a [u8], u8),
+    Bad,
+}
+
+/// The number field as a token: everything up to whitespace, `#` or the end.
+fn model_number(token: &[u8]) -> Option<u8> {
+    let (negative, digits) = match token.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, token),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let significant = &digits[digits.iter().take_while(|&&d| d == b'0').count()..];
+    if significant.len() > 3 {
+        return None;
+    }
+    let value = significant
+        .iter()
+        .fold(0u32, |v, &d| v * 10 + u32::from(d - b'0'));
+    if negative && value != 0 {
+        return None;
+    }
+    u8::try_from(value).ok()
+}
+
+fn model_line(raw: &[u8]) -> Line<'_> {
+    let line = raw.split(|&b| b == 0).next().unwrap_or_default();
+    // Words, by whitespace: the name, and the text after it.
+    let skip = |s: &[u8]| s.iter().take_while(|&&b| is_c_space(b)).count();
+    let line = &line[skip(line)..];
+    if line.is_empty() || line[0] == b'#' {
+        return Line::Blank;
+    }
+    let name_len = line.iter().take_while(|&&b| !is_c_space(b)).count();
+    let (name, rest) = line.split_at(name_len);
+    if name.len() > 127 {
+        return Line::Bad;
+    }
+    let rest = &rest[skip(rest)..];
+    // The number field: up to the next whitespace or `#`.
+    let end = rest
+        .iter()
+        .position(|&b| is_c_space(b) || b == b'#')
+        .unwrap_or(rest.len());
+    match model_number(&rest[..end]) {
+        Some(n) => Line::Entry(name, n),
+        None => Line::Bad,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let t = ProtocolTable::parse(data);
+
+    // The model's tables and warnings.
+    let mut by_name: std::collections::BTreeMap<Vec<u8>, u8> = Default::default();
+    let mut by_number: Vec<Option<Vec<u8>>> = vec![None; 256];
+    let mut bad = Vec::new();
+    for (i, raw) in data.split(|&b| b == b'\n').enumerate() {
+        match model_line(raw) {
+            Line::Blank => {}
+            Line::Bad => bad.push(i + 1),
+            Line::Entry(name, n) => {
+                if !by_name.contains_key(name) {
+                    by_name.insert(name.to_vec(), n);
+                    let slot = &mut by_number[usize::from(n)];
+                    if slot.is_none() {
+                        *slot = Some(name.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        tables(&t),
+        (by_name.into_iter().collect::<Vec<_>>(), by_number),
+        "the tables are not the model's"
+    );
+    assert_eq!(t.warning_count, bad.len(), "warned lines");
+    assert_eq!(
+        t.warnings.iter().map(|w| w.line).collect::<Vec<_>>(),
+        bad.iter()
+            .copied()
+            .take(t.warnings.len())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        t.warnings.len(),
+        bad.len().min(nmap_core::protocols::KEPT_WARNINGS)
+    );
 
     let lines = data.iter().filter(|&&b| b == b'\n').count() + 1;
     for w in &t.warnings {

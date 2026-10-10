@@ -15,12 +15,23 @@ name: nmap-rs-ci
 # via the default `synchronize` activity. The push trigger's remaining job is master
 # after a merge. Trade-off, deliberately accepted: a `claude/**` branch pushed with
 # NO open pull request is not built until a PR is opened for it.
+# The data files, nselib/, scripts/ and nse_main.lua live outside nmap-rs/, but
+# goldens and gates here read them (the nmapdb and scriptload goldens, the
+# probe and OS databases' corpora, every NSE differential). A PR that only
+# syncs them must run this workflow too, or the goldens go stale silently and
+# the failure lands on the next unrelated nmap-rs PR (M6.6 review).
 on:
   push:
     branches: [master]
-    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
+    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml',
+            'nmap-mac-prefixes', 'nmap-services', 'nmap-protocols',
+            'nmap-service-probes', 'nmap-os-db', 'nselib/**', 'scripts/**',
+            'nse_main.lua']
   pull_request:
-    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml']
+    paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml',
+            'nmap-mac-prefixes', 'nmap-services', 'nmap-protocols',
+            'nmap-service-probes', 'nmap-os-db', 'nselib/**', 'scripts/**',
+            'nse_main.lua']
 
 # Supersede a PR's in-flight run when it is force-pushed: with a ~40-minute fuzz
 # matrix, a stale run is pure waste and its result is about code that no longer
@@ -403,6 +414,10 @@ jobs:
       # silent_require failed). The port loads each through its engine and must
       # end every one the same way, and must lack exactly the modules removed.
       # Regenerated live here; the test job runs the committed golden.
+      # --check also fails when the committed golden is not the live one,
+      # `# missing:` header included: a golden regenerated with another missing
+      # set cannot then pass the test job unnoticed (M6.6 review, S24/S27).
+      - run: bash tests/differential/m6/regen_m66_scriptload.sh --check
       - run: python3 tests/differential/m6/oracle/gen_m66_scriptload.py "$RUNNER_TEMP"
       - run: M66_SCRIPTLOAD_GOLDEN="$RUNNER_TEMP/m66_scriptload_golden.txt" cargo test -p nmap-core --test scriptload_differential
       # M6.6: nmap's C module `nmapdb` over this tree's data files, through a

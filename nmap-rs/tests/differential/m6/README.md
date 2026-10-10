@@ -32,7 +32,7 @@ any difference.
 | `m64_net_golden.txt` | sockets, timers, `resolve`, `mutex`, `condvar`, socket limits, shipped `http-*` scripts (M6.4d), vs nmap 7.94 | `oracle/gen_m64_net.py` (live in CI) | `nse_net_differential` (in `nmap-sys`) | 3 scenarios, 17 scripts |
 | `m64_cli_golden.txt` | `nmap-rs --script` as a whole program: every phase's results and port states in normal and XML output, script arguments, timeouts, start-up errors (M6.4e), vs nmap 7.94 | `oracle/gen_m64_cli.py` (live in CI) | `nse_cli_differential` (in `nmap-cli`) | 15 scenarios |
 | `m66_nmapdb_golden.txt`, `m66_nmapdb_quarantine.txt` | the C module `nmapdb` over this tree's data files (M6.6), vs nmap 7.94 | `regen_m66_nmapdb.sh`, `oracle/gen_m66_nmapdb.py` (live in CI) | `nmapdb_differential` | 115,064 lines; 36 calls quarantined, each pinned |
-| `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 531 OK, 33 LOUD, 47 QUIET |
+| `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `regen_m66_scriptload.sh`, `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 531 OK, 33 LOUD, 47 QUIET |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -389,9 +389,19 @@ writes them. No line is excused: the port names the function as
 `luaL_argerror` does for the call's shape, and raises with `luaL_where`'s
 position, so the `pcall` rows and the `datafiles.lua:127:` rows match as they
 stand. A second test runs every quarantined call and requires the answer its
-ledger id pins: the table's for `getprotbynum(255)` (nil), a clean `invalid
-option` error for an unknown protocol, and `Expected a 6-byte MAC address`
-for a high byte. `M66_NMAPDB_GOLDEN` names a live golden.
+ledger id pins: a constant for `getprotbynum(255)` (nil, and a third test
+checks, without the port's parser, that the shipped `nmap-protocols` has no
+line for 255), a clean `invalid option` error for an unknown protocol, and
+`Expected a 6-byte MAC address` for a high byte. The probe is shared by
+oracle and port, so the golden must also hold a floor of rows of each kind
+(`MIN_ROWS`): a probe weakened and regenerated in place fails there.
+`M66_NMAPDB_GOLDEN` names a live golden.
+
+The engine-level tests hand the engine a data-file reader of their own; the
+CLI's (`data_file_at`, which also refuses FIFOs, devices and files over
+64 MiB) is gated end to end by `crates/cli/tests/nmapdb_cli.rs`, which runs
+`nmap-rs --datadir` over this repository with a prerule that calls all four
+functions.
 
 **Script loads.** nmap cannot load a script without its C modules, so
 `oracle/gen_m66_scriptload.py` emulates it. The scratch data directory
@@ -418,8 +428,16 @@ golden's missing set. So porting a module fails the gate until the module
 leaves `PORT_MISSING` and the golden is regenerated:
 
 ```sh
-python3 oracle/gen_m66_scriptload.py .
+./regen_m66_scriptload.sh            # regenerate in place
+./regen_m66_scriptload.sh --check    # what CI runs: the committed golden is the live one
 ```
+
+`--check` compares the whole file, the `# missing:` header included, so a
+golden regenerated with another missing set fails CI even when the test job,
+which reads the committed copy, would pass. A unit test in `nse/runtime.rs`
+(`the_registered_c_modules_are_exactly_the_ported_ones`) lists the C modules
+the port registers, exactly, so porting or stubbing one means editing that
+list as well as `PORT_MISSING`.
 
 Measured with this generator: with every module missing, 7.94 gives
 514 / 51 / 46; once `nmapdb` leaves the set, 531 / 33 / 47 (the committed
@@ -430,4 +448,17 @@ leaves it too, 560 / 2 / 49, as `docs/M6.6-ANALYSIS.md` §0 predicts.
 the `service-names` scenario of `m64_scripts_golden.txt` runs the fixture
 `s-service.nse` over 1/tcp, 4/tcp (which `nmap-services` names `unknown`)
 and an open port, and 7.94 and the port both see no name for 4/tcp
-(`nmaplib-unknown-service-name`).
+(`nmaplib-unknown-service-name`). Since the M6.6 review the fixture then calls
+`nmap.set_port_version(host, port, "incomplete")` on 1/tcp and 4/tcp, and both
+see the table's fallback: `tcpmux`, and no name for 4/tcp, `dtype=table`,
+conf 3.
+
+**Sabotage checks.** To show a gate catches a defect, break the code, run the
+gate, and restore the file from a byte copy, never with `git checkout` (which
+discards uncommitted work, `porting-kit/LESSONS.md` #038). The restore must
+also change the file's mtime — `cp` without `-p`, `shutil.copy` rather than
+`copy2`, or a `touch` afterwards — because cargo decides what to rebuild by
+mtime: a restore that brings back the file's original, older timestamp leaves
+the build made from the sabotaged file looking up to date, and the next run
+tests that stale, still-sabotaged binary (the M6.6 review's first S25 run did
+exactly that).

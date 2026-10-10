@@ -26,10 +26,14 @@
 //!
 //! **Errors** are raised as `luaL_error` and `luaL_argerror` raise them: with
 //! the position of the Lua code that called the function (`luaL_where(L,
-//! 1)`), and with the function named as `luaL_argerror` names it — by the
-//! field its Lua caller called it through, `'getservbyport'`, and otherwise,
-//! when the caller is not Lua code (a `pcall`), by the name
-//! `pushglobalfuncname` finds in `package.loaded`, `'nmapdb.getservbyport'`.
+//! 1)`). A bad argument names the function by its registered name,
+//! `'getservbyport'`, when the caller is Lua code, and otherwise (a `pcall`)
+//! by the name `pushglobalfuncname` finds in `package.loaded`,
+//! `'nmapdb.getservbyport'`. 7.94 names it as `getfuncname` describes the
+//! call — the field, local, upvalue or global it was called through, a
+//! method call's `calling 'X' on bad self`, a metamethod's event — so the two
+//! agree only on a direct `nmapdb.X(...)` call and a `pcall`
+//! (`nmapdb-bad-argument-naming`).
 //!
 //! **Where the C is not followed** (DIVERGENCES.md, Milestone 6.6 step a):
 //! `getservbyport`'s option list is terminated, so an unknown protocol is a
@@ -130,6 +134,20 @@ fn error_line(lib: &mut NmapLib, parts: &[&[u8]]) {
     lib.log(LogTarget::Error, &line);
 }
 
+/// After the warnings a parse kept (at most ten), one line for those it
+/// only counted, so a malformed file of any size costs a dozen lines of
+/// output, not one per line.
+fn more_line(lib: &mut NmapLib, count: usize, shown: usize, path: &[u8]) {
+    let more = count.saturating_sub(shown);
+    if more > 0 {
+        let n = more.to_string();
+        error_line(
+            lib,
+            &[b"... and ", n.as_bytes(), b" more parse errors in ", path],
+        );
+    }
+}
+
 /// `mac_prefix_init` (`MACLookup.cc:84-167`): read `nmap-mac-prefixes` the
 /// first time, and the table from then on.
 fn mac_table(lib: &mut NmapLib) -> Option<&MacPrefixDb> {
@@ -156,11 +174,16 @@ fn mac_table(lib: &mut NmapLib) -> Option<&MacPrefixDb> {
                 None
             }
             DataFile::Read { path, bytes } => {
-                let db = MacPrefixDb::parse(&bytes);
+                let mut db = MacPrefixDb::parse(&bytes);
+                drop(bytes);
                 // The C gives up at its first bad line; this reads on, and says
-                // so of each (`macvendor-parse-degrade`).
-                for w in &db.warnings {
+                // so of the first few, then counts the rest
+                // (`macvendor-parse-degrade`). The warnings are not kept with
+                // the table.
+                let warnings = std::mem::take(&mut db.warnings);
+                for w in &warnings {
                     let n = w.line.to_string();
+                    let problem = w.problem.to_string();
                     error_line(
                         lib,
                         &[
@@ -169,11 +192,12 @@ fn mac_table(lib: &mut NmapLib) -> Option<&MacPrefixDb> {
                             b" of ",
                             &path,
                             b": ",
-                            w.message.as_bytes(),
+                            problem.as_bytes(),
                             b". Skipping it.",
                         ],
                     );
                 }
+                more_line(lib, db.warning_count, warnings.len(), &path);
                 lib.db.loaded.insert("nmap-mac-prefixes", path);
                 Some(db)
             }
@@ -207,8 +231,12 @@ fn protocol_table(lib: &mut NmapLib) -> Option<&ProtocolTable> {
                 None
             }
             DataFile::Read { path, bytes } => {
-                let table = ProtocolTable::parse(&bytes);
-                for w in &table.warnings {
+                let mut table = ProtocolTable::parse(&bytes);
+                drop(bytes);
+                // C says so of every bad line; this of the first few, then
+                // counts the rest (`protocols-parse-warning-cap`).
+                let warnings = std::mem::take(&mut table.warnings);
+                for w in &warnings {
                     let n = w.line.to_string();
                     error_line(
                         lib,
@@ -220,6 +248,7 @@ fn protocol_table(lib: &mut NmapLib) -> Option<&ProtocolTable> {
                         ],
                     );
                 }
+                more_line(lib, table.warning_count, warnings.len(), &path);
                 lib.db.loaded.insert("nmap-protocols", path);
                 Some(table)
             }
@@ -316,9 +345,10 @@ fn l_getprotbyname<'gc>(
     put(s, v)
 }
 
-/// The name `luaL_argerror` gives the function: the field its caller called
-/// it through when the caller is Lua code, and otherwise the name
-/// `pushglobalfuncname` finds for it in `package.loaded`.
+/// The name `luaL_argerror` gives the function: its registered name when the
+/// caller is Lua code, whatever that code called it through, and otherwise
+/// the name `pushglobalfuncname` finds for it in `package.loaded`
+/// (`nmapdb-bad-argument-naming`).
 fn function_name(exec: &Execution<'_, '_>, name: &'static str) -> String {
     if exec.frame_info(1).is_some_and(|f| f.lua.is_some()) {
         name.to_string()
@@ -540,6 +570,56 @@ mod tests {
         let logs = logs.borrow();
         assert_eq!(logs.len(), 1, "{logs:?}");
         assert!(logs[0].starts_with(b"Parse error on line #7 of /data/nmap-mac-prefixes:"));
+        // Where the file was read from, for "Read data files from".
+        assert_eq!(
+            lib.borrow().db.loaded.get("nmap-mac-prefixes"),
+            Some(&b"/data/nmap-mac-prefixes".to_vec())
+        );
+    }
+
+    /// `macvendor-parse-degrade` and `protocols-parse-warning-cap`: a file of
+    /// bad lines is reported in at most eleven lines, the table still loads
+    /// from its good lines, and no warning is kept with the table.
+    #[test]
+    fn a_file_of_bad_lines_is_reported_in_a_dozen_lines() {
+        let mut macs = b"x\n".repeat(1000);
+        macs.extend_from_slice(b"080027 Fine\n");
+        let mut protos = b"bad\n".repeat(1000);
+        protos.extend_from_slice(b"tcp 6\n");
+        let (lib, logs) = lib_with(vec![
+            ("nmap-mac-prefixes", read("nmap-mac-prefixes", &macs)),
+            ("nmap-protocols", read("nmap-protocols", &protos)),
+        ]);
+        let out = run(
+            &lib,
+            "return r(nmapdb.mac2corp('080027000000'), nmapdb.getprotbyname('tcp'))",
+        );
+        assert_eq!(out, "s:Fine|6");
+        let logs = logs.borrow();
+        assert_eq!(logs.len(), 22, "{logs:?}");
+        assert_eq!(
+            logs[0],
+            b"Parse error on line #1 of /data/nmap-mac-prefixes: expected a 6, 7 or 9 digit \
+              prefix, found 0 hex digits. Skipping it.\n"
+                .to_vec()
+        );
+        assert_eq!(
+            logs[10],
+            b"... and 990 more parse errors in /data/nmap-mac-prefixes\n".to_vec()
+        );
+        assert_eq!(
+            logs[11],
+            b"Parse error in protocols file /data/nmap-protocols line 1\n".to_vec()
+        );
+        assert_eq!(
+            logs[21],
+            b"... and 990 more parse errors in /data/nmap-protocols\n".to_vec()
+        );
+        let l = lib.borrow();
+        let mac = l.db.mac.as_ref().and_then(Option::as_ref).unwrap();
+        assert!(mac.warnings.is_empty());
+        let protocols = l.db.protocols.as_ref().and_then(Option::as_ref).unwrap();
+        assert!(protocols.warnings.is_empty());
     }
 
     #[test]

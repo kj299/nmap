@@ -274,4 +274,125 @@ mod tests {
         }
         assert_eq!(blocks, 14, "the prelude's blocks");
     }
+
+    /// The C modules this port registers, exactly: nmap's are registered by
+    /// `set_nmap_libraries` (`nse_main.cc:556-579`) — `nmap`, `nmapdb`,
+    /// `lfs`, `lpeg`, `libssh2`, `openssl`, `zlib` — with `nmap.socket` and
+    /// `nmap.dnet` from `luaopen_nmap`. This port has the first two and the
+    /// sub-modules, and the scriptload golden is generated with the rest
+    /// removed (`oracle/gen_m66_scriptload.py`, `PORT_MISSING`). Porting a
+    /// module, or stubbing one, means changing this list as well as that one
+    /// (M6.6 review, sabotages S24 and S27).
+    #[test]
+    fn the_registered_c_modules_are_exactly_the_ported_ones() {
+        use super::*;
+        use crate::nse::nmaplib::{NmapEnv, NmapLib, Phase};
+        use crate::nse::stdlib::iolib::{FsError, OpenMode, ScriptFile, Whence};
+
+        struct NoLibs;
+        impl LibrarySource for NoLibs {
+            fn find(&self, _: &[u8]) -> Option<Vec<u8>> {
+                None
+            }
+            fn read(&self, _: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+                Err(b"none".to_vec())
+            }
+        }
+        struct Sink;
+        impl ScriptFile for Sink {
+            fn read(&mut self, _: &mut [u8]) -> Result<usize, FsError> {
+                Ok(0)
+            }
+            fn write(&mut self, _: &[u8]) -> Result<(), FsError> {
+                Ok(())
+            }
+            fn seek(&mut self, _: Whence, _: i64) -> Result<u64, FsError> {
+                Ok(0)
+            }
+            fn flush(&mut self) -> Result<(), FsError> {
+                Ok(())
+            }
+        }
+        struct NoFs;
+        impl ScriptFs for NoFs {
+            fn open(&self, _: &[u8], _: OpenMode) -> Result<Box<dyn ScriptFile>, FsError> {
+                Err(FsError {
+                    message: "no".into(),
+                    errno: 2,
+                })
+            }
+            fn stdout(&self) -> Box<dyn ScriptFile> {
+                Box::new(Sink)
+            }
+        }
+        let lib = NmapLib::new(NmapEnv {
+            verbose: 0,
+            debugging: 0,
+            timing_level: 3,
+            version_intensity: 7,
+            ttl: -1,
+            data_length: -1,
+            have_ssl: false,
+            privileged: false,
+            ipv6: false,
+            interface: None,
+            dns_servers: vec![],
+            excluded_ports: None,
+            services: None,
+            phase: Phase::PreScan,
+            interfaces: Ok(Vec::new()),
+            fetchfile: Box::new(|_| None),
+            read_data_file: Box::new(|_| crate::nse::nmapdb::DataFile::NotFound),
+            clock: Box::new(|| (0, 0)),
+            random: Box::new(|_| false),
+            log: Box::new(|_, _| {}),
+        });
+        let config = StateConfig {
+            lib,
+            args: ArgTable::default(),
+            source: Rc::new(NoLibs),
+            fs: Rc::new(NoFs),
+            os: Rc::new(OsEnv {
+                now: Box::new(|| 0),
+                cpu_seconds: Box::new(|| 0.0),
+                home: None,
+            }),
+            memory_limit: None,
+            engine: EngineOptions::default(),
+            net: Rc::new(RefCell::new(crate::nse::net::NoNet)),
+        };
+        let mut lua = build(&config);
+        // Every `package.loaded` entry that is not one of Lua's own libraries,
+        // and which of them are globals too.
+        let out = run_chunk(
+            &mut lua,
+            "=t",
+            b"local std = {_G = 1, package = 1, coroutine = 1, table = 1, io = 1, os = 1, \
+               string = 1, math = 1, utf8 = 1, debug = 1} \
+              local k = {} \
+              for name, v in pairs(package.loaded) do \
+                if not std[name] then \
+                  k[#k + 1] = name .. (rawget(_G, name) == v and '=global' or '') \
+                end \
+              end \
+              table.sort(k) \
+              return table.concat(k, ',')",
+            1_000_000,
+        );
+        assert_eq!(
+            out,
+            ChunkOutcome::Returned(vec![
+                "nmap.dnet,nmap.socket,nmap=global,nmapdb=global".to_string()
+            ])
+        );
+        for missing in ["lfs", "lpeg", "libssh2", "openssl", "zlib"] {
+            let out = run_chunk(
+                &mut lua,
+                "=t",
+                format!("return tostring(rawget(_G, '{missing}'))").as_bytes(),
+                1_000_000,
+            );
+            assert_eq!(out, ChunkOutcome::Returned(vec!["nil".to_string()]));
+        }
+    }
 }

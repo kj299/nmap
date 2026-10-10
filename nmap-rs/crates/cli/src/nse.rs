@@ -7,9 +7,10 @@
 //! phase's results.
 //!
 //! Between slices of VM work the engine asks a watchdog whether to go on.
-//! It stops a phase when the script scheduler has made no pass for the stall
-//! limit (`nse-stall-limit`): `--script-timeout` when given, else ten
-//! minutes. nmap has no such limit, and a script that never yields hangs it.
+//! It stops a phase when no script thread has yielded, finished or started
+//! for the stall limit (`nse-stall-limit`): `--script-timeout` when given,
+//! else ten minutes. nmap has no such limit, and a script that never yields
+//! hangs it.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -285,11 +286,12 @@ fn open(setup: Setup) -> Result<Running, String> {
     Ok(Running { state, last_pass })
 }
 
-/// The stall limit (`nse-stall-limit`): stop when the scheduler has made no
-/// pass for `stall`. While the scripts load, each script's start counts as
-/// a pass, so the limit bounds one script's top-level code, not the whole
-/// load: 124 `default` scripts take about a second to load here, which
-/// `--script-timeout 1` would otherwise refuse.
+/// The stall limit (`nse-stall-limit`): stop when no progress has been made
+/// for `stall`. Progress is a scheduler pass (the network poll), a script's
+/// load, or a scheduler resume of a script thread (`cnse.progress`), so the
+/// limit bounds one script's top-level code or one resume, not a whole load
+/// or a whole pass: 124 `default` scripts take about a second to load here,
+/// which `--script-timeout 1` would otherwise refuse.
 struct StallWatch {
     last_pass: Rc<std::cell::Cell<Instant>>,
     stall: Duration,

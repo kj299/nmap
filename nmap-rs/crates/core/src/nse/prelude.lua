@@ -981,6 +981,19 @@ do
 end
 -- <<<
 
+-- The stall limit (core::nse::engine, `nse-stall-limit`) counts each time the
+-- scheduler resumes a script thread as progress: a thread that runs and
+-- yields, or finishes, has made some, however many threads one pass of the
+-- loop resumes before it polls the network. A script's own coroutines resume
+-- through coroutine.resume, not here, so they cannot hold the limit off.
+do
+  local resume_thread = Thread.resume;
+  function Thread:resume (timeouts)
+    cnse.progress();
+    return resume_thread(self, timeouts);
+  end
+end
+
 -- get_chosen_scripts's last step, after the scripts are loaded: each
 -- script's runlevel, one more than the highest of the scripts it depends on.
 local function calculate_runlevels (chosen_scripts)

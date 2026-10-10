@@ -63,14 +63,15 @@ pub struct NseState {
     pub(crate) lib: super::nmaplib::Shared,
     /// Results the scripts stored, until a phase renders them.
     pub(crate) store: Rc<RefCell<Store>>,
-    /// Run between slices of every call into the engine.
-    pub(crate) watchdog: Option<Box<dyn super::engine::Watchdog>>,
+    /// Run between slices of every call into the engine, and told of
+    /// progress by `cnse.progress`.
+    pub(crate) watchdog: super::engine::SharedWatchdog,
 }
 
 impl NseState {
     /// Set the check run between slices of VM work ([`super::engine::Watchdog`]).
     pub fn set_watchdog(&mut self, watchdog: Option<Box<dyn super::engine::Watchdog>>) {
-        self.watchdog = watchdog;
+        *self.watchdog.borrow_mut() = watchdog;
     }
 }
 
@@ -79,9 +80,10 @@ impl NseState {
 pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
     let mut lua = build(config);
     let store = Rc::new(RefCell::new(Store::default()));
+    let watchdog: super::engine::SharedWatchdog = Rc::new(RefCell::new(None));
     let ipv6 = config.lib.borrow().env.ipv6;
     let cnse = lua.enter(|ctx| {
-        let cnse = load_cnse(ctx, &config.lib, &store, config.engine);
+        let cnse = load_cnse(ctx, &config.lib, &store, &watchdog, config.engine);
         let nmap: piccolo::Table = ctx.get_global("nmap").expect("build installs nmap");
         let net = super::net::load_net(
             ctx,
@@ -112,7 +114,7 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
         engine,
         lib: config.lib.clone(),
         store,
-        watchdog: None,
+        watchdog,
     })
 }
 

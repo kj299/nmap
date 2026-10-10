@@ -127,20 +127,17 @@ fn run_bounded(d: &std::path::Path, args: &[&str]) -> (std::process::Output, std
     (child.wait_with_output().expect("output"), started.elapsed())
 }
 
-/// Loading is held to the stall limit one script at a time: each script's
-/// start counts as a pass. Five scripts whose top-level code computes for
-/// 0.3 s when loaded load under `--script-timeout 1`, as 7.94 loads them.
-/// Before this, the whole load was timed, so `-sC --script-timeout 1`
-/// failed to start (about a second for the 124 `default` scripts in a debug
-/// build). Each thread runs a script's top-level code again; the scripts
-/// compute only the first time, because the scheduler's first resume of
-/// five such threads is timed as one pass (`nse-stall-limit-times-a-pass`).
+/// The stall limit bounds one script's work, not a batch of them: each
+/// script's load and each time the scheduler resumes a script thread count
+/// as progress. Five scripts whose top-level code computes for 0.3 s run
+/// under `--script-timeout 1`, as 7.94 runs them (1.6 s), though that code
+/// runs once at load and again in each thread's first resume, all in one
+/// pass of the scheduler. Before, the whole load was timed, so
+/// `-sC --script-timeout 1` failed to start, and then the whole pass was
+/// (`nse-stall-limit-times-a-pass`), so these five aborted the pre-scan.
 #[test]
 fn the_stall_limit_bounds_each_script_load_not_the_whole_load() {
-    let slow = "if not nmap.registry[SCRIPT_NAME] then\n\
-                  nmap.registry[SCRIPT_NAME] = true\n\
-                  local t = os.clock() while os.clock() - t < 0.3 do end\n\
-                end\n\
+    let slow = "local t = os.clock() while os.clock() - t < 0.3 do end\n\
                 categories = {'safe'}\nprerule = function() return true end\n\
                 action = function() return 'loaded' end\n";
     let names = [
@@ -194,6 +191,35 @@ fn a_script_that_spins_at_load_is_stopped_at_the_stall_limit() {
         stderr.contains("NSE: failed to initialize the script engine:\nloading scripts: no script thread yielded for 1 seconds (the stall limit; see --script-timeout)"),
         "{stderr}"
     );
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+/// A script cannot hold the limit off with coroutines of its own: their
+/// resumes are not the scheduler's, so a thread that ping-pongs between
+/// two of them forever, never yielding to the scheduler, ends its phase at
+/// the limit. 7.94 hangs.
+#[test]
+fn a_scripts_own_coroutines_do_not_count_as_progress() {
+    let d = datadir(
+        "pingpong",
+        &[(
+            "pingpong.nse",
+            "categories = {'safe'}\nprerule = function() return true end\n\
+             action = function()\n\
+               local co = coroutine.wrap(function() while true do coroutine.yield() end end)\n\
+               while true do co() end\n\
+             end\n",
+        )],
+    );
+    let (out, elapsed) = run_bounded(&d, &["--script", "pingpong", "--script-timeout", "1"]);
+    let _ = std::fs::remove_dir_all(&d);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("NSE: Script Engine Scan Aborted.")
+            && stderr.contains("no script thread yielded for 1 seconds"),
+        "{stderr}"
+    );
+    assert!(out.status.success(), "{stderr}");
     assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
 }
 

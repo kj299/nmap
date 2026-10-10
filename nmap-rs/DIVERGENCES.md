@@ -3741,9 +3741,10 @@ of ten points is caught:
       so far, and the scan carries on. The limit is `--script-timeout` when
       that is set (at least one second), else ten minutes. A script yields
       on every socket call, so a legitimate one does not compute for ten
-      minutes without a pass. While the scripts load, each script's start
-      counts as a pass, so the limit bounds one script's top-level code and
-      not the whole load. Until the cleanup after M6.6 step b the whole load
+      minutes without a pass. Each script's load and each scheduler resume of
+      a script thread count as a pass, so the limit bounds one script's
+      top-level code, or one resume, and not a whole load or a whole loop of
+      the scheduler (`nse-stall-limit-times-a-pass`). Until the cleanup after M6.6 step b the whole load
       was timed, and `-sC --script-timeout 1` failed to start in 3 of 5 runs:
       the 124 `default` scripts take about a second to load in a debug
       build, where 7.94 takes 0.33 s.
@@ -3812,16 +3813,21 @@ of ten points is caught:
       the real and then the effective user.
 - [ ] `nse-script-help-trace-updatedb-refused` — `--script-help`,
       `--script-trace` and `--script-updatedb` are refused, failing closed.
-- [ ] `nse-stall-limit-times-a-pass` — the stall limit times one pass of
-      the scheduler's loop, and only its network poll marks progress. A
-      pass creates up to 1,000 threads and resumes every running one before
-      it polls. A thread's first resume runs the script's top-level code and
-      its rule, so many hosts, ports or scripts can keep a pass longer than
-      a small `--script-timeout` with every thread behaving. Measured: five
-      scripts each spending 0.3 s in their top-level code abort the
-      pre-scan phase under `--script-timeout 1`, where 7.94 runs them in
-      1.6 s. Counting each resume as a pass needs a Rust call before
-      `Thread:resume`, in what is verbatim `nse_main.lua` today.
+- [x] `nse-stall-limit-times-a-pass` — **a port defect, found while fixing
+      the load-time limit; fixed after M6.6 step b.** The stall limit timed one
+      pass of the scheduler's loop, and only its network poll marked
+      progress. A pass creates up to 1,000 threads and resumes every running
+      one before it polls, and a thread's first resume runs the script's
+      top-level code and its rule, so many hosts, ports or scripts could keep
+      a pass longer than a small `--script-timeout` with every thread
+      behaving. Measured: five scripts each spending 0.3 s in their top-level
+      code aborted the pre-scan phase under `--script-timeout 1`, where 7.94
+      runs them in 1.6 s. Now each time the scheduler resumes a script thread
+      counts as progress: the prelude's glue wraps the verbatim
+      `Thread:resume` with a call to `cnse.progress`. A script's own
+      coroutines resume through `coroutine.resume`, not there, so a thread
+      that ping-pongs between two of them forever still ends its phase at the
+      limit (`nse_cli_differential`, both cases).
 - [ ] `nse-os-block-after-scripts` — with `-O`, the OS block is printed
       after the whole report, as before M6.4e, so it comes after `Host
       script results:` where nmap prints it before. Since

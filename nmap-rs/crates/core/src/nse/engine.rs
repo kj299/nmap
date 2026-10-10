@@ -79,6 +79,7 @@ pub(crate) struct Store {
 struct Cnse {
     lib: Shared,
     store: Rc<RefCell<Store>>,
+    watchdog: SharedWatchdog,
 }
 
 type CnseBody =
@@ -132,11 +133,13 @@ pub(crate) fn load_cnse<'gc>(
     ctx: Context<'gc>,
     lib: &Shared,
     store: &Rc<RefCell<Store>>,
+    watchdog: &SharedWatchdog,
     options: EngineOptions,
 ) -> Table<'gc> {
     let c = Rc::new(Cnse {
         lib: lib.clone(),
         store: store.clone(),
+        watchdog: Rc::clone(watchdog),
     });
     let t = Table::new(&ctx);
     let fns: [(&'static str, CnseBody); 16] = [
@@ -161,6 +164,7 @@ pub(crate) fn load_cnse<'gc>(
         install(ctx, t, &c, name, body);
     }
     install(ctx, t, &c, "rendered", l_rendered);
+    install(ctx, t, &c, "progress", l_progress);
     t.set_field(ctx, "script_timeout", Value::Number(options.script_timeout));
     t.set_field(
         ctx,
@@ -527,10 +531,32 @@ pub trait Watchdog {
     /// the phase is reported aborted with `reason`.
     fn check(&mut self) -> Option<String>;
 
-    /// The engine is about to load one script. Loading is not scheduled, so
-    /// no scheduler pass marks progress through it; this does, so that a
-    /// limit bounds each script's top-level code rather than the whole load.
+    /// The engine is about to start a unit of work a limit should bound on
+    /// its own: loading one script, or the scheduler resuming one script
+    /// thread (`cnse.progress`, from the prelude's `Thread:resume`). So a
+    /// limit bounds one script's top-level code, or one resume, rather than
+    /// a whole load or a whole pass of the scheduler.
     fn progress(&mut self) {}
+}
+
+/// The watchdog, shared between the engine, which checks it between slices,
+/// and `cnse.progress`, which marks progress from inside a slice. Neither
+/// holds the borrow across a call into the VM.
+pub(crate) type SharedWatchdog = Rc<RefCell<Option<Box<dyn Watchdog>>>>;
+
+/// `cnse.progress()`: the scheduler is about to resume a script thread
+/// ([`Watchdog::progress`]). Not in `nse_main.cc`, which has no stall limit.
+fn l_progress<'gc>(
+    c: &Cnse,
+    _ctx: Context<'gc>,
+    _stack: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
+    if let Ok(mut w) = c.watchdog.try_borrow_mut() {
+        if let Some(w) = w.as_mut() {
+            w.progress();
+        }
+    }
+    Ok(())
 }
 
 /// Step `ex` until it finishes, the budget is spent, or the watchdog stops
@@ -539,7 +565,7 @@ pub(crate) fn finish(
     lua: &mut Lua,
     ex: &StashedExecutor,
     budget: Budget,
-    watchdog: Option<&mut Box<dyn Watchdog>>,
+    watchdog: &SharedWatchdog,
     what: &str,
 ) -> Result<(), String> {
     finish_spending(lua, ex, budget, &mut 0, watchdog, what)
@@ -552,7 +578,7 @@ fn finish_spending(
     ex: &StashedExecutor,
     budget: Budget,
     spent: &mut u64,
-    mut watchdog: Option<&mut Box<dyn Watchdog>>,
+    watchdog: &SharedWatchdog,
     what: &str,
 ) -> Result<(), String> {
     const SLICE: i32 = 4096;
@@ -567,7 +593,9 @@ fn finish_spending(
         if budget.is_some_and(|b| *spent > b) {
             return Err(format!("{what}: out of fuel"));
         }
-        if let Some(reason) = watchdog.as_mut().and_then(|w| w.check()) {
+        // Borrowed between slices only: `cnse.progress` borrows it inside one.
+        let stop = watchdog.borrow_mut().as_mut().and_then(|w| w.check());
+        if let Some(reason) = stop {
             return Err(format!("{what}: {reason}"));
         }
     }
@@ -639,7 +667,7 @@ impl super::runtime::NseState {
     pub fn load_scripts(&mut self, chosen: &[ChosenScript], budget: Budget) -> Result<(), String> {
         let mut spent = 0;
         for c in chosen {
-            if let Some(w) = self.watchdog.as_mut() {
+            if let Some(w) = self.watchdog.borrow_mut().as_mut() {
                 w.progress();
             }
             let ex = self.lua.enter(|ctx| {
@@ -661,12 +689,12 @@ impl super::runtime::NseState {
                 &ex,
                 budget,
                 &mut spent,
-                self.watchdog.as_mut(),
+                &self.watchdog,
                 "loading scripts",
             )?;
             outcome(&mut self.lua, &ex)?;
         }
-        if let Some(w) = self.watchdog.as_mut() {
+        if let Some(w) = self.watchdog.borrow_mut().as_mut() {
             w.progress();
         }
         let ex = self.lua.enter(|ctx| {
@@ -681,7 +709,7 @@ impl super::runtime::NseState {
             &ex,
             budget,
             &mut spent,
-            self.watchdog.as_mut(),
+            &self.watchdog,
             "loading scripts",
         )?;
         outcome(&mut self.lua, &ex)
@@ -740,15 +768,9 @@ impl super::runtime::NseState {
             let f: piccolo::Function = engine.get(ctx, "main").expect("the prelude returns main");
             ctx.stash(Executor::start(ctx, f, (list, scantype)))
         });
-        let aborted = finish(
-            &mut self.lua,
-            &ex,
-            budget,
-            self.watchdog.as_mut(),
-            "script scan",
-        )
-        .and_then(|()| outcome(&mut self.lua, &ex))
-        .err();
+        let aborted = finish(&mut self.lua, &ex, budget, &self.watchdog, "script scan")
+            .and_then(|()| outcome(&mut self.lua, &ex))
+            .err();
         let mut results = self.render(budget);
         results.aborted = aborted;
         results
@@ -779,14 +801,8 @@ impl super::runtime::NseState {
         });
         // A result whose rendering did not finish is reported with no text,
         // as the C reports a FORMAT_TABLE that failed.
-        let _ = finish(
-            &mut self.lua,
-            &ex,
-            budget,
-            self.watchdog.as_mut(),
-            "rendering",
-        )
-        .and_then(|()| outcome(&mut self.lua, &ex));
+        let _ = finish(&mut self.lua, &ex, budget, &self.watchdog, "rendering")
+            .and_then(|()| outcome(&mut self.lua, &ex));
         let rendered = std::mem::take(&mut self.store.borrow_mut().rendered);
         let lib = self.lib.borrow();
         let out = PhaseResults {

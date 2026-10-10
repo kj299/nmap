@@ -4247,12 +4247,27 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       and the random grammars of `walkers_agree_with_the_c_on_random_grammars`
       (the C's verifier plus that pass, with sub-grammars under predicates).
       Until the step b review a third arm refused the cycles through `B` too.
-      **For step c**, whose compiler has an iterative `getfirst`: it must
-      detect re-entry of a call target already on its current walk and raise
-      at the first match that compiles such a use, where the C's recursion
-      would not end. That is exact, because the C's descent into a call does
-      not depend on the follow set: the uses the C compiles finish, and the
-      ones it recurses on are the ones that re-enter.
+      **Step c (done):** the compiler's `getfirst` is iterative, memoised per
+      node in closed form (E10), and marks each node on its walk; re-entering
+      one is where the C's recursion would not end, and the match that
+      compiles such a use raises `rule 'A' may be left recursive`, naming the
+      last rule on the cycle (`code::analysis`). That is exact, because the
+      C's descent into a call does not depend on the follow set: the uses
+      the C compiles finish, and the ones it recurses on are the ones that
+      re-enter. Measured over the step b review's 334 grammars in six uses on
+      four subjects (`oracle/m66c_behind.lua`; `m66c_behind_golden.txt`, from
+      the tree's `lpeg.c` with its peephole and `Cc(nil)` defects fixed, by
+      `oracle/gen_m66c_behind.py`, local only): of the 2,004 cases the C
+      answers 537, and the port gives each answer; it crashes on 1,451, where
+      the port raises at every match on 1,401 and refuses the other 50 at
+      construction (the second verifier pass above); it runs on (3 s) on 16,
+      where the port refuses 10 at construction and runs on, pre-emptibly, on
+      6 — left calls through `B` coded as tail calls, which loop at one
+      position (`P{"A", A = B(P"a" * #V"A")}`). Nothing is cached from a
+      compile that fails (`lpeg-partial-program-not-cached`). Pinned by
+      `a_left_call_through_behind_raises_at_compile` and
+      `left_calls_through_behind_compile_where_the_c_does`; sabotage: the
+      re-entry check removed fails both.
 - [x] `lpeg-recursive-walkers-stack-overflow` (construction) — `finalfix`,
       `verifyrule`, `checkloops`, `checkaux` and `fixedlenx` recurse on the C
       stack with no bound. Here each is a loop over an explicit stack grown
@@ -4262,11 +4277,26 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       choices 458,980) by `walkers_answer_at_ten_times_the_cs_crash_depths`,
       and through the VM by `deep_patterns_are_walked_without_recursion`
       (`P"a"^-458980` in a grammar, in `B`, in `ptree`). Sabotage: a
-      recursive `finalfix` aborts both. The compiler's and the captures'
-      walkers are steps c and d.
+      recursive `finalfix` aborts both. **Step c:** the compiler's analyses
+      (`getfirst`, `headfail`, `needfollow`), code generation, `correctcalls`
+      and the peephole, the matching machine and capture evaluation, which
+      recurse in the C, are loops over explicit stacks too: compiled, matched
+      and evaluated at ten times the C's crash depths (`Ct` 61,590, `P{}`
+      76,990, `-` 458,980) and `P"a"^-200000` on a 256 KiB thread
+      (`deep_patterns_compile_match_and_capture_without_recursion`), and
+      through the VM on a 1 MiB one (`deep_patterns_match_without_recursion`).
+      `correctcalls` visits only the grammar's own open calls, where the C
+      scans its whole code, nested grammars' included: quadratic in the
+      nesting (76,990 nested grammars took 255 s to compile with the C's scan
+      in a debug build, under 5 s without). Sabotage: a recursive walk in code
+      generation aborts the deep tests. Step d adds the captures that call
+      Lua.
 - [x] `lpeg-ktable-key-16bit` (construction) — keys are 32 bits wide here
       (D4): a pattern of 70,000 constants builds (`C.join.70000`). The values
-      they read back at match time are step c's pin.
+      read back at match time are step c's pins: `X.ktable.32768` and
+      `X.ktable.65537` (quarantined: the C reads nil past 32,767 and aliases
+      from 65,537) give every constant back, with a correct LPeg's answers
+      (`m66c_quarantine_pins.txt`).
 - [x] `lpeg-uservalue-type-confusion` — the constant table is a field of the
       pattern object (`lpeg::Pattern`), never a user value: there is nothing
       for `debug.setuservalue` to replace, whether or not it exists. Since
@@ -4317,15 +4347,18 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       argument as `luaL_optinteger` does and stores it as given, in the
       state's registry: a string stays a string, none is nil, and opening the
       library stores `MAXBACK` as the float 100.0. nmap runs every script in
-      one state, so the value is process-wide. It is read, narrowed and
-      floored when a match grows its stack (step c). Pinned by
+      one state, so the value is process-wide. A match reads it once, when
+      it starts, and narrows and floors it as its stack grows
+      (`lpeg-backtrack-ceiling`, step c). Pinned by
       `setmaxstack_stores_its_argument_as_given`; corpus rows H.
 - [x] `lpeg-locale-is-the-c-locale` — `locale` builds the C locale's classes
       (sizes 62/52/33/10/94/26/95/32/6/26/22, nothing at or above 128) and
       sets them with `lua_setfield`, which honours `__newindex`, in the C's
       order — each `__newindex` call a call into the VM, an error in it
       stopping the rest. Pinned by `the_c_locales_classes_have_the_cs_sizes`;
-      corpus rows I. The classes' members are matched from step c.
+      corpus rows I. The classes' members are matched from step c: a class
+      that takes bytes at or above 128 fails that test and three step c
+      corpus rows (sabotage).
 - [x] `lpeg-metatable-shape` — `__add __div __gc __index __len __mul __name
       __pow __sub __unm`, `__name` `lpeg-pattern`, `__index` the `lpeg` table,
       no `__metatable`. `__gc` checks its argument is a pattern and does
@@ -4359,7 +4392,15 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       review; before it, one call). What a call does that cannot stop
       part-way — reading a grammar table, which the C reads at one instant,
       and a constructor's copy of its operands — is charged to the fuel in
-      full once done.
+      full once done. **Step c** adds `match`'s stages, each returning between
+      slices: the compile (linear in a grammar's size where the C's
+      `getfirst` is exponential, the nullable chain `Rᵢ ← Rᵢ₋₁ cᵢ^-1 / Rᵢ₋₁
+      dᵢ^-1`), the machine (a unit per instruction, per byte a span scans and
+      per entry a failure pops: `S <- 'a' S 'b' / 'a' S 'c' / ''` on
+      `a¹⁶d`), and capture evaluation (`Cb` nested `k` deep, `2^k` values
+      with no Lua call) — `every_stage_of_a_match_is_pre_empted`. So an
+      exponential match, which the C runs to its end, ends the phase at the
+      stall limit.
 - [ ] `lpeg-callback-may-yield` — the Lua a constructor calls runs as a VM
       call (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
       coroutine, and the constructor goes on where it was when that is
@@ -4388,7 +4429,10 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       fuzz target `nse_lpeg_build`, which runs each program in two slicings,
       takes "not enough memory" on either side as compatible with any answer
       on the other (seeds `vm_budget_slice_*`); pinned by
-      `a_grammar_being_built_is_counted_while_it_is_built`.
+      `a_grammar_being_built_is_counted_while_it_is_built`. From step c a
+      match holds its compiler, backtrack stack, capture list and evaluation
+      state the same way, and a capture list, stack or string the budget
+      refuses is "not enough memory" (`a_match_is_held_to_the_memory_budget`).
 - [ ] `lpeg-bad-argument-naming` — as `nmapdb-bad-argument-naming`: from Lua
       code a function is named by its registered name (`'P'`) and a
       metamethod by its event (`'mul'`), as an operator names it; otherwise
@@ -4420,3 +4464,170 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       argument #N to 'setmetatable'|'next'|'rawlen'|'rawget'|'rawset'|
       'ipairs'|'select' (...)` to one marker; fixing these messages retires
       the class.
+
+## Milestone 6.6 step c — LPeg's compiler, matching machine and the captures that call no Lua (`core::nse::lpeg`, `core::nse::lpeg::code`, `core::nse::lpeg::vm`)
+
+`lpeg.match` and every capture that calls no Lua: the compiler
+(`lpeg::code`: the analyses memoised per node, `getfirst` in closed form
+(E10); code generation, `correctcalls` and the peephole, instruction for
+instruction the C's), the matching machine (`lpeg::vm`: the backtrack stack an
+explicit `Vec` with the C's ceilings, D2), capture evaluation
+(`lpeg::vm::capture`: `C`, `Cc`, `Cp`, `Ct`, `Cg`, `Cb`, `Carg`, `Cs`,
+`/string`, `/number`) and `match`'s arguments. Each stage is resumable and
+burns fuel; a match takes a handle to its pattern's program when it starts
+(E3), and a program is kept on the pattern only once it is whole (E13). The
+module is still not registered.
+
+**Gated** by `lpeg_corpus_differential` at step c: all 37,367 rows the step
+map gives steps b and c, compared with the golden, accepted only as equal or
+under a named class — `argname` 2 rows, `vmbase` 2, and `cdepth` 1
+(`H.stackcaps.999950`, `lpeg-capture-ceiling-is-the-embeddings`); and by
+`every_quarantined_step_row_matches_its_pin`: the 119 quarantined rows step c
+runs, each held to its pin in `m66c_quarantine_pins.txt` (149 rows: 142 the
+answer of the tree's `lpeg.c` with its peephole and `Cc(nil)` defects fixed,
+7 a correct LPeg's; the other 30 are step d's). Also gated: `lpeg_match_quirks`
+(174 cases from the step's brief, against the tree's oracle);
+`lpeg_match_limits` (the D2 ceilings, depth, the capture ceiling, pre-emption
+of every stage, memory, and the left calls through `B` against
+`m66c_behind_golden.txt`); unit tests in `code/tests.rs` (the analyses
+against transliterations of `lpeg.c`'s at every node of random trees, pcode
+goldens, slicing invariance, a nullable chain in linear steps) and
+`vm/tests.rs` (slicing invariance, ceilings, pre-emption, deep patterns on a
+256 KiB thread); fuzz target `nse_lpeg_match`, which checks compile, match and
+capture values against a direct PEG interpreter of the tree; Miri on the
+module's unit tests. Each of the plan's 18 step c sabotages fails at least one
+of these.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `lpeg-codegen-jump-out-of-code` — when `peephole` turns a jump to a
+      commit into that commit (`lpeg.c:1846`), the C goes on from `i - 1`:
+      the last slot of the instruction before, an offset or charset bytes,
+      read as an instruction. From there the scan is misaligned; it "optimises"
+      labels in words that are not labels and follows them out of the code
+      (`finaltarget`, `:1508`). H06 (`-(S""*"a")+"c"`) and H07 (`P{P""}^-1`)
+      crash 7.94 in some harnesses, and 33 corpus rows are quarantined with
+      this id (ASan: SEGV, heap-buffer-overflow, heap-use-after-free). The new
+      label is already final, so the port goes on after the rewritten
+      instruction, as the C does wherever it stays aligned (`code::gen`).
+      Pinned by quirks `Q01a`/`Q01b` (1 and 1, the answer of the C with that
+      line removed), `the_peephole_stays_aligned`, the pcode goldens of
+      `programs_are_the_cs`, and the 10 rows of this id that step c runs, each
+      pinned with that build's answer (`oracle/gen_m66c_quarantine_pins.py`,
+      local only); the other 23 are step d's. Sabotage: the `i--` restored
+      fails all four.
+- [x] `lpeg-cc-nil-without-ktable` — `Cc(nil)` adds no constant
+      (`addtoktable` gives nil key 0), so a pattern with no other constant has
+      no constant table, and `Cconst` reads entry 0 of the table that is not
+      there: `lua_rawgeti` on nil, SIGSEGV (an API-check abort with
+      `LUA_USE_APICHECK`). 105 corpus rows are quarantined with this id. Here
+      key 0 is nil, so `Cc(nil)` captures nil, as LPeg means it to; where the
+      pattern has a table the C reads its entry 0, nil too, so the answers
+      agree wherever the C answers. Pinned by `cc_nil_reads_no_constant_table`
+      and the 99 rows of this id that step c runs (pinned with the answer of
+      the C whose `Cconst` pushes nil for key 0); 6 are step d's. Sabotage:
+      reading the missing table fails both.
+- [x] `lpeg-initposition-negation-overflow` — `initposition`
+      (`lpeg.c:3191`) negates a non-positive `init` in a `lua_Integer`, which
+      is undefined for `math.mininteger` (UBSan). As gcc compiles it the
+      negation wraps, its `size_t` is 2^63, past any subject, and the match
+      starts at the first byte; the port takes the magnitude unsigned and gives
+      that answer with no undefined step. Pinned by quirk `Q04e` and the
+      three rows of this id that step c runs (`X.init.minint`,
+      `E.init.15.0`, `E.init.15.1`, with the C's answers);
+      `X.cmt.res.minint`, `Cmt` returning `math.mininteger`, is step d's.
+- [x] `lpeg-nested-capture-lua-stack-overflow` — `pushcapture` asks for 4
+      free stack slots (`luaL_checkstack(L, 4, …)`) as it enters each
+      capture, and a simple capture pushes its whole match after its nested
+      captures' values, so captures nested `k` deep push `k` values on the
+      space checked for 4: past what the C function was given
+      (`L->top <= L->ci->top`, the API check), into the stack's slack and,
+      deeper, past its allocation (300 nested `C` crash 7.94). Here the values
+      live in the cursor's mirror of the Lua stack, checked against the
+      stack's real ceiling at every capture (`lpeg-capture-ceiling`), so every
+      depth answers, up to that ceiling: 300 nested `C` give 300 values.
+      Pinned by the five rows of this id (`H.nestC.40` to `.299` and
+      `X.ub.nestC`, with a correct LPeg's answers) and the deep tests.
+- [x] `lpeg-partial-program-not-cached` — the C compiles a pattern at its
+      first match into the pattern's own buffer, grown by `reallocprog`
+      (`lpeg.c:1350`); if a growth fails ("not enough memory"), the buffer
+      keeps the partial program, and the next match runs it, since `lp_match`
+      compiles only when there is no code (`:3206`): a program with no `IEnd`,
+      run past its end. The port keeps a program on the pattern only when it
+      is whole (`Pattern::compiled`, E13); a compile that fails, for memory or
+      at a left call through `B` (`lpeg-getfirst-unbounded-recursion`), leaves
+      nothing, and the next match compiles again. Pinned by
+      `a_failed_compile_caches_nothing`, which compiles under a budget that
+      refuses, then matches with the budget raised.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `lpeg-backtrack-ceiling` — D2: the backtrack stack starts at
+      `INITBACK` (100) entries and, when full, doubles up to the value
+      `setmaxstack` stored, read as `lua_tointeger` and narrowed to an `int`;
+      at or past it, "too many pending calls/choices". So any value under 100
+      is 100, the floor: `setmaxstack(150)` passes 74 levels of
+      `S <- 'a' S 'b' / ''` and fails at 75, and 5, `nil` or 2^31 pass 49 and
+      fail at 50. A choice coded as a test takes no entry
+      (`S <- '(' S ')' / 'x'`: 98 levels pass, 99 fail; 148 and 149 under
+      `setmaxstack(150)`), and a call followed by a return is a jump
+      (`S <- 'a' S / ''`, 100,000 deep, no entry). The C reads the stored
+      value at each growth, with no Lua run in between; a match here reads it
+      once, when it starts, so another script's `setmaxstack` while a match
+      is pre-empted does not reach it
+      (`setmaxstack_does_not_reach_a_running_match`). The stack grows through
+      the memory budget: "not enough memory" before the ceiling where the
+      budget refuses (`a_match_is_held_to_the_memory_budget`). Pinned by
+      `the_backtrack_ceilings_are_the_cs` (two), corpus rows G and `X.limit.*`.
+- [x] `lpeg-hascaptures-does-not-follow-calls` — 0.12's `hascaptures`
+      (`lpeg.c:1046`) does not follow a call, so a capture or a predicate over
+      a call to a rule with captures is coded as if it had none: `Ct(V"B")`,
+      `B = C"x"`, is a full capture after the call and `B`'s capture escapes
+      the table (`"x"` and an empty table); `#V"B"` keeps `B`'s captures,
+      where `#C"x"` drops them; `C(V"B") * V"B"`, `B = Cc(1)`, gives
+      `1, "", 1`. Reproduced (`code::analysis`). Pinned by
+      `hascaptures_does_not_follow_calls` and quirks `Q02` to `Q03b`.
+- [x] `lpeg-capture-ceiling` — `pushcapture`'s `luaL_checkstack(L, 4, "too
+      many captures")` against the Lua stack's limit (`LUAI_MAXSTACK`,
+      1,000,000): `C(1)^0` gives at most 999,997 − U0 values, U0 the slots in
+      use below the match, and past that "stack overflow (too many
+      captures)"; values that fit but leave the caller no room for its next
+      call fail there, with Lua's bare "stack overflow". The cursor mirrors
+      the stack and checks the same sum at every capture, with U0 the slots in
+      use when `match` is called, its arguments included, plus one: 5 below
+      `table.unpack`'s ceiling in the same frame, the golden's
+      `H.stackcaps.rel`. A table capture holds its values off the stack
+      (1,200,000 in one `Ct`). Pinned by `the_capture_ceiling_is_the_cs`,
+      `the_capture_ceiling_is_luas`.
+- [x] `lpeg-maxstrcaps-skips-silently` — `/string` collects at most
+      `MAXSTRCAPS` (10) captures, the whole match and nine nested; it skips
+      the rest without a word, `%n` past those collected is "invalid capture
+      index (n)", and a `%n` naming a capture with no values "no values in
+      capture index n". Reproduced; corpus rows `X.maxstrcaps.*`, quirks.
+- [x] `lpeg-subst-negative-length` — `Cs` adds the subject between its
+      captures with `luaL_addlstring(b, curr, next - curr)`. Captures a
+      predicate keeps (`#V"B"`, above) can end past where the next one
+      starts, and the negative length, as a `size_t`, is "buffer too large"
+      where the buffer already holds at least its magnitude and "not enough
+      memory" otherwise (`luaL_prepbuffsize`, Lua 5.4). Reproduced
+      (`vm::capture`); quirks `Qbuf1` to `Qbuf4`, measured on the tree's
+      oracle.
+
+### Differences, open and documented
+
+- [ ] `lpeg-capture-ceiling-is-the-embeddings` — the absolute capture
+      ceiling is a property of the embedding: how many stack slots the
+      frames below the call use, 999,934 values under the standalone oracle
+      and 999,945 under 7.94. Piccolo lays its frames out otherwise
+      (`stack-limit-counts-slots-differently`), and the port's ceiling falls
+      a few slots higher: 999,950 values fit, where the golden's
+      `H.stackcaps.999950` is the error. The relative ceiling is the C's
+      (`lpeg-capture-ceiling`). Tolerated by the corpus gate's `cdepth`
+      class, which only rows tagged `cdepth` may use, and only with the
+      golden's status and log: at step c, that one row.
+- [ ] `lpeg-lua-calling-captures-refused` — until step d, a pattern with a
+      capture that calls Lua (`Cmt`, `P(function)`, `/function`, `Cf`,
+      `/table`) builds and compiles, and its match raises "lpeg: match-time
+      and function captures are not implemented until M6.6 step d" before
+      it runs. No script can reach it: the module is not registered. Step d
+      removes this entry.

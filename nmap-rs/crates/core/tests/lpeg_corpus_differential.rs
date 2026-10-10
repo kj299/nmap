@@ -17,9 +17,10 @@
 //!   `lpeg-grammar-error-rule-name-is-hash-ordered`); the same mask is applied
 //!   to the port's output before comparing.
 //! - **No per-row exemption list.** A row that differs passes only if it
-//!   agrees under a *named* normalisation class, each ledgered: [`CLASSES`].
-//!   Every class's count is printed, and a class may be used only by rows of
-//!   the kind it names.
+//!   agrees under a *named* normalisation class, each ledgered: [`CLASSES`],
+//!   and [`CDEPTH`] for the rows the cases file tags `cdepth`. Every class's
+//!   count is printed, and a class may be used only by rows of the kind it
+//!   names.
 #![cfg(not(miri))] // reads the corpus from disk; minutes of VM time under Miri
 
 mod lpeg_eval;
@@ -31,17 +32,18 @@ use std::rc::Rc;
 use nmap_core::nse::package::{load_package, LibrarySource};
 use nmap_core::nse::stdlib::iolib::{load_io, FsError, OpenMode, ScriptFile, ScriptFs, Whence};
 use nmap_core::nse::stdlib::utf8lib::load_utf8;
-use piccolo::{Closure, Executor, Function, Table, Value, Variadic};
+use piccolo::{Closure, Executor, Function, Lua, Table, Value, Variadic};
 use regex::Regex;
 
 /// The plan's step this gate runs up to (`b`, then `c`, then `d`): every row
 /// `m66_lpeg_steps.txt` maps to it or to an earlier step.
-const STEP: char = 'b';
+const STEP: char = 'c';
 
 /// The fewest rows the step must run: the corpus and its step map are
 /// generated, and a weakened generator regenerated in place would otherwise
-/// pass on what is left. 12,641 rows were mapped to step b by step 0b.
-const MIN_ROWS: [(char, usize); 1] = [('b', 12_641)];
+/// pass on what is left. Step 0b mapped 12,641 rows to step b and 24,726 to
+/// step c.
+const MIN_ROWS: [(char, usize); 2] = [('b', 12_641), ('c', 24_726)];
 
 fn m6(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -219,6 +221,18 @@ const CLASSES: [(&str, &str); 3] = [
     ("vmbase", "vm-base-library-argument-errors"),
 ];
 
+/// `cdepth` (`classify_m66_lpeg.py`): a row the cases file tags `cdepth` has
+/// for its answer the depth of the embedding it runs in — how many Lua
+/// stack slots the frames below the call use, which piccolo lays out
+/// otherwise than the C — and nothing about LPeg. At step c these are the
+/// absolute capture ceilings, `H.stackcaps.999000` to `.1000100`: the port
+/// puts the ceiling where the C puts it relative to `table.unpack`'s in the
+/// same frame (`H.stackcaps.rel`, an untagged row held to the golden's -5),
+/// and the absolute ceiling, about 999,934 under the standalone oracle and
+/// 999,945 under 7.94, falls elsewhere. Such a row agrees under this class
+/// when its status and log are the golden's, whatever its values.
+const CDEPTH: (&str, &str) = ("cdepth", "lpeg-capture-ceiling-is-the-embeddings");
+
 /// The rows this step runs, in corpus order: (id, tags, chunk).
 fn step_rows() -> Vec<(String, String, Vec<u8>)> {
     let steps: HashMap<String, char> = lines("m66_lpeg_steps.txt")
@@ -246,26 +260,10 @@ fn step_rows() -> Vec<(String, String, Vec<u8>)> {
         .collect()
 }
 
-#[test]
-fn every_step_row_matches_the_trees_own_lpeg() {
-    let rows = step_rows();
-    for (step, min) in MIN_ROWS {
-        if step <= STEP {
-            let n = lines("m66_lpeg_steps.txt")
-                .iter()
-                .filter(|r| r[1].starts_with(step))
-                .count();
-            assert!(n >= min, "step {step} has {n} rows, fewer than {min}");
-        }
-    }
-    let golden: HashMap<String, (String, String, String)> = lines("m66_lpeg_golden.txt")
-        .into_iter()
-        .map(|r| {
-            assert_eq!(r.len(), 4, "{}: malformed golden row", r[0]);
-            (r[0].clone(), (r[1].clone(), r[2].clone(), r[3].clone()))
-        })
-        .collect();
-
+/// A state with the test-only `lpeg`, `io`, `utf8`, `package` and
+/// `require` finding the tree's `re` and `lpeg-utility`, and the case
+/// runner's `run_row` as a global.
+fn corpus_lua() -> Lua {
     let mut lua = lpeg_eval::new_lua();
     let core = std::fs::read(m6("oracle/m66_lpeg_core.lua")).expect("the core");
     let ex = lua
@@ -304,43 +302,87 @@ fn every_step_row_matches_the_trees_own_lpeg() {
         ctx.set_global("run_row", t.get_value(ctx, "run_row"));
     });
 
+    lua
+}
+
+/// Run one case through `run_row`: its status, values and log, the last two
+/// masked for hash order as the golden is.
+fn run_case(
+    lua: &mut Lua,
+    masks: &Masks,
+    id: &str,
+    tags: &str,
+    chunk: &[u8],
+) -> (String, String, String) {
+    let ex = lua.enter(|ctx| {
+        let f: Function = ctx.get_global("run_row").expect("run_row");
+        let row = Table::new(&ctx);
+        row.set_field(ctx, "id", ctx.intern(id.as_bytes()));
+        row.set_field(ctx, "tags", ctx.intern(tags.as_bytes()));
+        row.set_field(ctx, "chunk", ctx.intern(chunk));
+        ctx.stash(Executor::start(ctx, f, row))
+    });
+    let (done, _) = lpeg_eval::step_only(lua, &ex, 1_000_000, 100_000);
+    let got = if done {
+        lua.enter(
+            |ctx| match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
+                Ok(Ok(vs)) => {
+                    let s = |i: usize| match vs.0.get(i) {
+                        Some(Value::String(s)) => {
+                            String::from_utf8_lossy(s.as_bytes()).into_owned()
+                        }
+                        Some(v) => v.display().to_string(),
+                        None => String::new(),
+                    };
+                    (s(0), masks.hashorder(&s(1)), masks.hashorder(&s(2)))
+                }
+                Ok(Err(e)) => ("RAISED".into(), e.to_string(), String::new()),
+                Err(e) => ("NO-RESULT".into(), e.to_string(), String::new()),
+            },
+        )
+    } else {
+        ("UNFINISHED".into(), String::new(), String::new())
+    };
+    got
+}
+
+#[test]
+fn every_step_row_matches_the_trees_own_lpeg() {
+    let rows = step_rows();
+    for (step, min) in MIN_ROWS {
+        if step <= STEP {
+            let n = lines("m66_lpeg_steps.txt")
+                .iter()
+                .filter(|r| r[1].starts_with(step))
+                .count();
+            assert!(n >= min, "step {step} has {n} rows, fewer than {min}");
+        }
+    }
+    let golden: HashMap<String, (String, String, String)> = lines("m66_lpeg_golden.txt")
+        .into_iter()
+        .map(|r| {
+            assert_eq!(r.len(), 4, "{}: malformed golden row", r[0]);
+            (r[0].clone(), (r[1].clone(), r[2].clone(), r[3].clone()))
+        })
+        .collect();
+
+    let mut lua = corpus_lua();
     let masks = Masks::new();
     let mut by_class: HashMap<String, Vec<String>> = HashMap::new();
     let mut mismatches = Vec::new();
     for (id, tags, chunk) in &rows {
-        let ex = lua.enter(|ctx| {
-            let f: Function = ctx.get_global("run_row").expect("run_row");
-            let row = Table::new(&ctx);
-            row.set_field(ctx, "id", ctx.intern(id.as_bytes()));
-            row.set_field(ctx, "tags", ctx.intern(tags.as_bytes()));
-            row.set_field(ctx, "chunk", ctx.intern(chunk));
-            ctx.stash(Executor::start(ctx, f, row))
-        });
-        let (done, _) = lpeg_eval::step_only(&mut lua, &ex, 1_000_000, 100_000);
-        let got = if done {
-            lua.enter(
-                |ctx| match ctx.fetch(&ex).take_result::<Variadic<Vec<Value>>>(ctx) {
-                    Ok(Ok(vs)) => {
-                        let s = |i: usize| match vs.0.get(i) {
-                            Some(Value::String(s)) => {
-                                String::from_utf8_lossy(s.as_bytes()).into_owned()
-                            }
-                            Some(v) => v.display().to_string(),
-                            None => String::new(),
-                        };
-                        (s(0), masks.hashorder(&s(1)), masks.hashorder(&s(2)))
-                    }
-                    Ok(Err(e)) => ("RAISED".into(), e.to_string(), String::new()),
-                    Err(e) => ("NO-RESULT".into(), e.to_string(), String::new()),
-                },
-            )
-        } else {
-            ("UNFINISHED".into(), String::new(), String::new())
-        };
+        let got = run_case(&mut lua, &masks, id, tags, chunk);
         let want = golden
             .get(id)
             .unwrap_or_else(|| panic!("{id}: in the cases but not the golden"));
         if &got == want {
+            continue;
+        }
+        if tags.split(',').any(|t| t == CDEPTH.0) && got.0 == want.0 && got.2 == want.2 {
+            by_class
+                .entry(CDEPTH.0.to_string())
+                .or_default()
+                .push(id.clone());
             continue;
         }
         // The smallest set of named classes under which the row agrees.
@@ -371,6 +413,7 @@ fn every_step_row_matches_the_trees_own_lpeg() {
         rows.len(),
         CLASSES
             .iter()
+            .chain([&CDEPTH])
             .map(|(c, l)| format!("{c} = {l}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -386,5 +429,63 @@ fn every_step_row_matches_the_trees_own_lpeg() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// The fewest quarantined rows pinned at or below [`STEP`]: at step c, the
+/// peephole's 10, `Cc(nil)`'s 99 and `init`'s 3 that the fixed C answers,
+/// and 7 semantic pins.
+const MIN_PINS: usize = 119;
+
+/// The quarantined rows (`m66_lpeg_quarantine.txt`: they crash or are
+/// undefined in the C, so no golden holds them, LESSONS #033) that the step
+/// can run, against their pins (`m66c_quarantine_pins.txt`, written by
+/// `oracle/gen_m66c_quarantine_pins.py`): what the tree's `lpeg.c` answers
+/// with the two defects the port fixes fixed in it
+/// (`lpeg-codegen-jump-out-of-code`, `lpeg-cc-nil-without-ktable`), or
+/// where that build still fails, a correct LPeg's answer. Compared exactly,
+/// with no class.
+#[test]
+fn every_quarantined_step_row_matches_its_pin() {
+    let chunks: HashMap<String, Vec<u8>> = lines("m66_lpeg_quarantine.txt")
+        .into_iter()
+        .map(|r| (r[0].clone(), unescape(&r[2])))
+        .collect();
+    let masks = Masks::new();
+    let mut lua = corpus_lua();
+    let (mut ran, mut mismatches) = (0usize, Vec::new());
+    for pin in lines("m66c_quarantine_pins.txt") {
+        assert_eq!(pin.len(), 6, "{}: malformed pin", pin[0]);
+        let step = pin[1].chars().next().unwrap_or('?');
+        if step > STEP {
+            continue;
+        }
+        let chunk = chunks
+            .get(&pin[0])
+            .unwrap_or_else(|| panic!("{}: pinned but not quarantined", pin[0]));
+        let got = run_case(&mut lua, &masks, &pin[0], "", chunk);
+        let want = (
+            pin[3].clone(),
+            masks.hashorder(&pin[4]),
+            masks.hashorder(&pin[5]),
+        );
+        ran += 1;
+        if got != want {
+            mismatches.push(format!(
+                "  {} ({}):\n      pin  = {} {} | {}\n      port = {} {} | {}",
+                pin[0], pin[2], want.0, want.1, want.2, got.0, got.1, got.2
+            ));
+        }
+    }
+    eprintln!("step {STEP}: {ran} quarantined rows against their pins");
+    assert!(
+        ran >= MIN_PINS,
+        "{ran} pinned rows at step {STEP}, fewer than {MIN_PINS}"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {ran} quarantined rows differ from their pins:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
     );
 }

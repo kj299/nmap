@@ -1,21 +1,32 @@
 //! LPeg 0.12 (`lpeg.c`, built by `nse_lpeg.cc`): patterns as values.
 //!
-//! The port is in two parts (`docs/M6.6-ANALYSIS.md`, E1):
+//! The port is in four parts (`docs/M6.6-ANALYSIS.md`, E1):
 //! - [`tree`], pure: the pattern trees, laid out as the C lays them out, their
 //!   constructors, and the walkers construction runs — `finalfix`, the
 //!   grammar verifier, `checkaux`, `fixedlenx` — as resumable state machines
 //!   with explicit stacks. Fuzzed and run under Miri on its own.
+//! - [`code`], pure: the compiler, tree to program, instruction for
+//!   instruction the C's (`lpcode.c`), with its analyses memoised per node
+//!   (E10) and its code generation, call fixing and peephole as one resumable
+//!   job stack.
+//! - [`vm`], pure: the matching machine (`lpvm.c`), its backtrack stack an
+//!   explicit, budgeted `Vec` with the C's ceilings (D2), and
+//!   [`vm::capture`], capture evaluation (`lpcap.c`) as a resumable frame
+//!   machine over a mirror of the Lua stack.
 //! - this file, the binding: Lua values into trees and back. A pattern is a
-//!   userdata holding its tree and its constant table (`ktable`); the
-//!   constant table is a Lua table only this module can reach, never a
-//!   user value a script can replace (`lpeg-uservalue-type-confusion`).
+//!   userdata holding its tree, its constant table (`ktable`) and, once a
+//!   match has compiled it whole, its program; the constant table is a Lua
+//!   table only this module can reach, never a user value a script can
+//!   replace (`lpeg-uservalue-type-confusion`).
 //!
-//! **What step b ports.** Every constructor and operator, `type`,
-//! `version`, `setmaxstack`, `locale`, the `ptree`/`pcode` stubs and the
-//! pattern metatable. Not `match`: there is no compiler or matching
-//! machine yet (steps c and d), and the module is not registered — no script
-//! can `require` it (E9). [`register_for_tests`] installs it for the test
-//! suites only, with a `match` that says it is not there yet.
+//! **What steps b and c port.** Every constructor and operator, `type`,
+//! `version`, `setmaxstack`, `locale`, the `ptree`/`pcode` stubs, the
+//! pattern metatable, and `match` with every capture that calls no Lua
+//! (`C`, `Cc`, `Cp`, `Ct`, `Cg`, `Cb`, `Carg`, `Cs`, `/string`, `/number`).
+//! A pattern with a capture that calls Lua (`Cmt`, a function, `/function`,
+//! `Cf`, `/table`) compiles, and its match fails closed with an error naming
+//! step d. The module is not registered — no script can `require` it (E9);
+//! [`register_for_tests`] installs it for the test suites only.
 //!
 //! **Calls take time.** Building a grammar copies its rules and their
 //! constant tables and runs the verifier, `B` measures its pattern and `+`
@@ -27,7 +38,12 @@
 //! slice (D3). What cannot stop part-way — reading a grammar table, which
 //! the C reads at one instant, and a constructor's copy of its operands — is
 //! charged to the fuel in full after it is done. Nothing is held across
-//! slices but indices, GC handles and the call's own buffers.
+//! slices but indices, GC handles and the call's own buffers. `match` goes
+//! the same way through its stages — the compile (once per pattern: the
+//! program is kept only when whole, E13), the machine (a unit per
+//! instruction, per byte a span scans, per entry a failure pops) and the
+//! captures (a unit per frame of evaluation, per table and per value it
+//! makes) — on a program it took a handle to when it started (E3).
 //!
 //! **Errors** are raised as `luaL_error` and `luaL_argerror` raise them: the
 //! C's words, after the position of the Lua code that made the call
@@ -47,9 +63,15 @@
 //! collector see both (E4). Near the budget, whether a call fails can depend
 //! on where the slices fell (`lpeg-memory-errors-depend-on-slicing`).
 
+pub mod code;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod tree;
+pub mod vm;
 
+use std::cell::RefCell;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use gc_arena::metrics::Metrics;
 use gc_arena::{Collect, Rootable};
@@ -59,10 +81,15 @@ use piccolo::{
     SequencePoll, Singleton, Stack, Table, UserData, Value,
 };
 
+use self::code::{CodeError, Compiler, Program};
 use self::tree::{
     CSize, CapKind, Charset, CheckAux, FinalFix, FindOpenCall, FixedLen, GrammarBuild, Key, Pred,
     Tag, Tree, TreeError, VerifyGrammar, MAXBEHIND, MAXRULES, SHRT_MAX,
 };
+use self::vm::capture::{
+    CapCursor, CapEnv, CapError, CapVal, TableKey, View, FIXEDARGS, LUAI_MAXSTACK,
+};
+use self::vm::{Capture, Vm, VmError, VmPoll};
 use super::nmaplib::{c_str, Fail};
 use super::stdlib::{check_integer, lua_error_bytes, type_error};
 
@@ -199,6 +226,44 @@ pub struct Pattern<'gc> {
     #[collect(require_static)]
     tree: Accounted,
     ktable: Option<Table<'gc>>,
+    /// The program, compiled at the first match and kept (`lp_match`,
+    /// `lpeg.c:3206`; E13). A match takes its own handle to it when it
+    /// starts and never reads this again (E3), so nothing — a recompile, a
+    /// collection, `__gc` — can change the code a running match runs.
+    #[collect(require_static)]
+    code: RefCell<Option<Rc<Compiled>>>,
+}
+
+/// A compiled program, accounted to the VM's heap while it lives.
+pub struct Compiled {
+    program: Program,
+    metrics: Metrics,
+    bytes: usize,
+}
+
+impl Compiled {
+    fn new(ctx: Context<'_>, program: Program) -> Compiled {
+        let bytes = program.heap_bytes();
+        let metrics = ctx.metrics().clone();
+        metrics.mark_external_allocation(bytes);
+        Compiled {
+            program,
+            metrics,
+            bytes,
+        }
+    }
+
+    /// The program.
+    #[must_use]
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+}
+
+impl Drop for Compiled {
+    fn drop(&mut self) {
+        self.metrics.mark_external_deallocation(self.bytes);
+    }
 }
 
 impl<'gc> Pattern<'gc> {
@@ -212,6 +277,12 @@ impl<'gc> Pattern<'gc> {
     #[must_use]
     pub fn ktable(&self) -> Option<Table<'gc>> {
         self.ktable
+    }
+
+    /// The compiled program, if a match has compiled it.
+    #[must_use]
+    pub fn compiled(&self) -> Option<Rc<Compiled>> {
+        self.code.borrow().clone()
     }
 }
 
@@ -275,6 +346,7 @@ fn new_pattern<'gc>(ctx: Context<'gc>, tree: Tree, ktable: Option<Table<'gc>>) -
             bytes,
         },
         ktable,
+        code: RefCell::new(None),
     };
     let u = UserData::new::<PatternRoot>(&ctx, p);
     u.set_metatable(&ctx, Some(registry(ctx).metatable));
@@ -1443,9 +1515,7 @@ impl<'gc> Job<'gc> {
                 registry(ctx).store.set_field(ctx, "maxstack", v);
                 return Ok(Some(Vec::new()));
             }
-            Func::Match => {
-                return Err(Fail::err("lpeg.match is not implemented until M6.6 step c").into());
-            }
+            Func::Match => return Err(Fail::err("lpeg: match runs as its own job").into()),
             Func::Locale => return Err(Fail::err("lpeg: locale runs as its own job").into()),
             _ => {}
         }
@@ -1723,17 +1793,7 @@ impl<'gc> Job<'gc> {
 
     /// The Lua error for `e`: see the module's "Errors".
     fn raise(&self, ctx: Context<'gc>, exec: &Execution<'gc, '_>, e: Failure<'gc>) -> Error<'gc> {
-        match e {
-            Failure::Memory => ctx.not_enough_memory(),
-            Failure::TooBig => lua_error_bytes(ctx, b"memory allocation error: block too big"),
-            Failure::Raised(e) => e,
-            Failure::Lua(f) => {
-                let lua_caller = exec.frame_info(1).is_some_and(|f| f.lua.is_some());
-                let mut msg = exec.where_at(1);
-                msg.extend_from_slice(&f.message(&self.func.name(lua_caller)));
-                lua_error_bytes(ctx, &msg)
-            }
-        }
+        raise(ctx, exec, self.func, e)
     }
 
     /// `newroot1sib`.
@@ -1775,6 +1835,26 @@ impl<'gc> Job<'gc> {
     }
 }
 
+/// The Lua error for `e`, raised by `func`: see the module's "Errors".
+fn raise<'gc>(
+    ctx: Context<'gc>,
+    exec: &Execution<'gc, '_>,
+    func: Func,
+    e: Failure<'gc>,
+) -> Error<'gc> {
+    match e {
+        Failure::Memory => ctx.not_enough_memory(),
+        Failure::TooBig => lua_error_bytes(ctx, b"memory allocation error: block too big"),
+        Failure::Raised(e) => e,
+        Failure::Lua(f) => {
+            let lua_caller = exec.frame_info(1).is_some_and(|f| f.lua.is_some());
+            let mut msg = exec.where_at(1);
+            msg.extend_from_slice(&f.message(&func.name(lua_caller)));
+            lua_error_bytes(ctx, &msg)
+        }
+    }
+}
+
 /// `getpatt` of a value that is not a table: the pattern it converts to.
 fn getpatt<'gc>(
     ctx: Context<'gc>,
@@ -1801,6 +1881,636 @@ fn getpatt<'gc>(
     Ok(new_pattern(ctx, tree, None))
 }
 
+// ---------------------------------------------------------------------------
+// Matching.
+
+/// Stack slots `lp_match` and `match` use below the captures' values, past
+/// the arguments: the cache slot, the capture list, the constant table and
+/// the backtrack stack (`lpeg.c:3210-3212`, `:3496`). With the slots a
+/// call of a callback sits on here, this puts the capture ceiling where the
+/// C's is relative to `table.unpack`'s in the same frame (`H.stackcaps.rel`,
+/// -5; `stack_overflow_is_where_the_cs_is_relative_to_unpack`).
+const MATCH_SLOTS: usize = 1;
+
+/// The slots of the thread's Lua stack in use: what `lua_checkstack` counts
+/// against `LUAI_MAXSTACK` (found from [`Stack::has_room`], which says
+/// whether `n` more fit).
+fn stack_in_use(stack: &Stack<'_, '_>) -> usize {
+    if !stack.has_room(0) {
+        return LUAI_MAXSTACK;
+    }
+    // `has_room(lo)` holds and `has_room(hi)` does not.
+    let (mut lo, mut hi) = (0usize, LUAI_MAXSTACK.saturating_add(1));
+    while hi.saturating_sub(lo) > 1 {
+        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+        if stack.has_room(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    LUAI_MAXSTACK.saturating_sub(lo)
+}
+
+/// The value `setmaxstack` stored, as `doublestack` reads it: `lua_tointeger`
+/// (an integer, a float with an integer value, a numeric string; anything
+/// else 0), then an `int` (`lpeg-setmaxstack-stores-its-argument`).
+fn max_stack(ctx: Context<'_>) -> vm::MaxStack {
+    narrow(max_stack_value(ctx).to_integer().unwrap_or(0))
+}
+
+/// `initposition` (`lpeg.c:3183`): `init` as a 0-based position, counting
+/// from the end when it is not positive (0 and -0.0 included), cropped to
+/// the subject.
+fn init_position(ii: i64, len: usize) -> usize {
+    let len64 = u64::try_from(len).unwrap_or(u64::MAX);
+    if ii > 0 {
+        let i = ii.unsigned_abs();
+        if i <= len64 {
+            usize::try_from(i.saturating_sub(1)).unwrap_or(len)
+        } else {
+            len
+        }
+    } else {
+        // `-ii`, which the C computes in a `lua_Integer` (undefined for
+        // `math.mininteger`: `lpeg-initposition-negation-overflow`).
+        let m = ii.unsigned_abs();
+        if m <= len64 {
+            len.saturating_sub(usize::try_from(m).unwrap_or(len))
+        } else {
+            0
+        }
+    }
+}
+
+/// A pattern's constants and a match's arguments, as capture evaluation
+/// sees them.
+struct LuaEnv<'a, 'gc> {
+    ctx: Context<'gc>,
+    ktable: Option<Table<'gc>>,
+    args: &'a [Value<'gc>],
+}
+
+impl<'gc> LuaEnv<'_, 'gc> {
+    fn view(&self, v: Value<'gc>) -> View<'static> {
+        match v {
+            Value::Nil => View::Nil,
+            Value::String(s) => View::Str(std::borrow::Cow::Owned(s.as_bytes().to_vec())),
+            Value::Integer(_) | Value::Number(_) => View::Num(std::borrow::Cow::Owned(
+                v.into_string(self.ctx)
+                    .map(|s| s.as_bytes().to_vec())
+                    .unwrap_or_default(),
+            )),
+            v => View::Other(v.type_name()),
+        }
+    }
+
+    fn constant_value(&self, k: Key) -> Value<'gc> {
+        match (k, self.ktable) {
+            (0, _) | (_, None) => Value::Nil,
+            (k, Some(t)) => t.get_raw(Value::Integer(i64::from(k))),
+        }
+    }
+}
+
+impl CapEnv for LuaEnv<'_, '_> {
+    fn constant(&self, k: Key) -> View<'_> {
+        self.view(self.constant_value(k))
+    }
+
+    fn argument(&self, n: u32) -> View<'_> {
+        let i = usize::try_from(n)
+            .ok()
+            .and_then(|n| n.checked_add(FIXEDARGS - 1));
+        self.view(
+            i.and_then(|i| self.args.get(i))
+                .copied()
+                .unwrap_or(Value::Nil),
+        )
+    }
+
+    fn same_constant(&self, a: Key, b: Key) -> bool {
+        raw_equal(self.constant_value(a), self.constant_value(b))
+    }
+}
+
+/// Where a match is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MStage {
+    /// `getpatt` of argument 1.
+    Convert,
+    /// The program: the pattern's, or compiled now.
+    Code,
+    /// The subject and `init`.
+    Subject,
+    /// The matching machine.
+    Run,
+    /// Capture evaluation.
+    Captures,
+    /// The tables the captures made, from this one.
+    Tables(usize),
+    /// Their contents: table `t`, from entry `e`.
+    Fill(usize, usize),
+    /// The values, from this one.
+    Values(usize),
+}
+
+/// One call of `lpeg.match` (`lp_match`, `lpeg.c:3201`), from its arguments
+/// to its results: resumable at every stage (D3), inline when it fits in the
+/// fuel the VM has left.
+#[derive(Collect)]
+#[collect(no_drop)]
+struct MatchJob<'gc> {
+    /// The arguments, converted in place as the C converts them.
+    args: Vec<Value<'gc>>,
+    /// `ptop`: how many there were, nils passed explicitly included.
+    #[collect(require_static)]
+    ptop: usize,
+    grammar: Option<GrammarJob<'gc>>,
+    #[collect(require_static)]
+    stage: MStage,
+    #[collect(require_static)]
+    compiler: Option<Box<Compiler>>,
+    /// The program this match runs, taken once (E3).
+    #[collect(require_static)]
+    program: Option<Rc<Compiled>>,
+    #[collect(require_static)]
+    vm: Option<Box<Vm>>,
+    /// `setmaxstack`'s value, read once the subject is known. The C reads it
+    /// at every growth of the backtrack stack, but no Lua runs inside a
+    /// match that calls none, so one read is the C's value throughout; a
+    /// read per slice would let another script's `setmaxstack` reach a match
+    /// it pre-empted.
+    #[collect(require_static)]
+    maxstack: vm::MaxStack,
+    #[collect(require_static)]
+    caps: Vec<Capture>,
+    #[collect(require_static)]
+    cursor: Option<Box<CapCursor>>,
+    /// The stack slots in use below the captures' values.
+    #[collect(require_static)]
+    u0: usize,
+    tables: Vec<Table<'gc>>,
+    out: Vec<Value<'gc>>,
+    /// A call to make on the first poll.
+    call: Option<(Function<'gc>, Vec<Value<'gc>>)>,
+    #[collect(require_static)]
+    awaiting: bool,
+    #[collect(require_static)]
+    held: Held,
+}
+
+impl<'gc> MatchJob<'gc> {
+    /// A match of these arguments, called with `in_use` slots of the Lua
+    /// stack in use (the arguments included).
+    fn new(ctx: Context<'gc>, args: Vec<Value<'gc>>, in_use: usize) -> Self {
+        MatchJob {
+            ptop: args.len(),
+            args,
+            grammar: None,
+            stage: MStage::Convert,
+            compiler: None,
+            program: None,
+            vm: None,
+            maxstack: 0,
+            caps: Vec::new(),
+            cursor: None,
+            u0: in_use.saturating_add(MATCH_SLOTS),
+            tables: Vec::new(),
+            out: Vec::new(),
+            call: None,
+            awaiting: false,
+            held: Held::new(ctx.metrics().clone()),
+        }
+    }
+
+    /// The bytes it holds outside the VM's heap.
+    fn heap_bytes(&self) -> usize {
+        let b = |cap: usize, size: usize| cap.saturating_mul(size);
+        [
+            b(self.args.capacity(), std::mem::size_of::<Value<'_>>()),
+            self.grammar.as_ref().map_or(0, GrammarJob::heap_bytes),
+            self.compiler.as_ref().map_or(0, |c| c.heap_bytes()),
+            self.vm.as_ref().map_or(0, |v| v.heap_bytes()),
+            b(self.caps.capacity(), std::mem::size_of::<Capture>()),
+            self.cursor.as_ref().map_or(0, |c| c.heap_bytes()),
+            b(self.tables.capacity(), std::mem::size_of::<Table<'_>>()),
+            b(self.out.capacity(), std::mem::size_of::<Value<'_>>()),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
+    fn arg(&self, i: usize) -> Option<Value<'gc>> {
+        i.checked_sub(1).and_then(|i| self.args.get(i)).copied()
+    }
+
+    fn pattern(&self, ctx: Context<'gc>) -> Result<&'gc Pattern<'gc>, Failure<'gc>> {
+        self.arg(1)
+            .and_then(|v| pattern(ctx, v))
+            .ok_or_else(|| not_a_pattern(ctx, self.arg(1), 1))
+    }
+
+    fn subject(&self) -> Result<piccolo::String<'gc>, Failure<'gc>> {
+        match self.arg(2) {
+            Some(Value::String(s)) => Ok(s),
+            _ => Err(Fail::err("lpeg: subject lost").into()),
+        }
+    }
+
+    /// The value a call made for this job returned.
+    fn resume(&mut self, ctx: Context<'gc>, v: Value<'gc>) -> Result<(), Failure<'gc>> {
+        if let Some(g) = &mut self.grammar {
+            return g.resume(ctx, v);
+        }
+        Ok(())
+    }
+
+    /// Run until done, out of budget, or waiting on a call.
+    fn advance(
+        &mut self,
+        ctx: Context<'gc>,
+        spend: &mut Spend,
+    ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
+        loop {
+            match self.stage {
+                // `getpatt(L, 1, NULL)`, which builds a grammar from a table.
+                MStage::Convert => {
+                    if let Some(g) = &mut self.grammar {
+                        match g.advance(ctx, spend)? {
+                            Flow::Done(p) => {
+                                self.grammar = None;
+                                self.args[0] = p;
+                                self.stage = MStage::Code;
+                            }
+                            Flow::Pending => return Ok(Flow::Pending),
+                            Flow::Call(f, args) => return Ok(Flow::Call(f, args)),
+                        }
+                        continue;
+                    }
+                    match self.arg(1) {
+                        Some(Value::Table(t)) => self.grammar = Some(GrammarJob::new(t, 1)),
+                        v => {
+                            let p = getpatt(ctx, v, 1)?;
+                            if !matches!(v, Some(Value::UserData(_))) {
+                                if let Some(made) = pattern(ctx, p) {
+                                    spend.charge(u64::from(fuel_for(
+                                        made.tree().len(),
+                                        COPY_PER_FUEL,
+                                    )));
+                                }
+                                self.args[0] = p;
+                            }
+                            self.stage = MStage::Code;
+                        }
+                    }
+                }
+                // The program, compiled lazily and kept on the pattern only
+                // once it is whole (E13); then this match's own handle to it.
+                MStage::Code => {
+                    let p = self.pattern(ctx)?;
+                    if self.program.is_none() {
+                        self.program = p.compiled();
+                    }
+                    if self.program.is_none() {
+                        let c = self
+                            .compiler
+                            .get_or_insert_with(|| Box::new(Compiler::new()));
+                        match c.step(p.tree(), &mut spend.budget) {
+                            std::task::Poll::Pending => return Ok(Flow::Pending),
+                            std::task::Poll::Ready(Err(e)) => {
+                                return Err(code_failure(ctx, p.ktable(), e))
+                            }
+                            std::task::Poll::Ready(Ok(program)) => {
+                                let compiled = Rc::new(Compiled::new(ctx, program));
+                                *p.code.borrow_mut() = Some(Rc::clone(&compiled));
+                                self.program = Some(compiled);
+                                self.compiler = None;
+                            }
+                        }
+                    }
+                    // Captures that call Lua are step d's: refuse rather than
+                    // guess.
+                    if self.program.as_ref().is_some_and(|c| c.program.calls_lua()) {
+                        return Err(Fail::err(
+                            "lpeg: match-time and function captures are not implemented until M6.6 step d",
+                        )
+                        .into());
+                    }
+                    self.stage = MStage::Subject;
+                }
+                // `luaL_checklstring(L, 2)`, which turns a number into a
+                // string in place, then `initposition`.
+                MStage::Subject => {
+                    let s = match self.arg(2) {
+                        Some(Value::String(s)) => s,
+                        Some(v @ (Value::Integer(_) | Value::Number(_))) => v
+                            .into_string(ctx)
+                            .ok_or_else(|| type_error(ctx, Some(v), 2, "string"))?,
+                        v => return Err(type_error(ctx, v, 2, "string").into()),
+                    };
+                    self.args[1] = Value::String(s);
+                    let ii = match self.arg(3) {
+                        None | Some(Value::Nil) => 1,
+                        v => check_integer(ctx, v, 3)?,
+                    };
+                    let init = init_position(ii, s.as_bytes().len());
+                    self.vm = Some(Box::new(Vm::new(init)));
+                    self.maxstack = max_stack(ctx);
+                    self.stage = MStage::Run;
+                }
+                MStage::Run => {
+                    let compiled = self
+                        .program
+                        .clone()
+                        .ok_or(Failure::Lua(Fail::err("lpeg: program lost")))?;
+                    let subj = self.subject()?;
+                    let vm = self
+                        .vm
+                        .as_mut()
+                        .ok_or(Failure::Lua(Fail::err("lpeg: match lost")))?;
+                    match vm
+                        .run(
+                            &compiled.program,
+                            subj.as_bytes(),
+                            self.maxstack,
+                            &mut spend.budget,
+                        )
+                        .map_err(vm_failure)?
+                    {
+                        VmPoll::Pending => return Ok(Flow::Pending),
+                        VmPoll::Done(None) => return Ok(Flow::Done(vec![Value::Nil])),
+                        VmPoll::Done(Some(end)) => {
+                            self.caps = vm.take_captures();
+                            self.vm = None;
+                            self.cursor = Some(Box::new(CapCursor::new(end, self.u0, self.ptop)));
+                            self.stage = MStage::Captures;
+                        }
+                    }
+                }
+                MStage::Captures => {
+                    let p = self.pattern(ctx)?;
+                    let subj = self.subject()?;
+                    let env = LuaEnv {
+                        ctx,
+                        ktable: p.ktable(),
+                        args: &self.args,
+                    };
+                    let cursor = self
+                        .cursor
+                        .as_mut()
+                        .ok_or(Failure::Lua(Fail::err("lpeg: captures lost")))?;
+                    match cursor.step(&self.caps, subj.as_bytes(), &env, &mut spend.budget) {
+                        Ok(None) => return Ok(Flow::Pending),
+                        Ok(Some(())) => {
+                            self.caps = Vec::new();
+                            self.stage = MStage::Tables(0);
+                        }
+                        Err(e) => return Err(cap_failure(ctx, &env, e)),
+                    }
+                }
+                // The tables, made in the order the captures made them, a
+                // unit each; then what each holds, in order.
+                MStage::Tables(i) => {
+                    let n = self.cursor.as_ref().map_or(0, |c| c.tables());
+                    let mut i = i;
+                    while i < n {
+                        if spend.budget == 0 {
+                            self.stage = MStage::Tables(i);
+                            return Ok(Flow::Pending);
+                        }
+                        spend.budget = spend.budget.saturating_sub(1);
+                        if !super::stdlib::reserve(&mut self.tables, 1) {
+                            return Err(Failure::Memory);
+                        }
+                        self.tables.push(Table::new(&ctx));
+                        i = i.saturating_add(1);
+                    }
+                    self.stage = MStage::Fill(0, 0);
+                }
+                MStage::Fill(t, e) => {
+                    let (mut t, mut e) = (t, e);
+                    let p = self.pattern(ctx)?;
+                    let subj = self.subject()?;
+                    let Some(cursor) = self.cursor.as_ref() else {
+                        return Err(Fail::err("lpeg: captures lost").into());
+                    };
+                    while t < self.tables.len() {
+                        let entries = cursor.table(u32::try_from(t).unwrap_or(u32::MAX));
+                        let Some(&(k, v)) = entries.get(e) else {
+                            t = t.saturating_add(1);
+                            e = 0;
+                            continue;
+                        };
+                        if spend.budget == 0 {
+                            self.stage = MStage::Fill(t, e);
+                            return Ok(Flow::Pending);
+                        }
+                        spend.budget = spend.budget.saturating_sub(1);
+                        let key = match k {
+                            TableKey::Int(i) => Value::Integer(i),
+                            TableKey::K(k) => constant(p, k),
+                        };
+                        let value = self.value(ctx, p, subj, cursor, v);
+                        // `lua_rawseti` and `lua_settable` on a fresh table:
+                        // raw, and `nil` removes.
+                        self.tables[t]
+                            .set_raw(&ctx, key, value)
+                            .map_err(|e| key_failure(ctx, e))?;
+                        e = e.saturating_add(1);
+                    }
+                    self.stage = MStage::Values(0);
+                }
+                MStage::Values(i) => {
+                    let p = self.pattern(ctx)?;
+                    let subj = self.subject()?;
+                    let Some(cursor) = self.cursor.as_ref() else {
+                        return Err(Fail::err("lpeg: captures lost").into());
+                    };
+                    let vals = cursor.values();
+                    let mut i = i;
+                    while let Some(&v) = vals.get(i) {
+                        if spend.budget == 0 {
+                            self.stage = MStage::Values(i);
+                            return Ok(Flow::Pending);
+                        }
+                        spend.budget = spend.budget.saturating_sub(1);
+                        let value = self.value(ctx, p, subj, cursor, v);
+                        if self.out.len() == self.out.capacity()
+                            && !super::stdlib::reserve(&mut self.out, 1)
+                        {
+                            return Err(Failure::Memory);
+                        }
+                        self.out.push(value);
+                        i = i.saturating_add(1);
+                    }
+                    self.cursor = None;
+                    return Ok(Flow::Done(std::mem::take(&mut self.out)));
+                }
+            }
+        }
+    }
+
+    /// A capture value as a Lua value.
+    fn value(
+        &self,
+        ctx: Context<'gc>,
+        p: &'gc Pattern<'gc>,
+        subj: piccolo::String<'gc>,
+        cursor: &CapCursor,
+        v: CapVal,
+    ) -> Value<'gc> {
+        match v {
+            CapVal::Nil | CapVal::Buf => Value::Nil,
+            CapVal::Int(i) => Value::Integer(i),
+            CapVal::Str(a, b) => {
+                Value::String(ctx.intern(subj.as_bytes().get(a..b).unwrap_or(&[])))
+            }
+            CapVal::Bytes(i) => Value::String(ctx.intern(cursor.string(i))),
+            CapVal::K(k) => constant(p, k),
+            CapVal::Arg(n) => usize::try_from(n)
+                .ok()
+                .and_then(|n| n.checked_add(FIXEDARGS - 1))
+                .and_then(|i| self.args.get(i))
+                .copied()
+                .unwrap_or(Value::Nil),
+            CapVal::Table(t) => self
+                .tables
+                .get(usize::try_from(t).unwrap_or(usize::MAX))
+                .map_or(Value::Nil, |t| Value::Table(*t)),
+        }
+    }
+
+    /// [`MatchJob::advance`] with the fuel the VM has left, at least
+    /// [`MIN_STEPS`] steps; as [`Job::run`].
+    fn run(
+        &mut self,
+        ctx: Context<'gc>,
+        exec: &mut Execution<'gc, '_>,
+    ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
+        let fuel = exec.fuel();
+        let start = u32::try_from(fuel.remaining()).unwrap_or(0).max(MIN_STEPS);
+        let mut spend = Spend {
+            budget: start,
+            over: 0,
+            work: 0,
+        };
+        let r = self.advance(ctx, &mut spend);
+        let used = u64::from(start.saturating_sub(spend.budget)).saturating_add(spend.over);
+        fuel.consume(i32::try_from(used).unwrap_or(i32::MAX));
+        let held = self.heap_bytes();
+        self.held.set(held);
+        r
+    }
+}
+
+impl<'gc> Sequence<'gc> for MatchJob<'gc> {
+    fn poll(
+        self: Pin<&mut Self>,
+        ctx: Context<'gc>,
+        mut exec: Execution<'gc, '_>,
+        mut stack: Stack<'gc, '_>,
+    ) -> Result<SequencePoll<'gc>, Error<'gc>> {
+        let this = self.get_mut();
+        if let Some((f, args)) = this.call.take() {
+            stack.clear();
+            stack.extend(args);
+            this.awaiting = true;
+            return Ok(SequencePoll::Call {
+                bottom: 0,
+                function: f,
+            });
+        }
+        if std::mem::take(&mut this.awaiting) {
+            let v = stack.get(0);
+            stack.clear();
+            if let Err(e) = this.resume(ctx, v) {
+                return Err(raise(ctx, &exec, Func::Match, e));
+            }
+        }
+        match this.run(ctx, &mut exec) {
+            Ok(Flow::Done(vs)) => {
+                stack.clear();
+                stack.extend(vs);
+                Ok(SequencePoll::Return)
+            }
+            Ok(Flow::Pending) => Ok(SequencePoll::Pending),
+            Ok(Flow::Call(f, args)) => {
+                stack.clear();
+                stack.extend(args);
+                this.awaiting = true;
+                Ok(SequencePoll::Call {
+                    bottom: 0,
+                    function: f,
+                })
+            }
+            Err(e) => Err(raise(ctx, &exec, Func::Match, e)),
+        }
+    }
+}
+
+/// The pattern's constant at key `k` (0 is `nil`).
+fn constant<'gc>(p: &Pattern<'gc>, k: Key) -> Value<'gc> {
+    match (k, p.ktable()) {
+        (0, _) | (_, None) => Value::Nil,
+        (k, Some(t)) => t.get_raw(Value::Integer(i64::from(k))),
+    }
+}
+
+/// A [`CodeError`] in the C's words.
+fn code_failure<'gc>(ctx: Context<'gc>, ktable: Option<Table<'gc>>, e: CodeError) -> Failure<'gc> {
+    match e {
+        CodeError::Tree(e) => tree_failure(ctx, ktable, e),
+        CodeError::LeftRecursive(k) => tree_failure(ctx, ktable, TreeError::LeftRecursive(k)),
+        // `reallocprog`'s `luaL_error` (`lpeg.c:1356`).
+        CodeError::NotEnoughMemory => Failure::Lua(Fail::err("not enough memory")),
+    }
+}
+
+/// A [`VmError`] in the C's words.
+fn vm_failure<'gc>(e: VmError) -> Failure<'gc> {
+    match e {
+        VmError::TooManyPending => Failure::Lua(Fail::err("too many pending calls/choices")),
+        VmError::TooManyCaptures => Failure::Lua(Fail::err("too many captures")),
+        VmError::NotEnoughMemory => Failure::Memory,
+        VmError::RunTime => Failure::Lua(Fail::err(
+            "lpeg: match-time captures are not implemented until M6.6 step d",
+        )),
+        VmError::Malformed => Failure::Lua(Fail::err("lpeg: malformed program")),
+    }
+}
+
+/// A [`CapError`] in the C's words.
+fn cap_failure<'gc>(ctx: Context<'gc>, env: &LuaEnv<'_, 'gc>, e: CapError) -> Failure<'gc> {
+    let f = |m: String| Failure::Lua(Fail::err(m));
+    match e {
+        CapError::StackOverflow => f("stack overflow (too many captures)".into()),
+        CapError::BackrefNotFound(k) => {
+            // `lua_tostring` of the name, printed with `%s`.
+            let mut m = b"back reference '".to_vec();
+            match env.constant_value(k).into_string(ctx) {
+                Some(s) => m.extend_from_slice(c_str(s.as_bytes())),
+                None => m.extend_from_slice(b"(null)"),
+            }
+            m.extend_from_slice(b"' not found");
+            Failure::Lua(Fail::err(m))
+        }
+        CapError::AbsentArgument(n) => f(format!("reference to absent argument #{n}")),
+        CapError::NoCapture(n) => f(format!("no capture '{n}'")),
+        CapError::InvalidCaptureIndex(l) => f(format!("invalid capture index ({l})")),
+        CapError::NoValues(l) => f(format!("no values in capture index {l}")),
+        CapError::InvalidValue { what, type_name } => {
+            f(format!("invalid {what} value (a {type_name})"))
+        }
+        CapError::BufferTooLarge => f("buffer too large".into()),
+        CapError::NotEnoughMemory => Failure::Memory,
+        CapError::CallsLua => {
+            f("lpeg: function captures are not implemented until M6.6 step d".into())
+        }
+        CapError::Malformed => f("lpeg: malformed capture list".into()),
+    }
+}
+
 /// The C locale's classes (`lp_locale`), in the C's order. nmap never sets
 /// `LC_CTYPE`, so no byte of 128 or more is in any of them.
 type Class = fn(u8) -> bool;
@@ -1822,6 +2532,22 @@ const CLASSES: [(&str, Class); 11] = [
 /// A library function or metamethod as a Lua function.
 fn callback<'gc>(ctx: Context<'gc>, func: Func) -> Callback<'gc> {
     Callback::from_fn_with(&ctx, func, |&func, ctx, mut exec, mut stack| {
+        if func == Func::Match {
+            let in_use = stack_in_use(&stack);
+            let mut job = MatchJob::new(ctx, stack.drain(..).collect(), in_use);
+            return match job.run(ctx, &mut exec) {
+                Ok(Flow::Done(vs)) => {
+                    stack.extend(vs);
+                    Ok(CallbackReturn::Return)
+                }
+                Ok(Flow::Pending) => Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, job))),
+                Ok(Flow::Call(f, args)) => {
+                    job.call = Some((f, args));
+                    Ok(CallbackReturn::Sequence(BoxSequence::new(&ctx, job)))
+                }
+                Err(e) => Err(raise(ctx, &exec, func, e)),
+            };
+        }
         let mut job = Job::new(ctx, func, stack.drain(..).collect());
         match job.run(ctx, &mut exec) {
             Ok(Flow::Done(vs)) => {
@@ -1902,9 +2628,9 @@ fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 /// (the state's `package.loaded`), and return it.
 ///
 /// No script can reach the module yet (E9): the NSE runtime never calls this
-/// (`runtime::tests::lpeg_is_not_registered`), and `match` here only raises
-/// "not implemented until M6.6 step c". Step e registers the module for
-/// real, when every capture kind works.
+/// (`runtime::tests::lpeg_is_not_registered`), and `match` here refuses the
+/// captures that call Lua ("not implemented until M6.6 step d"). Step e
+/// registers the module for real, when every capture kind works.
 pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) -> Table<'gc> {
     let lib = open(ctx);
     if let Some(loaded) = loaded {
@@ -1914,8 +2640,8 @@ pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) ->
 }
 
 /// The value `setmaxstack` stored (`lpeg-maxstack`), as given: `100.0` until
-/// a script calls it. Step c reads it at every growth of the backtrack
-/// stack, as the C does.
+/// a script calls it. A match reads it once, when it starts (the C reads it
+/// at every growth of the backtrack stack, with no Lua run in between).
 #[must_use]
 pub fn max_stack_value<'gc>(ctx: Context<'gc>) -> Value<'gc> {
     registry(ctx).store.get_value(ctx, "maxstack")

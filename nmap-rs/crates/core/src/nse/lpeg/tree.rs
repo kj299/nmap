@@ -752,6 +752,12 @@ impl Tree {
         &mut self.nodes
     }
 
+    /// A tree of these nodes, laid out as [`Tree`] says: the compiler's copy
+    /// of a pattern's tree, which it fixes and compiles (step c).
+    pub(crate) fn from_nodes(nodes: Vec<Node>) -> Tree {
+        Tree { nodes }
+    }
+
     /// The bytes the tree holds outside the VM's heap.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {

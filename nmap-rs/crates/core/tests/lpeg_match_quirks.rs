@@ -1173,6 +1173,81 @@ const CASES: &[(&str, &str, bool, usize, &str)] = &[
         1,
         r##""c:1: buffer too large""##,
     ),
+    // A capture `#V"B"` keeps can start past where the capture around it
+    // closes, and be the last entry when it does: the C tests `siz == 0`
+    // before it takes the length (`lpeg.c:3657`), so the close is a close
+    // entry like any other. Measured on the tree's oracle; the last three
+    // are the `nse_lpeg_match` fuzz artefact `crash-ba181fea...`.
+    (
+        "QF1a",
+        r##"return match(P{"A", A = C(Cc(1) * #V"B"), B = "x" * Cp()}, "x")"##,
+        true,
+        3,
+        r##""", 1, 2"##,
+    ),
+    (
+        "QF1b",
+        r##"return match(P{"A", A = Ct(Cc(1) * #V"B"), B = "x" * Cp()}, "x")"##,
+        true,
+        1,
+        r##"{[1]=1,[2]=2}"##,
+    ),
+    (
+        "QF1c",
+        r##"return match(P{"A", A = Cs(Cc(1) * #V"B"), B = "x" * Cp()}, "x")"##,
+        false,
+        1,
+        r##""c:1: buffer too large""##,
+    ),
+    (
+        "QF1d",
+        r##"return match(P{"A", A = Cg(Cc(1) * #V"B"), B = "x" * Cp()}, "x")"##,
+        true,
+        2,
+        r##"1, 2"##,
+    ),
+    (
+        "QF1e",
+        r##"return match(P{"A", A = (Cc(1) * #V"B") / "%1%2", B = "xy" * C(1)}, "xyz")"##,
+        true,
+        1,
+        r##""1z""##,
+    ),
+    (
+        "QF1f",
+        r##"return match(P{"A", A = C(Cc(1) * #V"B"), B = "x" * C(1)}, "xy")"##,
+        true,
+        3,
+        r##""", 1, "y""##,
+    ),
+    (
+        "QF1g",
+        r##"return match(P{"A", A = C(#V"B" * Cc(2)), B = "x" * Cp()}, "x")"##,
+        true,
+        3,
+        r##""", 2, 2"##,
+    ),
+    (
+        "QF1h",
+        r##"return match(C(P{(P(1) / 1 * #V(1)) + Ct("c" + P(1))}), "abc")"##,
+        true,
+        4,
+        r##""a", "a", "b", {}"##,
+    ),
+    (
+        "QF1i",
+        r##"return match(C(P{(P(1) / 1 * #V(1)) + Ct("c" + P(1))}), "ab")"##,
+        true,
+        3,
+        r##""a", "a", {}"##,
+    ),
+    (
+        "QF1j",
+        r##"return match(C(P{(P(1) / 1 * #V(1)) + Ct("c" + P(1))}), "a")"##,
+        true,
+        2,
+        r##""a", {}"##,
+    ),
 ];
 
 /// `run.lua`'s runner, as a function of a case.

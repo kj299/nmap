@@ -40,8 +40,8 @@ impl CapEnv for Env {
         }
     }
 
-    fn same_constant(&self, a: Key, b: Key) -> bool {
-        a != 0 && a == b
+    fn same_constant(&self, a: Key, b: Key) -> (bool, usize) {
+        (a != 0 && a == b, 0)
     }
 }
 
@@ -483,4 +483,50 @@ fn deep_patterns_compile_match_and_capture_without_recursion() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// Group names whose comparison costs bytes (equal hashes, two strings):
+/// `Cb`'s scan charges a unit per `BYTES_PER_FUEL` bytes compared, what the
+/// budget cannot pay past it (`CapCursor::take_over`), all at once.
+#[test]
+fn a_name_compared_byte_by_byte_is_charged() {
+    struct Costly;
+    impl CapEnv for Costly {
+        fn constant(&self, k: Key) -> View<'_> {
+            Env.constant(k)
+        }
+        fn argument(&self, n: u32) -> View<'_> {
+            Env.argument(n)
+        }
+        fn same_constant(&self, a: Key, b: Key) -> (bool, usize) {
+            (a != 0 && a == b, 1 << 20)
+        }
+    }
+    // `Cg(C(1), 'a') * Cb'a'`: the reference scans back to the group.
+    let g = Tree::capture(
+        CapKind::Group,
+        1,
+        &Tree::capture(CapKind::Simple, 0, &Tree::number(1).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let t = seq(&g, &Tree::empty_capture(CapKind::Backref, 1).unwrap());
+    let p = compile(&fix(&t).unwrap());
+    let (r, caps, _) = run(&p, b"x", 100, u32::MAX);
+    let end = r.unwrap().unwrap();
+    let mut c = CapCursor::new(end, 0, 2);
+    let (mut spent, mut over) = (0u64, 0u64);
+    loop {
+        let mut b = 1_000u32;
+        let done = c.step(&caps, b"x", &Costly, &mut b).unwrap();
+        spent += u64::from(1_000 - b);
+        over += c.take_over();
+        if done.is_some() {
+            break;
+        }
+    }
+    let per = crate::nse::lpeg::BYTES_PER_FUEL as u64;
+    assert!(
+        spent + over >= (1 << 20) / per,
+        "{spent} units and {over} past the budget for a 1 MiB comparison"
+    );
 }

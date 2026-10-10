@@ -21,7 +21,9 @@
 //! machine stops where it is, mid-span or mid-failure included, and returns
 //! [`VmPoll::Pending`]; run again with the same program and subject, it goes
 //! on. It holds indices only: the binding borrows the program and subject
-//! afresh at every slice, from the handles its match holds (E3).
+//! afresh at every slice, from the handles its match holds (E3). A growth of
+//! the stack or the capture list that takes the heap past the memory budget
+//! ends the slice too (`lpeg::grow`).
 //!
 //! Lua is called by match-time captures only (`CloseRunTime`), which are
 //! step d's; until then the machine stops with [`VmError::RunTime`].
@@ -37,7 +39,7 @@ pub mod capture;
 
 use super::code::{Op, Program, Slot};
 use super::tree::{CapKind, Key};
-use crate::nse::stdlib::reserve;
+use super::{did_steps, grow, Grown};
 
 /// `INITBACK` (`lpeg.c:3360`): the backtrack stack's first size, and the
 /// floor of its ceiling — the stored maximum is read only when it is full.
@@ -226,6 +228,19 @@ impl Vm {
         maxstack: MaxStack,
         budget: &mut u32,
     ) -> Result<VmPoll, VmError> {
+        let steps = self.steps;
+        let r = self.run_inner(prog, subj, maxstack, budget);
+        did_steps(self.steps - steps);
+        r
+    }
+
+    fn run_inner(
+        &mut self,
+        prog: &Program,
+        subj: &[u8],
+        maxstack: MaxStack,
+        budget: &mut u32,
+    ) -> Result<VmPoll, VmError> {
         if let Some(d) = self.done {
             return Ok(VmPoll::Done(d));
         }
@@ -252,12 +267,15 @@ impl Vm {
             };
             match op {
                 Op::End => {
-                    self.push_cap(Capture {
-                        s: self.s,
-                        idx: 0,
-                        kind: CapKind::Close as u8,
-                        siz: 0,
-                    })?;
+                    self.push_cap(
+                        Capture {
+                            s: self.s,
+                            idx: 0,
+                            kind: CapKind::Close as u8,
+                            siz: 0,
+                        },
+                        budget,
+                    )?;
                     self.done = Some(Some(self.s));
                     return Ok(VmPoll::Done(Some(self.s)));
                 }
@@ -344,6 +362,7 @@ impl Vm {
                             caplevel: self.caps.len(),
                         },
                         maxstack,
+                        budget,
                     )?;
                     self.pc = p + 2;
                 }
@@ -355,6 +374,7 @@ impl Vm {
                             caplevel: 0,
                         },
                         maxstack,
+                        budget,
                     )?;
                     self.pc = target(slots, p)?;
                 }
@@ -392,40 +412,60 @@ impl Vm {
                 Op::CloseCapture => {
                     let s = self.s;
                     let prev = self.caps.last_mut().ok_or(VmError::Malformed)?;
-                    let len = s.checked_sub(prev.s).ok_or(VmError::Malformed)?;
-                    // A close right after its open: one full capture.
-                    if prev.siz == 0 && len < UCHAR_MAX {
+                    // A close right after its open: one full capture. The
+                    // C tests `siz == 0` first and takes the length only
+                    // then (`lpeg.c:3657`): a full capture an and-predicate
+                    // kept from a called rule can start past `s` (`#V"B"`,
+                    // `lpeg-hascaptures-does-not-follow-calls`), and a close
+                    // follows it like any other. An open entry is never past
+                    // `s`: nothing moves back past where it opened.
+                    let fold = if prev.siz == 0 {
+                        let len = s.checked_sub(prev.s).ok_or(VmError::Malformed)?;
+                        (len < UCHAR_MAX).then_some(len)
+                    } else {
+                        None
+                    };
+                    if let Some(len) = fold {
                         prev.siz = u8::try_from(len + 1).map_err(|_| VmError::Malformed)?;
                     } else {
-                        self.push_cap(Capture {
-                            s,
-                            idx: key,
-                            kind: aux & 0xf,
-                            siz: 1,
-                        })?;
+                        self.push_cap(
+                            Capture {
+                                s,
+                                idx: key,
+                                kind: aux & 0xf,
+                                siz: 1,
+                            },
+                            budget,
+                        )?;
                     }
                     self.pc = p + 1;
                 }
                 Op::OpenCapture => {
-                    self.push_cap(Capture {
-                        s: self.s,
-                        idx: key,
-                        kind: aux & 0xf,
-                        siz: 0,
-                    })?;
+                    self.push_cap(
+                        Capture {
+                            s: self.s,
+                            idx: key,
+                            kind: aux & 0xf,
+                            siz: 0,
+                        },
+                        budget,
+                    )?;
                     self.pc = p + 1;
                 }
                 Op::FullCapture => {
                     let off = aux >> 4;
-                    self.push_cap(Capture {
-                        s: self
-                            .s
-                            .checked_sub(usize::from(off))
-                            .ok_or(VmError::Malformed)?,
-                        idx: key,
-                        kind: aux & 0xf,
-                        siz: off + 1,
-                    })?;
+                    self.push_cap(
+                        Capture {
+                            s: self
+                                .s
+                                .checked_sub(usize::from(off))
+                                .ok_or(VmError::Malformed)?,
+                            idx: key,
+                            kind: aux & 0xf,
+                            siz: off + 1,
+                        },
+                        budget,
+                    )?;
                     self.pc = p + 1;
                 }
                 Op::CloseRunTime => return Err(VmError::RunTime),
@@ -455,8 +495,13 @@ impl Vm {
     }
 
     /// Push a backtrack entry; at the logical size, grow first
-    /// (`doublestack`).
-    fn push_frame(&mut self, f: Frame, maxstack: MaxStack) -> Result<(), VmError> {
+    /// (`doublestack`). A growth past the memory budget ends the slice.
+    fn push_frame(
+        &mut self,
+        f: Frame,
+        maxstack: MaxStack,
+        budget: &mut u32,
+    ) -> Result<(), VmError> {
         if self.stack.len() >= self.stack_cap {
             let n = self.stack_cap;
             let max = i64::from(maxstack);
@@ -469,24 +514,19 @@ impl Vm {
                 .saturating_mul(2)
                 .min(usize::try_from(max).unwrap_or(usize::MAX));
             let more = newn.saturating_sub(self.stack.len());
-            if !reserve(&mut self.stack, more) {
-                return Err(VmError::NotEnoughMemory);
-            }
+            room(grow(&mut self.stack, more), budget)?;
             self.stack_cap = newn;
         }
-        if self.stack.len() == self.stack.capacity() && !reserve(&mut self.stack, 1) {
-            return Err(VmError::NotEnoughMemory);
-        }
+        room(grow(&mut self.stack, 1), budget)?;
         self.stack.push(f);
         self.deepest = self.deepest.max(self.stack.len());
         Ok(())
     }
 
-    /// Push a capture; at the logical size, grow first (`doublecap`).
-    fn push_cap(&mut self, c: Capture) -> Result<(), VmError> {
-        if self.caps.len() == self.caps.capacity() && !reserve(&mut self.caps, 1) {
-            return Err(VmError::NotEnoughMemory);
-        }
+    /// Push a capture; at the logical size, grow first (`doublecap`). A
+    /// growth past the memory budget ends the slice.
+    fn push_cap(&mut self, c: Capture, budget: &mut u32) -> Result<(), VmError> {
+        room(grow(&mut self.caps, 1), budget)?;
         self.caps.push(c);
         let captop = self.caps.len();
         if captop >= self.capsize {
@@ -496,6 +536,19 @@ impl Vm {
             self.capsize = captop.saturating_mul(2);
         }
         Ok(())
+    }
+}
+
+/// What a [`grow`] means for the machine: room, room and the slice ends,
+/// or "not enough memory".
+fn room(g: Grown, budget: &mut u32) -> Result<(), VmError> {
+    match g {
+        Grown::Ok => Ok(()),
+        Grown::PastBudget => {
+            *budget = 0;
+            Ok(())
+        }
+        Grown::Refused => Err(VmError::NotEnoughMemory),
     }
 }
 

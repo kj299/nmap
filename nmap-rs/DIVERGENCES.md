@@ -3373,6 +3373,25 @@ Gated by three things:
 - [ ] `vm-close-attribute-unsupported` — the vendored parser rejects Lua
       5.4's `<close>` attribute, so `io` handles' `__close` is never reached
       from Lua. No shipped script or library uses `<close>`.
+- [ ] `vm-gc-metamethods-never-run` — the vendored VM never calls a table's
+      or a userdata's `__gc` metamethod: an object with one is collected like
+      any other, and its finalizer never runs (piccolo finalizes only its own
+      threads). PUC-Lua runs pending finalizers in a collection step, which
+      an allocation can trigger inside a C function too: LPeg 0.12's
+      backtrack-stack and capture-list growth (`doublestack`, `doublecap`)
+      can run one mid-match, and a finalizer that calls `setmaxstack` changes
+      the ceiling of the match that is running (the M6.6 step c review's
+      `t5.lua` on the tree's oracle: 210 finalizer calls inside 300 matches,
+      22 of them past a ceiling of 150). Here no Lua runs inside a match that
+      calls none (`lpeg-backtrack-ceiling`). One shipped script sets `__gc`:
+      `telnet-brute.nse:162` closes its connection's socket from it, which
+      here happens only when the script closes it or its thread ends (a
+      thread that ends has its sockets closed for it, `nse-socket-limit`),
+      not when the connection object is collected. Pinned by
+      `gc_metamethods_never_run` (`tests/lpeg_match_limits.rs`): 1,000 tables
+      and 100 userdata with a `__gc`, collected in full collections, are never
+      finalized, and the review's repro, with a full collection after every
+      slice, sees no finalizer call and no match past the ceiling.
 - [ ] `nse-c-modules-pending` — `openssl`, `lpeg` (and `re` on it), `lfs`,
       `libssh2` and `zlib` are not preloaded yet. The 17 libraries and 4
       suites above fail to load where they need them, and are pinned so that
@@ -4400,7 +4419,16 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       `a¹⁶d`), and capture evaluation (`Cb` nested `k` deep, `2^k` values
       with no Lua call) — `every_stage_of_a_match_is_pre_empted`. So an
       exponential match, which the C runs to its end, ends the phase at the
-      stall limit.
+      stall limit. Since the step c review, work in proportion to bytes —
+      text copied into a capture's buffer, a value made a Lua string, two
+      group names compared, the values a `C` moves, the compiler's copy of the
+      tree and its memo tables — takes a unit of fuel per `BYTES_PER_FUEL`
+      (4, measured) bytes, and a long copy goes on in the next slice; before,
+      a unit each whatever its length, so a `/string` format of 2 MB took
+      ≈140 s in slices of 182 ms. A string made whole (229 ms for 200 MiB) is
+      one slice, charged in full past its fuel. Gated by counting the work
+      apart from the fuel (`no_slice_does_more_work_than_its_fuel_pays_for`,
+      `a_chain_of_jumps_is_walked_across_slices`).
 - [ ] `lpeg-callback-may-yield` — the Lua a constructor calls runs as a VM
       call (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
       coroutine, and the constructor goes on where it was when that is
@@ -4433,6 +4461,15 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       match holds its compiler, backtrack stack, capture list and evaluation
       state the same way, and a capture list, stack or string the budget
       refuses is "not enough memory" (`a_match_is_held_to_the_memory_budget`).
+      Since the step c review a match accounts each growth to the heap as it
+      grows, not only when the slice ends, and a growth that takes the heap
+      past the budget ends the slice, so the collection that follows sees
+      it: within a slice the heap passes the budget by at most that growth
+      (`a_match_passes_the_memory_budget_by_at_most_one_growth`; before, the
+      review's 256 back-references to a substitution of 8 MiB peaked at
+      344 MB inside one slice under a 64 MiB budget, and peak at 59 MB now).
+      The fuzz target `nse_lpeg_match` runs its binding mode under a budget,
+      with the same tolerance.
 - [ ] `lpeg-bad-argument-naming` — as `nmapdb-bad-argument-naming`: from Lua
       code a function is named by its registered name (`'P'`) and a
       metamethod by its event (`'mul'`), as an operator names it; otherwise
@@ -4486,17 +4523,26 @@ under a named class — `argname` 2 rows, `vmbase` 2, and `cdepth` 1
 runs, each held to its pin in `m66c_quarantine_pins.txt` (149 rows: 142 the
 answer of the tree's `lpeg.c` with its peephole and `Cc(nil)` defects fixed,
 7 a correct LPeg's; the other 30 are step d's). Also gated: `lpeg_match_quirks`
-(174 cases from the step's brief, against the tree's oracle);
+(184 cases from the step's brief and its review, against the tree's oracle);
 `lpeg_match_limits` (the D2 ceilings, depth, the capture ceiling, pre-emption
 of every stage, memory, and the left calls through `B` against
-`m66c_behind_golden.txt`); unit tests in `code/tests.rs` (the analyses
+`m66c_behind_golden.txt`; and, since the review, work per slice counted
+apart from the fuel charged for it (`no_slice_does_more_work_than_its_fuel_pays_for`),
+the heap within a slice (`a_match_passes_the_memory_budget_by_at_most_one_growth`),
+a table capture's list given back as it fills, two threads compiling one
+pattern at once with a collection after every slice
+(`concurrent_compiles_of_a_shared_pattern_agree`), and `__gc`
+(`gc_metamethods_never_run`)); unit tests in `code/tests.rs` (the analyses
 against transliterations of `lpeg.c`'s at every node of random trees, pcode
-goldens, slicing invariance, a nullable chain in linear steps) and
-`vm/tests.rs` (slicing invariance, ceilings, pre-emption, deep patterns on a
-256 KiB thread); fuzz target `nse_lpeg_match`, which checks compile, match and
-capture values against a direct PEG interpreter of the tree; Miri on the
-module's unit tests. Each of the plan's 18 step c sabotages fails at least one
-of these.
+goldens, slicing invariance, a nullable chain in linear steps, a chain of
+jumps walked across slices) and `vm/tests.rs` (slicing invariance, ceilings,
+pre-emption, deep patterns on a 256 KiB thread); fuzz target
+`nse_lpeg_match`, which checks compile, match and capture values against a
+direct PEG interpreter of the tree, and, on an eighth of its inputs, the same
+pattern through the binding in two slicings under a memory budget and a
+small backtrack ceiling; Miri on the module's unit tests. Each of the plan's
+18 step c sabotages fails at least one of these, and so does each of the
+review fixes'.
 
 ### Security / robustness (divergence from the C, deliberately)
 
@@ -4572,10 +4618,18 @@ of these.
       (`S <- '(' S ')' / 'x'`: 98 levels pass, 99 fail; 148 and 149 under
       `setmaxstack(150)`), and a call followed by a return is a jump
       (`S <- 'a' S / ''`, 100,000 deep, no entry). The C reads the stored
-      value at each growth, with no Lua run in between; a match here reads it
-      once, when it starts, so another script's `setmaxstack` while a match
-      is pre-empted does not reach it
-      (`setmaxstack_does_not_reach_a_running_match`). The stack grows through
+      value at each growth. In a match that calls no Lua the only Lua that
+      can run in between is a `__gc` finalizer, which a collection during the
+      growth's allocation may run, and which may call `setmaxstack`
+      (the step c review's `t5.lua`: 210 such calls mid-match and 22 matches
+      past a ceiling of 150 in 300, on the tree's oracle); the port never runs
+      a `__gc` metamethod (`vm-gc-metamethods-never-run`), so no Lua runs
+      inside a match at step c. A match here reads the value once, when it
+      starts, so another script's `setmaxstack` while a match is pre-empted
+      does not reach it (`setmaxstack_does_not_reach_a_running_match`); step
+      d re-reads it after each call a callback makes, as a `setmaxstack` in a
+      `Cmt` reaches its own match in the C (`docs/M6.6-ANALYSIS.md` §1.3).
+      The stack grows through
       the memory budget: "not enough memory" before the ceiling where the
       budget refuses (`a_match_is_held_to_the_memory_budget`). Pinned by
       `the_backtrack_ceilings_are_the_cs` (two), corpus rows G and `X.limit.*`.
@@ -4585,8 +4639,16 @@ of these.
       `B = C"x"`, is a full capture after the call and `B`'s capture escapes
       the table (`"x"` and an empty table); `#V"B"` keeps `B`'s captures,
       where `#C"x"` drops them; `C(V"B") * V"B"`, `B = Cc(1)`, gives
-      `1, "", 1`. Reproduced (`code::analysis`). Pinned by
-      `hascaptures_does_not_follow_calls` and quirks `Q02` to `Q03b`.
+      `1, "", 1`. Reproduced (`code::analysis`). A capture `#V"B"` keeps can
+      start past where the capture around it closes, and be the last entry
+      when it does: the C's `ICloseCapture` tests `siz == 0` before it takes
+      the length (`lpeg.c:3657`), so the close is a close entry like any
+      other (`C(Cc(1) * #V"B")`, `B = 'x' * Cp()`, on `'x'` gives `"", 1, 2`).
+      Until the step c review the port took the length first, and raised
+      "lpeg: malformed program" there (found by `nse_lpeg_match`, its
+      artefact now the seed `close_after_kept_capture`). Pinned by
+      `hascaptures_does_not_follow_calls` and quirks `Q02` to `Q03b` and
+      `QF1a` to `QF1j` (the last three the fuzz artefact's pattern).
 - [x] `lpeg-capture-ceiling` — `pushcapture`'s `luaL_checkstack(L, 4, "too
       many captures")` against the Lua stack's limit (`LUAI_MAXSTACK`,
       1,000,000): `C(1)^0` gives at most 999,997 − U0 values, U0 the slots in
@@ -4596,9 +4658,18 @@ of these.
       the stack and checks the same sum at every capture, with U0 the slots in
       use when `match` is called, its arguments included, plus one: 5 below
       `table.unpack`'s ceiling in the same frame, the golden's
-      `H.stackcaps.rel`. A table capture holds its values off the stack
-      (1,200,000 in one `Ct`). Pinned by `the_capture_ceiling_is_the_cs`,
-      `the_capture_ceiling_is_luas`.
+      `H.stackcaps.rel`. The ceiling relative to `table.unpack`'s is the C's
+      where the match's values are returned (`pcall(L.match, …)`,
+      `return L.match(…)` through frames: −8, −9 and −8 for `C(1)^0`,
+      `C(1)^0 * (P(0) / 'q')` and `C(C(1)^0)` on both, measured by the step c
+      review). Where they are passed straight into another call
+      (`select('#', L.match(…))`, `table.pack(L.match(…))`) the C fails
+      earlier, on the callee's own stack reservation, with a bare "stack
+      overflow" (−2, −3, −3), and there the C depends on its history: in one
+      process an `n` that had passed failed right after; the port raises
+      "stack overflow (too many captures)" at −8, −9, −8. A table capture
+      holds its values off the stack (1,200,000 in one `Ct`). Pinned by
+      `the_capture_ceiling_is_the_cs`, `the_capture_ceiling_is_luas`.
 - [x] `lpeg-maxstrcaps-skips-silently` — `/string` collects at most
       `MAXSTRCAPS` (10) captures, the whole match and nine nested; it skips
       the rest without a word, `%n` past those collected is "invalid capture
@@ -4620,14 +4691,21 @@ of these.
       frames below the call use, 999,934 values under the standalone oracle
       and 999,945 under 7.94. Piccolo lays its frames out otherwise
       (`stack-limit-counts-slots-differently`), and the port's ceiling falls
-      a few slots higher: 999,950 values fit, where the golden's
-      `H.stackcaps.999950` is the error. The relative ceiling is the C's
-      (`lpeg-capture-ceiling`). Tolerated by the corpus gate's `cdepth`
+      higher: 999,950 values fit, where the golden's `H.stackcaps.999950` is
+      the error; in the step c review's harnesses, 2 to 10 Lua frames deeper
+      than the corpus's, it was 41 to 51 values higher than the C's, growing
+      about a slot a frame. The ceiling relative to `table.unpack`'s is the
+      C's where the match's values are returned, and not where they are
+      passed straight into another call, where the C fails earlier and
+      depends on its history (`lpeg-capture-ceiling`). Nothing realistic
+      reaches 999,9xx values. Tolerated by the corpus gate's `cdepth`
       class, which only rows tagged `cdepth` may use, and only with the
       golden's status and log: at step c, that one row.
 - [ ] `lpeg-lua-calling-captures-refused` — until step d, a pattern with a
       capture that calls Lua (`Cmt`, `P(function)`, `/function`, `Cf`,
       `/table`) builds and compiles, and its match raises "lpeg: match-time
       and function captures are not implemented until M6.6 step d" before
-      it runs. No script can reach it: the module is not registered. Step d
-      removes this entry.
+      it runs. The machine's and capture evaluation's checks behind that one
+      say the same words (since the step c review; before, words of their
+      own that the first check never let through). No script can reach it:
+      the module is not registered. Step d removes this entry.

@@ -20,16 +20,21 @@
 use std::task::Poll;
 
 use super::super::tree::{CapKind, Charset, FinalFix, Key, Node, Tag, Tree, TreeError, MAX_TREE};
+use super::super::{did_bytes, did_steps, grow, Grown, BYTES_PER_FUEL};
 use super::analysis::{to_charset, Analyses, SetId, FULL};
 use super::{inst_at, set_kind, target_at, CodeError, Op, Program, SetKind, Slot, MAXOFF};
-use crate::nse::stdlib::reserve;
+
+/// Room for `n` more, through the memory budget, the growth accounted at
+/// once ([`grow`]); a heap past the budget is the VM's to collect after the
+/// slice, which the compiler's growth — a few slots a unit — never outruns
+/// by much.
+fn reserve<T>(v: &mut Vec<T>, n: usize) -> bool {
+    grow(v, n) != Grown::Refused
+}
 
 /// `MAXBEHIND` (`lpeg.c:121`): the most an and-predicate may look behind
 /// to undo its match.
 const MAXBEHIND: i64 = 255;
-
-/// Nodes one unit of budget copies.
-const COPY_PER_FUEL: usize = 16;
 
 /// One pending piece of code generation. `tt` is the test instruction that
 /// protects the code (`NOINST` is `None`), `fl` the follow set.
@@ -113,6 +118,8 @@ enum Phase {
     Copy(usize),
     /// `finalfix` on the copy.
     Fix(FinalFix),
+    /// The analyses' memo tables, filled from this node.
+    Memos(usize),
     /// `codegen`.
     Gen,
     /// The peephole, from this slot.
@@ -132,8 +139,22 @@ pub struct Compiler {
     jobs: Vec<Job>,
     grammars: Vec<GrammarFrame>,
     calls_lua: bool,
+    /// Walks along chains of `Jmp`s (`finaltarget`) under way or done, for
+    /// the instruction being worked on: the peephole's two, or
+    /// `correctcalls`'s one.
+    chains: [Option<Chain>; 2],
     /// Units of budget spent, for the tests.
     spent: u64,
+}
+
+/// A walk along a chain of `Jmp`s from `from`: at `at` after `hops` jumps.
+/// Where the budget ran out on the way, the walk goes on from `at` when the
+/// same chain is asked for again.
+#[derive(Debug, Clone, Copy)]
+struct Chain {
+    from: usize,
+    at: usize,
+    hops: usize,
 }
 
 /// `?` for an analysis that may not be ready: the job waits.
@@ -172,6 +193,7 @@ impl Compiler {
             jobs: Vec::new(),
             grammars: Vec::new(),
             calls_lua: false,
+            chains: [None, None],
             spent: 0,
         }
     }
@@ -213,9 +235,9 @@ impl Compiler {
     pub fn step(&mut self, src: &Tree, budget: &mut u32) -> Poll<Result<Program, CodeError>> {
         let start = *budget;
         let r = self.run(src, budget);
-        self.spent = self
-            .spent
-            .saturating_add(u64::from(start.saturating_sub(*budget)));
+        let spent = u64::from(start.saturating_sub(*budget));
+        self.spent = self.spent.saturating_add(spent);
+        did_steps(spent);
         match r {
             Ok(Some(p)) => Poll::Ready(Ok(p)),
             Ok(None) => Poll::Pending,
@@ -234,15 +256,21 @@ impl Compiler {
                     if *budget == 0 {
                         return Ok(None);
                     }
-                    let max = usize::try_from(*budget)
+                    // The nodes the budget pays for, `BYTES_PER_FUEL` bytes
+                    // a unit; one at least.
+                    let size = std::mem::size_of::<Node>();
+                    let max = (usize::try_from(*budget)
                         .unwrap_or(usize::MAX)
-                        .saturating_mul(COPY_PER_FUEL);
+                        .saturating_mul(BYTES_PER_FUEL)
+                        / size)
+                        .max(1);
                     let end = src.len().min(from.saturating_add(max));
                     if let Some(part) = src.nodes().get(from..end) {
                         self.nodes.extend_from_slice(part);
                     }
-                    let cost =
-                        u32::try_from((end - from).div_ceil(COPY_PER_FUEL)).unwrap_or(u32::MAX);
+                    let bytes = (end - from).saturating_mul(size);
+                    did_bytes(bytes);
+                    let cost = u32::try_from(bytes.div_ceil(BYTES_PER_FUEL)).unwrap_or(u32::MAX);
                     *budget = budget.saturating_sub(cost.max(1));
                     if end < src.len() {
                         self.phase = Phase::Copy(end);
@@ -255,16 +283,23 @@ impl Compiler {
                     Poll::Pending => return Ok(None),
                     Poll::Ready(r) => {
                         r?;
-                        self.an.ensure_memos(self.tree.len())?;
-                        self.push_job(Job::Gen {
-                            t: 0,
-                            opt: false,
-                            tt: None,
-                            fl: FULL,
-                        })?;
-                        self.phase = Phase::Gen;
+                        self.phase = Phase::Memos(0);
                     }
                 },
+                Phase::Memos(from) => {
+                    let from = *from;
+                    if let Some(at) = self.an.fill_memos(self.tree.len(), from, budget)? {
+                        self.phase = Phase::Memos(at);
+                        return Ok(None);
+                    }
+                    self.push_job(Job::Gen {
+                        t: 0,
+                        opt: false,
+                        tt: None,
+                        fl: FULL,
+                    })?;
+                    self.phase = Phase::Gen;
+                }
                 Phase::Gen => {
                     let tree = std::mem::take(&mut self.tree);
                     let r = self.gen(&tree, budget);
@@ -285,11 +320,12 @@ impl Compiler {
                         None => self.phase = Phase::Done,
                     }
                 }
+                // The code as it grew, not shrunk to fit: a reallocation
+                // would copy all of it in one step, and the slack — less
+                // than the code — is accounted with it while it lives.
                 Phase::Done => {
-                    let mut slots = std::mem::take(&mut self.code);
-                    slots.shrink_to_fit();
                     return Ok(Some(Program {
-                        slots,
+                        slots: std::mem::take(&mut self.code),
                         calls_lua: self.calls_lua,
                     }));
                 }
@@ -443,25 +479,57 @@ impl Compiler {
         Ok(Some(i))
     }
 
-    /// `finaltarget`: where a chain of `Jmp`s from `i` ends, at a unit of
-    /// budget a jump (the units are taken whatever is left: a chain is never
-    /// longer than the code).
-    fn final_target(&self, mut i: usize, budget: &mut u32) -> Result<usize, CodeError> {
-        let mut hops = 0usize;
-        while matches!(inst_at(&self.code, i), Some((Op::Jmp, _, _))) {
-            i = target_at(&self.code, i).ok_or_else(malformed)?;
-            hops += 1;
-            if hops > self.code.len() {
+    /// `finaltarget`: where the chain of `Jmp`s from `from` ends, a unit of
+    /// budget a jump, walked in [`Compiler::chains`]`[w]`. `None` when the
+    /// budget runs out on the way: asked again for the same chain, the walk
+    /// goes on from where it stopped (a chain is never longer than the code,
+    /// and one walk can outlast a slice).
+    fn final_target(
+        &mut self,
+        w: usize,
+        from: usize,
+        budget: &mut u32,
+    ) -> Result<Option<usize>, CodeError> {
+        let mut c = match self.chains.get(w).copied().flatten() {
+            Some(c) if c.from == from => c,
+            _ => Chain {
+                from,
+                at: from,
+                hops: 0,
+            },
+        };
+        while matches!(inst_at(&self.code, c.at), Some((Op::Jmp, _, _))) {
+            if *budget == 0 {
+                *self.chains.get_mut(w).ok_or_else(malformed)? = Some(c);
+                return Ok(None);
+            }
+            *budget -= 1;
+            did_steps(1);
+            c.at = target_at(&self.code, c.at).ok_or_else(malformed)?;
+            c.hops += 1;
+            if c.hops > self.code.len() {
                 return Err(malformed());
             }
-            *budget = budget.saturating_sub(1);
         }
-        Ok(i)
+        *self.chains.get_mut(w).ok_or_else(malformed)? = Some(c);
+        Ok(Some(c.at))
     }
 
-    /// `finallabel`.
-    fn final_label(&self, i: usize, budget: &mut u32) -> Result<usize, CodeError> {
-        self.final_target(target_at(&self.code, i).ok_or_else(malformed)?, budget)
+    /// `finallabel`, walked in [`Compiler::chains`]`[w]`.
+    fn final_label(
+        &mut self,
+        w: usize,
+        i: usize,
+        budget: &mut u32,
+    ) -> Result<Option<usize>, CodeError> {
+        let from = target_at(&self.code, i).ok_or_else(malformed)?;
+        self.final_target(w, from, budget)
+    }
+
+    /// Whether a walk is under way for the instruction being worked on: it
+    /// goes on with no new unit for the instruction.
+    fn walking(&self) -> bool {
+        self.chains.iter().any(Option::is_some)
     }
 
     // ------------------------------------------------------------ codegen
@@ -982,16 +1050,21 @@ impl Compiler {
     /// corrected before, so the scan meets only these, and this visits only
     /// these. A unit of budget a call.
     fn correct_calls(&mut self, mut k: usize, budget: &mut u32) -> Result<Option<()>, CodeError> {
+        let pause = |c: &mut Compiler, k: usize| {
+            if let Some(Job::CorrectCalls { k: at }) = c.jobs.last_mut() {
+                *at = k;
+            }
+        };
         loop {
             let frame = self.grammars.last().ok_or_else(malformed)?;
             let Some(&i) = frame.calls.get(k) else { break };
-            if *budget == 0 {
-                if let Some(Job::CorrectCalls { k: at }) = self.jobs.last_mut() {
-                    *at = k;
+            if !self.walking() {
+                if *budget == 0 {
+                    pause(self, k);
+                    return Ok(None);
                 }
-                return Ok(None);
+                *budget -= 1;
             }
-            *budget -= 1;
             let (op, _, key) = inst_at(&self.code, i).ok_or_else(malformed)?;
             if op != Op::OpenCall {
                 return Err(malformed());
@@ -1000,7 +1073,11 @@ impl Compiler {
                 .positions
                 .get(usize::try_from(key).map_err(|_| malformed())?)
                 .ok_or_else(malformed)?;
-            let ft = self.final_target(i + 2, budget)?;
+            let Some(ft) = self.final_target(0, i + 2, budget)? else {
+                pause(self, k);
+                return Ok(None);
+            };
+            self.chains = [None, None];
             let tail = matches!(inst_at(&self.code, ft), Some((Op::Ret, _, _)));
             if let Some(Slot::Inst { op, .. }) = self.code.get_mut(i) {
                 *op = if tail { Op::Jmp } else { Op::Call };
@@ -1027,10 +1104,14 @@ impl Compiler {
     /// instruction, as the C does whenever it stays aligned.
     fn peephole(&mut self, mut i: usize, budget: &mut u32) -> Result<Option<usize>, CodeError> {
         while i < self.code.len() {
-            if *budget == 0 {
-                return Ok(Some(i));
+            // A unit an instruction, unless it is one whose walk the budget
+            // ran out on: that goes on, the walk's jumps a unit each.
+            if !self.walking() {
+                if *budget == 0 {
+                    return Ok(Some(i));
+                }
+                *budget -= 1;
             }
-            *budget -= 1;
             let (op, _, _) = inst_at(&self.code, i).ok_or_else(malformed)?;
             match op {
                 Op::Choice
@@ -1041,28 +1122,37 @@ impl Compiler {
                 | Op::TestChar
                 | Op::TestSet
                 | Op::TestAny => {
-                    let l = self.final_label(i, budget)?;
+                    let Some(l) = self.final_label(0, i, budget)? else {
+                        return Ok(Some(i));
+                    };
                     self.jump_to(Some(i), l)?;
                 }
                 Op::Jmp => {
-                    let ft = self.final_target(i, budget)?;
+                    let Some(ft) = self.final_target(0, i, budget)? else {
+                        return Ok(Some(i));
+                    };
                     let target = *self.code.get(ft).ok_or_else(malformed)?;
                     match inst_at(&self.code, ft) {
                         // Instructions that end or jump on their own: the
                         // jump becomes one, its label slot a filler.
                         Some((Op::Ret | Op::Fail | Op::FailTwice | Op::End, _, _)) => {
-                            self.code[i] = target;
-                            self.code[i + 1] = Slot::Inst {
-                                op: Op::Any,
-                                aux: 0,
-                                key: 0,
-                            };
+                            self.set_slot(i, target)?;
+                            self.set_slot(
+                                i + 1,
+                                Slot::Inst {
+                                    op: Op::Any,
+                                    aux: 0,
+                                    key: 0,
+                                },
+                            )?;
                         }
                         // Ones that jump explicitly: the jump becomes one,
                         // with its final label.
                         Some((Op::Commit | Op::PartialCommit | Op::BackCommit, _, _)) => {
-                            let fft = self.final_label(ft, budget)?;
-                            self.code[i] = target;
+                            let Some(fft) = self.final_label(1, ft, budget)? else {
+                                return Ok(Some(i));
+                            };
+                            self.set_slot(i, target)?;
                             self.jump_to(Some(i), fft)?;
                         }
                         _ => self.jump_to(Some(i), ft)?,
@@ -1070,9 +1160,39 @@ impl Compiler {
                 }
                 _ => {}
             }
+            self.chains = [None, None];
             let (op, _, _) = inst_at(&self.code, i).ok_or_else(malformed)?;
             i += op.size();
         }
         Ok(None)
+    }
+
+    /// Slot `i` becomes `s`; a slot past the code is a program this
+    /// compiler cannot have made (every `Jmp` is emitted with its label's).
+    fn set_slot(&mut self, i: usize, s: Slot) -> Result<(), CodeError> {
+        *self.code.get_mut(i).ok_or_else(malformed)? = s;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The peephole writes its rewrites through a checked access: a slot
+    /// past the code is the malformed-program error, never a panic. (A
+    /// `Jmp`'s label slot is read on the walk to its final target before
+    /// it is written, so no program this compiler makes reaches it.)
+    #[test]
+    fn a_rewrite_past_the_code_is_malformed() {
+        let mut c = Compiler::new();
+        c.code = vec![Slot::Inst {
+            op: Op::Jmp,
+            aux: 0,
+            key: 0,
+        }];
+        assert_eq!(c.set_slot(1, Slot::Offset(0)), Err(malformed()));
+        assert_eq!(c.set_slot(0, Slot::Offset(0)), Ok(()));
+        assert_eq!(c.code, [Slot::Offset(0)]);
     }
 }

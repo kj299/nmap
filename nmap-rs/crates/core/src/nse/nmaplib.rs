@@ -517,7 +517,7 @@ pub(crate) fn get_target(
     idx: usize,
 ) -> Result<usize, Fail> {
     let Some(Value::Table(t)) = args.get(idx) else {
-        return Err(type_error(args.get(idx), idx, "table").into());
+        return Err(type_error(args.ctx, args.get(idx), idx, "table").into());
     };
     let ctx = args.ctx;
     let token = t.get_value(ctx, "_Target");
@@ -602,7 +602,7 @@ pub(crate) fn get_port(
     idx: usize,
 ) -> Result<Option<usize>, Fail> {
     let Some(Value::Table(t)) = args.get(idx) else {
-        return Err(type_error(args.get(idx), idx, "table").into());
+        return Err(type_error(args.ctx, args.get(idx), idx, "table").into());
     };
     let ctx = args.ctx;
     let Value::Integer(number) = t.get_value(ctx, "number") else {

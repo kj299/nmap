@@ -129,7 +129,7 @@ fn xpcall<'gc>(
         Value::Function(h) if stack.len() >= 2 => h,
         _ => {
             let got = (stack.len() >= 2).then(|| stack.get(1));
-            return Err(raise(ctx, "xpcall", type_error(got, 2, "function")));
+            return Err(raise(ctx, "xpcall", type_error(ctx, got, 2, "function")));
         }
     };
     let f = stack.get(0);
@@ -316,7 +316,7 @@ fn load<'gc>(
                 },
             )))
         }
-        other => Err(raise(ctx, "load", type_error(other, 1, "function"))),
+        other => Err(raise(ctx, "load", type_error(ctx, other, 1, "function"))),
     }
 }
 
@@ -493,7 +493,7 @@ fn wrap<'gc>(
         Value::Function(f) if !stack.is_empty() => f,
         _ => {
             let got = (!stack.is_empty()).then(|| stack.get(0));
-            return Err(raise(ctx, "wrap", type_error(got, 1, "function")));
+            return Err(raise(ctx, "wrap", type_error(ctx, got, 1, "function")));
         }
     };
     let thread = Thread::new(ctx);

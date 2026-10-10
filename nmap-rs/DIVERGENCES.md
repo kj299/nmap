@@ -2717,9 +2717,11 @@ accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
 - [x] `format-tostring-of-references`: `%s` uses the VM's own `tostring`.
       Until M6.4c2 a table printed as `<table 0x…>` where PUC-Lua prints
       `table: 0x…`; vendored patch `0011` now prints `type: 0x…` as
-      `luaL_tolstring` does, for `%s` and `tostring` alike. A metatable's
-      `__name` is still not consulted. The address differs between runs in
-      both.
+      `luaL_tolstring` does, for `%s` and `tostring` alike. Since M6.6 step b
+      (patch `0012`, E7) a metatable's `__name`, when it is a string, names
+      the kind as in PUC-Lua: `lpeg-pattern: 0x…`, `My.Type: 0x…` (pinned by
+      `name_is_honoured_by_tostring_and_type_errors` and the LPeg corpus's
+      `J.kind`). The address differs between runs in both.
 - [x] `format-tostring-may-yield`: a `__tostring` metamethod called by `%s`
       runs as a VM call, so it may yield, where PUC-Lua raises "attempt to
       yield across a C-call boundary" — as for `gsub` callbacks.
@@ -2831,13 +2833,17 @@ reader never stops, since a number is never the empty string.
       a script resuming with `continue` would suspend the executor the
       scheduler drives. A test checks they are gone.
 
-- [ ] `stdlib-type-errors-ignore-name` — the stdlib's type-error helper
-      (`crates/core/src/nse/stdlib/mod.rs:258-263`) names a userdata
-      `userdata`. PUC-Lua's `luaL_typeerror` uses the metatable's `__name`, so
-      7.94 says `got FILE*` (measured in M6.6 Phase 0). `tostring` has the
-      same gap (`format-tostring-of-references`). M6.6 step b honours
-      `__name` in both (`docs/M6.6-ANALYSIS.md`, E7), and LPeg needs that,
-      because its patterns are `lpeg-pattern`.
+- [x] `stdlib-type-errors-ignore-name` — **closed in M6.6 step b.** The
+      stdlib's type-error helper (`stdlib::type_error`) named a userdata
+      `userdata`, where PUC-Lua's `luaL_typeerror` uses the metatable's
+      `__name` and 7.94 says `got FILE*` (measured in M6.6 Phase 0). It now
+      names a table or userdata as `luaT_objtypename` does (the VM's
+      `meta_ops::objtypename`): `got FILE*`, `got lpeg-pattern`, and the
+      type for a `__name` that is not a string. `tostring` was fixed with it
+      (`format-tostring-of-references`). Pinned by the LPeg corpus's
+      `J.typeerr` rows and `name_is_honoured_by_tostring_and_type_errors`;
+      every M6 stdlib and io corpus still passes (`docs/M6.6-ANALYSIS.md`,
+      E7).
 
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 
@@ -4039,3 +4045,172 @@ are closed by gates added in the review.
       one (`Tables::loaded`, asserted by `mac2corp_looks_up_most_specific_first`
       and `getprotbynum_and_getprotbyname_answer_from_nmap_protocols`), for when
       it does.
+
+## Milestone 6.6 step b — LPeg pattern trees (`core::nse::lpeg`, `core::nse::lpeg::tree`, `core::nse::stdlib`, vendored VM patch `0012`)
+
+LPeg 0.12's pattern construction: every constructor and operator, the
+grammar builder and its verifier, `type`, `version`, `setmaxstack`, `locale`,
+the `ptree`/`pcode` stubs and the `lpeg-pattern` metatable. Nothing matches
+yet — the compiler and matching machine are steps c and d — and the module is
+not registered: only the test suites install it
+(`lpeg::register_for_tests`; `runtime::tests::lpeg_is_not_registered`).
+
+**Gated** by `lpeg_tree_differential`: 5,579 constructions
+(`tests/differential/m6/m66b_tree_cases.txt`, `oracle/gen_m66b_trees.py`),
+each run by the same Lua (`oracle/m66b_tree_core.lua`) under the tree's
+standalone Lua with `lpeg.c` and under the port, compared byte for byte —
+results, identities (`rawequal`), the metatable and every error message, its
+position prefix and function name included — with no exemption list. The one
+masked class is the rule name four grammar errors take from table-traversal
+order (`lpeg-grammar-error-rule-name-is-hash-ordered`), unmasked in the rows
+noted `[exact]`. Each family has a floor. `regen_m66b_trees.sh --check`
+regenerates both files and runs the generator and the oracle twice. Also
+gated: unit tests in `tree/tests.rs` against transliterations of the C's
+recursive walkers on random trees and grammars, in step slices of one to
+seven; `lpeg_tree_limits` (pre-emption, depth, sizes, `setmaxstack`,
+`__name`); fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `lpeg-tree-size-int-overflow` — `numtree`'s `2*n-1` and `lp_star`'s
+      `(n+1)*(size1+1)` and `n*(size1+3)-1` are `int` products in the C
+      (`lpeg.c:2368-2384`, `:2638-2660`), and `MAXPATTSIZE` is used nowhere:
+      `P(2^31+1)` ends 7.94 in `malloc(): corrupted top size`, `P'a'^(2^31)`
+      in SIGSEGV. Here every size is computed in `usize` with checked
+      arithmetic, limited to the C's `int` (`tree::MAX_TREE`), and asked of
+      the memory budget before a node is written: `not enough memory`, raised
+      without a position as a memory error is. Where the C's overflowed size
+      happened to be small, its later checks answered instead —
+      `P''^(2^31-1)` raises "loop body may accept empty string" there, and
+      `not enough memory` here, as the allocation the C makes first would
+      have. Pinned by `sizes_the_cs_int_cannot_hold_are_not_enough_memory`
+      and `oversized_trees_are_not_enough_memory` (also under a 64 MiB
+      budget), and fuzzed (`nse_lpeg_build`, adversarial integers under a
+      budget).
+- [x] `lpeg-pattern-string-size-overflow` — `getpatt`'s `2*(slen-1)+1` for a
+      string pattern of 1 GiB or more overflows, and `newtree` writes past its
+      allocation (ASan, M6.6 Phase 0). Checked here: `not enough memory`.
+- [x] `lpeg-getfirst-unbounded-recursion` — the verifier misses two kinds of
+      left recursion, and the C then recurses without bound in `getfirst`
+      when it compiles: measured on the tree's oracle,
+      `P{"A", A = B(P"a" - V"A")}` crashes at the first match,
+      `P{"S", S = V"A" + "z", A = B(#V"A" * "a")}` crashes, and
+      `P{"A", A = -P{P"x"} * V"A"}` hangs (with `+ "y"`, crashes).
+      `verifyrule` returns at `TBehind` ("look-behind cannot have calls", but a
+      call inside a predicate inside `B` is a left call), and at a sub-grammar
+      it answers the sub-grammar's own nullability, dropping a nullable
+      context (`-`, `#`, `^n`). Here, after the C's checks have all passed, a
+      second pass that does neither refuses such a grammar: `rule 'A' may be
+      left recursive` (`tree::VerifyGrammar`). It runs last, so every grammar
+      the C refuses keeps the C's error and rule name, and only over a tree
+      with a look-behind or a sub-grammar in it. **Divergence:** a grammar
+      the C accepts by accident is refused too — `P{"A", A = B(#V"A" * "a")}`
+      builds and matches in the C (`match(p, "aaab")` is nil) unless a choice
+      reaches the rule, when it crashes. Pinned by
+      `left_recursion_through_behind_or_a_sub_grammar_is_refused`; the random
+      grammars of `walkers_agree_with_the_c_on_random_grammars` are checked
+      against the C's verifier plus that pass; the corpus generates no such
+      grammar (the C would crash at match time on most).
+- [x] `lpeg-recursive-walkers-stack-overflow` (construction) — `finalfix`,
+      `verifyrule`, `checkloops`, `checkaux` and `fixedlenx` recurse on the C
+      stack with no bound. Here each is a loop over an explicit stack grown
+      through the memory budget (`tree::walk`), and `correctkeys` and
+      `hascaptures` are scans of the slots. Pinned at ten times the C's crash
+      depths (Ct 61,590; P{} 76,990; `Cs`, `Cmt`, `-`, `#` and alternating
+      choices 458,980) by `walkers_answer_at_ten_times_the_cs_crash_depths`,
+      and through the VM by `deep_patterns_are_walked_without_recursion`
+      (`P"a"^-458980` in a grammar, in `B`, in `ptree`). Sabotage: a
+      recursive `finalfix` aborts both. The compiler's and the captures'
+      walkers are steps c and d.
+- [x] `lpeg-ktable-key-16bit` (construction) — keys are 32 bits wide here
+      (D4): a pattern of 70,000 constants builds (`C.join.70000`). The values
+      they read back at match time are step c's pin.
+- [x] `lpeg-uservalue-type-confusion` — the constant table is a field of the
+      pattern object (`lpeg::Pattern`), never a user value: there is nothing
+      for `debug.setuservalue` to replace, whether or not it exists.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `lpeg-integer-args-narrowed-to-int` — `P(n)`, `p^n`, `p/n` and
+      `Carg(n)` read `n` as the C does — `lua_tointeger` or
+      `luaL_checkinteger`, then truncated to a 32-bit `int`
+      (`lpeg::narrow`, E11): `P(2^32+2)` is `P(2)`, `p^(2^32+1)` is `p^1`,
+      `/(2^32+1)` is `/1`, `Carg(2^32+1)` is `Carg(1)`; `P(1.5)` and `P(2^63)`
+      are `P(0)`, which always matches; `p^1.5` raises "number has no integer
+      representation". Sizes derived from them are checked (above). Corpus
+      rows A, C, F and G; the operator reaches it through
+      `fingerprint-strings.n`.
+- [x] `lpeg-v-without-argument-names-itself` — `lp_V` pushes its result
+      before it checks argument 1, so `V()` passes the check and names the
+      rule by the pattern itself: `P{"S", S = V()}` raises `rule '(a
+      userdata)' undefined in given grammar`, while `V(nil)` is "non-nil value
+      expected". Rows `Z.V.none`, `Z.A.V.1`.
+- [x] `lpeg-grammar-key-converting-to-1-skipped` — a grammar key that
+      `lua_tonumber` makes 1 (`1.0`, `"1"`, `" 0x1 "`, `"1.0"`) is skipped as
+      the initial rule's slot, whatever its value, as is the initial rule's
+      name. Corpus rows D.
+- [x] `lpeg-grammar-error-rule-name-is-hash-ordered` — four grammar errors
+      name the first rule at fault in the table's traversal order, salted per
+      process in the C (`hashorder`, `docs/M6.6-ANALYSIS.md` §3): masked in
+      the corpus, compared where one rule alone can be named.
+- [x] `lpeg-ptree-pcode-stubs` — `ptree` converts its argument (a table is
+      built as a grammar, verifier and all) and, given a true second
+      argument, runs `finalfix` (`rule 'x' used outside a grammar`), then
+      raises "function only implemented in debug mode"; `pcode` checks for a
+      pattern, then raises the same (E5). Here `finalfix` runs on a copy; the
+      C's runs in place, on a pattern every later compilation fixes again the
+      same way. Corpus rows L.
+- [x] `lpeg-setmaxstack-stores-its-argument` — `setmaxstack` checks its
+      argument as `luaL_optinteger` does and stores it as given, in the
+      state's registry: a string stays a string, none is nil, and opening the
+      library stores `MAXBACK` as the float 100.0. nmap runs every script in
+      one state, so the value is process-wide. It is read, narrowed and
+      floored when a match grows its stack (step c). Pinned by
+      `setmaxstack_stores_its_argument_as_given`; corpus rows H.
+- [x] `lpeg-locale-is-the-c-locale` — `locale` builds the C locale's classes
+      (sizes 62/52/33/10/94/26/95/32/6/26/22, nothing at or above 128) and
+      sets them with `lua_setfield`, which honours `__newindex`, in the C's
+      order — each `__newindex` call a call into the VM, an error in it
+      stopping the rest. Pinned by `the_c_locales_classes_have_the_cs_sizes`;
+      corpus rows I. The classes' members are matched from step c.
+- [x] `lpeg-metatable-shape` — `__add __div __gc __index __len __mul __name
+      __pow __sub __unm`, `__name` `lpeg-pattern`, `__index` the `lpeg` table,
+      no `__metatable`. `__gc` checks its argument is a pattern and does
+      nothing: there is no code to free, and a match never holds a borrow a
+      collection could invalidate. Corpus rows J.
+
+### Differences, open and documented
+
+- [ ] `lpeg-stall-limit-ends-finite-work` — construction can take time
+      exponential in a grammar's depth (§1.1): the verifier, `B`'s
+      `fixedlenx`, and `checkaux` for `^n` and `+`. Here each is resumable and
+      burns fuel, so the VM — and the stall watchdog — see every slice (D3):
+      the k = 26 chain `Rᵢ ← Rᵢ₊₁ + Rᵢ₊₁` builds in 8,054 slices of 10^5 fuel,
+      and `B` and `^1` over it in 4,027 each (`lpeg_tree_limits`); the C's
+      build takes 1.5 s. So a slow but finite construction that outlasts the
+      stall limit ends the phase, where the C would finish it.
+- [ ] `lpeg-bad-argument-naming` — as `nmapdb-bad-argument-naming`: from Lua
+      code a function is named by its registered name (`'P'`) and a
+      metamethod by its event (`'mul'`), as an operator names it; otherwise
+      `'lpeg.P'` and `'?'`, as `pushglobalfuncname` finds them. The two agree
+      with the C on direct calls, operators and `pcall` — every row of the
+      corpus — and differ on other call shapes: a local alias, a method call
+      (`p:B()` numbers arguments from the receiver), a metamethod called as a
+      field (`mt.__mul(a, b)`, `'__mul'` in the C), and an operator reached
+      through a string's arithmetic metamethod, which the C calls from C
+      (`'?'`, no position).
+- [ ] `lpeg-grammar-stack-overflow-message` — `collectrules` checks the Lua
+      stack for each rule (`luaL_checkstack`), so a grammar of about half a
+      million rules or more fails with "stack overflow (grammar has too many
+      rules)" in the C (measured at 600,000; 400,000 gives the argument
+      error). The port's stack is not involved: past `MAXRULES` it is always
+      `bad argument #n to 'P' (grammar has too many rules)`. Both refuse.
+- [ ] `vm-base-library-argument-errors` — **found by this step's corpus, not
+      LPeg's.** The VM's own base library raises its argument errors in its
+      own words: `setmetatable`, `next`, `rawlen`, `rawget` give "type error,
+      expected Table, found number", `select('x')` "Bad argument to
+      'select'", and `ipairs()` returns a function where PUC-Lua raises
+      "bad argument #1 to 'ipairs' (value expected)" (measured against the
+      tree's Lua). The corpus checks `setmetatable` on a pattern for its
+      outcome only (`J.setmt`), and leaves out Phase 0's row that compared
+      its message.

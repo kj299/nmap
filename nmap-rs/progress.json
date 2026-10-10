@@ -15,6 +15,9 @@
     "core::nse::choose": [
       "nse_results"
     ],
+    "core::nse::lpeg::tree": [
+      "nse_lpeg_build"
+    ],
     "core::nse::nmapdb": [
       "nse_mac2corp"
     ],
@@ -229,6 +232,7 @@
     "core::nse::choose": "unsafe_audited",
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
+    "core::nse::lpeg::tree": "unsafe_audited",
     "core::nse::net": "unsafe_audited",
     "core::nse::nmapdb": "unsafe_audited",
     "core::nse::nmaplib": "unsafe_audited",

@@ -569,6 +569,26 @@ pub fn tostring<'gc>(
         }
     }
 
+    // `luaL_tolstring`'s default case: a metatable's `__name`, when it is a
+    // string, names the kind in place of the type, `"%s: %p"` all the same.
+    // Read raw, as `luaL_getmetafield` reads it.
+    let named = match v {
+        Value::Table(t) => t
+            .metatable()
+            .map(|mt| (mt, gc_arena::Gc::as_ptr(t.into_inner()) as *const ())),
+        Value::UserData(u) => u
+            .metatable()
+            .map(|mt| (mt, gc_arena::Gc::as_ptr(u.into_inner()) as *const ())),
+        _ => None,
+    };
+    if let Some((mt, ptr)) = named {
+        if let Value::String(name) = mt.get_value(ctx, "__name") {
+            let mut out = name.as_bytes().to_vec();
+            out.extend_from_slice(format!(": {ptr:p}").as_bytes());
+            return Ok(MetaResult::Value(ctx.intern(&out).into()));
+        }
+    }
+
     Ok(match v {
         v @ Value::String(_) => MetaResult::Value(v),
         v => MetaResult::Value(ctx.intern(v.display().to_string().as_bytes()).into()),

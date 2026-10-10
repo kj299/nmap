@@ -28,6 +28,12 @@ libfuzzer-sys = "0.4"
 [dependencies.nmap-core]
 path = "../crates/core"
 
+# The vendored Lua VM, for `nse_lpeg_build`, which runs pattern construction
+# through the VM with the test-only `lpeg` registration. Already in the graph
+# through nmap-core; this names the edge.
+[dependencies.piccolo]
+path = "../crates/vendor/piccolo"
+
 # Detach from the parent workspace: fuzz builds on nightly with a distinct
 # dependency set and must not be pulled into the stable workspace gates.
 [workspace]
@@ -357,6 +363,13 @@ name = "nse_mac2corp"
 path = "fuzz_targets/nse_mac2corp.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_lpeg_build"
+path = "fuzz_targets/nse_lpeg_build.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "nse_protocols"

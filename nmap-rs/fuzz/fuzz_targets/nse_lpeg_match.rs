@@ -1,4 +1,4 @@
-// cargo-fuzz target for LPeg matching (M6.6 step c):
+// cargo-fuzz target for LPeg matching (M6.6 steps c and d):
 // `nmap_core::nse::lpeg::code` (the compiler), `nmap_core::nse::lpeg::vm`
 // (the matching machine) and `vm::capture` (capture evaluation), pure and
 // through the binding.
@@ -35,7 +35,16 @@
 // program as Lua, built by the constructors and run by `lpeg.match` in a
 // Lua state with the test-only registration: `getpatt`, the binding's
 // `MatchJob` and `LuaEnv`, `init`, extra arguments, the values' conversion,
-// what a match holds accounted to the heap). Constants are larger here:
+// what a match holds accounted to the heap), and, from step d, the captures
+// that call Lua: a quarter of its composite nodes (op bytes from 200) are a
+// `Cmt`, a function
+// coerced as `P(f)`, a `/function`, a `Cf` or a `/table`, with callbacks from
+// a fixed set (`chunk`'s `F`, `G`, `H`, `T`): returning false, true,
+// positions (the current, one on, one back, past the end, `3.5`, a padded
+// string), the captures' values or their count, a table, nothing; raising an
+// error table or a string; running a nested match; calling `setmaxstack`;
+// `__index` functions and tables. A pattern holding one is checked through
+// the binding alone. Constants are larger here:
 // strings of up to 3,600 bytes by repetition, `/string` formats of up to
 // 128 copies of theirs (256 `%n`), a subject repeated up to 64 times (3 KiB),
 // `init` from -3 to 3, a backtrack ceiling of 100 or 150, a memory budget of
@@ -47,10 +56,12 @@
 //     table by its sorted pairs — or "not enough memory" on either side
 //     (`lpeg-memory-errors-depend-on-slicing`);
 //   * no error the binding raises for its own defects ("lpeg: malformed
-//     program", "lpeg: ... lost", the step d refusal) is ever seen.
+//     program", "lpeg: ... lost", "lpeg: capture call refused") is ever
+//     seen.
 //   A run past 300,000 units of fuel is not compared. Seeds
-//   `close_after_kept_capture_binding` and `binding_table_of_many_captures`
-//   reach the two checks.
+//   `close_after_kept_capture_binding`, `binding_table_of_many_captures`
+//   and the `binding_cmt_*`, `binding_function_*`, `binding_fold_*` and
+//   `binding_query_*` ones reach the two checks.
 #![no_main]
 
 use std::borrow::Cow;
@@ -77,6 +88,10 @@ const STEPS: u64 = 400_000;
 struct Input<'a> {
     data: &'a [u8],
     at: usize,
+    /// Binding mode: patterns may hold captures that call Lua.
+    lua: bool,
+    /// The pattern holds one: the pure checks do not run.
+    calls: bool,
 }
 
 impl Input<'_> {
@@ -239,6 +254,11 @@ fn pattern(inp: &mut Input, d: u32, rules: u32) -> (Tree, String) {
             _ => (lit(b"b"), "P'b'".to_string()),
         };
     }
+    // Binding mode: a quarter of the composite nodes (ops 200 and up) call
+    // Lua.
+    if inp.lua && op >= 200 {
+        return lua_capture(inp, d, rules);
+    }
     let sub = |inp: &mut Input| pattern(inp, d - 1, rules);
     match op % 16 {
         0 | 1 => {
@@ -343,6 +363,25 @@ fn pattern(inp: &mut Input, d: u32, rules: u32) -> (Tree, String) {
         }
         _ => grammar(inp, d - 1).unwrap_or_else(|| (lit(b"c"), "P'c'".to_string())),
     }
+}
+
+/// A capture that calls Lua (binding mode only: the pure checks do not run
+/// on a pattern holding one), over a sub-pattern, with one of the chunk's
+/// fixed callbacks ([`chunk`]): a match-time capture (`Cmt`, or a function
+/// coerced as `P(f)`), `/function`, `Cf` or `/table`. The tree is a
+/// stand-in.
+fn lua_capture(inp: &mut Input, d: u32, rules: u32) -> (Tree, String) {
+    inp.calls = true;
+    let (t, lt) = pattern(inp, d - 1, rules);
+    let k = usize::from(inp.byte());
+    let lua = match k % 5 {
+        0 => format!("Cmt({lt}, F[{}])", 1 + k / 5 % 12),
+        1 => format!("({lt} / G[{}])", 1 + k / 5 % 6),
+        2 => format!("Cf({lt}, H[{}])", 1 + k / 5 % 3),
+        3 => format!("({lt} / T[{}])", 1 + k / 5 % 3),
+        _ => format!("({lt} * P(F[{}]))", 1 + k / 5 % 12),
+    };
+    (Tree::capture(CapKind::Function, 0, &t).unwrap(), lua)
 }
 
 /// A grammar of one to three rules, built, fixed and verified as `lpeg.P`
@@ -925,7 +964,7 @@ fn evaluate(caps: &[Capture], s: &[u8], end: usize) -> Result<Vec<Val>, Err> {
 
 fn port_value(c: &CapCursor, s: &[u8], v: CapVal) -> Val {
     match v {
-        CapVal::Nil | CapVal::Buf => Val::Nil,
+        CapVal::Nil | CapVal::Buf | CapVal::Callee => Val::Nil,
         CapVal::Int(i) => Val::Int(i),
         CapVal::Str(a, b) => Val::Str(s[a..b].to_vec()),
         CapVal::Bytes(i) => Val::Str(c.string(i).to_vec()),
@@ -983,6 +1022,7 @@ fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>>
     let end = loop {
         let mut b = slice;
         match vm.run(&program, s, i32::MAX, &mut b) {
+            Ok(VmPoll::RunTime(rt)) => panic!("a match-time capture in a pure run: {rt:?}"),
             Ok(VmPoll::Done(None)) => return Some(Ok(None)),
             Ok(VmPoll::Done(Some(e))) => break e,
             Ok(VmPoll::Pending) => {}
@@ -1109,8 +1149,46 @@ fn ser(v: Value, d: u32) -> String {
 fn chunk(expr: &str, subject: &[u8], times: usize, init: i64, max: u32) -> String {
     format!(
         r#"local L = lpeg
-local P, S, V, B, C, Cc, Cp, Carg, Cb, Cg, Ct, Cs =
-  L.P, L.S, L.V, L.B, L.C, L.Cc, L.Cp, L.Carg, L.Cb, L.Cg, L.Ct, L.Cs
+local P, S, V, B, C, Cc, Cp, Carg, Cb, Cg, Ct, Cs, Cmt, Cf =
+  L.P, L.S, L.V, L.B, L.C, L.Cc, L.Cp, L.Carg, L.Cb, L.Cg, L.Ct, L.Cs, L.Cmt, L.Cf
+-- A value as text, the same in every run (a table's `tostring` is its
+-- address).
+local function show(v)
+  if type(v) == 'table' then return '{{' .. #v .. '}}' end
+  return tostring(v)
+end
+local F = {{
+  function(s, i) return false end,
+  function(s, i) return true end,
+  function(s, i) return i end,
+  function(s, i) return i + 1 end,
+  function(s, i) return i - 1 end,
+  function(s, i, ...) return true, ... end,
+  function(s, i, ...) return i, select('#', ...), ... end,
+  function() error({{ code = 1 }}) end,
+  function(s, i) return true, L.match(C(1)^0, s, i) end,
+  function(s, i) L.setmaxstack(150) return true end,
+  function(s, i) return 3.5 end,
+  function(s, i, a) return ' ' .. i .. ' ', a end,
+}}
+local G = {{
+  function(...) return ... end,
+  function(...) return select('#', ...) end,
+  function() end,
+  function(a) return {{ a }} end,
+  function() error('G', 0) end,
+  function(a) return L.match(C(1), show(a)) end,
+}}
+local H = {{
+  function(a, b) return show(a) .. show(b) end,
+  function(a, ...) return select('#', ...) end,
+  function(a) return nil end,
+}}
+local T = {{
+  {{ a = 'A', b = false }},
+  setmetatable({{}}, {{ __index = function(t, k) return type(k) end }}),
+  setmetatable({{}}, {{ __index = {{ c = 'C' }} }}),
+}}
 L.setmaxstack({max})
 local ok, p = pcall(function() return {expr} end)
 if not ok then return "build", p end
@@ -1146,7 +1224,12 @@ fn binding(src: &str, slice: i32) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let mut inp = Input { data, at: 0 };
+    let mut inp = Input {
+        data,
+        at: 0,
+        lua: data.first().is_some_and(|&b| b >= 224),
+        calls: false,
+    };
     let first = inp.byte();
     let slice = 1 + u32::from(first % 64);
     let (t, lua) = pattern(&mut inp, 5, 0);
@@ -1163,6 +1246,10 @@ fuzz_target!(|data: &[u8]| {
         let max = if first & 16 != 0 { 150 } else { 100 };
         let src = chunk(&lua, &subject, 1 + sum % 64, init, max);
         binding(&src, i32::try_from(64 * slice).unwrap_or(4096));
+    }
+    if inp.calls {
+        // The pure side has no Lua to call: the binding was the check.
+        return;
     }
     let mut fixed = t.clone();
     let mut w = FinalFix::new(None, 0);

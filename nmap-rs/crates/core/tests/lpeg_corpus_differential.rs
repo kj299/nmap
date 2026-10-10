@@ -37,13 +37,13 @@ use regex::Regex;
 
 /// The plan's step this gate runs up to (`b`, then `c`, then `d`): every row
 /// `m66_lpeg_steps.txt` maps to it or to an earlier step.
-const STEP: char = 'c';
+const STEP: char = 'd';
 
 /// The fewest rows the step must run: the corpus and its step map are
 /// generated, and a weakened generator regenerated in place would otherwise
-/// pass on what is left. Step 0b mapped 12,641 rows to step b and 24,726 to
-/// step c.
-const MIN_ROWS: [(char, usize); 2] = [('b', 12_641), ('c', 24_726)];
+/// pass on what is left. Step 0b mapped 12,641 rows to step b, 24,726 to
+/// step c and 25,232 to step d.
+const MIN_ROWS: [(char, usize); 3] = [('b', 12_641), ('c', 24_726), ('d', 25_232)];
 
 fn m6(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -167,7 +167,7 @@ impl Masks {
             // The base functions whose argument errors the VM words its own
             // way (`vm-base-library-argument-errors`), and that wording.
             vm_base_c: re(
-                r"bad argument #\d+ to '(?:setmetatable|next|rawlen|rawget|rawset|ipairs|select)' \([^)]*\)",
+                r"bad argument #\d+ to '(?:setmetatable|next|rawlen|rawget|rawset|ipairs|select|char)' \([^)]*\)",
             ),
             vm_base_port: re(r"type error, expected \w+, found \w+|Bad argument to 'select'"),
         }
@@ -188,9 +188,21 @@ impl Masks {
             .into_owned()
     }
 
-    /// One named class's normalisation.
-    fn class(&self, class: &str, s: &str) -> String {
+    /// One named class's normalisation, of the port's text (`port`) or the
+    /// C's.
+    fn class(&self, class: &str, s: &str, port: bool) -> String {
         match class {
+            // The port numbers a method call's arguments from the receiver,
+            // one past the C's (`luaL_argerror` takes one off for a call its
+            // `lua_getinfo` names a "method"): `p:match(nil)`.
+            "method" if port => self
+                .argname
+                .replace_all(s, |c: &regex::Captures| {
+                    let n: u64 = c[1].parse().unwrap_or(0);
+                    c[0].replacen(&format!("#{n}"), &format!("#{}", n.saturating_sub(1)), 1)
+                })
+                .into_owned(),
+            "method" => s.to_string(),
             "position" => self.position.replace_all(s, "\"").into_owned(),
             "argname" => self
                 .argname
@@ -213,12 +225,17 @@ impl Masks {
 /// are worded the VM's way (`type error, expected Table, found userdata`
 /// where Lua says `bad argument #1 to 'setmetatable' (table expected, got
 /// lpeg-pattern)`): the corpus's two rows that hand a pattern to
-/// `setmetatable`. Tried alone, then in pairs, then all together; the
+/// `setmetatable`, and, from step d, lpeg-utility's `string.char` of a bad
+/// escape (`K.parse_fp.badesc`); `method` is a method call's argument
+/// numbering, which the port starts at the receiver
+/// (`lpeg-bad-argument-naming`): `re.compile(nil)`'s `pattern:match(nil)`
+/// (`J.compile.nil`). Tried alone, then in pairs, then all together; the
 /// smallest set under which a row agrees is the one it is counted under.
-const CLASSES: [(&str, &str); 3] = [
+const CLASSES: [(&str, &str); 4] = [
     ("position", "stdlib-errors-have-no-position"),
     ("argname", "stdlib-bad-argument-naming"),
     ("vmbase", "vm-base-library-argument-errors"),
+    ("method", "lpeg-bad-argument-naming"),
 ];
 
 /// `cdepth` (`classify_m66_lpeg.py`): a row the cases file tags `cdepth` has
@@ -397,8 +414,13 @@ fn every_step_row_matches_the_trees_own_lpeg() {
             .collect();
         sets.sort_by_key(Vec::len);
         let agrees = sets.iter().find(|set| {
-            let n = |s: &str| set.iter().fold(s.to_string(), |s, c| masks.class(c, &s));
-            got.0 == want.0 && n(&got.1) == n(&want.1) && n(&got.2) == n(&want.2)
+            let n = |s: &str, port: bool| {
+                set.iter()
+                    .fold(s.to_string(), |s, c| masks.class(c, &s, port))
+            };
+            got.0 == want.0
+                && n(&got.1, true) == n(&want.1, false)
+                && n(&got.2, true) == n(&want.2, false)
         });
         match agrees {
             Some(set) => by_class.entry(set.join("+")).or_default().push(id.clone()),
@@ -434,17 +456,26 @@ fn every_step_row_matches_the_trees_own_lpeg() {
 
 /// The fewest quarantined rows pinned at or below [`STEP`]: at step c, the
 /// peephole's 10, `Cc(nil)`'s 99 and `init`'s 3 that the fixed C answers,
-/// and 7 semantic pins.
-const MIN_PINS: usize = 119;
+/// and 7 semantic pins; at step d, the 30 more of those ids that run
+/// captures calling Lua, and the 8 of `m66d_quarantine_pins.txt`.
+const MIN_PINS: usize = 157;
+
+/// The pin files: step c's, and step d's for the rows of the three ids
+/// whose defects only a match-time capture reaches.
+const PIN_FILES: [&str; 2] = ["m66c_quarantine_pins.txt", "m66d_quarantine_pins.txt"];
 
 /// The quarantined rows (`m66_lpeg_quarantine.txt`: they crash or are
 /// undefined in the C, so no golden holds them, LESSONS #033) that the step
-/// can run, against their pins (`m66c_quarantine_pins.txt`, written by
-/// `oracle/gen_m66c_quarantine_pins.py`): what the tree's `lpeg.c` answers
+/// can run, against their pins: `m66c_quarantine_pins.txt`, written by
+/// `oracle/gen_m66c_quarantine_pins.py`, what the tree's `lpeg.c` answers
 /// with the two defects the port fixes fixed in it
 /// (`lpeg-codegen-jump-out-of-code`, `lpeg-cc-nil-without-ktable`), or
-/// where that build still fails, a correct LPeg's answer. Compared exactly,
-/// with no class.
+/// where that build still fails, a correct LPeg's answer; and
+/// `m66d_quarantine_pins.txt` (`oracle/gen_m66d_quarantine_pins.py`), the
+/// answers of that build with the three match-time capture defects fixed
+/// as well (`lpeg-doublecap-stack-overread`,
+/// `lpeg-runtime-capture-index-16bit`, `lpeg-code-freed-during-match`).
+/// Compared exactly, with no class.
 #[test]
 fn every_quarantined_step_row_matches_its_pin() {
     let chunks: HashMap<String, Vec<u8>> = lines("m66_lpeg_quarantine.txt")
@@ -454,7 +485,7 @@ fn every_quarantined_step_row_matches_its_pin() {
     let masks = Masks::new();
     let mut lua = corpus_lua();
     let (mut ran, mut mismatches) = (0usize, Vec::new());
-    for pin in lines("m66c_quarantine_pins.txt") {
+    for pin in PIN_FILES.into_iter().flat_map(lines) {
         assert_eq!(pin.len(), 6, "{}: malformed pin", pin[0]);
         let step = pin[1].chars().next().unwrap_or('?');
         if step > STEP {

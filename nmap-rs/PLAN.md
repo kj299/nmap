@@ -49,8 +49,8 @@ record; edit it as milestones complete.
 > (`nmapdb`) are merged (#130, #131), and so are step 0b (the LPeg oracle,
 > spike and adversarial search, which confirmed D3) and step b (LPeg trees,
 > constructors and the verifier) (#132). Step c (the compiler, the VM and
-> the captures that do not call Lua) is merged (#134); its review fix round
-> is in review. The
+> the captures that do not call Lua) and its review fixes are merged (#134,
+> #135); step d (the captures that call Lua) is built and in review. The
 > vendored VM now matches nmap's own Lua on all but 1 of 99 semantics cases, and the
 > standard library it lacks has been written first-party in `core::nse::stdlib`,
 > leaf-first by how many shipped files each function unblocks: `string.pack`/
@@ -498,9 +498,8 @@ the update/submission paths are new behavior → golden + negative tests, ledger
      `nmapdb` oracle and per-script load harness) and a (`nmapdb`) are done:
      `-sC` now stops on `lpeg`, not `nmapdb`. Steps 0b and b are merged
      (#132); step c (compiler, VM, non-calling captures) is merged (#134),
-     and its review fix round (byte work charged per 4 bytes, memory
-     accounted at each growth, a work-per-slice gate, a fuzzed binding) is
-     in review; steps d and e follow.
+     and so is its review fix round (#135); step d (the captures that call
+     Lua) is built and in review; step e (registration) follows.
    - **Milestone numbers are names, not order:**
      - M6.6 (`nmapdb`, `lpeg`) runs before M6.5;
      - M6.7 is legacy TLS;

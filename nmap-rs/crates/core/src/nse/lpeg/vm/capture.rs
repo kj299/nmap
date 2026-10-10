@@ -33,8 +33,24 @@
 //! growth that takes the heap past the memory budget ends the slice
 //! (`lpeg::grow`).
 //!
-//! Captures that call Lua (`/f`, `/table`, `Cf`, match-time captures) are
-//! step d's: [`CapError::CallsLua`] until then.
+//! **Captures that call Lua** (`/f`, `Cf`, `/table`; step d). The cursor
+//! does not call: where the C's `functioncap`, `foldcap` and `querycap` call
+//! Lua (`lua_call`, `lua_gettable`), it stops with [`Step::Call`], naming the
+//! function's (or table's) constant and the values the call takes, which
+//! stay on its stack; the binding converts them, makes the call through the
+//! VM, and hands the results back ([`CapCursor::returned`]), and evaluation
+//! goes on. So a callback runs at the C's moment, in the C's order, with the
+//! cursor's state intact around it however long it takes, a coroutine yield
+//! included. Lua values — a call's results, a match-time capture's values
+//! (`Cruntime`, read from the binding's window) — are carried as
+//! [`CapVal::Lua`] of the binding's value type `V`; a cursor that never
+//! meets them ([`NoLua`], the pure tests and fuzz targets) has none, and its
+//! [`CapCursor::step`] refuses a call with [`CapError::CallsLua`].
+//!
+//! **Inside a match-time capture** the C evaluates the capture's nested
+//! values when it closes (`runtimecap`'s `pushnestedvalues`), on the whole
+//! capture list so far: [`CapCursor::nested_at`] is that evaluation, of the
+//! one capture.
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -44,6 +60,8 @@
 )]
 
 use std::borrow::Cow;
+
+use gc_arena::Collect;
 
 use super::Capture;
 use crate::nse::lpeg::tree::{CapKind, Key};
@@ -66,11 +84,18 @@ pub const FIXEDARGS: usize = 3;
 pub const TABLE_CHUNK: usize = 4096;
 
 /// One assignment a table capture makes.
-pub type Entry = (TableKey, CapVal);
+pub type Entry<V = NoLua> = (TableKey, CapVal<V>);
+
+/// The Lua value type of a cursor that never holds one: it evaluates only
+/// the captures that call no Lua (the pure tests and fuzz targets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum NoLua {}
 
 /// One slot of the mirrored Lua stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapVal {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Collect)]
+#[collect(no_drop)]
+pub enum CapVal<V = NoLua> {
     Nil,
     /// A position or a match's end, 1-based.
     Int(i64),
@@ -86,10 +111,16 @@ pub enum CapVal {
     Table(u32),
     /// `luaL_Buffer`'s slot while a string capture is being built.
     Buf,
+    /// A Lua value: a call's result, or a match-time capture's value.
+    Lua(V),
+    /// The slot the function of a call takes below its arguments
+    /// (`functioncap`, `foldcap`): a slot of the stack, never a value.
+    Callee,
 }
 
 /// A key a table capture sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Collect)]
+#[collect(require_static)]
 pub enum TableKey {
     /// A positional value (`lua_rawseti`).
     Int(i64),
@@ -112,8 +143,9 @@ pub enum View<'a> {
     Other(&'static str),
 }
 
-/// The constants and extra arguments of a match, as the cursor sees them.
-pub trait CapEnv {
+/// The constants and extra arguments of a match, as the cursor sees them,
+/// and the Lua values it holds (`V`).
+pub trait CapEnv<V = NoLua> {
     /// The constant at key `k` (`k > 0`).
     fn constant(&self, k: Key) -> View<'_>;
     /// `match`'s `n`-th extra argument (`n >= 1`, present).
@@ -122,6 +154,53 @@ pub trait CapEnv {
     /// are always strings), and how many bytes deciding it compared. Key 0 is
     /// `nil`.
     fn same_constant(&self, a: Key, b: Key) -> (bool, usize);
+    /// The value a match-time capture left at index `i` of the binding's
+    /// window (a `Cruntime` entry's `idx`: `lua_pushvalue(L, idx)`), if
+    /// there is one.
+    fn dynamic(&self, _i: Key) -> Option<V> {
+        None
+    }
+    /// A Lua value as capture evaluation needs to see it.
+    fn value(&self, _v: V) -> View<'_> {
+        View::Nil
+    }
+}
+
+/// What a step of evaluation came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// The values are made.
+    Done,
+    /// The budget is spent.
+    Pending,
+    /// A call into Lua is needed before evaluation can go on: the binding
+    /// makes it and hands the results back ([`CapCursor::returned`]).
+    Call(CallReq),
+}
+
+/// A call capture evaluation needs (`lpeg.c:570-617`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallReq {
+    pub kind: CallKind,
+    /// The constant key of the function (`Function`, `Fold`) or the table
+    /// (`Query`).
+    pub key: Key,
+    /// The index in [`CapCursor::values`] of the call's first argument; the
+    /// arguments run to the end. For `Query`, the one value is the key.
+    pub args: usize,
+}
+
+/// Which capture a call is for, and so what it keeps of the results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    /// `p / f`: `lua_call(L, n, LUA_MULTRET)`, every result a value.
+    Function,
+    /// `Cf(p, f)`: `lua_call(L, n + 1, 1)`, exactly one result, the
+    /// accumulator.
+    Fold,
+    /// `p / t`: `lua_gettable` (`__index` honoured), one result, and `nil`
+    /// no value.
+    Query,
 }
 
 /// Why evaluation failed. The binding words each as the C does.
@@ -149,7 +228,10 @@ pub enum CapError {
     BufferTooLarge,
     /// The memory budget refused a buffer or a table.
     NotEnoughMemory,
-    /// A capture that calls Lua: step d's.
+    /// "no initial value for fold capture" (`foldcap`).
+    NoInitialFold,
+    /// A capture that calls Lua, met by a cursor that cannot call
+    /// ([`CapCursor::step`]: a [`NoLua`] one).
     CallsLua,
     /// A list this machine cannot have made.
     Malformed,
@@ -232,6 +314,33 @@ enum Frame {
     /// `luaL_addlstring` of `src[at..end]` into the buffer being built, as
     /// much a step as the budget pays for.
     Copy { src: Src, at: usize, end: usize },
+    /// `functioncap` (`lpeg.c:610`): the function's slot, then the nested
+    /// values (stage 0); then the call (stage 1), whose results are the
+    /// capture's values.
+    Function { key: Key, stage: u8 },
+    /// `foldcap` (`lpeg.c:586`).
+    Fold { key: Key, stage: FoldStage },
+    /// `querycap` (`lpeg.c:570`): the first nested value (stage 0), then
+    /// the table indexed by it (stage 1).
+    Query { key: Key, stage: u8 },
+    /// `runtimecap`'s `pushnestedvalues(cs, 0)` (`lpeg.c:675`): the values
+    /// of the match-time capture whose open entry is at `open`.
+    Runtime { open: usize, started: bool },
+}
+
+/// Where `foldcap` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldStage {
+    /// About to check for an initial value and evaluate it.
+    Start,
+    /// Back with the first nested capture's values: the first is the
+    /// accumulator.
+    First,
+    /// At the next nested capture, or the close.
+    Loop,
+    /// Back with a nested capture's values, the function's slot at `callee`
+    /// below the accumulator: the call.
+    Called { callee: usize },
 }
 
 /// Where a [`Frame::Copy`] copies from.
@@ -245,6 +354,8 @@ enum Src {
     Const(Key),
     /// An extra argument's text.
     Arg(u32),
+    /// The text of the Lua value at this index of the stack.
+    Value(usize),
 }
 
 /// Where `substcap` is.
@@ -280,50 +391,73 @@ enum TableWait {
     Positional,
 }
 
-/// Capture evaluation of one match (`getcaptures`, `lpeg.c:902`).
-#[derive(Debug, Clone)]
-pub struct CapCursor {
+/// Capture evaluation of one match (`getcaptures`, `lpeg.c:902`), or of one
+/// match-time capture's values ([`CapCursor::nested_at`]). `V` is the
+/// binding's Lua value: traced, when it is one, with the cursor.
+#[derive(Debug, Clone, Collect)]
+#[collect(no_drop)]
+pub struct CapCursor<V = NoLua> {
+    #[collect(require_static)]
     pos: usize,
+    #[collect(require_static)]
     frames: Vec<Frame>,
     /// The mirrored Lua stack.
-    vs: Vec<CapVal>,
+    vs: Vec<CapVal<V>>,
     /// The buffers of the string captures being built, innermost last.
+    #[collect(require_static)]
     bufs: Vec<Vec<u8>>,
     /// The strings built.
+    #[collect(require_static)]
     strings: Vec<Vec<u8>>,
     /// The tables made, as their assignments in order, in chunks of
     /// [`TABLE_CHUNK`].
-    tables: Vec<Vec<Vec<Entry>>>,
+    tables: Vec<Vec<Vec<Entry<V>>>>,
     /// `/string`'s capture arrays, [`MAXSTRCAPS`] slots each.
+    #[collect(require_static)]
     strcaps: Vec<StrAux>,
     /// The last returned count.
+    #[collect(require_static)]
     ret: usize,
     /// The match's end, for a match with no values.
+    #[collect(require_static)]
     end: usize,
     /// Stack slots in use below the values.
+    #[collect(require_static)]
     u0: usize,
     /// `match`'s argument count (`ptop`).
+    #[collect(require_static)]
     ptop: usize,
+    #[collect(require_static)]
     done: bool,
+    #[collect(require_static)]
     steps: u64,
     /// A growth took the heap past the memory budget: end the slice.
+    #[collect(require_static)]
     stop: bool,
     /// Units a step took past the budget, on work it could not stop
     /// part-way ([`CapCursor::take_over`]).
+    #[collect(require_static)]
     over: u64,
+    /// The call evaluation waits on ([`Step::Call`]).
+    #[collect(require_static)]
+    pending: Option<CallReq>,
 }
 
-impl CapCursor {
+impl CapCursor<NoLua> {
     /// Evaluation of a match that ended at `end`, with `u0` stack slots in
-    /// use when it starts and `ptop` arguments to `match`.
+    /// use when it starts and `ptop` arguments to `match`, by a cursor that
+    /// calls no Lua.
     #[must_use]
-    pub fn new(end: usize, u0: usize, ptop: usize) -> CapCursor {
+    pub fn new(end: usize, u0: usize, ptop: usize) -> CapCursor<NoLua> {
+        CapCursor::with_values(end, u0, ptop)
+    }
+}
+
+impl<V: Copy> CapCursor<V> {
+    fn with_root(root: Frame, end: usize, u0: usize, ptop: usize) -> CapCursor<V> {
         CapCursor {
             pos: 0,
-            frames: vec![Frame::Top {
-                n: 0,
-                started: false,
-            }],
+            frames: vec![root],
             vs: Vec::new(),
             bufs: Vec::new(),
             strings: Vec::new(),
@@ -337,7 +471,42 @@ impl CapCursor {
             steps: 0,
             stop: false,
             over: 0,
+            pending: None,
         }
+    }
+
+    /// Evaluation of a match that ended at `end` (`getcaptures`), with `u0`
+    /// stack slots in use when it starts and `ptop` arguments to `match`,
+    /// holding Lua values of type `V`.
+    #[must_use]
+    pub fn with_values(end: usize, u0: usize, ptop: usize) -> CapCursor<V> {
+        CapCursor::with_root(
+            Frame::Top {
+                n: 0,
+                started: false,
+            },
+            end,
+            u0,
+            ptop,
+        )
+    }
+
+    /// Evaluation of the values of the match-time capture whose open entry
+    /// is at `open` in the capture list, closed by the list's last entry
+    /// (`runtimecap`, `lpeg.c:661-676`): its nested values, or the whole
+    /// match if it has none. `u0` stack slots are in use below them (the
+    /// function, the subject and the position among them).
+    #[must_use]
+    pub fn nested_at(open: usize, u0: usize, ptop: usize) -> CapCursor<V> {
+        CapCursor::with_root(
+            Frame::Runtime {
+                open,
+                started: false,
+            },
+            0,
+            u0,
+            ptop,
+        )
     }
 
     /// Units of budget a step took past the budget it was given, on work
@@ -348,10 +517,50 @@ impl CapCursor {
         std::mem::take(&mut self.over)
     }
 
-    /// The values, once done: what `match` returns.
+    /// The values: what `match` returns once done, or a match-time
+    /// capture's arguments; while a call is waiting, its arguments
+    /// ([`CallReq::args`]) are the last of them.
     #[must_use]
-    pub fn values(&self) -> &[CapVal] {
+    pub fn values(&self) -> &[CapVal<V>] {
         &self.vs
+    }
+
+    /// The results of the call [`Step::Call`] asked for, as the capture keeps
+    /// them: every result of a function capture's call, the one a fold's
+    /// call returned (the binding passes exactly one, `nil` for none), a
+    /// query's value or nothing for `nil`. They replace the call's
+    /// arguments (and the function's slot), and evaluation goes on at the
+    /// next step.
+    pub fn returned(&mut self, results: &[V]) -> Result<(), CapError> {
+        let req = self.pending.take().ok_or(CapError::Malformed)?;
+        let keep = match req.kind {
+            // The function's slot below the arguments goes too.
+            CallKind::Function | CallKind::Fold => req.args.checked_sub(1),
+            CallKind::Query => Some(req.args),
+        }
+        .ok_or(CapError::Malformed)?;
+        if keep > self.vs.len() {
+            return Err(CapError::Malformed);
+        }
+        self.vs.truncate(keep);
+        grow(&mut self.vs, results.len(), &mut self.stop)?;
+        self.vs.extend(results.iter().map(|&v| CapVal::Lua(v)));
+        did_steps(u64::try_from(results.len()).unwrap_or(u64::MAX));
+        match (req.kind, self.frames.last()) {
+            (CallKind::Function, Some(Frame::Function { .. }))
+            | (CallKind::Query, Some(Frame::Query { .. })) => {
+                self.ret(results.len());
+                Ok(())
+            }
+            (CallKind::Fold, Some(&Frame::Fold { key, .. })) if results.len() == 1 => {
+                self.set(Frame::Fold {
+                    key,
+                    stage: FoldStage::Loop,
+                });
+                Ok(())
+            }
+            _ => Err(CapError::Malformed),
+        }
     }
 
     /// The string a [`CapVal::Bytes`] refers to.
@@ -365,7 +574,7 @@ impl CapCursor {
     /// The assignments of the table a [`CapVal::Table`] refers to, in order
     /// (a copy, for the tests).
     #[must_use]
-    pub fn table(&self, i: u32) -> Vec<Entry> {
+    pub fn table(&self, i: u32) -> Vec<Entry<V>> {
         self.tables
             .get(usize::try_from(i).unwrap_or(usize::MAX))
             .map_or(Vec::new(), |chunks| chunks.concat())
@@ -374,7 +583,7 @@ impl CapCursor {
     /// Assignment `e` of table `i`, in order; `None` past the last (or in a
     /// chunk given back).
     #[must_use]
-    pub fn table_entry(&self, i: u32, e: usize) -> Option<Entry> {
+    pub fn table_entry(&self, i: u32, e: usize) -> Option<Entry<V>> {
         self.tables
             .get(usize::try_from(i).ok()?)?
             .get(e / TABLE_CHUNK)?
@@ -449,16 +658,35 @@ impl CapCursor {
         .fold(0, usize::saturating_add)
     }
 
-    /// Evaluate until done (`Some`) or `budget` is spent (`None`). `caps` is
-    /// the match's capture list, its closing `Cclose` included, and `subj`
-    /// its subject, the same at every step.
+    /// Evaluate until done (`Some`) or `budget` is spent (`None`), by a
+    /// cursor that cannot call Lua: a capture that calls it is
+    /// [`CapError::CallsLua`]. `caps` is the match's capture list, its
+    /// closing `Cclose` included, and `subj` its subject, the same at every
+    /// step.
     pub fn step(
         &mut self,
         caps: &[Capture],
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         budget: &mut u32,
     ) -> Result<Option<()>, CapError> {
+        match self.run_step(caps, subj, env, budget)? {
+            Step::Done => Ok(Some(())),
+            Step::Pending => Ok(None),
+            Step::Call(_) => Err(CapError::CallsLua),
+        }
+    }
+
+    /// Evaluate until done, `budget` is spent, or a call into Lua is
+    /// needed ([`Step::Call`]: no step is taken again until its results are
+    /// handed back). `caps` and `subj` as for [`CapCursor::step`].
+    pub fn run_step(
+        &mut self,
+        caps: &[Capture],
+        subj: &[u8],
+        env: &dyn CapEnv<V>,
+        budget: &mut u32,
+    ) -> Result<Step, CapError> {
         let start = self.steps;
         let r = self.run(caps, subj, env, budget);
         did_steps(self.steps - start);
@@ -469,12 +697,15 @@ impl CapCursor {
         &mut self,
         caps: &[Capture],
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         budget: &mut u32,
-    ) -> Result<Option<()>, CapError> {
+    ) -> Result<Step, CapError> {
+        if let Some(req) = self.pending {
+            return Ok(Step::Call(req));
+        }
         while !self.done {
             if *budget == 0 {
-                return Ok(None);
+                return Ok(Step::Pending);
             }
             *budget -= 1;
             self.steps += 1;
@@ -486,8 +717,11 @@ impl CapCursor {
             if std::mem::take(&mut self.stop) {
                 *budget = 0;
             }
+            if let Some(req) = self.pending {
+                return Ok(Step::Call(req));
+            }
         }
-        Ok(Some(()))
+        Ok(Step::Done)
     }
 
     // ------------------------------------------------------------ helpers
@@ -496,13 +730,13 @@ impl CapCursor {
         caps.get(i).ok_or(CapError::Malformed)
     }
 
-    fn push(&mut self, v: CapVal) -> Result<(), CapError> {
+    fn push(&mut self, v: CapVal<V>) -> Result<(), CapError> {
         grow(&mut self.vs, 1, &mut self.stop)?;
         self.vs.push(v);
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<CapVal, CapError> {
+    fn pop(&mut self) -> Result<CapVal<V>, CapError> {
         self.vs.pop().ok_or(CapError::Malformed)
     }
 
@@ -572,7 +806,7 @@ impl CapCursor {
     }
 
     /// `luaL_typename` of a value.
-    fn type_name(v: CapVal, env: &dyn CapEnv) -> &'static str {
+    fn type_name(v: CapVal<V>, env: &dyn CapEnv<V>) -> &'static str {
         let view = |w: View<'_>| match w {
             View::Nil => "nil",
             View::Str(_) => "string",
@@ -586,14 +820,15 @@ impl CapCursor {
             CapVal::Table(_) => "table",
             CapVal::K(k) => view(seen(env.constant(k))),
             CapVal::Arg(n) => view(seen(env.argument(n))),
-            CapVal::Buf => "userdata",
+            CapVal::Lua(x) => view(seen(env.value(x))),
+            CapVal::Buf | CapVal::Callee => "userdata",
         }
     }
 
     /// The constant at `k` as a value: key 0 is `nil` (`Cc(nil)` adds no
     /// constant, and the C reads entry 0 of a table it may not have:
     /// `lpeg-cc-nil-without-ktable`).
-    fn constant(k: Key) -> CapVal {
+    fn constant(k: Key) -> CapVal<V> {
         if k == 0 {
             CapVal::Nil
         } else {
@@ -608,7 +843,7 @@ impl CapCursor {
         frame: Frame,
         caps: &[Capture],
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         budget: &mut u32,
     ) -> Result<(), CapError> {
         match frame {
@@ -709,7 +944,124 @@ impl CapCursor {
             Frame::Subst { curr, stage } => self.subst_cap(caps, subj, curr, stage),
             Frame::AddOne { what, stage, n } => self.add_one(caps, env, what, stage, n, budget),
             Frame::Copy { src, at, end } => self.copy_step(subj, env, src, at, end, budget),
+            Frame::Function { key, stage } => self.function_cap(key, stage),
+            Frame::Fold { key, stage } => self.fold_cap(caps, key, stage),
+            Frame::Query { key, stage } => self.query_cap(key, stage),
+            // `runtimecap`'s `pushnestedvalues(cs, 0)`: from the open entry,
+            // over the whole list (`cs->ocap`), so a back-reference sees the
+            // groups before it.
+            Frame::Runtime { open, started } => {
+                if started {
+                    self.frames.pop();
+                    self.done = true;
+                    return Ok(());
+                }
+                self.pos = open;
+                self.set(Frame::Runtime {
+                    open,
+                    started: true,
+                });
+                self.call(nested(false))
+            }
         }
+    }
+
+    /// `functioncap` (`lpeg.c:610`): the function's slot, the nested
+    /// values (the whole match if none), then the call, all of whose results
+    /// are the capture's values.
+    fn function_cap(&mut self, key: Key, stage: u8) -> Result<(), CapError> {
+        if stage == 0 {
+            self.push(CapVal::Callee)?;
+            self.set(Frame::Function { key, stage: 1 });
+            return self.call(nested(false));
+        }
+        let args = self.vs.len() - self.ret;
+        self.pending = Some(CallReq {
+            kind: CallKind::Function,
+            key,
+            args,
+        });
+        Ok(())
+    }
+
+    /// `foldcap` (`lpeg.c:586`), 0.12's: the first nested capture's first
+    /// value is the accumulator ("no initial value for fold capture" if the
+    /// capture has no nested captures, or the first gives no value); then
+    /// for each further nested capture, `f(acc, its values...)`, one result
+    /// kept, the function's slot below the accumulator while its values are
+    /// evaluated.
+    fn fold_cap(&mut self, caps: &[Capture], key: Key, stage: FoldStage) -> Result<(), CapError> {
+        match stage {
+            FoldStage::Start => {
+                let full = self.cap(caps, self.pos)?.is_full();
+                self.pos += 1;
+                if full || self.cap(caps, self.pos)?.is_close() {
+                    return Err(CapError::NoInitialFold);
+                }
+                self.set(Frame::Fold {
+                    key,
+                    stage: FoldStage::First,
+                });
+                self.call(Frame::Push)
+            }
+            FoldStage::First => {
+                let n = self.ret;
+                if n == 0 {
+                    return Err(CapError::NoInitialFold);
+                }
+                // `lua_pop(L, n - 1)`: the first value stays.
+                self.vs.truncate(self.vs.len() - (n - 1));
+                self.set(Frame::Fold {
+                    key,
+                    stage: FoldStage::Loop,
+                });
+                Ok(())
+            }
+            FoldStage::Loop => {
+                if self.cap(caps, self.pos)?.is_close() {
+                    self.pos += 1;
+                    self.ret(1);
+                    return Ok(());
+                }
+                // `lua_pushvalue(f); lua_insert(L, -2)`: the function's slot
+                // below the accumulator.
+                let callee = self.vs.len().checked_sub(1).ok_or(CapError::Malformed)?;
+                grow(&mut self.vs, 1, &mut self.stop)?;
+                self.vs.insert(callee, CapVal::Callee);
+                self.set(Frame::Fold {
+                    key,
+                    stage: FoldStage::Called { callee },
+                });
+                self.call(Frame::Push)
+            }
+            FoldStage::Called { callee } => {
+                self.pending = Some(CallReq {
+                    kind: CallKind::Fold,
+                    key,
+                    args: callee + 1,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// `querycap` (`lpeg.c:570`): the first nested value (the whole match if
+    /// none) indexes the table.
+    fn query_cap(&mut self, key: Key, stage: u8) -> Result<(), CapError> {
+        if stage == 0 {
+            self.set(Frame::Query { key, stage: 1 });
+            return self.call(nested(false));
+        }
+        // `pushonenestedvalue`: the first value stays.
+        let n = self.ret;
+        let first = self.vs.len().checked_sub(n).ok_or(CapError::Malformed)?;
+        self.vs.truncate(first + 1);
+        self.pending = Some(CallReq {
+            kind: CallKind::Query,
+            key,
+            args: first,
+        });
+        Ok(())
     }
 
     /// `lua_insert(L, -k)` after a simple capture's nested values: the whole
@@ -731,7 +1083,7 @@ impl CapCursor {
             (self.ret, last)
         };
         let at = self.vs.len().checked_sub(k).ok_or(CapError::Malformed)?;
-        let size = std::mem::size_of::<CapVal>();
+        let size = std::mem::size_of::<CapVal<V>>();
         let room = (BYTES_PER_FUEL.saturating_mul(
             usize::try_from(*budget)
                 .unwrap_or(usize::MAX)
@@ -765,7 +1117,7 @@ impl CapCursor {
     fn copy_step(
         &mut self,
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         src: Src,
         at: usize,
         end: usize,
@@ -787,10 +1139,14 @@ impl CapCursor {
                 .strings
                 .get(usize::try_from(i).unwrap_or(usize::MAX))
                 .ok_or(CapError::Malformed)?,
-            Src::Const(_) | Src::Arg(_) => {
+            Src::Const(_) | Src::Arg(_) | Src::Value(_) => {
                 view = match src {
                     Src::Const(k) => seen(env.constant(k)),
                     Src::Arg(m) => seen(env.argument(m)),
+                    Src::Value(i) => match self.vs.get(i) {
+                        Some(&CapVal::Lua(x)) => seen(env.value(x)),
+                        _ => return Err(CapError::Malformed),
+                    },
                     _ => View::Nil,
                 };
                 match &view {
@@ -821,9 +1177,9 @@ impl CapCursor {
         &mut self,
         caps: &[Capture],
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
     ) -> Result<(), CapError> {
-        let _ = (subj, env);
+        let _ = subj;
         // `luaL_checkstack(L, 4, "too many captures")`: the stack's whole
         // height, plus four, within `LUAI_MAXSTACK`.
         if self.u0.saturating_add(self.vs.len()).saturating_add(4) > LUAI_MAXSTACK {
@@ -906,7 +1262,26 @@ impl CapCursor {
                     self.call(nested(false))?;
                 }
             }
-            k if super::super::code::kind_calls_lua(k) => return Err(CapError::CallsLua),
+            k if k == CapKind::Function as u8 => self.set(Frame::Function {
+                key: c.idx,
+                stage: 0,
+            }),
+            k if k == CapKind::Fold as u8 => self.set(Frame::Fold {
+                key: c.idx,
+                stage: FoldStage::Start,
+            }),
+            k if k == CapKind::Query as u8 => self.set(Frame::Query {
+                key: c.idx,
+                stage: 0,
+            }),
+            // `lua_pushvalue(L, idx)`: the value a match-time capture left
+            // in the binding's window, the same object at every read.
+            k if k == CapKind::Runtime as u8 => {
+                let v = env.dynamic(c.idx).ok_or(CapError::Malformed)?;
+                self.push(CapVal::Lua(v))?;
+                self.pos += 1;
+                self.ret(1);
+            }
             _ => return Err(CapError::Malformed),
         }
         Ok(())
@@ -983,7 +1358,7 @@ impl CapCursor {
     fn find_back(
         &mut self,
         caps: &[Capture],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         name: Key,
         mut cap: usize,
         mut skip: Option<usize>,
@@ -1128,7 +1503,7 @@ impl CapCursor {
         }
     }
 
-    fn assign(&mut self, t: u32, k: TableKey, v: CapVal) -> Result<(), CapError> {
+    fn assign(&mut self, t: u32, k: TableKey, v: CapVal<V>) -> Result<(), CapError> {
         let chunks = self
             .tables
             .get_mut(usize::try_from(t).unwrap_or(usize::MAX))
@@ -1302,7 +1677,7 @@ impl CapCursor {
         &mut self,
         _caps: &[Capture],
         subj: &[u8],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         fmt: Key,
         base: usize,
         n: usize,
@@ -1483,7 +1858,7 @@ impl CapCursor {
     fn add_one(
         &mut self,
         caps: &[Capture],
-        env: &dyn CapEnv,
+        env: &dyn CapEnv<V>,
         what: &'static str,
         stage: u8,
         n: usize,
@@ -1550,8 +1925,15 @@ impl CapCursor {
                         let len = text_len(seen(env.argument(m)))?;
                         self.copy(Src::Arg(m), 0, len)
                     }
+                    // A string's or a number's text (`luaL_addvalue`): from
+                    // the value, where it is on the stack.
+                    CapVal::Lua(x) => {
+                        let len = text_len(seen(env.value(x)))?;
+                        let at = self.vs.len() - 1;
+                        self.copy(Src::Value(at), 0, len)
+                    }
                     CapVal::Nil | CapVal::Table(_) => Err(invalid()),
-                    CapVal::Buf => Err(CapError::Malformed),
+                    CapVal::Buf | CapVal::Callee => Err(CapError::Malformed),
                 }
             }
             // The value is in: off the stack.

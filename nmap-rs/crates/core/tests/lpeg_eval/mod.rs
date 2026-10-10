@@ -2,10 +2,16 @@
 //! registration ([`nmap_core::nse::lpeg::register_for_tests`]), and a runner
 //! that steps a chunk in slices of fuel, counting the slices.
 //!
-//! Shared by `lpeg_tree_differential` and `lpeg_tree_limits`.
+//! Shared by the `lpeg_*` tests.
 #![allow(dead_code)] // each user takes a different subset
 
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
 use nmap_core::nse::lpeg::register_for_tests;
+use nmap_core::nse::package::{load_package, LibrarySource};
+use nmap_core::nse::stdlib::iolib::{load_io, FsError, OpenMode, ScriptFile, ScriptFs, Whence};
+use nmap_core::nse::stdlib::utf8lib::load_utf8;
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{Closure, Executor, Fuel, Function, Lua, StashedExecutor, Table, Value, Variadic};
 
@@ -166,4 +172,108 @@ pub fn call_global(
         ctx.stash(Executor::start(ctx, f, Variadic(args)))
     });
     step_to_end(lua, &ex, slice, u64::MAX)
+}
+
+/// The repository's `nselib/`.
+pub fn nselib() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../nselib")
+        .canonicalize()
+        .expect("the tree's nselib")
+}
+
+/// `require` finding `re`, `json` and `lpeg-utility` in the tree's
+/// `nselib/`, by absolute path, as nmap's `--datadir` would; nothing else.
+struct Nselib;
+
+impl LibrarySource for Nselib {
+    fn find(&self, file: &[u8]) -> Option<Vec<u8>> {
+        let name = std::str::from_utf8(file).ok()?.strip_prefix("nselib/")?;
+        if !matches!(name, "re.lua" | "json.lua" | "lpeg-utility.lua") {
+            return None;
+        }
+        let p = nselib().join(name);
+        p.is_file()
+            .then(|| p.to_string_lossy().into_owned().into_bytes())
+    }
+    fn read(&self, path: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+        std::fs::read(Path::new(
+            std::str::from_utf8(path).map_err(|_| Vec::new())?,
+        ))
+        .map_err(|e| e.to_string().into_bytes())
+    }
+}
+
+/// `io` as the NSE state has it — `io.stdout` is a `FILE*` a chunk can hand
+/// to LPeg, and `print` lives in `io`'s library — with no file to open and
+/// its output discarded.
+struct NoFiles;
+
+struct Discard;
+
+impl ScriptFile for Discard {
+    fn read(&mut self, _: &mut [u8]) -> Result<usize, FsError> {
+        Ok(0)
+    }
+    fn write(&mut self, _: &[u8]) -> Result<(), FsError> {
+        Ok(())
+    }
+    fn seek(&mut self, _: Whence, _: i64) -> Result<u64, FsError> {
+        Ok(0)
+    }
+    fn flush(&mut self) -> Result<(), FsError> {
+        Ok(())
+    }
+}
+
+impl ScriptFs for NoFiles {
+    fn open(&self, _: &[u8], _: OpenMode) -> Result<Box<dyn ScriptFile>, FsError> {
+        Err(FsError::denied())
+    }
+    fn stdout(&self) -> Box<dyn ScriptFile> {
+        Box::new(Discard)
+    }
+}
+
+/// The libraries on top of LPeg, loaded as M6.6 step d's brief's harness
+/// loads them: `stdnse`, `unittest` and `unicode` stubbed, then `re`,
+/// `json` and lpeg-utility (`U`) as globals.
+const NSELIB_PRELUDE: &str = r#"
+package.preload["stdnse"] = function()
+  local M = {}
+  function M.module(name, ...)
+    local env = {}; env._NAME = name; env._M = env
+    for _, f in ipairs({...}) do f(env) end
+    return env
+  end
+  function M.seeall(env) setmetatable(env, {__index = _G}) end
+  function M.debug1() end
+  return M
+end
+package.preload["unittest"] = function() return { testing = function() return false end } end
+package.preload["unicode"] = function() return { utf8_enc = utf8.char } end
+re = require "re"
+json = require "json"
+U = require "lpeg-utility"
+"#;
+
+/// [`new_lua`], with `io` (`print` among it), `utf8`, and `package` finding
+/// the tree's `re`, `json` and `lpeg-utility`, loaded as globals
+/// ([`NSELIB_PRELUDE`]).
+pub fn new_lua_with_nselib() -> Lua {
+    let mut lua = new_lua();
+    let ex = lua
+        .try_enter(|ctx| {
+            load_io(ctx, Rc::new(NoFiles));
+            load_utf8(ctx);
+            let loaded = load_package(ctx, Rc::new(Nselib));
+            let lpeg = ctx.get_global::<Value>("lpeg").expect("lpeg");
+            loaded.set_field(ctx, "lpeg", lpeg);
+            let c = Closure::load(ctx, Some("=prelude"), NSELIB_PRELUDE.as_bytes())?;
+            Ok(ctx.stash(Executor::start(ctx, c.into(), ())))
+        })
+        .expect("the prelude compiles");
+    let (out, _) = step_to_end(&mut lua, &ex, 1_000_000, 1_000);
+    assert_eq!(out, Outcome::Returned(Vec::new()), "the libraries load");
+    lua
 }

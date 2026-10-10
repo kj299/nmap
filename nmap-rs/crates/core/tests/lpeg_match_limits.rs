@@ -36,7 +36,8 @@ fn run_small_stack(src: &'static str) -> Outcome {
 /// D2: the C's backtrack ceilings, exactly, through `lpeg.match`. The stack
 /// starts at 100 entries (`INITBACK`, the floor) and grows, when full, by
 /// doubling up to the value `setmaxstack` stored, as an `int` (the C reads
-/// it at each growth; no Lua runs in between, so a match reads it once).
+/// it at each growth; no Lua but a callback the match calls runs in between,
+/// so a match reads it when it starts and after each such call).
 #[test]
 fn the_backtrack_ceilings_are_the_cs() {
     let nested = "local S = lpeg.P{'S', S = 'a' * lpeg.V'S' * 'b' + ''} \
@@ -99,13 +100,13 @@ fn the_backtrack_ceilings_are_the_cs() {
     }
 }
 
-/// A match pre-empted part-way keeps the ceiling it started with: another
-/// script's `setmaxstack` between its slices does not reach it. In the C no
-/// Lua runs inside a match that calls none, except a `__gc` finalizer a
-/// collection during the stack's growth may run, which the port never runs
-/// (`gc_metamethods_never_run`). Step d re-reads the ceiling after each call
-/// a callback makes, where the C's `doublestack` would see a `setmaxstack`
-/// made inside a `Cmt` (`docs/M6.6-ANALYSIS.md` §1.3), and not after a
+/// A match pre-empted part-way keeps the ceiling it had: another script's
+/// `setmaxstack` between its slices does not reach it. In the C no Lua runs
+/// inside a match but the callbacks the match calls, and a `__gc` finalizer
+/// a collection during the stack's growth may run, which the port never runs
+/// (`gc_metamethods_never_run`). So a match reads the ceiling when it
+/// starts and again after each call it makes returns
+/// (`a_setmaxstack_in_a_callback_reaches_its_own_match`), and not after a
 /// plain pause for fuel.
 #[test]
 fn setmaxstack_does_not_reach_a_running_match() {
@@ -148,11 +149,31 @@ fn setmaxstack_does_not_reach_a_running_match() {
     );
 }
 
+/// A `setmaxstack` a callback calls reaches the match the callback runs in,
+/// as the C's `doublestack` reads the stored maximum at every growth (the
+/// brief's X10): `S <- 'a' S 'b' / ''` on a^200 b^200 fails with the
+/// default, and matches (401) after a match-time capture raises the
+/// ceiling first.
+#[test]
+fn a_setmaxstack_in_a_callback_reaches_its_own_match() {
+    assert_eq!(
+        run(
+            "local g = lpeg.P{ 'S', S = lpeg.P'a' * lpeg.V'S' * 'b' + '' } \
+             local p = lpeg.Cmt(lpeg.P(true), function() lpeg.setmaxstack(1000) return true end) * g \
+             local s = ('a'):rep(200) .. ('b'):rep(200) \
+             lpeg.setmaxstack(100) local ok1, r1 = pcall(lpeg.match, g, s) \
+             lpeg.setmaxstack(100) local ok2, r2 = pcall(lpeg.match, p, s) \
+             lpeg.setmaxstack(100) return ok1, r1, ok2, r2"
+        ),
+        returned(&["false", "too many pending calls/choices", "true", "401"])
+    );
+}
+
 /// The VM never runs a `__gc` metamethod, a table's or a userdata's
 /// (`vm-gc-metamethods-never-run`): objects with one, collected in full
-/// collections, are never finalized. So no Lua runs inside a match at step
-/// c, where in the C a collection that a growth of the match's stacks
-/// triggers runs pending finalizers: the review's repro (`t5.lua`: 300
+/// collections, are never finalized. So no Lua runs inside a match but the
+/// callbacks it calls, where in the C a collection that a growth of the
+/// match's stacks triggers runs pending finalizers too: the review's repro (`t5.lua`: 300
 /// matches of `S <- C'a' S 'b' / ''` 100 deep under `setmaxstack(150)`, each
 /// after 50 objects whose `__gc` raises the ceiling to 1,000 when it runs
 /// during a match) gives the tree's oracle 210 finalizer calls mid-match and
@@ -410,6 +431,27 @@ fn every_stage_of_a_match_is_pre_empted() {
             "return #lpeg.match(p, 'x')",
             "4096",
         ),
+        // Step d: 2^13 such values evaluated inside a match-time capture
+        // when it closes, then made its function's arguments. (The
+        // callbacks take the first: a Lua function that walks 8,192 varargs
+        // runs 15,000 units past its slice on its own, `f(table.unpack(t))`
+        // as much, which is the VM's granularity, not LPeg's.)
+        (
+            "local g = lpeg.Cg(lpeg.C(1), 'a') \
+             for i = 1, 13 do g = g * lpeg.Cg(lpeg.Cb'a' * lpeg.Cb'a', 'a') end \
+             p = lpeg.Cmt(g * lpeg.Cb'a', function(s, i, a) return true, a end) \
+             lpeg.match(p, 'y')",
+            "return lpeg.match(p, 'x')",
+            "x",
+        ),
+        // And made a `/function`'s arguments after the match.
+        (
+            "local g = lpeg.Cg(lpeg.C(1), 'a') \
+             for i = 1, 13 do g = g * lpeg.Cg(lpeg.Cb'a' * lpeg.Cb'a', 'a') end \
+             p = (g * lpeg.Cb'a') / function(a) return a .. '!' end lpeg.match(p, 'y')",
+            "return lpeg.match(p, 'x')",
+            "x!",
+        ),
     ];
     for (setup, src, want) in cases {
         let mut lua = new_lua();
@@ -511,6 +553,55 @@ const BYTE_WORK: &[(&str, &str, &str)] = &[
     ),
     // The compiler's memo tables for a tree of 400,000 nodes.
     ("p = lpeg.P'a'^-100000", "return lpeg.match(p, 'b')", "1"),
+    // Step d. A fold over 20,000 values, each the result of a call: 40,000
+    // calls, each through the VM.
+    (
+        "p = lpeg.Cf(lpeg.Cc(0) * (lpeg.C(1) / function(c) return 1 end)^0, \
+           function(a, b) return a + b end) s = ('a'):rep(20000)",
+        "return lpeg.match(p, s)",
+        "20000",
+    ),
+    // A `/table` indexed by a 1 MiB key, made a Lua string for its
+    // `__index`.
+    (
+        "s = ('a'):rep(1 << 20) \
+         p = lpeg.C(lpeg.P(1)^0) / setmetatable({}, { __index = function(_, k) return #k end })",
+        "return lpeg.match(p, s)",
+        "1048576",
+    ),
+    // A match-time capture returning 100,000 values, kept as captures and
+    // read back.
+    (
+        "T = {} for i = 1, 100000 do T[i] = i end \
+         p = lpeg.Cmt(1, function() return true, table.unpack(T) end)",
+        "return select('#', lpeg.match(p, 'a'))",
+        "100000",
+    ),
+    // 50,000 dynamic captures in a table capture, each read from the window.
+    (
+        "p = lpeg.Ct(lpeg.Cmt(1, function(s, i) return true, i end)^0) s = ('a'):rep(50000)",
+        "return #lpeg.match(p, s)",
+        "50000",
+    ),
+    // Dynamic captures 2,000 deep: each level's match-time capture gets its
+    // inner ones' values and returns them all and one more, 2 million in all
+    // (the innermost gets the whole match, `"a"`: 2,001 values, the C's).
+    (
+        "lpeg.setmaxstack(100000) \
+         p = lpeg.P{'S', S = lpeg.Cmt('a' * lpeg.V'S', function(s, i, ...) return true, i, ... end) + ''} \
+         s = ('a'):rep(2000)",
+        "return select('#', lpeg.match(p, s))",
+        "2001",
+    ),
+    // A table capture of 100,000 entries made a Lua table for a call, and a
+    // call of 100,000 arguments.
+    (
+        "s = ('a'):rep(100000) \
+         p = lpeg.Ct(lpeg.C(1)^0) / function(t) return #t end \
+         q = lpeg.C(1)^0 / function(...) return select('#', ...) end",
+        "return lpeg.match(p, s) + lpeg.match(q, s)",
+        "200000",
+    ),
 ];
 
 /// D3, counted: no slice of a match does more than a few times the work its
@@ -635,6 +726,94 @@ fn a_match_passes_the_memory_budget_by_at_most_one_growth() {
         "the heap passed the budget ({limit}) by {} bytes",
         peak.saturating_sub(limit)
     );
+}
+
+/// E4 within a slice for the captures that call Lua (step d): the values a
+/// call takes, made Lua values in a list that grows through the budget; a
+/// table capture made a Lua table for a call; the values match-time
+/// captures keep, on the match's stack, and their entries in the capture
+/// list. Each case, under a budget 8 MiB above what the state holds, fails
+/// with "not enough memory", and the heap, as the budget counts it, passes
+/// the budget by at most its largest single growth: (setup, the match, that
+/// growth's bound).
+#[test]
+fn calls_pass_the_memory_budget_by_at_most_one_growth() {
+    use nmap_core::nse::lpeg::take_peak_accounted;
+    let cases: [(&str, &str, usize); 3] = [
+        // 400,000 values to a call: the capture list (24 bytes an entry,
+        // doubling to 2^19), the cursor's values (as many), the arguments
+        // (16 bytes each), each growth asking the budget first, which refuses
+        // the one that would not fit (4 KB past it, measured: the strings
+        // around it).
+        (
+            "s = ('a'):rep(400000) p = lpeg.C(1)^0 / function(...) return select('#', ...) end \
+             lpeg.match(p, 'a') collectgarbage()",
+            "return pcall(lpeg.match, p, s)",
+            64 << 10,
+        ),
+        // A table of 400,000 entries made a Lua table for a call (4 KB).
+        (
+            "s = ('a'):rep(400000) p = lpeg.Ct(lpeg.C(1)^0) / function(t) return #t end \
+             lpeg.match(p, 'a') collectgarbage()",
+            "return pcall(lpeg.match, p, s)",
+            64 << 10,
+        ),
+        // Match-time captures keeping 1,000 values each: the window — the
+        // match's stack, 16 bytes a value, doubling as Lua's stack does —
+        // and the capture list grow (3.9 MB past the budget, measured: the
+        // stack's doubling from 2^18 values).
+        (
+            "T = {} for i = 1, 1000 do T[i] = i end s = ('a'):rep(900) \
+             p = lpeg.Cmt(1, function() return true, table.unpack(T) end)^0 \
+             lpeg.match(p, 'a') collectgarbage()",
+            "return pcall(lpeg.match, p, s)",
+            (1 << 18) * 24,
+        ),
+    ];
+    for (setup, src, bound) in cases {
+        let mut lua = new_lua();
+        let ex = start(&mut lua, setup);
+        assert_eq!(
+            step_to_end(&mut lua, &ex, 1_000_000, 1_000).0,
+            returned(&[]),
+            "{setup}"
+        );
+        let limit = lua.total_memory() + (8 << 20);
+        lua.set_memory_limit(limit);
+        let _ = take_peak_accounted();
+        let ex = start(&mut lua, src);
+        let mut peak = 0usize;
+        let mut slices = 0u64;
+        loop {
+            let mut fuel = Fuel::with(i32::MAX);
+            let done = lua
+                .enter(|ctx| ctx.fetch(&ex).step(ctx, &mut fuel))
+                .expect("steps");
+            peak = peak.max(lua.total_memory());
+            slices += 1;
+            if done {
+                break;
+            }
+            assert!(slices < 100_000, "{setup}: runs on");
+        }
+        let peak = peak.max(take_peak_accounted());
+        let out = lua.enter(|ctx| {
+            let vs: Variadic<Vec<Value>> = ctx.fetch(&ex).take_result(ctx).unwrap().unwrap();
+            vs.0.iter()
+                .map(|v| v.display().to_string())
+                .collect::<Vec<_>>()
+        });
+        eprintln!(
+            "{setup}: {out:?}, past the budget by {}",
+            peak.saturating_sub(limit)
+        );
+        assert_eq!(out, ["false", "not enough memory"], "{setup}");
+        assert!(
+            peak <= limit + bound,
+            "{setup}: the heap passed the budget ({limit}) by {} bytes",
+            peak.saturating_sub(limit)
+        );
+    }
 }
 
 /// What capture evaluation holds for a table capture is given back as the

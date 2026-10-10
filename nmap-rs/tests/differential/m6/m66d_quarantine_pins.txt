@@ -1,0 +1,13 @@
+# M6.6 step d: pins for quarantined rows of m66_lpeg_cases.txt's generator that run
+# match-time captures, by oracle/gen_m66d_quarantine_pins.py (local only: it builds a
+# patched copy of lpeg.c). id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log; source
+# fixed-c is the tree's lpeg.c with doublecap's over-read, the 16-bit runtime-capture
+# index and the code __gc frees mid-match fixed, on top of step c's two. 8 rows.
+H.dyncaps.100000	d	fixed-c	ok	true i100001 s"v"	-
+H.dyncaps.499000	d	fixed-c	ok	true i499001 s"v"	-
+H.dyncaps.500000	d	fixed-c	ok	false i2 E(s"stack overflow (too many captures)")	-
+H.dyncaps.1100000	d	fixed-c	ok	false i2 E(s"stack overflow")	-
+X.cmt.res.many	d	fixed-c	ok	i5000	K2(i2,a)
+X.rtcap.33000	d	fixed-c	ok	i33000 s"v" s"v"	-
+X.ub.gc	d	fixed-c	ok	i3	-
+R.16321	d	fixed-c	ok	nil nil nil nil nil nil nil	Mvals2(i1,);Mvals2(i2,);Mvals2(i3,);Mvals2(i4,);Mvals2(i5,);Mvals2(i6,);Mvals2(i7,);Mvals2(i8,)

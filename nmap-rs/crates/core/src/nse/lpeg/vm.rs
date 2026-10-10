@@ -25,8 +25,23 @@
 //! the stack or the capture list that takes the heap past the memory budget
 //! ends the slice too (`lpeg::grow`).
 //!
-//! Lua is called by match-time captures only (`CloseRunTime`), which are
-//! step d's; until then the machine stops with [`VmError::RunTime`].
+//! **Match-time captures** (`Cmt`, `P(function)`; step d). At
+//! `ICloseRunTime` the machine finds the capture's open entry and the first
+//! dynamic value its body left (`findopen`, `finddyncap`: a scan back, a unit
+//! an entry), puts a close after the list, and stops with
+//! [`VmPoll::RunTime`]: the binding evaluates the capture's values
+//! ([`capture::CapCursor::nested_at`]), calls its function through the VM and
+//! decodes the results, and tells the machine what came of it
+//! ([`Vm::runtime_kept`], [`Vm::runtime_failed`]), as `resdyncaptures` and
+//! `adddyncaptures` do. The values a match-time capture keeps live in the
+//! binding's window, the Lua stack its `Sequence` owns, as the C keeps them on
+//! the Lua stack; the machine tracks only how many there are
+//! ([`Vm::dyn_top`]), and a `Cruntime` entry's index into them, 32 bits wide
+//! where the C's is a `short` (D4, `lpeg-runtime-capture-index-16bit`). A
+//! failure drops those of the entries it drops and every one above
+//! (`removedyncap`, a unit an entry scanned); an and-predicate's back-commit
+//! drops the entries and keeps the values, as orphans, as the C does
+//! (`lpeg-and-predicate-keeps-dynamic-captures`).
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -116,8 +131,6 @@ pub enum VmError {
     TooManyCaptures,
     /// The memory budget refused the stack or the capture list.
     NotEnoughMemory,
-    /// A match-time capture: step d's.
-    RunTime,
     /// A program this compiler cannot have made.
     Malformed,
 }
@@ -129,6 +142,46 @@ pub enum VmPoll {
     Done(Option<usize>),
     /// The budget is spent.
     Pending,
+    /// A match-time capture closed: its function must be called before the
+    /// machine goes on ([`Vm::runtime_kept`], [`Vm::runtime_failed`]).
+    RunTime(RunTime),
+}
+
+/// A match-time capture the machine has closed (`ICloseRunTime`,
+/// `lpeg.c:3628`), waiting for its function's results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunTime {
+    /// The index of its open entry in the capture list (`findopen`): a
+    /// group whose key is the function's constant. The list holds the
+    /// entries of its body after it, then a close at the current position.
+    pub open: usize,
+    /// The window index of the first dynamic value its body's entries hold
+    /// (`finddyncap`), if any: the call drops it and every value above it.
+    pub first_dyn: Option<usize>,
+    /// The constant key of its function.
+    pub key: Key,
+    /// The position after its body: the call's position argument, less one.
+    pub s: usize,
+}
+
+/// `findopen` back from a match-time capture's close, and `finddyncap` on
+/// the way.
+#[derive(Debug, Clone, Copy)]
+struct OpenScan {
+    /// The entry looked at last (going back).
+    at: usize,
+    /// Closes waiting for their open.
+    closes: usize,
+    /// The lowest-placed runtime value seen.
+    first_dyn: Option<usize>,
+}
+
+/// `removedyncap` after a failure: the entries from `at` (to the end of the
+/// list) scanned for the first runtime value, then back to `frame`.
+#[derive(Debug, Clone, Copy)]
+struct Unwind {
+    at: usize,
+    frame: Frame,
 }
 
 /// A match in progress (`match`, `lpeg.c:3486`).
@@ -148,6 +201,15 @@ pub struct Vm {
     done: Option<Option<usize>>,
     steps: u64,
     deepest: usize,
+    /// How many dynamic values the binding's window holds, orphans
+    /// included: the C's Lua stack top above `lp_match`'s own slots.
+    dyn_top: usize,
+    /// Looking for a closing match-time capture's open entry.
+    scan: Option<OpenScan>,
+    /// A match-time capture waiting for its function's results.
+    runtime: Option<RunTime>,
+    /// Looking for the first runtime value a failure drops.
+    unwind: Option<Unwind>,
 }
 
 /// The `setmaxstack` value as `doublestack` reads it: `lua_tointeger`, an
@@ -177,7 +239,81 @@ impl Vm {
             done: None,
             steps: 0,
             deepest: 1,
+            dyn_top: 0,
+            scan: None,
+            runtime: None,
+            unwind: None,
         }
+    }
+
+    /// How many dynamic values the binding's window should hold: those of
+    /// the match-time captures in the list, and the orphans an and-predicate
+    /// left above them. A failure can lower it; after each run the binding
+    /// drops what is past it.
+    #[must_use]
+    pub fn dyn_top(&self) -> usize {
+        self.dyn_top
+    }
+
+    /// The match-time capture waiting for its function's results did not
+    /// match: its function returned `false`, `nil` or nothing
+    /// (`resdyncaptures`), the dynamic values its body held are gone and the
+    /// window holds `fr`. Its entries go, and the machine fails from there.
+    pub fn runtime_failed(&mut self, fr: usize) -> Result<(), VmError> {
+        let rt = self.runtime.take().ok_or(VmError::Malformed)?;
+        self.caps.truncate(rt.open);
+        self.dyn_top = fr;
+        self.failing = true;
+        Ok(())
+    }
+
+    /// The match-time capture waiting for its function's results matched,
+    /// up to position `s`, and its call left `n` values at window indices
+    /// `fr..fr + n`, after the dynamic values its body held were dropped
+    /// (`fr` is where the first of those was). Its entries become a group of
+    /// `n` runtime captures at `s` (`adddyncaptures`), or nothing for none;
+    /// the machine goes on after it.
+    pub fn runtime_kept(
+        &mut self,
+        s: usize,
+        fr: usize,
+        n: usize,
+        budget: &mut u32,
+    ) -> Result<(), VmError> {
+        let rt = self.runtime.take().ok_or(VmError::Malformed)?;
+        let open = *self.caps.get(rt.open).ok_or(VmError::Malformed)?;
+        self.caps.truncate(rt.open);
+        self.dyn_top = fr + n;
+        if n > 0 {
+            room(grow(&mut self.caps, n + 2), budget)?;
+            // The capture's own open entry, an anonymous group now.
+            self.caps.push(Capture { idx: 0, ..open });
+            for i in fr..fr + n {
+                self.caps.push(Capture {
+                    s,
+                    idx: Key::try_from(i).map_err(|_| VmError::Malformed)?,
+                    kind: CapKind::Runtime as u8,
+                    siz: 1,
+                });
+            }
+            self.caps.push(Capture {
+                s,
+                idx: 0,
+                kind: CapKind::Close as u8,
+                siz: 1,
+            });
+            // `captop += n + 2`, then `doublecap` at the logical size.
+            let captop = self.caps.len();
+            if captop >= self.capsize {
+                if captop >= CAPLIST_LIMIT {
+                    return Err(VmError::TooManyCaptures);
+                }
+                self.capsize = captop.saturating_mul(2);
+            }
+        }
+        self.s = s;
+        self.pc += 1;
+        Ok(())
     }
 
     /// The capture list: after a match, its entries and the closing `Cclose`.
@@ -217,10 +353,11 @@ impl Vm {
             )
     }
 
-    /// Run `prog` on `subj` until the match ends or `budget` is spent.
-    /// `maxstack` is the stored maximum as the C reads it at a growth of the
-    /// stack; no Lua code runs within a slice, so it cannot change within
-    /// one.
+    /// Run `prog` on `subj` until the match ends, `budget` is spent, or a
+    /// match-time capture closes. `maxstack` is the stored maximum as the C
+    /// reads it at a growth of the stack; no Lua code runs within a slice,
+    /// and the binding reads it again after each call a callback makes, so
+    /// it is the C's value at every growth.
     pub fn run(
         &mut self,
         prog: &Program,
@@ -244,9 +381,18 @@ impl Vm {
         if let Some(d) = self.done {
             return Ok(VmPoll::Done(d));
         }
+        if let Some(rt) = self.runtime {
+            return Ok(VmPoll::RunTime(rt));
+        }
         let slots = prog.slots();
         let e = subj.len();
         loop {
+            if self.scan.is_some() {
+                return Ok(match self.find_open(budget)? {
+                    Some(rt) => VmPoll::RunTime(rt),
+                    None => VmPoll::Pending,
+                });
+            }
             if self.failing {
                 if !self.fail(budget)? {
                     return Ok(VmPoll::Pending);
@@ -468,7 +614,15 @@ impl Vm {
                     )?;
                     self.pc = p + 1;
                 }
-                Op::CloseRunTime => return Err(VmError::RunTime),
+                // `runtimecap`: find the capture's open entry, a unit an
+                // entry, then stop for its function's call.
+                Op::CloseRunTime => {
+                    self.scan = Some(OpenScan {
+                        at: self.caps.len(),
+                        closes: 0,
+                        first_dyn: None,
+                    });
+                }
                 Op::OpenCall | Op::Giveup => return Err(VmError::Malformed),
             }
         }
@@ -476,22 +630,116 @@ impl Vm {
 
     /// The failure sequence (`lpeg.c:3617-3626`): pop entries, a unit each,
     /// to the last one that saved a position (pending calls go with them),
-    /// and go back to it. False if the budget ran out first.
+    /// and go back to it. With dynamic values in the window, the entries the
+    /// failure drops are first scanned, a unit each, for the first runtime
+    /// capture, whose value and every one above it go (`removedyncap`). False
+    /// if the budget ran out first.
     fn fail(&mut self, budget: &mut u32) -> Result<bool, VmError> {
         loop {
+            if let Some(mut u) = self.unwind {
+                let mut scanned = 0u64;
+                let found = loop {
+                    let Some(c) = self.caps.get(u.at) else {
+                        break true;
+                    };
+                    if *budget == 0 {
+                        break false;
+                    }
+                    *budget -= 1;
+                    scanned += 1;
+                    if c.kind == CapKind::Runtime as u8 {
+                        self.dyn_top = usize::try_from(c.idx).map_err(|_| VmError::Malformed)?;
+                        break true;
+                    }
+                    u.at += 1;
+                };
+                did_steps(scanned);
+                if !found {
+                    self.unwind = Some(u);
+                    return Ok(false);
+                }
+                self.unwind = None;
+                self.back_to(u.frame);
+                return Ok(true);
+            }
             if *budget == 0 {
                 return Ok(false);
             }
             *budget -= 1;
             let f = self.stack.pop().ok_or(VmError::Malformed)?;
             if f.s != CALL {
-                self.caps.truncate(f.caplevel);
-                self.s = f.s;
-                self.pc = f.p;
-                self.failing = false;
+                if self.dyn_top > 0 && self.caps.len() > f.caplevel {
+                    self.unwind = Some(Unwind {
+                        at: f.caplevel,
+                        frame: f,
+                    });
+                    continue;
+                }
+                self.back_to(f);
                 return Ok(true);
             }
         }
+    }
+
+    /// Go back to the entry a failure popped.
+    fn back_to(&mut self, f: Frame) {
+        self.caps.truncate(f.caplevel);
+        self.s = f.s;
+        self.pc = f.p;
+        self.failing = false;
+    }
+
+    /// `findopen` back from the end of the list, a unit an entry, noting the
+    /// lowest-placed runtime value on the way (`finddyncap`); once found, the
+    /// close after the list (`close->kind = Cclose; close->s = s`, the slot
+    /// `captop` points at, not counted in it) and the capture waiting for its
+    /// call. `None` if the budget ran out first.
+    fn find_open(&mut self, budget: &mut u32) -> Result<Option<RunTime>, VmError> {
+        let Some(mut sc) = self.scan else {
+            return Ok(self.runtime);
+        };
+        let mut scanned = 0u64;
+        let r = loop {
+            if *budget == 0 {
+                break None;
+            }
+            *budget -= 1;
+            scanned += 1;
+            sc.at = sc.at.checked_sub(1).ok_or(VmError::Malformed)?;
+            let c = self.caps[sc.at];
+            if c.is_close() {
+                sc.closes += 1;
+            } else if !c.is_full() {
+                if sc.closes == 0 {
+                    break Some(sc.at);
+                }
+                sc.closes -= 1;
+            } else if c.kind == CapKind::Runtime as u8 {
+                sc.first_dyn = Some(usize::try_from(c.idx).map_err(|_| VmError::Malformed)?);
+            }
+        };
+        did_steps(scanned);
+        let Some(open) = r else {
+            self.scan = Some(sc);
+            return Ok(None);
+        };
+        self.scan = None;
+        room(grow(&mut self.caps, 1), budget)?;
+        let key = self.caps[open].idx;
+        self.caps.push(Capture {
+            s: self.s,
+            idx: 0,
+            kind: CapKind::Close as u8,
+            siz: 0,
+        });
+        let rt = RunTime {
+            open,
+            first_dyn: sc.first_dyn,
+            key,
+            s: self.s,
+        };
+        self.runtime = Some(rt);
+        Ok(Some(rt))
     }
 
     /// Push a backtrack entry; at the logical size, grow first

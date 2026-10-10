@@ -4308,8 +4308,13 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       scans its whole code, nested grammars' included: quadratic in the
       nesting (76,990 nested grammars took 255 s to compile with the C's scan
       in a debug build, under 5 s without). Sabotage: a recursive walk in code
-      generation aborts the deep tests. Step d adds the captures that call
-      Lua.
+      generation aborts the deep tests. **Step d:** the captures that call
+      Lua are frames of the same cursor (`functioncap`, `foldcap` and
+      `querycap` stop for their calls and resume), a match-time capture's
+      values are the cursor run from its open entry, and the tables a call's
+      arguments hold are filled from a worklist, so nothing recurses:
+      dynamic captures 2,000 deep, each level's match-time capture
+      returning its inner ones' values (`no_slice_does_more_work_than_its_fuel_pays_for`).
 - [x] `lpeg-ktable-key-16bit` (construction) — keys are 32 bits wide here
       (D4): a pattern of 70,000 constants builds (`C.join.70000`). The values
       read back at match time are step c's pins: `X.ktable.32768` and
@@ -4366,9 +4371,10 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       argument as `luaL_optinteger` does and stores it as given, in the
       state's registry: a string stays a string, none is nil, and opening the
       library stores `MAXBACK` as the float 100.0. nmap runs every script in
-      one state, so the value is process-wide. A match reads it once, when
-      it starts, and narrows and floors it as its stack grows
-      (`lpeg-backtrack-ceiling`, step c). Pinned by
+      one state, so the value is process-wide. A match reads it when it
+      starts and again after each call it makes returns, and narrows and
+      floors it as its stack grows (`lpeg-backtrack-ceiling`, steps c and
+      d). Pinned by
       `setmaxstack_stores_its_argument_as_given`; corpus rows H.
 - [x] `lpeg-locale-is-the-c-locale` — `locale` builds the C locale's classes
       (sizes 62/52/33/10/94/26/95/32/6/26/22, nothing at or above 128) and
@@ -4428,21 +4434,48 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       ≈140 s in slices of 182 ms. A string made whole (229 ms for 200 MiB) is
       one slice, charged in full past its fuel. Gated by counting the work
       apart from the fuel (`no_slice_does_more_work_than_its_fuel_pays_for`,
-      `a_chain_of_jumps_is_walked_across_slices`).
-- [ ] `lpeg-callback-may-yield` — the Lua a constructor calls runs as a VM
-      call (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
-      coroutine, and the constructor goes on where it was when that is
-      resumed. The C calls it from C (`lua_gettable`, `lua_setfield`) and
-      raises "attempt to yield across a C-call boundary". At step b two
-      paths: a grammar table's `__index`, read for its initial rule
-      (`getfirstrule`), and `locale(t)`'s `__newindex` for each class
-      (`createcat`). Steps c and d add the captures' (`Cmt`, `/f`, `Cf`,
-      `/table`), as `pattern-gsub-callback-may-yield` and
-      `format-tostring-may-yield` are for gsub and `%s`. Everything else
-      about the calls is the C's: their order, their arguments, their error
-      objects, one C level each. Pinned by
-      `a_constructors_callbacks_may_yield`; no golden asserts the C's
-      refusal (the step b review's `idx.yield`, `loc.yield`).
+      `a_chain_of_jumps_is_walked_across_slices`). **Step d** adds the
+      captures that call Lua: the callbacks are Lua, run by the VM under its
+      own fuel; LPeg's part around each — the scan back for a match-time
+      capture's open entry and for the first value a failure drops, a unit
+      an entry; the capture's values evaluated when it closes; a call's
+      arguments made Lua values and the tables among them filled, a unit a
+      value or an entry and a unit per `BYTES_PER_FUEL` bytes of text; the
+      results taken, a unit each — stops between slices like the rest
+      (`every_stage_of_a_match_is_pre_empted`: 2^13 back-referenced values
+      evaluated inside a match-time capture, and made a `/function`'s
+      arguments; `no_slice_does_more_work_than_its_fuel_pays_for`: a fold of
+      40,000 calls, a 1 MiB `/table` key, 100,000 values from one `Cmt`,
+      50,000 dynamic captures in a table, dynamic captures 2,000 deep, a
+      100,000-entry table and 100,000 arguments made for calls, each at most
+      1.25 of its fuel's worth a slice). What a callback does in a slice is
+      the VM's: a Lua function handed 8,192 arguments that walks them runs
+      15,000 units past its slice, as `f(table.unpack(t))` does in plain Lua.
+- [ ] `lpeg-callback-may-yield` — the Lua LPeg calls runs as a VM call
+      (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
+      coroutine, and the constructor or the match goes on where it was when
+      that is resumed. The C calls it from C (`lua_call`, `lua_gettable`,
+      `lua_setfield`) and raises "attempt to yield across a C-call
+      boundary". Six paths: a grammar table's `__index`, read for its
+      initial rule (`getfirstrule`), and `locale(t)`'s `__newindex` for each
+      class (`createcat`), from step b; and from step d a match-time
+      capture's function (`Cmt`, `P(function)`), a `/function`, a `Cf`'s
+      function and a `/table`'s `__index` — as
+      `pattern-gsub-callback-may-yield` and `format-tostring-may-yield` are
+      for gsub and `%s`. A match suspended so keeps everything it holds (its
+      program, its window of dynamic values, its capture cursor), and other
+      code may run meanwhile: another match of the same pattern, a
+      collection, the pattern's `__gc` — none of which changes it (E3) — or
+      a `setmaxstack`, which it reads, as it does after every call it makes,
+      when the callback returns (in the C no other script can run inside a
+      match). Everything else about the calls is the C's: their order,
+      their arguments, their error objects, one C level each. Pinned by
+      `a_constructors_callbacks_may_yield`, `each_way_into_lua_may_yield`
+      (each path yields, other code runs, and the match ends with the answer
+      it would have had) and the step d brief's X08, X09, L07 and B03 in
+      `lpeg_callback_quirks` (the port's answers under this class); no
+      golden asserts the C's refusal (the step b review's `idx.yield`,
+      `loc.yield`).
 - [ ] `lpeg-memory-errors-depend-on-slicing` — what a call holds between
       slices of fuel (a grammar being built, `p^n`'s tree, a walker's stack)
       is counted against the memory budget while held (`lpeg::Held`, since
@@ -4468,8 +4501,15 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       (`a_match_passes_the_memory_budget_by_at_most_one_growth`; before, the
       review's 256 back-references to a substitution of 8 MiB peaked at
       344 MB inside one slice under a 64 MiB budget, and peak at 59 MB now).
-      The fuzz target `nse_lpeg_match` runs its binding mode under a budget,
-      with the same tolerance.
+      From step d the arguments a call is given and the tables made for it
+      grow the same way, and the values match-time captures keep are on the
+      match's own Lua stack, which grows as Lua's does
+      (`calls_pass_the_memory_budget_by_at_most_one_growth`: 400,000
+      arguments, a 400,000-entry table for a call, 4 KB past an 8 MiB
+      budget each; match-time captures keeping 1,000 values each, 3.9 MB,
+      the stack's doubling from 2^18 values). The fuzz target
+      `nse_lpeg_match` runs its binding mode under a budget, with the same
+      tolerance.
 - [ ] `lpeg-bad-argument-naming` — as `nmapdb-bad-argument-naming`: from Lua
       code a function is named by its registered name (`'P'`) and a
       metamethod by its event (`'mul'`), as an operator names it; otherwise
@@ -4479,7 +4519,15 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       (`p:B()` numbers arguments from the receiver), a metamethod called as a
       field (`mt.__mul(a, b)`, `'__mul'` in the C), and an operator reached
       through a string's arithmetic metamethod, which the C calls from C
-      (`'?'`, no position).
+      (`'?'`, no position). From step d the corpus reaches the method call:
+      `re.compile(nil)` runs `pattern:match(nil, 1, defs)` (`re.lua:269`),
+      and the C, whose `luaL_argerror` takes one off the number of a call
+      `lua_getinfo` names a "method", says `bad argument #1 to 'match'`
+      where the port says `#2` (row `J.compile.nil`). Telling a method call
+      apart needs the calling instruction, which the VM does not show a Rust
+      function. **Tolerated by a gate:** `lpeg_corpus_differential`'s named
+      class `method`, which takes one off the port's argument numbers and
+      nothing off the C's — that row alone at step d.
 - [ ] `lpeg-grammar-stack-overflow-message` — `collectrules` checks the Lua
       stack for each rule (`luaL_checkstack`), so a grammar of about half a
       million rules or more fails with "stack overflow (grammar has too many
@@ -4499,8 +4547,15 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       {})`), and `lpeg_corpus_differential` accepts them only under its
       named class `vmbase`, which maps the VM's wording and Lua's `bad
       argument #N to 'setmetatable'|'next'|'rawlen'|'rawget'|'rawset'|
-      'ipairs'|'select' (...)` to one marker; fixing these messages retires
-      the class.
+      'ipairs'|'select'|'char' (...)` to one marker; fixing these messages
+      retires the class. Step d adds `string.char` ("type error, expected
+      u8, found nil", with no position, where the C says
+      `lpeg-utility.lua:144: bad argument #1 to 'char' (number expected, got
+      nil)`): lpeg-utility's `get_response` and `parse_fp` hand it the
+      `tonumber` of a bad `\xHH` escape, from a `/function` after the match —
+      a fingerprint string a peer's response can make (row
+      `K.parse_fp.badesc`, under `vmbase` and `position`; the step d brief's
+      U01 in `lpeg_callback_quirks`).
 
 ## Milestone 6.6 step c — LPeg's compiler, matching machine and the captures that call no Lua (`core::nse::lpeg`, `core::nse::lpeg::code`, `core::nse::lpeg::vm`)
 
@@ -4560,8 +4615,8 @@ review fixes'.
       line removed), `the_peephole_stays_aligned`, the pcode goldens of
       `programs_are_the_cs`, and the 10 rows of this id that step c runs, each
       pinned with that build's answer (`oracle/gen_m66c_quarantine_pins.py`,
-      local only); the other 23 are step d's. Sabotage: the `i--` restored
-      fails all four.
+      local only), and the other 23, which call Lua, from step d. Sabotage:
+      the `i--` restored fails all four.
 - [x] `lpeg-cc-nil-without-ktable` — `Cc(nil)` adds no constant
       (`addtoktable` gives nil key 0), so a pattern with no other constant has
       no constant table, and `Cconst` reads entry 0 of the table that is not
@@ -4571,8 +4626,8 @@ review fixes'.
       pattern has a table the C reads its entry 0, nil too, so the answers
       agree wherever the C answers. Pinned by `cc_nil_reads_no_constant_table`
       and the 99 rows of this id that step c runs (pinned with the answer of
-      the C whose `Cconst` pushes nil for key 0); 6 are step d's. Sabotage:
-      reading the missing table fails both.
+      the C whose `Cconst` pushes nil for key 0), and the other 6 from step
+      d. Sabotage: reading the missing table fails both.
 - [x] `lpeg-initposition-negation-overflow` — `initposition`
       (`lpeg.c:3191`) negates a non-positive `init` in a `lua_Integer`, which
       is undefined for `math.mininteger` (UBSan). As gcc compiles it the
@@ -4580,8 +4635,11 @@ review fixes'.
       starts at the first byte; the port takes the magnitude unsigned and gives
       that answer with no undefined step. Pinned by quirk `Q04e` and the
       three rows of this id that step c runs (`X.init.minint`,
-      `E.init.15.0`, `E.init.15.1`, with the C's answers);
-      `X.cmt.res.minint`, `Cmt` returning `math.mininteger`, is step d's.
+      `E.init.15.0`, `E.init.15.1`, with the C's answers), and from step d
+      `X.cmt.res.minint`: a `Cmt` returning `math.mininteger`, whose
+      `res - 1` (`lpeg.c:3439`) is undefined in the C; here the subtraction
+      is checked and the position refused, "invalid position returned by
+      match-time capture", as the C's wrapped value is (the brief's R13).
 - [x] `lpeg-nested-capture-lua-stack-overflow` — `pushcapture` asks for 4
       free stack slots (`luaL_checkstack(L, 4, …)`) as it enters each
       capture, and a simple capture pushes its whole match after its nested
@@ -4618,18 +4676,21 @@ review fixes'.
       (`S <- '(' S ')' / 'x'`: 98 levels pass, 99 fail; 148 and 149 under
       `setmaxstack(150)`), and a call followed by a return is a jump
       (`S <- 'a' S / ''`, 100,000 deep, no entry). The C reads the stored
-      value at each growth. In a match that calls no Lua the only Lua that
-      can run in between is a `__gc` finalizer, which a collection during the
-      growth's allocation may run, and which may call `setmaxstack`
+      value at each growth. The Lua that can run in between is a callback the
+      match calls (step d) or a `__gc` finalizer, which a collection during
+      the growth's allocation may run, and which may call `setmaxstack`
       (the step c review's `t5.lua`: 210 such calls mid-match and 22 matches
       past a ceiling of 150 in 300, on the tree's oracle); the port never runs
-      a `__gc` metamethod (`vm-gc-metamethods-never-run`), so no Lua runs
-      inside a match at step c. A match here reads the value once, when it
-      starts, so another script's `setmaxstack` while a match is pre-empted
-      does not reach it (`setmaxstack_does_not_reach_a_running_match`); step
-      d re-reads it after each call a callback makes, as a `setmaxstack` in a
-      `Cmt` reaches its own match in the C (`docs/M6.6-ANALYSIS.md` §1.3).
-      The stack grows through
+      a `__gc` metamethod (`vm-gc-metamethods-never-run`). So a match here
+      reads the value when it starts and again after each call it makes
+      returns — a `setmaxstack` in a `Cmt` reaches its own match, as in the
+      C (`docs/M6.6-ANALYSIS.md` §1.3: `S <- 'a' S 'b' / ''` on a^200 b^200
+      fails by default and matches, 401, after one,
+      `a_setmaxstack_in_a_callback_reaches_its_own_match`) — and not when it
+      only ran out of fuel, so another script's `setmaxstack` while a match
+      is pre-empted does not reach it
+      (`setmaxstack_does_not_reach_a_running_match`; one made while a
+      callback has yielded does, `lpeg-callback-may-yield`). The stack grows through
       the memory budget: "not enough memory" before the ceiling where the
       budget refuses (`a_match_is_held_to_the_memory_budget`). Pinned by
       `the_backtrack_ceilings_are_the_cs` (two), corpus rows G and `X.limit.*`.
@@ -4700,12 +4761,180 @@ review fixes'.
       depends on its history (`lpeg-capture-ceiling`). Nothing realistic
       reaches 999,9xx values. Tolerated by the corpus gate's `cdepth`
       class, which only rows tagged `cdepth` may use, and only with the
-      golden's status and log: at step c, that one row.
-- [ ] `lpeg-lua-calling-captures-refused` — until step d, a pattern with a
-      capture that calls Lua (`Cmt`, `P(function)`, `/function`, `Cf`,
-      `/table`) builds and compiles, and its match raises "lpeg: match-time
-      and function captures are not implemented until M6.6 step d" before
-      it runs. The machine's and capture evaluation's checks behind that one
-      say the same words (since the step c review; before, words of their
-      own that the first check never let through). No script can reach it:
-      the module is not registered. Step d removes this entry.
+      golden's status and log: at step c, that one row. **Step d** adds the
+      embedding's other two ceilings, each pinned at the port's own number
+      beside the C's: the live dynamic values a match keeps, on its own Lua
+      stack as the C keeps them (`Cmt(1, →true, 1)^0`, the brief's N17, and
+      `#p`'s orphans, N15: 999,957 calls under the standalone oracle, then
+      Lua's bare "stack overflow" as the next callback's frame is pushed;
+      999,986 here); and the C levels left to re-entry (`C stack overflow`
+      after 195 levels of `Cmt`, `/function`, `/table` or `Cf` re-entry and
+      196 of `gsub` in the brief's harness, which `lua.c` enters two C calls
+      deep; 197 and 198 here, where an `Executor` enters none). Relative to
+      `gsub` in the same harness each LPeg path is the C's, one level less
+      (`each_way_into_lua_takes_one_c_level`, the six paths; `H.reenter.rel`
+      at the golden's 0). The corpus's `cdepth` rows at step d:
+      `H.stackcaps.999950` and `H.reenter.196` to `.200` and `.250`. In
+      `lpeg_callback_quirks` N15, N17 and X03 to X07 are pinned at the
+      port's numbers under this class.
+
+## Milestone 6.6 step d — LPeg's captures that call Lua (`core::nse::lpeg`, `core::nse::lpeg::vm`)
+
+The captures that call Lua: a match-time capture (`Cmt`, and a function
+coerced as `P(f)`), called at `ICloseRunTime` with the subject, the position
+and its values, its results decoded as `resdyncaptures` decodes them and its
+extra values kept as dynamic captures; and `/function`, `Cf` (0.12's fold)
+and `/table` (through `lua_gettable`, `__index` honoured), called from
+capture evaluation. Every call is made through the VM (`SequencePoll::Call`,
+one C level), from the match's `Sequence`: the capture cursor stops where the
+C's `functioncap`, `foldcap` and `querycap` call and resumes with the results
+(`vm::capture::Step::Call`, `CapCursor::returned`), and the machine stops at a
+match-time capture's close (`VmPoll::RunTime`) until its results are decoded
+(`Vm::runtime_kept`, `Vm::runtime_failed`). The values match-time captures
+keep live where the C keeps them, on the Lua stack — the bottom of the
+match's own stack, its window — so the thread traces them and they count
+against `LUAI_MAXSTACK`; the machine counts them (`Vm::dyn_top`) and drops
+those a failure drops (`removedyncap`); a call's arguments and results, and
+the cursor's Lua values (`CapVal::Lua`), are traced with the job. A match
+runs the program it took when it started (E3), and reads `setmaxstack`'s value
+after each call it makes. The module is still not registered.
+
+**Gated** by `lpeg_corpus_differential` at step d: all 62,599 rows of step
+0b's corpus — every family, J, K and Q through the tree's `re.lua` and
+`lpeg-utility.lua` — compared with the golden, accepted only as equal or under
+a named class (`argname` 2 rows, `vmbase` 2, `vmbase+position` 1
+(`K.parse_fp.badesc`), `method` 1 (`J.compile.nil`), `cdepth` 7); and by
+`every_quarantined_step_row_matches_its_pin`: 157 quarantined rows, each held
+to its pin — `m66c_quarantine_pins.txt`'s 149 and `m66d_quarantine_pins.txt`'s
+8, the answers of the tree's `lpeg.c` with the doublecap over-read, the
+16-bit runtime-capture index and the code `__gc` frees fixed as well
+(`oracle/gen_m66d_quarantine_pins.py`, local only). Also gated:
+`lpeg_callback_quirks` (the step d brief's 207 pins, the C's answers, the
+port's own beside them under a named class for 15: `lpeg-callback-may-yield`
+4, `lpeg-runtime-capture-index-16bit` 3, `lpeg-capture-ceiling-is-the-embeddings`
+7, `vm-base-library-argument-errors` 1); `lpeg_callback_limits` (the JSON
+ceilings 34/32/32 through `json.lua`; each of the six ways into Lua one C
+level below `gsub`, passing its error object on unchanged, and allowed to
+yield; two threads sharing patterns whose callbacks collect and call
+`__gc`, with a full collection after every slice); `lpeg_match_limits`
+(`a_setmaxstack_in_a_callback_reaches_its_own_match`, the brief's X10; the
+callback-heavy cases of `no_slice_does_more_work_than_its_fuel_pays_for`,
+`every_stage_of_a_match_is_pre_empted` and
+`calls_pass_the_memory_budget_by_at_most_one_growth`); unit tests in
+`vm/tests.rs` (a mock binding: the window through backtracking and
+and-predicates, the order of calls, slicing invariance with calls) and in the
+module (the binding's calls through the VM, under Miri too); fuzz target
+`nse_lpeg_match`, whose binding mode builds the captures that call Lua with
+callbacks from a fixed set. Each of the step's sabotages fails a gate: `Cf`'s
+arguments reversed (S03), a backward position accepted (S06), 3.5 taken as 3
+(S07), dynamic values kept on backtrack (S08: the window test, N14, and the
+corpus rows that catch it in the C, `X.dyncap.bt.1000000` and
+`X.dyncap.bt.cs.1000000`, whose kept values overflow the window as they
+overflow the C's stack), `/table` read raw (S09), `correctkeys` shifting
+`Carg` (S16), a `/f` inside a `Cmt` not called at its close, the calls made
+at the match's own C level, a callback's error made a string, `__gc` made
+destructive with the code cache read again after a call, the window's values
+held weakly while a callback runs, `setmaxstack` not read after a call or
+read at every slice, an and-predicate's orphans dropped (N15), and a call's
+results taken without fuel; `__gc` made destructive alone passes, the
+match's own program protecting it.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `lpeg-runtime-capture-index-16bit` — D4: a runtime capture's index
+      into the Lua stack is a `short` (`Capture.idx`, `lpeg.c:241`, set at
+      `:3461`, read by `lua_pushvalue` at `:857-858`), so from the k-th live
+      dynamic value, k ≥ 32,764 − (`match`'s arguments) — 32,762 for
+      `match(p, s)` and for `json.parse` — it wraps and reads another live
+      object; `finddyncap`'s `settop(id - 1)` goes wrong with it. A peer
+      reaches it: `json.lua` decodes each `\uXXXX` escape with a `Cmt`
+      (`json.lua:133`), so a JSON string of 33,000 escapes parses to a
+      string wrong from its 32,762nd character on 7.94, and one of exactly
+      32,762 fails ("invalid value (table) at index 32762 in table for
+      'concat'"). Here the index is 32 bits wide: every value is the one
+      returned. Pinned by the brief's J11 (33,000 escapes: the port's
+      `true, 33000, true, nil` beside the C's `true, 33000, false, 32762`),
+      J12 (32,762: `true, true`), J13 (32,761: the C's `true, true`, below
+      the threshold) and N19 (33,000 values in a table: none wrong) in
+      `lpeg_callback_quirks`, and the quarantined row `X.rtcap.33000`.
+- [x] `lpeg-doublecap-stack-overread` — the capture list starts as a
+      32-entry array on the C stack (`lp_match`); when a match-time
+      capture's values take it past its size, `doublecap` copies `captop`
+      entries out of it, `n + 1` more than it holds (`lpeg.c:3643-3645`,
+      `:3394`): ASan's stack-buffer-overflow, and a crash natively from
+      1,000 to 5,000 values (one `Cmt` returning them, or `Cmt(1, f)^0`
+      returning one a call). Here the list is a `Vec`, and every value comes
+      back: 5,000 from one `Cmt` (`X.cmt.res.many`), 100,000 (the brief's R26
+      at 100), 499,000 dynamic captures (`H.dyncaps.499000`; 500,000 is
+      "stack overflow (too many captures)" and 1,100,000 Lua's "stack
+      overflow", as in the fixed C: `H.dyncaps.*`), and `R.16321`, each
+      pinned with the answer of the tree's `lpeg.c` with the copy made to
+      the entries the list holds.
+- [x] `lpeg-code-freed-during-match` — `__gc` (`lp_gc`, `lpeg.c:3252`) frees
+      a pattern's code, and a `Cmt` can call it on the pattern it runs in:
+      the machine then reads freed memory (ASan: heap-use-after-free at
+      `:3505`); the tree's oracle silently answers `nil` where the answer is
+      `"ccc"` (step 0b's `gcuaf.lua`). Here `__gc` checks its argument and
+      frees nothing, and a match runs the program it took when it started,
+      never the pattern's cache again (E3), so nothing a callback does — a
+      `__gc` call, a collection, another thread's match compiling the same
+      pattern — changes the code it runs. Pinned by
+      `a_collection_mid_match_changes_nothing` (`gcuaf.lua`'s pattern gives
+      `"ccc"`, and two threads whose callbacks call `__gc` and
+      `collectgarbage()`, run side by side with a full collection after every
+      slice, give the C's answers), `X.ub.gc` (3, the fixed C's), the brief's
+      X11 and X14, and `each_way_into_lua_may_yield` (a `__gc` and a
+      collection while a callback has yielded).
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- [x] `lpeg-and-predicate-keeps-dynamic-captures` — E14: `IBackCommit`
+      (`lpeg.c:3605-3611`) restores the capture list but not the Lua stack,
+      so the values a match-time capture inside `#p` returned stay live,
+      orphans, until a failure below them drops them (`removedyncap`
+      truncates the stack from the first runtime capture it drops, orphans
+      above it included) or a match-time capture closing over them drops
+      them with its body's (`runtimecap`'s `lua_remove`s). A
+      `(#Cmt(1, →true, 1) * 1)^0` loop over 1.1 MB therefore fills the Lua
+      stack and ends in Lua's bare "stack overflow" (the brief's N15: after
+      999,957 calls in the C, 999,986 here,
+      `lpeg-capture-ceiling-is-the-embeddings`), where the same loop
+      returning only `true` matches (N16: 1,100,000 calls, 1,100,001).
+      Deterministic and crash-free, and no corpus pattern has `#Cmt`:
+      reproduced. The window keeps the orphans exactly as the C's stack
+      does, so every count of dynamic values is the C's
+      (`dynamic_values_go_with_their_captures_but_not_through_and_predicates`).
+- [x] `lpeg-capture-callbacks-run-lazily` — capture evaluation is lazy and
+      runs where the C runs it, so a callback runs zero times, once or many:
+      a capture outside every match-time capture is evaluated only after the
+      whole match succeeds (a failed match or a discarded alternative calls
+      nothing, and an error there is never raised: the brief's F03, F05,
+      F26); one inside a match-time capture is evaluated each time that
+      capture closes, before its function, even if the match then fails, and
+      never again after it (F02, F04, F06, F25, F27, Q15), so a `/f` inside
+      nested `Cmt`s runs when its innermost encloser closes, after any inner
+      one's function (F28: `b cmt-in a cmt-out post`); a named group is
+      evaluated only through `Ct` or `Cb` (F24: never), each `Cb` evaluates
+      its group again (F13: twice), `/0` evaluates nothing (F15), `/n` all
+      its values (F14), and `/"%n"` only the captures `%n` names, once per
+      reference (F16); a fold's value `k + 1` is evaluated after call `k`
+      (F22). Reproduced; `lpeg_callback_quirks`.
+- [x] `lpeg-matchtime-results-decoded-as-the-cs` — `resdyncaptures` and
+      `adddyncaptures` (`lpeg.c:3430-3467`): `false`, `nil` or no result
+      fail; `true` keeps the position and every further result, `nil`
+      included, is a capture; anything else is a position read with
+      `lua_tointeger` (`" 2 "`, `"0x3"`, `"3e0"`, `"2.0"` and `3.0` are
+      positions; `3.5`, NaN, `2^63`, a table or `"x"` are 0), and one before
+      the current position or past the subject's end, 0 and
+      `math.mininteger` included, is "invalid position returned by
+      match-time capture"; a capture whose function returns no values leaves
+      no entry, so a `Cf` does not see it as a capture without values and a
+      `/f` around it gets the whole match (N23, N25, C14); its function gets
+      the subject as `match` converted it, the position after its body from
+      the subject's start, and its body's values or the whole match. And
+      `Cf` is 0.12's: "no initial value for fold capture" when the body has
+      no capture or its first gives no value (C02-C04, C12), the first
+      value of the first capture the accumulator, one result kept. A
+      callable table given to `/` is a query, not a call (F21). Reproduced;
+      the brief's M, R, C and N pins in `lpeg_callback_quirks`, corpus
+      rows C, F, X.

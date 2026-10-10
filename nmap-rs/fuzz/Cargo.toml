@@ -372,6 +372,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nse_lpeg_match"
+path = "fuzz_targets/nse_lpeg_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "nse_protocols"
 path = "fuzz_targets/nse_protocols.rs"
 test = false

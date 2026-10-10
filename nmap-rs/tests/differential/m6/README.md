@@ -762,3 +762,76 @@ lpeg-utility's `get_response`, `parse_fp` and `escaped_quote`, ntp-info's
 Every one is linear in subject size up to 64 KiB. Step e sets each pattern's
 regression ceiling from it. Its step counter cannot see work inside a span
 instruction; the README says what that misses.
+
+## M6.6 step c — matching, against the corpus and the C
+
+Step c ports `lpeg.match` with every capture that calls no Lua. Its gates
+read the step 0b files above and three more of their own.
+
+**The corpus at step c.** `crates/core/tests/lpeg_corpus_differential.rs`
+takes its step from one constant, now `'c'`: it runs the 37,367 rows
+`m66_lpeg_steps.txt` gives steps b and c through `oracle/m66_lpeg_core.lua`
+in the port's VM and compares them with the golden. A row that differs passes
+only under a named class, each ledgered: `argname` (2 rows), `vmbase` (2) and
+`cdepth` (1, `H.stackcaps.999950`: the absolute capture ceiling is the
+embedding's, `lpeg-capture-ceiling-is-the-embeddings`). `cdepth` accepts only
+rows the cases file tags `cdepth`, and only when their status and log are the
+golden's. `H.stackcaps.rel`, the ceiling relative to `table.unpack`'s, is
+held to the golden's -5.
+
+**The quarantine's pins.** No golden records a quarantined row (LESSONS
+#033), so each gets a pin of its own in `m66c_quarantine_pins.txt`
+(`id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log`), which
+`every_quarantined_step_row_matches_its_pin` runs at or below its step:
+
+```sh
+python3 oracle/gen_m66c_quarantine_pins.py          # rewrite the pins (local only)
+python3 oracle/gen_m66c_quarantine_pins.py --check  # FAIL if stale
+```
+
+- `fixed-c`: the answer of this tree's `lpeg.c` with the two defects fixed
+  that the port fixes, built from a patched copy (`lpeg_search/
+  build_patched_lua.sh`; the tree's file is never edited): the peephole keeps
+  its rewrite of a jump and goes on after it, without the `i--` re-scan
+  (`lpeg-codegen-jump-out-of-code`), and `Cconst` pushes nil for key 0
+  (`lpeg-cc-nil-without-ktable`). Rows of those ids and of
+  `lpeg-initposition-negation-overflow` take this source, each run alone, its
+  step from the same census rule `classify_m66_lpeg.py` applies;
+- `semantic`: a correct LPeg's answer where that build still fails, written in
+  the generator with its reason (16-bit constant keys; nested captures past
+  the stack space LPeg checked for).
+
+149 rows: 112 `fixed-c` and 7 `semantic` at step c, 30 `fixed-c` at step d.
+The other quarantined rows (`lpeg-doublecap-stack-overread`,
+`lpeg-code-freed-during-match`, `lpeg-runtime-capture-index-16bit`, and
+construction rows step b's tests pin) are step d's or not `match` rows.
+
+**Left calls through `B`.** `oracle/m66c_behind.lua` holds the step b
+review's 334 grammars in six uses each (`P(g)`, `"q" + P(g)`, `P(g) * "z"`,
+`P(g) + "q"`, `-P(g)`, `P(g)^-1`), matched on four subjects.
+`oracle/gen_m66c_behind.py` (local only, the same patched build) runs each
+case in its own process and writes `m66c_behind_golden.txt`: the answer, or
+`CRASH` where the C's `getfirst` recursed until the process died, or `HANG`
+where it ran on for 3 s. Of 2,004 cases: 537 answers, 1,451 crashes, 16
+hangs. `left_calls_through_behind_compile_where_the_c_does` holds the port to
+every answer, to "rule '…' may be left recursive" at every crash, and to
+running on (pre-emptibly) where the C ran on; a grammar step b's second
+verifier pass refuses at construction counts only where the C crashed or ran
+on (60 cases).
+
+```sh
+python3 oracle/gen_m66c_behind.py           # rewrite the golden (local only)
+python3 oracle/gen_m66c_behind.py --check   # FAIL if stale
+```
+
+**Quirks.** `crates/core/tests/lpeg_match_quirks.rs` holds 174 chunks, each
+with the tree's oracle's answer through the same serialiser: the compiler's,
+the machine's and the captures' observable quirks (the step's brief §5), and
+four out-of-order substitutions (`lpeg-subst-negative-length`). `Q01a` and
+`Q01b` (H07, H06) carry the patched build's answer.
+
+**Fuzzing.** `fuzz/fuzz_targets/nse_lpeg_match.rs` builds a pattern from the
+input, compiles, matches and evaluates it in one slice and in slices of 1 to
+64 units, and checks both against a direct PEG interpreter of the tree with
+LPeg's capture placement, evaluated by a transliteration of `lpcap.c`.
+Seeds: `fuzz/seeds/nse_lpeg_match/`, one per capture kind and error.

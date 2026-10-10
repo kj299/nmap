@@ -1,0 +1,155 @@
+# M6.6 step c: pins for quarantined rows of m66_lpeg_cases.txt's generator,
+# by oracle/gen_m66c_quarantine_pins.py (local only: it builds a patched copy of
+# lpeg.c). id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log; source fixed-c is
+# the tree's lpeg.c with its peephole and Cc(nil) defects fixed, semantic a
+# correct LPeg's answer where that build still fails. The chunks are the
+# quarantine's. 149 rows.
+C.7.0	c	fixed-c	ok	nil	-
+C.7.1	c	fixed-c	ok	nil	-
+C.7.2	c	fixed-c	ok	nil	-
+C.7.3	c	fixed-c	ok	nil	-
+C.7.4	c	fixed-c	ok	nil	-
+C.7.5	c	fixed-c	ok	nil	-
+C.46.0	c	fixed-c	ok	{i1=i1,i3=i1}	-
+C.46.1	c	fixed-c	ok	{i1=i1,i3=i1}	-
+C.46.2	c	fixed-c	ok	{i1=i1,i3=i1}	-
+C.46.3	c	fixed-c	ok	{i1=i1,i3=i1}	-
+C.46.4	c	fixed-c	ok	{i1=i1,i3=i1}	-
+C.46.5	c	fixed-c	ok	{i1=i1,i3=i1}	-
+E.init.15.0	c	fixed-c	ok	i1 s""	-
+E.init.15.1	c	fixed-c	ok	i1 s"abc"	-
+F.num.1.6	c	fixed-c	ok	nil	-
+F.num.2.6	c	fixed-c	err	s"no capture '2'"	-
+F.num.3.6	c	fixed-c	err	s"no capture '3'"	-
+F.num.5.6	c	fixed-c	err	s"no capture '32767'"	-
+H.nestC.40	c	semantic	ok	i40 s"a" s"a"	-
+H.nestC.100	c	semantic	ok	i100 s"a" s"a"	-
+H.nestC.200	c	semantic	ok	i200 s"a" s"a"	-
+H.nestC.299	c	semantic	ok	i299 s"a" s"a"	-
+X.cmt.res.minint	d	fixed-c	err	s"invalid position returned by match-time capture"	K2(i2,a)
+X.init.minint	c	fixed-c	ok	i1	-
+X.ktable.32768	c	semantic	ok	i32768 i0 i1 i32768	-
+X.ktable.65537	c	semantic	ok	i65537 i0 i1 i65537	-
+X.ub.ccnil	c	fixed-c	ok	nil	-
+X.ub.jump1	c	fixed-c	ok	i1	-
+X.ub.jump2	c	fixed-c	ok	i1	-
+X.ub.nestC	c	semantic	ok	i300	-
+R.762	c	fixed-c	ok	nil	-
+R.1748	c	fixed-c	ok	s"" nil	-
+R.2103	c	fixed-c	ok	nil	-
+R.2280	c	fixed-c	ok	nil	-
+R.2448	d	fixed-c	ok	nil	-
+R.2487	c	fixed-c	ok	s""	-
+R.2585	c	fixed-c	ok	nil	-
+R.2732	c	fixed-c	ok	nil	-
+R.3820	c	fixed-c	ok	nil	-
+R.4230	c	fixed-c	ok	nil	-
+R.4268	c	fixed-c	ok	nil	-
+R.4656	c	fixed-c	ok	nil	-
+R.4919	c	fixed-c	ok	nil	-
+R.5090	c	fixed-c	err	s"invalid replacement value (a nil)"	-
+R.5643	c	fixed-c	ok	nil	-
+R.7063	d	fixed-c	ok	nil	Mgate2(i1,)
+R.7715	c	fixed-c	err	s"no capture '2'"	-
+R.8420	c	fixed-c	ok	nil	-
+R.8815	d	fixed-c	ok	i1	-
+R.8953	c	fixed-c	ok	nil	-
+R.9714	c	fixed-c	ok	nil	-
+R.9908	c	fixed-c	ok	nil	-
+R.10001	c	fixed-c	ok	nil	-
+R.10195	c	fixed-c	ok	nil	-
+R.10536	c	fixed-c	ok	nil	-
+R.10750	c	fixed-c	ok	i1	-
+R.10979	d	fixed-c	ok	i1	Mkeep2(i1,)
+R.11187	d	fixed-c	ok	nil	-
+R.11555	c	fixed-c	ok	nil	-
+R.11838	c	fixed-c	err	s"invalid replacement value (a nil)"	-
+R.12569	c	fixed-c	ok	nil	-
+R.12588	c	fixed-c	ok	nil	-
+R.12683	c	fixed-c	ok	nil	-
+R.13866	c	fixed-c	ok	nil	-
+R.14156	c	fixed-c	ok	nil	-
+R.14197	c	fixed-c	ok	nil	-
+R.15517	c	fixed-c	ok	nil	-
+R.16592	c	fixed-c	ok	nil	-
+R.17149	c	fixed-c	err	s"no capture '2'"	-
+R.17277	d	fixed-c	ok	nil	Mfalse2(i1,)
+R.17293	c	fixed-c	ok	nil	-
+R.17371	c	fixed-c	ok	nil	-
+R.18443	c	fixed-c	ok	nil	-
+R.18639	d	fixed-c	ok	s""	Mgate2(i1,)
+R.20169	c	fixed-c	ok	nil	-
+R.20401	d	fixed-c	ok	nil	-
+R.20481	c	fixed-c	ok	nil	-
+R.20937	c	fixed-c	ok	nil	-
+R.22040	c	fixed-c	ok	i1	-
+R.22078	c	fixed-c	ok	nil	-
+R.22188	d	fixed-c	ok	nil	Mgate2(i1,)
+R.22479	c	fixed-c	ok	nil	-
+R.23090	c	fixed-c	ok	{} s"\xff"	-
+R.24106	c	fixed-c	ok	nil	-
+R.24301	c	fixed-c	ok	nil	-
+R.24776	c	fixed-c	ok	nil	-
+R.25098	d	fixed-c	ok	nil	-
+R.25205	c	fixed-c	ok	nil	-
+R.25409	d	fixed-c	ok	nil	-
+R.26465	c	fixed-c	ok	{}	-
+R.26633	c	fixed-c	ok	nil	-
+R.26653	c	fixed-c	ok	nil	-
+R.28114	c	fixed-c	ok	nil	-
+R.28550	d	fixed-c	ok	i1	-
+R.28643	d	fixed-c	ok	nil	-
+R.29092	d	fixed-c	ok	{}	-
+R.29443	c	fixed-c	ok	nil	-
+R.29619	d	fixed-c	ok	nil	-
+R.29882	d	fixed-c	err	s"invalid replacement value (a nil)"	-
+R.30114	c	fixed-c	ok	i1	-
+R.31199	c	fixed-c	ok	nil	-
+R.32284	d	fixed-c	ok	nil	Mvals2(i1,)
+R.33048	c	fixed-c	ok	nil	-
+R.33565	d	fixed-c	ok	{}	-
+R.34539	c	fixed-c	ok	nil	-
+R.35526	c	fixed-c	ok	nil	-
+R.35780	c	fixed-c	err	s"invalid replacement value (a table)"	-
+R.35783	c	fixed-c	ok	nil	-
+R.39346	c	fixed-c	ok	s"" nil	-
+R.39465	c	fixed-c	ok	nil	-
+R.39636	c	fixed-c	ok	nil	-
+R.39721	c	fixed-c	ok	nil	-
+R.40659	c	fixed-c	ok	nil	-
+R.40839	c	fixed-c	ok	nil	-
+R.41139	d	fixed-c	ok	nil	-
+R.41514	d	fixed-c	ok	nil	-
+R.42131	c	fixed-c	ok	nil	-
+R.42134	c	fixed-c	ok	nil	-
+R.42486	c	fixed-c	ok	nil	-
+R.42633	c	fixed-c	ok	nil	-
+R.42652	c	fixed-c	ok	nil	-
+R.42757	c	fixed-c	ok	nil	-
+R.43188	c	fixed-c	ok	s"" nil	-
+R.43453	c	fixed-c	ok	nil	-
+R.43632	d	fixed-c	ok	i1	-
+R.44074	c	fixed-c	ok	{}	-
+R.44551	c	fixed-c	ok	nil	-
+R.45003	c	fixed-c	ok	nil nil	-
+R.45116	c	fixed-c	err	s"invalid replacement value (a nil)"	-
+R.45451	d	fixed-c	ok	i1	Mkeep2(i1,)
+R.45546	c	fixed-c	ok	nil s"b"	-
+R.46162	d	fixed-c	err	s"no initial value for fold capture"	-
+R.46553	d	fixed-c	ok	i2	-
+R.46605	c	fixed-c	ok	nil	-
+R.46636	c	fixed-c	ok	nil	-
+R.47448	d	fixed-c	ok	i1	-
+R.47536	d	fixed-c	ok	nil	-
+R.47556	d	fixed-c	ok	i1	Mcount2(i2,-)
+R.47766	c	fixed-c	ok	nil	-
+R.48222	c	fixed-c	ok	nil	-
+R.48337	c	fixed-c	ok	nil	-
+R.48442	c	fixed-c	ok	nil	-
+R.48808	c	fixed-c	ok	nil	-
+R.49073	c	fixed-c	ok	nil	-
+R.49265	d	fixed-c	ok	s"\xff"	-
+R.49418	d	fixed-c	ok	i1	-
+R.49600	c	fixed-c	ok	nil	-
+R.49710	c	fixed-c	ok	nil	-
+R.49875	c	fixed-c	ok	nil	-

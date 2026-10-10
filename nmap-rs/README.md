@@ -77,7 +77,8 @@ Beyond these:
 - **Fuzzing.** Every untrusted-input parser has a cargo-fuzz target in `fuzz/`,
   smoke-run in six CI shards. `fuzz/check-seeds.sh` checks seed hygiene.
 - **Differential tests** against the C oracle live in `tests/differential/`.
-  Each corpus has a `regen_*.sh --check` that re-derives it from the oracle.
+  Where a corpus has a `regen_*.sh`, its `--check` re-derives the corpus from
+  the oracle.
   Live runs against nmap itself are in CI's differential job.
 - **Vendored code.** `crates/vendor/piccolo/check_vendor.sh` proves the
   vendored tree is upstream plus its patch series.

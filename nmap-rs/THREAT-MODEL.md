@@ -26,7 +26,7 @@ Fuzz + validation priorities for M1, in order:
 | **Port spec** (`-p 1-65535,U:53,T:80`) | CLI | **untrusted** | `core::ports` | **yes (P0)** |
 | **`nmap-services`** data file (~1 MB) | filesystem / `--datadir` | **semi-trusted** | `core::ports` | **yes (P1)** |
 | **DNS responses** (fwd/rev resolution of targets) | remote resolver | **untrusted** | the OS resolver (`getaddrinfo`, via `tokio::net::lookup_host` in `sys::net`) | no — no DNS bytes reach our code |
-| Connect-scan results (RST/SYN-ACK/timeout) | remote host | untrusted-but-shallow | `sys::net` + `core::connect_scan` | indirect |
+| Connect-scan results (RST/SYN-ACK/timeout) | remote host | untrusted-but-shallow | `sys::net` + `sys::scan::connect_scan` | indirect |
 | Other CLI args / flags | operator | trusted-ish | `cli` | negative tests |
 | `NMAP_RS_TRACE`, env, `--datadir` | operator | trusted-ish | `cli`, `sys` | — |
 
@@ -148,15 +148,18 @@ model", Decision 2); this section records what the port does about each.
 | `--script` selection rules | operator | total, fuzzed; rules over 64 KiB refused | `core::nse::selection` (`nse_selection`) |
 | `--script-args` | operator, but often pasted | parsed by a port of nse_main.lua's grammar; fuzzed | `core::nse::scriptargs` (`nse_scriptargs`) |
 | Network responses handed to scripts | **untrusted** | parsed in Lua, through first-party stdlib functions that are each fuzzed and differentially tested | `core::nse::stdlib` (`nse_pattern`, `nse_format`, `nse_strpack`, `nse_tail`, `nse_utf8_date`) |
+| `nmapdb` arguments (M6.6 step a) | script | total parsers; the protocol option list is terminated, and a byte ≥ 0x80 is never a hex digit; fuzzed | `core::nse::nmapdb` (`nse_mac2corp`) |
+| `nmap-mac-prefixes`, `nmap-protocols` (M6.6 step a) | semi-trusted (installer, `--datadir`) | read once, as bytes; no assert: a prefix-only line is skipped, and so is a protocol line C misreads; fuzzed | `core::macvendor` (`macvendor_parse`), `core::protocols` (`nse_protocols`) |
 
 **The sandbox (Decision 2, M6.4c1).** In C nmap, `luaL_openlibs` gives every
 script `os.execute`, `io.popen` and the whole file system, usually as root.
 Here:
 
 - **No process or environment surface.** There is no `os.execute`, `exit`,
-  `getenv`, `remove`, `rename` or `tmpname`, no `io.popen`, `tmpfile` or stdin,
-  and no `loadfile`, `dofile`, `package.loadlib` or C searchers. `debug` is
-  `getinfo` and `traceback` only.
+  `remove`, `rename` or `tmpname`, no `io.popen`, `tmpfile` or stdin, and no
+  `loadfile`, `dofile`, `package.loadlib` or C searchers. `os.getenv`
+  answers `HOME` alone (`os-getenv-home-only`, M6.4e). `debug` is `getinfo`
+  and `traceback` only.
 - **Files through a policy.** Scripts may read beneath nmap's data
   directories and operator-named files. They may write operator-named files,
   or beneath an operator-designated output directory. Paths are compared and
@@ -209,6 +212,14 @@ Here:
 - `condvar`'s option list is not `NULL`-terminated, so an unknown option
   reads past it (`nse-condvar-option-overread`).
 - `set_timeout` formats an `int` with `%f` (`nse-negative-timeout-message`).
+- `nmapdb.getservbyport`'s protocol list is not `NULL`-terminated, so an
+  unknown protocol name reads past it
+  (`nmapdb-getservbyport-option-overread`).
+- 7.94's `nmapdb.getprotbynum` admits 255 and then asserts `num <
+  UCHAR_MAX`, and its 255-slot protocol table takes a write one past its
+  end from a data line for 255 (`nmapdb-getprotbynum-255-oracle-abort`).
+- `nmapdb.mac2corp` passes a `char` to `isxdigit`, which is undefined for
+  bytes ≥ 0x80 (`nmapdb-mac2corp-isxdigit-signed-char`).
 
 **Not defended.** The operator can name any script, and a script can scan,
 brute-force or exploit whatever its arguments point at. That is the tool's

@@ -14,7 +14,7 @@
 //! a binary chunk the mode allows, which the port refuses outright. An escaped
 //! "bad argument" error is compared by status, and an escaped error's
 //! `chunk:N: ` position is discounted, as in the pattern gate
-//! (DIVERGENCES.md, `error_string_gets_position`).
+//! (DIVERGENCES.md, `stdlib-errors-have-no-position`).
 #![cfg(not(miri))] // reads the corpus from disk; Miri has no filesystem
 
 mod m6_eval;

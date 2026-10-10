@@ -11,11 +11,11 @@
 //!
 //! No exemption list. The golden records the values each call returns, with
 //! their subtype, or that it raised — not the message. PUC-Lua's messages
-//! carry the caller's position, which this VM does not add (ledgered as
-//! `error_string_gets_position`), and for a missing argument they carry
-//! artefacts of the C's own stack layout: `str_pack` pushes a `nil` sentinel,
-//! so the first absent value reads as "got nil" and the second as "got light
-//! userdata".
+//! carry the caller's position, which the first-party stdlib does not add
+//! (ledgered as `stdlib-errors-have-no-position`), and for a missing argument
+//! they carry artefacts of the C's own stack layout: `str_pack` pushes a `nil`
+//! sentinel, so the first absent value reads as "got nil" and the second as
+//! "got light userdata".
 #![cfg(not(miri))] // reads the corpus from disk; Miri has no filesystem
 
 use nmap_core::nse::stdlib::load_strpack;

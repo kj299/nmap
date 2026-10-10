@@ -13,8 +13,8 @@
 # rather than copied, because the rendering both need is the same: every
 # returned value as `subtype:text` (strings as hex), and an error as the bare
 # word "error". The message is left out on purpose — PUC-Lua's carries the
-# caller's position, which the vendored VM does not add (DIVERGENCES.md,
-# `error_string_gets_position`), and for a missing argument it carries
+# caller's position, which the first-party stdlib does not add (DIVERGENCES.md,
+# `stdlib-errors-have-no-position`), and for a missing argument it carries
 # artefacts of the C's stack layout that are not Lua semantics at all.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

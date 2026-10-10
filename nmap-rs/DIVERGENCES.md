@@ -10,11 +10,17 @@ diverges is an unexplained regression and fails CI.
 be buggy; where you fixed a C defect, the Rust *should* diverge — record it here
 and ship it as a release note. Seed this from the Phase-0 C-flaw scan.
 
-Format — one bullet per case name, ticked when reviewed and accepted:
+Format — one bullet per entry, ticked when reviewed and accepted (`[ ]` is
+open or planned). The ID comes first, in backticks; the owner module and C
+location may follow in parentheses; the reason follows a `:` or a `—`:
 
 ```
-- [x] <matrix-case-name>: <why the Rust intentionally differs; CWE if a security fix>
+- [x] `<ledger-id>` (<owner module>, <C location>) — <why the Rust intentionally differs; CWE if a security fix>
 ```
+
+`diff_run.py --ledger` takes the text before the first `:` of a `- [x]` line
+as a case name, so it suppresses a differential-matrix case only when that
+case's bullet is written `` - [x] `<case-name>`: <why> ``.
 
 ## Security fixes (C defect closed by the port)
 
@@ -281,7 +287,7 @@ lands, `[x]` = confirmed by that module's gates.
       (`eth-win32.c:104`), so a failed raw send looks successful. The port returns the
       real send result. Additive robustness (Windows-only path).
 - [ ] `rawdata-no-signed-truncation` (`core::headers::raw`, ports `RawData::store`):
-      the C compares `int length >= (int)len` with `len` a `size_t` (`RawData.cc:147`);
+      the C compares `int length >= (int)len` with `len` a `size_t` (`RawData.cc:150`);
       `len > INT_MAX` casts negative and defeats the guard. The port carries lengths as
       `usize` with checked slicing; the truncation/underflow class is removed by
       construction. Bounded in practice today; hardened regardless.
@@ -419,7 +425,7 @@ the driver-specific choices.
 
   Inherits `build-explicit-fields-no-magic` (the driver passes `window=1024` and the
   encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
-  `validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
+  `recv-validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
 
 - [x] `route-minimal-onlink-then-gateway` (`sys::route`, minimal port of
       `nmap_route_dst`): source/interface selection tries loopback → an interface whose
@@ -1573,7 +1579,7 @@ OS fingerprint, prints it, tells the operator to paste it into a web form
 
 **Not covered here:** the `Service` kind exists in the format but nothing produces
 one yet. `service_scan.cc`'s `addServiceChar`/`addServiceString`/
-`addToServiceFingerprint` (`:1663-1720`) were never ported in M3 — see the correction
+`addToServiceFingerprint` (`:1663-1771`) were never ported in M3 — see the correction
 in `docs/S-ANALYSIS.md`. That is slice S3b, and unlike the rest of this workstream it
 has a real C oracle.
 
@@ -2813,9 +2819,9 @@ reader never stops, since a number is never the empty string.
 - [x] `xpcall-handler-runs-after-unwind`: PUC-Lua calls the handler at the
       point of the error, before the stack unwinds, which is what lets
       `debug.traceback` in a handler show the failing frame. Here the handler
-      runs after the protected call has unwound. Observable only through the
-      `debug` library, which the vendored VM does not provide; no shipped
-      script calls `xpcall`.
+      runs after the protected call has unwound, so a handler that calls
+      `debug.traceback` (provided since M6.4c1, `debug-is-introspection-only`)
+      does not show the failing frame. No shipped script calls `xpcall`.
 
 ### Differences in error *messages* only
 
@@ -3057,7 +3063,8 @@ operator over operands of every type, `error` at every level, `assert`,
 wrong types, and errors on later lines. Two VM defects closed:
 
 - `vm-runtime-errors-are-not-strings` (M6 tail), and
-  `error_string_gets_position` (M6.0): above.
+  `error_string_gets_position` (M6.0), by the patch described above. Closed
+  entries are removed, so neither is listed any more.
 - **A hang**: `for i = 1, 2, 0` looped forever (piccolo's loop was Lua 5.3's
   subtract-then-add scheme, which has no zero-step check); Lua 5.4 raises
   "'for' step is zero". Found by the first probe of this corpus.
@@ -3205,7 +3212,7 @@ Beyond the four VM entries above (`vm-allocation-failure-aborts`,
 
 ### Behaviour now matched that the corpora pin
 
-- [x] `xpcall-handler-run-count` — see the M6 tail: 214 runs, as in C.
+- `xpcall-handler-run-count` is ledgered in the M6 tail: 214 runs, as in C.
 - [x] `vm-call-metamethod-is-free` — `__call` takes no C level, and a limit
       it reaches is raised from the Lua caller, with its position, as from
       `tryfuncTM` inside `luaD_precall`.
@@ -3339,12 +3346,12 @@ Gated by three things:
       Two C modules carry the unterminated option list behind
       `nse-condvar-option-overread` and
       `nmaplib-set-port-version-option-overread`: `nmapdb.getservbyport`'s
-      protocol list (`nse_db.cc:49`), whose port uses a terminated one
+      protocol list (`nse_db.cc:50`), whose port uses a terminated one
       (`nmapdb-getservbyport-option-overread`), and `zlib`'s stream `flush`
       modes (`nse_zlib.cc:685`), which indexes a parallel array with the
       result. The port of `zlib` must use a terminated list.
 - [ ] `nse-cli-no-memory-budget` — the command line builds the NSE state
-      with `memory_limit: None` (`crates/cli/src/nse.rs:258`). Only the gates
+      with `memory_limit: None` (`open` in `crates/cli/src/nse.rs`). Only the gates
       set a budget (256 MiB). With no budget, piccolo's `Budget::allows`
       always says yes (`crates/vendor/piccolo/src/budget.rs:35-69`).
       - **What is still caught.** Buffers built through `stdlib::reserve`

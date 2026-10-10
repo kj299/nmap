@@ -2,10 +2,12 @@
 // build and emit exactly the format oracle/m60_driver.lua emits, so the two can
 // be diffed directly.
 //
-// NOT wired into the workspace, and regen_m60.sh does not run it: piccolo is
-// not a dependency of nmap-rs yet — deciding whether and how it becomes one is
-// what this corpus was built to inform. Keep it here so the measurements in
-// docs/M6-ANALYSIS.md stay reproducible. To run it:
+// Historical. It was written before piccolo became a dependency of nmap-rs,
+// to inform that decision; piccolo has been a workspace member
+// (crates/vendor/piccolo) since #109, and the corpus is gated by
+// crates/core/tests/lua_semantics_differential.rs. This file is NOT wired
+// into the workspace, and regen_m60.sh does not run it. Keep it here so the
+// measurements in docs/M6-ANALYSIS.md stay reproducible. To run it:
 //
 //   cargo new --bin score && cd score
 //   # add ONE of these to [dependencies]:

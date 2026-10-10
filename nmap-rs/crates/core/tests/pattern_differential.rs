@@ -20,11 +20,11 @@
 //!
 //! One prefix is discounted, and only on an error that escaped the chunk:
 //! `luaL_error` starts its message with the position of the *calling* Lua
-//! function — `chunk:1: malformed pattern ...` — which the vendored VM never
-//! adds (DIVERGENCES.md, `error_string_gets_position`). Errors caught inside a
-//! chunk are not touched: the generator makes those calls through `pcall`
-//! directly, where the C adds no prefix either, so their messages are compared
-//! byte for byte.
+//! function — `chunk:1: malformed pattern ...` — which the first-party stdlib
+//! does not add (DIVERGENCES.md, `stdlib-errors-have-no-position`). Errors
+//! caught inside a chunk are not touched: the generator makes those calls
+//! through `pcall` directly, where the C adds no prefix either, so their
+//! messages are compared byte for byte.
 #![cfg(not(miri))] // reads the corpus from disk; Miri has no filesystem
 
 mod m6_eval;

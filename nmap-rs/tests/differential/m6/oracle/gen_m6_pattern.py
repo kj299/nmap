@@ -119,10 +119,10 @@ def gmatch_chunk(call: str) -> str:
 # That is deliberate: `luaL_error` prefixes its message with the position of
 # the function one level up the stack, so a call from Lua code reads
 # "chunk:6: malformed pattern ..." while a call from `pcall` -- a C function,
-# which has no line -- reads "malformed pattern ...". The vendored VM never
-# adds that prefix (DIVERGENCES.md, `error_string_gets_position`); calling
-# through `pcall` takes it out of the comparison by construction instead of
-# by editing the oracle's answer.
+# which has no line -- reads "malformed pattern ...". The first-party stdlib
+# does not add that prefix (DIVERGENCES.md, `stdlib-errors-have-no-position`);
+# calling through `pcall` takes it out of the comparison by construction
+# instead of by editing the oracle's answer.
 MULTI = """
 local P = %s
 local subjects = {%s}

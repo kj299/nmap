@@ -128,7 +128,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     // Target specs from `-iL`, appended AFTER the positional ones. That order is
-    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3783) returns argv
+    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv
     // entries while `optind < argc` and only then reads the input file.
     if let Some(path) = cfg.input_file.clone() {
         match read_host_list(&path) {
@@ -1275,7 +1275,7 @@ fn select_ports(
 
     let Some(table) = services else {
         // No nmap-services: fall back to the historical 1-1024 sweep, which is
-        // what C does for an old-style file without ratios (`services.cc:411`).
+        // what C does for an old-style file without ratios (`services.cc:410`).
         let base: Vec<u16> = explicit.unwrap_or_else(|| (1u16..=1024).collect());
         return Ok(base.into_iter().filter(keep).collect());
     };

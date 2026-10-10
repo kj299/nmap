@@ -1,4 +1,4 @@
-//! Where nmap's data files are found: `nmap_fetchfile` (`nmap.cc:2677`).
+//! Where nmap's data files are found: `nmap_fetchfile_sub` (`nmap.cc:2677`).
 //!
 //! A file is looked for in each of these, in order, and the first readable
 //! copy wins:

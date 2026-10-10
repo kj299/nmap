@@ -81,7 +81,7 @@ fn parses_the_shipped_file_with_no_warnings() {
     let db = MacPrefixDb::parse(text.as_bytes());
 
     for w in db.warnings.iter().take(5) {
-        eprintln!("unexpected warning at line {}: {}", w.line, w.message);
+        eprintln!("unexpected warning at line {}: {}", w.line, w.problem);
     }
     assert!(
         db.warnings.is_empty(),

@@ -24,7 +24,7 @@ use nmap_core::{
 };
 mod nse;
 
-use nmap_sys::datadir::DataDirs;
+use nmap_sys::datadir::{read_data_file as read_regular_file, DataDirs, DataRead, DATA_FILE_MAX};
 use nmap_sys::net::resolve_host;
 use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig};
 
@@ -359,7 +359,7 @@ async fn main() -> ExitCode {
 
     // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
     if cfg.service_version {
-        run_service_version(&cfg, &mut results).await;
+        run_service_version(&cfg, &mut results, services.as_ref()).await;
     }
 
     // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so this
@@ -1040,7 +1040,11 @@ fn run_os_detection(_cfg: &RunConfig, _results: &mut ScanResults) -> String {
     String::new()
 }
 
-async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
+async fn run_service_version(
+    cfg: &RunConfig,
+    results: &mut ScanResults,
+    services: Option<&ServiceTable>,
+) {
     let Some(db_text) = load_probe_db_text() else {
         eprintln!(
             "nmap-rs: -sV requested but nmap-service-probes not found; skipping version scan"
@@ -1139,7 +1143,9 @@ async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
         };
         for pv in &hv.ports {
             if let Some(port) = host.ports.iter_mut().find(|p| p.number == pv.port) {
-                port.service = merge_version(&port.service, &pv.result);
+                port.service = merge_version(&port.service, &pv.result, || {
+                    services.and_then(|t| t.stored_name(port.number, port.protocol))
+                });
             }
         }
     }
@@ -1147,9 +1153,20 @@ async fn run_service_version(cfg: &RunConfig, results: &mut ScanResults) {
 
 /// Fold a `-sV` [`VersionResult`] into a port's [`ServiceInfo`], converting the
 /// byte-faithful version fields to display strings (non-printables escaped as the
-/// C's `\xNN`). A hard match sets `method="probed"`, `conf=10`; a soft/tcpwrapped
-/// result sets just the name.
-fn merge_version(existing: &ServiceInfo, r: &VersionResult) -> ServiceInfo {
+/// C's `\xNN`), as `PortList::setServiceProbeResults` records them
+/// (`portlist.cc:309-345`):
+///
+/// - a hard match: `method="probed"`, `conf=10`;
+/// - a soft match or tcpwrapped: `method="probed"`, `conf=8`;
+/// - nothing matched: the table's name (`table_name`, which is `s_name`: none
+///   for a port `nmap-services` names `unknown` or does not list),
+///   `method="table"`, `conf=3`. Scripts see that name, `service_dtype`
+///   "table" and confidence 3, as 7.94's do.
+fn merge_version<'a>(
+    existing: &ServiceInfo,
+    r: &VersionResult,
+    table_name: impl FnOnce() -> Option<&'a str>,
+) -> ServiceInfo {
     let mut svc = existing.clone();
     if let Some(name) = &r.service {
         svc.name = Some(name.clone()); // the probed name overrides the table guess
@@ -1170,11 +1187,16 @@ fn merge_version(existing: &ServiceInfo, r: &VersionResult) -> ServiceInfo {
             svc.method = Some("probed".into());
             svc.conf = Some(10);
         }
-        _ => {
-            // Soft match / tcpwrapped: name known, no hard version. nmap still
-            // marks the method probed with lower confidence.
+        _ if r.service.is_some() => {
+            // Soft match / tcpwrapped: name known, no hard version.
             svc.method = Some("probed".into());
-            svc.conf = Some(if r.service.is_some() { 8 } else { 3 });
+            svc.conf = Some(8);
+        }
+        _ => {
+            // PROBESTATE_FINISHED_NOMATCH: "Just look up the service name".
+            svc.name = table_name().map(str::to_owned);
+            svc.method = Some("table".into());
+            svc.conf = Some(3);
         }
     }
     svc
@@ -1588,26 +1610,46 @@ fn data() -> &'static DataDirs {
 /// bytes as C does: `nmapdb`'s `nmap-mac-prefixes` and `nmap-protocols`,
 /// which the script engine reads the first time a script needs them.
 fn read_data_bytes(name: &str) -> DataFile {
-    let Some(path) = data().fetch(name) else {
-        return DataFile::NotFound;
+    match data().fetch(name) {
+        Some(path) => data_file_at(name, &path),
+        None => DataFile::NotFound,
+    }
+}
+
+/// The file `nmap_fetchfile` found, as `mac_prefix_init` and
+/// `nmap_protocols_init` see it:
+/// - a directory is not found, since `nmap_fetchfile` returned 2 for it and
+///   they test for 1;
+/// - a file `fopen` cannot open is unreadable, with `strerror(errno)` and
+///   `errno` as `gh_perror` prints them;
+/// - a FIFO, device or other special file is refused, and so is one over
+///   [`DATA_FILE_MAX`] bytes, where C would block on the FIFO or read on
+///   for ever (`datafile-special-file-refused`, `datafile-size-cap`).
+///
+/// The path is printed as its bytes, as C prints it.
+fn data_file_at(name: &str, path: &std::path::Path) -> DataFile {
+    let shown = path.as_os_str().as_encoded_bytes().to_vec();
+    let unreadable = |error: String| DataFile::Unreadable {
+        path: shown.clone(),
+        error: error.into_bytes(),
     };
-    let shown = path.to_string_lossy().into_owned().into_bytes();
-    match std::fs::read(&path) {
-        Ok(bytes) => {
+    match read_regular_file(path, DATA_FILE_MAX) {
+        DataRead::Bytes(bytes) => {
             nmap_core::debug!(1, "loaded {name} from {}", path.display());
             DataFile::Read { path: shown, bytes }
         }
-        Err(e) => {
-            // `strerror(errno)` and `errno`, as `gh_perror` prints them.
+        DataRead::Directory => DataFile::NotFound,
+        DataRead::NotRegular => unreadable("Not a regular file".into()),
+        DataRead::TooLarge => unreadable(format!("File is larger than {DATA_FILE_MAX} bytes")),
+        DataRead::Io(e) => {
             let mut error = e.to_string();
             if let Some(i) = error.rfind(" (os error ") {
                 error.truncate(i);
             }
-            let errno = e.raw_os_error().unwrap_or(0);
-            DataFile::Unreadable {
-                path: shown,
-                error: format!("{error} ({errno})").into_bytes(),
-            }
+            unreadable(match e.raw_os_error() {
+                Some(errno) => format!("{error} ({errno})"),
+                None => error,
+            })
         }
     }
 }
@@ -1782,6 +1824,170 @@ mod port_selection_tests {
         assert_eq!(
             selected(&["-p", "20-30", "--exclude-ports", "22-25", "127.0.0.1"]),
             [20, 21, 26, 27, 28, 29, 30]
+        );
+    }
+}
+
+#[cfg(all(test, not(miri)))] // real files; Miri has no filesystem
+mod data_file_tests {
+    //! What `nmapdb`'s loaders are handed for each kind of file the data-file
+    //! search can find (M6.6 review: fidelity D1/D2, security D2/D5/D6).
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nmap-rs-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn unreadable(f: DataFile) -> (Vec<u8>, String) {
+        match f {
+            DataFile::Unreadable { path, error } => {
+                (path, String::from_utf8(error).expect("utf-8 reason"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_regular_file_is_read_with_its_path_as_bytes() {
+        let d = scratch("read");
+        let f = d.join("nmap-protocols");
+        std::fs::write(&f, "tcp 6\n").unwrap();
+        assert_eq!(
+            data_file_at("nmap-protocols", &f),
+            DataFile::Read {
+                path: f.as_os_str().as_encoded_bytes().to_vec(),
+                bytes: b"tcp 6\n".to_vec()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 7.94: `Cannot find nmap-mac-prefixes: ...` for a directory, since
+    /// `nmap_fetchfile` returns 2 and the loader tests for 1.
+    #[test]
+    fn a_directory_is_not_found() {
+        let d = scratch("dir");
+        assert_eq!(data_file_at("nmap-protocols", &d), DataFile::NotFound);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `datafile-special-file-refused` and `datafile-size-cap`: 7.94 blocks
+    /// on a FIFO and reads `/dev/zero` for ever; here each is refused with a
+    /// reason, and so is a file over the cap. No `(0)` where there is no OS
+    /// error.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_a_device_and_an_oversize_file_are_refused() {
+        let d = scratch("special");
+        let fifo = d.join("fifo");
+        if std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            let (path, error) = unreadable(data_file_at("nmap-protocols", &fifo));
+            assert_eq!(path, fifo.as_os_str().as_encoded_bytes());
+            assert_eq!(error, "Not a regular file");
+        }
+        let (_, error) = unreadable(data_file_at(
+            "nmap-mac-prefixes",
+            std::path::Path::new("/dev/zero"),
+        ));
+        assert_eq!(error, "Not a regular file");
+        // Sparse: no disk is used.
+        let big = d.join("big");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(DATA_FILE_MAX + 1).unwrap();
+        drop(f);
+        let (_, error) = unreadable(data_file_at("nmap-mac-prefixes", &big));
+        assert_eq!(error, "File is larger than 67108864 bytes");
+        assert!(!error.contains("(0)"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A socket opens with `ENXIO`, as `fopen` gets it in 7.94: `Unable to open
+    /// F.  ... : No such device or address (6)`.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_is_unreadable_with_the_cs_reason() {
+        let d = scratch("sock");
+        let s = d.join("nmap-mac-prefixes");
+        let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
+        let (_, error) = unreadable(data_file_at("nmap-mac-prefixes", &s));
+        assert_eq!(error, "No such device or address (6)");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A non-UTF-8 path is printed as its bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_keeps_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = scratch("bytes");
+        let f = d.join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        std::fs::create_dir_all(&f).unwrap();
+        let missing = f.join("nmap-protocols");
+        let (path, error) = unreadable(data_file_at("nmap-protocols", &missing));
+        assert!(path.windows(4).any(|w| w == b"caf\xe9"), "{path:?}");
+        assert_eq!(error, "No such file or directory (2)");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Fidelity D4: under `-sV`, a port no probe matched keeps the table's
+    /// name with `method="table"`, `conf=3`, and that is what scripts see
+    /// (7.94 with a junk listener on 8081: `service=blackice-icecap
+    /// conf=3.0 dtype=table`; on 46025, not in `nmap-services`: nil).
+    #[test]
+    fn an_unmatched_port_keeps_the_table_name_for_scripts() {
+        let table =
+            ServiceTable::parse("blackice-icecap\t8081/tcp\t0.0005\nunknown\t4/tcp\t0.0004\n");
+        let nomatch = VersionResult {
+            fingerprint: Some("SF-Port8081-TCP:V=x".into()),
+            ..VersionResult::default()
+        };
+        for (port, want) in [(8081, Some("blackice-icecap")), (4, None), (46025, None)] {
+            let svc = merge_version(&ServiceInfo::default(), &nomatch, || {
+                table.stored_name(port, nmap_core::model::Protocol::Tcp)
+            });
+            assert_eq!(svc.name.as_deref(), want, "{port}");
+            assert_eq!(svc.method.as_deref(), Some("table"));
+            assert_eq!(svc.conf, Some(3));
+            let mut p = nmap_core::model::Port::new(
+                port,
+                nmap_core::model::Protocol::Tcp,
+                PortState::Open,
+                nmap_core::model::Reason::ConnAccept,
+            );
+            p.service = svc;
+            let sp = nmap_core::nse::nmaplib::ScriptPort::from_model(&p);
+            let sd = sp.service.expect("a record");
+            assert_eq!(sd.name.as_deref(), want.map(str::as_bytes));
+            assert_eq!(sd.name_confidence, 3);
+            assert_eq!(sd.dtype, nmap_core::nse::nmaplib::DetectionType::Table);
+        }
+        // A hard match and a soft match are still probed.
+        let hard = VersionResult {
+            service: Some("http".into()),
+            resolution: nmap_core::Resolution::HardMatched,
+            ..VersionResult::default()
+        };
+        let svc = merge_version(&ServiceInfo::default(), &hard, || None);
+        assert_eq!(
+            (svc.name.as_deref(), svc.method.as_deref(), svc.conf),
+            (Some("http"), Some("probed"), Some(10))
+        );
+        let soft = VersionResult {
+            service: Some("ftp".into()),
+            resolution: nmap_core::Resolution::SoftMatched,
+            ..VersionResult::default()
+        };
+        let svc = merge_version(&ServiceInfo::default(), &soft, || Some("x"));
+        assert_eq!(
+            (svc.name.as_deref(), svc.method.as_deref(), svc.conf),
+            (Some("ftp"), Some("probed"), Some(8))
         );
     }
 }

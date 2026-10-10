@@ -29,13 +29,89 @@ pub struct DataDirs {
     dirs: Vec<PathBuf>,
 }
 
-/// `file_is_readable`: 1 for a file, 2 for a directory, 0 for neither or for
-/// one that cannot be opened.
+/// `file_is_readable` (`nbase_misc.c:706-731`): `stat`, then `access(R_OK)`;
+/// 1 for a file, 2 for a directory, 0 for neither. The search stops at either
+/// (`nmap_fetchfile` returns 2 for a directory, and the data-file loaders
+/// then treat it as not found, since they test for 1).
+///
+/// `access` is not in `std`, and this crate keeps its FFI behind `raw-ffi`, so
+/// its answer is had without it, and without ever opening anything that could
+/// block: a directory is readable if it can be listed, a regular file if it
+/// can be opened (neither blocks), and any other kind of file — a FIFO, a
+/// socket, a device — counts as readable without being opened, as `access`
+/// says of it to root. The loader that then opens it reports what it finds
+/// (`read_data_file`). Where this can differ from C: a non-root user and a
+/// FIFO, socket or device without read permission, which C passes over and
+/// this stops at (`datadir-readable-without-access`).
 fn readable(p: &Path) -> bool {
     match std::fs::metadata(p) {
         Ok(m) if m.is_dir() => std::fs::read_dir(p).is_ok(),
-        Ok(_) => std::fs::File::open(p).is_ok(),
+        Ok(m) if m.is_file() => std::fs::File::open(p).is_ok(),
+        Ok(_) => true,
         Err(_) => false,
+    }
+}
+
+/// The most of a data file [`read_data_file`] reads: far beyond any shipped
+/// file (`nmap-mac-prefixes` is under 1 MiB), and a bound on what a file
+/// planted in the search path can cost (`datafile-size-cap`).
+pub const DATA_FILE_MAX: u64 = 64 * 1024 * 1024;
+
+/// What [`read_data_file`] found.
+#[derive(Debug)]
+pub enum DataRead {
+    /// A regular file, read whole.
+    Bytes(Vec<u8>),
+    /// A directory: to the loaders, as to C's, not found.
+    Directory,
+    /// Neither a regular file nor a directory: a FIFO, a socket that opened,
+    /// a device. Refused, where C would read it (`datafile-special-file-refused`).
+    NotRegular,
+    /// Larger than the cap (`datafile-size-cap`).
+    TooLarge,
+    /// It could not be opened or read: the system's reason.
+    Io(std::io::Error),
+}
+
+/// Read a data file `nmap_fetchfile` found, as `fopen` and `fgets` would,
+/// but safely: opened non-blocking (a FIFO cannot stall the scan), only a
+/// regular file read, and at most `max` bytes of it.
+pub fn read_data_file(path: &Path, max: u64) -> DataRead {
+    use std::io::Read;
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return DataRead::Directory;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(f) => f,
+        Err(e) => return DataRead::Io(e),
+    };
+    // The kind of what was opened, not of what the name named a moment ago.
+    let meta = match file.metadata() {
+        Ok(m) => m,
+        Err(e) => return DataRead::Io(e),
+    };
+    if meta.is_dir() {
+        return DataRead::Directory;
+    }
+    if !meta.is_file() {
+        return DataRead::NotRegular;
+    }
+    if meta.len() > max {
+        return DataRead::TooLarge;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    // One byte past the cap tells a file that grew from one that fits.
+    match file.take(max.saturating_add(1)).read_to_end(&mut bytes) {
+        Ok(_) if !u64::try_from(bytes.len()).is_ok_and(|n| n <= max) => DataRead::TooLarge,
+        Ok(_) => DataRead::Bytes(bytes),
+        Err(e) => DataRead::Io(e),
     }
 }
 
@@ -163,6 +239,69 @@ mod tests {
         let abs = b.join("nmap-services");
         assert_eq!(dd.fetch_absolute(abs.to_str().unwrap()), Some(abs.clone()));
         assert_eq!(dd.existing(), vec![a, b]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nmap-rs-datadir-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `file_is_readable` stops the search at a directory (its 2), and the
+    /// loader then calls it not found; at a FIFO, without opening it.
+    #[test]
+    fn the_search_stops_at_a_directory_and_at_a_fifo() {
+        let tmp = scratch("stop");
+        let (a, b) = (tmp.join("a"), tmp.join("b"));
+        std::fs::create_dir_all(a.join("nmap-protocols")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("nmap-protocols"), "tcp 6\n").unwrap();
+        let dd = DataDirs::new(vec![a.clone(), b.clone()]);
+        let found = dd.fetch("nmap-protocols").unwrap();
+        assert_eq!(found, a.join("nmap-protocols"));
+        assert!(matches!(
+            read_data_file(&found, DATA_FILE_MAX),
+            DataRead::Directory
+        ));
+        #[cfg(unix)]
+        {
+            let fifo = a.join("nmap-mac-prefixes");
+            let ok = std::process::Command::new("mkfifo").arg(&fifo).status();
+            if ok.is_ok_and(|s| s.success()) {
+                std::fs::write(b.join("nmap-mac-prefixes"), "000000 X\n").unwrap();
+                // Neither the search nor the read blocks on the FIFO.
+                assert_eq!(dd.fetch("nmap-mac-prefixes"), Some(fifo.clone()));
+                assert!(matches!(
+                    read_data_file(&fifo, DATA_FILE_MAX),
+                    DataRead::NotRegular
+                ));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_data_file_is_read_up_to_the_cap() {
+        let tmp = scratch("cap");
+        let f = tmp.join("nmap-protocols");
+        std::fs::write(&f, b"tcp 6\nudp 17\n").unwrap();
+        match read_data_file(&f, DATA_FILE_MAX) {
+            DataRead::Bytes(b) => assert_eq!(b, b"tcp 6\nudp 17\n"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(read_data_file(&f, 13), DataRead::Bytes(_)));
+        assert!(matches!(read_data_file(&f, 12), DataRead::TooLarge));
+        match read_data_file(&tmp.join("missing"), DATA_FILE_MAX) {
+            DataRead::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("{other:?}"),
+        }
+        #[cfg(unix)]
+        assert!(matches!(
+            read_data_file(Path::new("/dev/zero"), DATA_FILE_MAX),
+            DataRead::NotRegular
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -152,7 +152,37 @@ fn service_name<'a>(
         .unwrap_or("unknown")
 }
 
-/// The SERVICE column, which under `-sV` marks an *unconfirmed* name with `?`.
+/// What C's `getServiceDeductions` holds as the name (`sd.name`): the port's
+/// own, else the table's stored name, which is none for a port `nmap-services`
+/// does not list and for the entries it names `unknown`
+/// ([`ServiceTable::stored_name`]).
+fn deduced_name<'a>(
+    port: u16,
+    proto: Protocol,
+    svc: &'a crate::model::ServiceInfo,
+    services: Option<&'a ServiceTable>,
+) -> Option<&'a str> {
+    svc.name
+        .as_deref()
+        .or_else(|| services.and_then(|t| t.stored_name(port, proto)))
+}
+
+/// Whether XML and grepable output describe the port's service at all: C
+/// prints a `<service>` element, and fills the grepable service field, only
+/// when `sd.name || sd.service_fp || sd.service_tunnel` (`output.cc:755`,
+/// `:783`). A port with no name — one `nmap-services` names `unknown`, or
+/// does not list — gets neither, though normal output prints `unknown`.
+fn has_service(
+    port: u16,
+    proto: Protocol,
+    svc: &crate::model::ServiceInfo,
+    services: Option<&ServiceTable>,
+) -> bool {
+    deduced_name(port, proto, svc, services).is_some() || svc.fingerprint.is_some()
+}
+
+/// The SERVICE column (`Port::getNmapServiceName`, `portlist.cc:137-173`),
+/// which under `-sV` marks an *unconfirmed* name with `?`.
 ///
 /// C distinguishes a name that a probe confirmed from one merely looked up in
 /// `nmap-services`, and only under `-sV` — because only then was a probe even
@@ -168,16 +198,23 @@ fn service_name<'a>(
 /// The `?` is the operator's signal that nothing was verified. Reporting a bare
 /// `jetdirect` for a port this scanner deliberately did not probe would claim a
 /// confirmation it never made — the same class of overclaim as `-sL` inventing
-/// host liveness.
+/// host liveness. C's rule: under `-sV`, an *open* port whose name is not
+/// `unknown` and that has no service record or one with confidence 5 or less
+/// (a probe that matched nothing leaves the table's name at confidence 3).
 fn service_column<'a>(
     port: u16,
     proto: Protocol,
+    state: PortState,
     svc: &'a crate::model::ServiceInfo,
     services: Option<&'a ServiceTable>,
     service_version: bool,
 ) -> String {
     let name = service_name(port, proto, svc.name.as_deref(), services);
-    if service_version && svc.name.is_none() {
+    if name != "unknown"
+        && service_version
+        && state == PortState::Open
+        && svc.conf.is_none_or(|c| c <= 5)
+    {
         format!("{name}?")
     } else {
         name.to_string()
@@ -509,7 +546,14 @@ fn render_port_table(
             let mut row = vec![
                 format!("{}/{}", p.number, p.protocol.as_str()),
                 p.state.as_str().to_string(),
-                service_column(p.number, p.protocol, &p.service, services, service_version),
+                service_column(
+                    p.number,
+                    p.protocol,
+                    p.state,
+                    &p.service,
+                    services,
+                    service_version,
+                ),
             ];
             if meta.reason {
                 row.push(p.reason.as_str().to_string());
@@ -605,18 +649,26 @@ pub fn render_grepable(
                     } else {
                         String::new()
                     };
+                    // No name, fingerprint or tunnel: an empty field.
+                    let service = if has_service(p.number, p.protocol, &p.service, services) {
+                        service_column(
+                            p.number,
+                            p.protocol,
+                            p.state,
+                            &p.service,
+                            services,
+                            meta.service_version,
+                        )
+                        .replace('/', "|")
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "{}/{}/{}//{}//{}/",
                         p.number,
                         p.state.as_str(),
                         p.protocol.as_str(),
-                        service_column(
-                            p.number,
-                            p.protocol,
-                            &p.service,
-                            services,
-                            meta.service_version
-                        ),
+                        service,
                         version,
                     )
                 })
@@ -935,6 +987,12 @@ pub fn render_xml(
                 .iter()
                 .map(|s| String::from_utf8_lossy(&s.xml()).into_owned())
                 .collect();
+            // No `<service>` for a port with no name, fingerprint or tunnel.
+            let service = if has_service(p.number, p.protocol, &p.service, services) {
+                service_xml(svc, &p.service, meta.service_version)
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
                 "<port protocol=\"{}\" portid=\"{}\"><state state=\"{}\" reason=\"{}\"/>{}{}</port>",
@@ -942,7 +1000,7 @@ pub fn render_xml(
                 p.number,
                 p.state.as_str(),
                 p.reason.as_str(),
-                service_xml(svc, &p.service, meta.service_version),
+                service,
                 script_xml,
             );
         }
@@ -1196,14 +1254,74 @@ mod tests {
         ServiceTable::parse("ssh 22/tcp 0.18\nhttp 80/tcp 0.48\n")
     }
 
-    /// `nmaplib-unknown-service-name` was fixed for scripts only: a port that
-    /// `nmap-services` names `unknown`, which scripts see with no name, is
-    /// still printed as `unknown` by every output, with the table method and
-    /// confidence 3.
+    /// A port with no service name — one `nmap-services` names `unknown`, or
+    /// does not list — as 7.94 prints it (`-p 1,4,46023` over loopback, all
+    /// closed): `unknown` in normal output, but no `<service>` element in XML
+    /// and an empty grepable service field (`output.cc:755`, `:783`).
+    ///
+    /// Until the M6.6 review this test pinned `<service name="unknown"
+    /// method="table" conf="3"/>` and `4/closed/tcp//unknown///`, which is
+    /// what 7.94 does *not* print.
     #[test]
-    fn a_port_named_unknown_in_the_table_is_printed_unknown() {
-        let table = ServiceTable::parse("unknown\t4/tcp\t0.000477\nssh\t22/tcp\t0.18\n");
+    fn a_port_with_no_service_name_has_no_xml_or_grepable_service() {
+        let table = ServiceTable::parse(
+            "tcpmux\t1/tcp\t0.001\nunknown\t4/tcp\t0.000477\nssh\t22/tcp\t0.18\n",
+        );
         assert_eq!(table.stored_name(4, Protocol::Tcp), None);
+        let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
+        for n in [1, 4, 46023] {
+            host.ports.push(Port::new(
+                n,
+                Protocol::Tcp,
+                PortState::Closed,
+                Reason::ConnRefused,
+            ));
+        }
+        let results = ScanResults {
+            hosts: vec![host],
+            ..Default::default()
+        };
+        let normal = render_normal(&results, &meta(), Some(&table));
+        assert!(normal.contains("1/tcp     closed tcpmux"), "{normal}");
+        assert!(normal.contains("4/tcp     closed unknown"), "{normal}");
+        assert!(normal.contains("46023/tcp closed unknown"), "{normal}");
+        let xml = render_xml(&results, &meta(), Some(&table));
+        assert!(
+            xml.contains(
+                "<port protocol=\"tcp\" portid=\"1\"><state state=\"closed\" \
+                 reason=\"conn-refused\"/><service name=\"tcpmux\" method=\"table\" conf=\"3\"/></port>"
+            ),
+            "{xml}"
+        );
+        for n in [4, 46023] {
+            assert!(
+                xml.contains(&format!(
+                    "<port protocol=\"tcp\" portid=\"{n}\"><state state=\"closed\" \
+                     reason=\"conn-refused\"/></port>"
+                )),
+                "{xml}"
+            );
+        }
+        assert!(!xml.contains("unknown"), "{xml}");
+        let grepable = render_grepable(&results, &meta(), Some(&table));
+        assert!(
+            grepable.contains(
+                "Ports: 1/closed/tcp//tcpmux///, 4/closed/tcp/////, 46023/closed/tcp/////"
+            ),
+            "{grepable}"
+        );
+    }
+
+    /// Under `-sV`, a probe that matched nothing leaves the table's name at
+    /// confidence 3, as 7.94 does (`8081/tcp open blackice-icecap?`, a junk
+    /// listener): the `?` goes on an open port with confidence 5 or less, never
+    /// on a closed one or on `unknown`; a fingerprint keeps the `<service>`
+    /// element of a port with no name, named `unknown`.
+    #[test]
+    fn sv_marks_unconfirmed_open_names_as_7_94_does() {
+        let table = ServiceTable::parse(
+            "unknown\t4/tcp\t0.000477\nblackice-icecap\t8081/tcp\t0.0005\nhttp\t80/tcp\t0.4\n",
+        );
         let mut host = Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up);
         host.ports.push(Port::new(
             4,
@@ -1211,19 +1329,58 @@ mod tests {
             PortState::Closed,
             Reason::ConnRefused,
         ));
+        let mut nomatch = Port::new(8081, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+        nomatch.service.name = Some("blackice-icecap".into());
+        nomatch.service.method = Some("table".into());
+        nomatch.service.conf = Some(3);
+        host.ports.push(nomatch);
+        let mut unnamed = Port::new(46025, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+        unnamed.service.method = Some("table".into());
+        unnamed.service.conf = Some(3);
+        unnamed.service.fingerprint = Some("SF-Port46025-TCP:V=x".into());
+        host.ports.push(unnamed);
+        let mut hard = Port::new(80, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+        hard.service.name = Some("http".into());
+        hard.service.method = Some("probed".into());
+        hard.service.conf = Some(10);
+        host.ports.push(hard);
         let results = ScanResults {
             hosts: vec![host],
             ..Default::default()
         };
-        let normal = render_normal(&results, &meta(), Some(&table));
-        assert!(normal.contains("4/tcp closed unknown"), "{normal}");
-        let xml = render_xml(&results, &meta(), Some(&table));
+        let mut m = meta();
+        m.service_version = true;
+        let normal = render_normal(&results, &m, Some(&table));
+        for want in [
+            "4/tcp ",
+            "closed unknown\n",
+            "8081/tcp  open   blackice-icecap?\n",
+            "46025/tcp open   unknown\n",
+        ] {
+            assert!(normal.contains(want), "{want:?} in\n{normal}");
+        }
+        assert!(!normal.contains("unknown?"), "{normal}");
+        assert!(!normal.contains("http?"), "{normal}");
+        let grepable = render_grepable(&results, &m, Some(&table));
+        assert!(
+            grepable.contains(
+                "4/closed/tcp/////, 8081/open/tcp//blackice-icecap?///, 46025/open/tcp//unknown///"
+            ),
+            "{grepable}"
+        );
+        let xml = render_xml(&results, &m, Some(&table));
+        assert!(
+            xml.contains("<service name=\"blackice-icecap\" method=\"table\" conf=\"3\"/>"),
+            "{xml}"
+        );
         assert!(
             xml.contains("<service name=\"unknown\" method=\"table\" conf=\"3\"/>"),
             "{xml}"
         );
-        let grepable = render_grepable(&results, &meta(), Some(&table));
-        assert!(grepable.contains("4/closed/tcp//unknown///"), "{grepable}");
+        assert!(
+            xml.contains("portid=\"4\"><state state=\"closed\" reason=\"conn-refused\"/></port>"),
+            "{xml}"
+        );
     }
 
     /// **These assertions were inverted until M7.10.** They required the two

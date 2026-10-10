@@ -59,6 +59,11 @@ pub struct ProtocolWarning {
     pub message: &'static str,
 }
 
+/// How many warnings a parse keeps; the rest are only counted
+/// ([`ProtocolTable::warning_count`]), so a malformed file of any size costs no
+/// memory for its warnings beyond these (`protocols-parse-warning-cap`).
+pub const KEPT_WARNINGS: usize = 10;
+
 /// The parsed `nmap-protocols` table.
 #[derive(Debug, Clone, Default)]
 pub struct ProtocolTable {
@@ -67,8 +72,10 @@ pub struct ProtocolTable {
     /// `protocol_table`: number to name, the first new name for a number
     /// winning.
     by_number: BTreeMap<u8, Vec<u8>>,
-    /// Lines that could not be read.
+    /// The first [`KEPT_WARNINGS`] lines that could not be read.
     pub warnings: Vec<ProtocolWarning>,
+    /// How many lines could not be read, kept or not.
+    pub warning_count: usize,
 }
 
 /// C's `isspace` in the C locale. Not `u8::is_ascii_whitespace`, which leaves
@@ -157,10 +164,15 @@ impl ProtocolTable {
             match parse_line(raw) {
                 Ok(None) => {}
                 Ok(Some((name, number))) => table.insert(name, number),
-                Err(message) => table.warnings.push(ProtocolWarning {
-                    line: i.saturating_add(1),
-                    message,
-                }),
+                Err(message) => {
+                    table.warning_count = table.warning_count.saturating_add(1);
+                    if table.warnings.len() < KEPT_WARNINGS {
+                        table.warnings.push(ProtocolWarning {
+                            line: i.saturating_add(1),
+                            message,
+                        });
+                    }
+                }
             }
         }
         table
@@ -339,6 +351,27 @@ mod tests {
         assert_eq!(t.by_name(b"x"), Some(6));
         assert_eq!(t.by_name(b"y"), None);
         assert!(t.warnings.is_empty());
+    }
+
+    /// `protocols-parse-warning-cap`: every bad line is counted, the first
+    /// [`KEPT_WARNINGS`] are kept, and the good lines among them still load.
+    #[test]
+    fn warnings_past_the_cap_are_counted_not_kept() {
+        let mut file = Vec::new();
+        for i in 0..25 {
+            file.extend_from_slice(b"bad\n");
+            if i == 20 {
+                file.extend_from_slice(b"tcp 6\n");
+            }
+        }
+        let t = ProtocolTable::parse(&file);
+        assert_eq!(t.warning_count, 25);
+        assert_eq!(t.warnings.len(), KEPT_WARNINGS);
+        assert_eq!(
+            t.warnings.iter().map(|w| w.line).collect::<Vec<_>>(),
+            (1..=KEPT_WARNINGS).collect::<Vec<_>>()
+        );
+        assert_eq!(t.by_name(b"tcp"), Some(6));
     }
 
     #[test]

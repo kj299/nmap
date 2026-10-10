@@ -45,12 +45,17 @@ that could surface in a differential.
 
 - [x] `services-parse-degrade` (`services.cc` `nmap_services_init`, owner
       `core::ports`): the C `fatal()`s and aborts the whole scan on a malformed
-      `nmap-services` line (bad ratio, `/0` denominator, unknown protocol). The
-      Rust `ServiceTable::parse` **skips** the offending line and keeps going, so
+      `nmap-services` line (bad ratio, `/0` denominator). The Rust
+      `ServiceTable::parse` **skips** the offending line and keeps going, so
       a corrupt or partially-edited data file degrades gracefully instead of
-      taking the tool down (availability hardening). Verified: real 3.9 MB
-      `nmap-services` parses to 27,461 entries; `top_ports(tcp,8)` matches nmap's
-      canonical `[80,23,443,21,22,25,3389,110]`.
+      taking the tool down (availability hardening). An **unknown protocol** is
+      not among C's fatal errors: 7.94 skips that line too, and at `-d` prints
+      `Unknown protocol (xyz) on line 2 of services file F.` (measured, M6.6
+      review); the port skips it silently, so the difference there is only the
+      debug message. Verified: real 3.9 MB `nmap-services` parses to 27,461
+      entries; `top_ports(tcp,8)` matches nmap's canonical
+      `[80,23,443,21,22,25,3389,110]`. Other lines the two read differently are
+      listed under `services-name-field-differences`.
 
 ## Deferred `-p` syntax (rejected explicitly, never silently ignored)
 
@@ -85,11 +90,12 @@ narrower *rendering* of the same result.
   `<?xml-stylesheet?>`, `<scaninfo>`, `<verbose>`, `<debugging>`, `<hostnames>`,
   `<times>`, `reason_ttl`, and `startstr`/`xmloutputversion` attributes. These are
   non-load-bearing for the connect scan and land with the output-fidelity pass.
-- **Unknown-service labelling.** In `-oN` the MVP prints `unknown` in the SERVICE
+- ~~**Unknown-service labelling.** In `-oN` the MVP prints `unknown` in the SERVICE
   column (matching nmap); in `-oX`/`-oG` nmap emits an *empty* service field / no
   `<service>` element for an unknown port, whereas the MVP currently emits
-  `name="unknown"`. Excluded from the projection (M1 does no `-sV`); flagged to
-  reconcile in the output-fidelity pass so `-oX` consumers aren't misled.
+  `name="unknown"`.~~ **Fixed in the M6.6 review** (`nmaplib-unknown-service-name`):
+  a port with no name — named `unknown` in `nmap-services`, or not listed — has no
+  `<service>` element and an empty grepable field, as in 7.94.
 - **`# Nmap ...` file banners / done-line.** nmap's `-oN`/`-oX`/`-oG` file format
   wraps output in `# Nmap <ver> scan initiated ... as: ...` / `# Nmap done at ...`
   comments and omits the interactive `Starting Nmap` line; the MVP uses its own
@@ -723,8 +729,21 @@ resolve as under 7.94).
       `services-parse-degrade`, `probedb-parse-degrade` and `osdb-parse-degrade`. On the
       shipped file the behaviour is identical — it parses with zero warnings. Since M6.6
       step a this reaches scripts through `nmapdb.mac2corp`, and each skipped line is
-      reported once, as `Parse error on line #N of FILE: REASON. Skipping it.`, where the
-      C's one message ends `Giving up parsing.`
+      reported, as `Parse error on line #N of FILE: REASON. Skipping it.`, where the C
+      reports its one bad line with `Parse error on line #N of FILE. Giving up parsing.`
+      — **twice** for a prefix of the wrong length or with a NUL in it, from
+      `MACLookup.cc:145` and `:150` (measured on 7.94 for 5- and 8-digit prefixes, M6.6
+      review), once otherwise.
+      **Capped since the M6.6 review** (security D1): step a kept a formatted `String`
+      per bad line for the whole run and printed every one, so 20 MiB of `x\n` cost
+      1,002 MB peak and 10,485,760 stderr lines, where 7.94 used 17 MB and one line. Now
+      a warning is a value (`MacDbProblem`, no allocation), the parser keeps the first
+      ten (`KEPT_WARNINGS`) and counts the rest, the warnings are taken out before the
+      table is stored, and `nmapdb` prints those ten and then one `... and M more parse
+      errors in FILE` line. The same file now peaks at 43 MB (28 MB with the shipped
+      files; debug build) and prints 11 lines. Pinned by
+      `warnings_past_the_cap_are_counted_not_kept` and
+      `a_file_of_bad_lines_is_reported_in_a_dozen_lines`.
 - [x] `macvendor-empty-vendor-skipped` (`core::macvendor`): a line holding a valid prefix
       and no vendor name reaches an `assert(*endptr)` in the C. nmap's build never
       defines `NDEBUG` (neither `Makefile.in` nor `configure.ac` does), so the assert is
@@ -737,12 +756,15 @@ resolve as under 7.94).
       pinned by `a_prefix_only_line_is_skipped_where_7_94_aborts` and
       `mac2corp_looks_up_most_specific_first`.
 - [x] `macvendor-no-fgets-truncation` (`core::macvendor`): the C reads lines into a
-      128-byte `fgets` buffer, so a longer line is split and its tail is parsed as if it
-      were a new line — which fails the hex-digit check and (per
-      `macvendor-parse-degrade`) abandons the file. This port reads whole lines. The
-      shipped file's longest line is 105 bytes, so the two agree on it today; the
-      divergence only shows on a file with a long vendor name. Since M6.6 step a it
-      reaches scripts through `nmapdb.mac2corp`.
+      128-byte `fgets` buffer, so a longer line is split: the head's vendor is cut at
+      the buffer, and the tail is parsed as if it were a new line. Usually the tail
+      fails the hex-digit check and (per `macvendor-parse-degrade`) abandons the file,
+      but it can parse: the line `080028 ` + `Q`×120 + `ABCDEF Injected` makes 7.94 map
+      `ABCDEF` to `Injected` (measured, M6.6 review), where the port gives nil, and
+      `080028`'s vendor whole where 7.94 cuts it to 120 bytes. This port reads whole
+      lines. The shipped file's longest line is 105 bytes, so the two agree on it
+      today; the divergence only shows on a file with a long vendor name. Since M6.6
+      step a it reaches scripts through `nmapdb.mac2corp`.
 - [x] `macvendor-lookup-order-preserved` (`core::macvendor`): **not a divergence** —
       recorded because it is load-bearing and easy to lose. Prefix keys are tagged with
       their digit count in the high bits exactly as the C's `(len << 36)` does, so the
@@ -1719,7 +1741,17 @@ removed: that one was theatre, this one is unobservable.
       instead. Without `nmap-protocols`, `nmapdb` prints `Unable to find
       nmap-protocols!` once (the C's message without its second sentence,
       `Resorting to /etc/protocols`), and `getprotbynum` and `getprotbyname`
-      give nil.
+      give nil. Two more differences in when the message appears:
+      - 7.94 loads `nmap-protocols` on every services init (it resolves the
+        services file's protocol column through it,
+        `services-protocols-hardcoded`), so it prints the message in any scan
+        that loads services; the port prints it only when a script first calls
+        `getprotbynum` or `getprotbyname`.
+      - A **directory** named `nmap-protocols` (or `nmap-mac-prefixes`) is "not
+        found" in both, since `nmap_fetchfile` returns 2 for it and the loaders
+        test for 1: 7.94 then falls back to `/etc/protocols` (59 numbers
+        resolve), the port prints `Unable to find nmap-protocols!` and gives nil
+        (`data_file_at`, M6.6 review).
 
 - [x] `rawio-safe-socket2-l3-plus-pcap-l2` (`sys::rawio`, ports the `send_ip_packet*` /
       `send_eth_packet` chokepoint): the send half of the raw path mirrors nmap's
@@ -2951,18 +2983,32 @@ MTU, the source address, `directly_connected` and the timing estimates.
         `4=nil/nil/closed`; the port's saw `4=unknown/string/closed`.
       - **Fix.** Scripts read `ServiceTable::stored_name`, which is nil for
         those entries as C's `s_name` is; `port.version.name_confidence` stays
-        3 and `service_dtype` stays `table`. Output keeps reading
-        `service_name`, so normal, XML and grepable output still print
-        `unknown`, and the entries stay in the table, so `-p unknown` still
-        selects them.
+        3 and `service_dtype` stays `table`, and so does `set_port_version`'s
+        fallback to the table (`portlist.cc:337-341`). The entries stay in the
+        table, so `-p unknown` still selects them.
+      - **Output, fixed in the M6.6 review.** Step a left XML and grepable
+        output printing `<service name="unknown" method="table" conf="3"/>` and
+        `4/closed/tcp//unknown///`, and a test pinned that; 7.94 prints neither
+        (`output.cc:755`, `:783`: only when `sd.name || sd.service_fp ||
+        sd.service_tunnel`). Now a port with no name — named `unknown`, or not
+        in `nmap-services` at all — has no `<service>` element and an empty
+        grepable service field, and normal output still prints `unknown`.
+        Measured on 7.94 and the port, `-p 1,4,46023` over loopback, all three
+        formats identical in what they say of the service.
       - **Gated** by the `service-names` scenario of `scripts_differential`
         (7.94 and the port both see `4/tcp closed service=nil/nil name=nil/nil
-        conf=3.0 dtype=table nmapdb=nil`), by `nmapdb_differential`'s 12,145
-        sweep lines, by `a_port_named_unknown_in_the_table_is_printed_unknown`
-        (`core::output`) and `unknown_entries_have_no_stored_name_but_stay_in_the_table`
+        conf=3.0 dtype=table nmapdb=nil`, and after `set_port_version(...,
+        "incomplete")` `set 4/tcp name=nil/nil conf=3.0 dtype=table`), by
+        `nmapdb_differential`'s 12,145 sweep lines, by
+        `a_port_with_no_service_name_has_no_xml_or_grepable_service` and
+        `sv_marks_unconfirmed_open_names_as_7_94_does` (`core::output`),
+        `set_port_version_falls_back_to_the_stored_name` (`core::nse::nmaplib`)
+        and `unknown_entries_have_no_stored_name_but_stay_in_the_table`
         (`core::ports`), and by sabotage: dropping the filter fails both
-        differentials, deleting the entries fails `-p unknown`, and an XML
-        renderer that drops the `<service>` element fails the output test.
+        differentials, using `service_name` in the `set_port_version` fallback
+        fails the scenario and the unit test (M6.6 review S19), deleting the
+        entries fails `-p unknown`, and an XML renderer that prints
+        `name="unknown"` again fails the output test.
 
 ## Milestone 6.4a — errors the VM raises, and the numeric `for` (vendored VM patch `0008`)
 
@@ -3715,16 +3761,30 @@ the port runs the same probe through its engine over the same files. All
 - `mac2corp` over every one of the 52,085 prefixes, at both ends of its
   range, and over 50,000 addresses, each as raw bytes, lower-case hex and
   upper-case hex with colons;
-- every protocol name, as written and in upper case;
-- 834 argument and edge lines, and the two functions as scripts reach them
-  through `datafiles` (with `datafiles.lua:127:` positions).
+- every protocol name, as written and in upper case (300 lines);
+- 513 argument and edge lines (`getprotbynum` over 0-256 and its argument
+  edges, 257 + 23; `getprotbyname`'s, 33; `getservbyport`'s, 129 + 1;
+  `mac2corp`'s, 70);
+- 21 lines of shape, counts, file checks and the two functions as scripts
+  reach them through `datafiles` (10, with `datafiles.lua:127:` positions).
+
+Each kind of row has a floor (`MIN_ROWS` in `nmapdb_differential`), since the
+probe is shared by oracle and port and a weakened probe regenerated in place
+would otherwise pass on the total alone (M6.6 review, S32).
 
 The calls 7.94 aborts or is undefined on are never made; they are listed
 in `m66_nmapdb_quarantine.txt` with an id below, and each id is a pin that
 every listed call is run against. Also gated: unit tests in each module,
 which Miri runs; fuzz targets `nse_mac2corp` (the argument parser against a
-model of its grammar) and `nse_protocols` (totality and first-wins); per-script
-loads (531 / 33 / 47, no pins); and eleven sabotages, each caught.
+model of its grammar), `nse_protocols` (totality, first-wins, and since the
+M6.6 review the tables and warnings against an independent model of each
+line, the number field's sign, digits, terminator and range included) and
+`macvendor_parse` (totality, and since the review a generated valid line is
+found with exactly its vendor); per-script loads (531 / 33 / 47, no pins,
+`regen_m66_scriptload.sh --check` in CI); the CLI end to end
+(`crates/cli/tests/nmapdb_cli.rs`, the CLI's own data-file reader); and eleven
+sabotages, each caught, plus the review's 34, of which the 8 not caught then
+are closed by gates added in the review.
 
 ### Security / robustness (divergence from the C, deliberately)
 
@@ -3763,13 +3823,68 @@ loads (531 / 33 / 47, no pins); and eleven sabotages, each caught.
       with `%hu`, so `http 65616/tcp` names port 80, and so does `-65456/tcp`.
       `ServiceTable` skips such a line, as it skips any port out of range
       (verified: `a_port_field_c_would_wrap_is_skipped`); `+81` and `0082`
-      are read as C reads them. The shipped file has none.
+      are read as C reads them. Not every field `%hu` reads right is read the
+      same: `zero -0/tcp` names port 0 in 7.94 and is skipped here (measured,
+      M6.6 review; `services-name-field-differences`). The shipped file has
+      none of these.
 - [x] `nmapdb-protocols-failure-not-fatal` — a found but unreadable
       `nmap-protocols` is a `pfatal` in C, which ends the scan
       (`protocols.cc:105-107`). Here `nmapdb` prints `Unable to open FILE for
       reading protocol information: REASON` once and its protocol lookups
       give nil. An unreadable `nmap-mac-prefixes` is reported in the C's own
       `gh_perror` form, which does not end the scan in either.
+      "Found but unreadable" is now what C means by it (M6.6 review, fidelity
+      D1/D2): the search stops at the first name that exists and is readable
+      to `stat` and `access` (`datadir-readable-without-access`), so a UNIX
+      socket there is reported, `No such device or address (6)` from `open`,
+      as 7.94 reports it, where step a passed over it silently to the next copy
+      in the search path; and a directory there is "not found", with the
+      missing-file message, as in 7.94, where step a said `Is a directory
+      (21)`. Measured against 7.94 for both files and both kinds; pinned by
+      `data_file_tests` (`cli`) and `nmapdb_reads_the_files_the_search_finds`.
+
+- [x] `datafile-special-file-refused` — `nmapdb`'s data files are opened
+      non-blocking (`O_NONBLOCK`) and only a regular file is read
+      (`sys::datadir::read_data_file`, the CLI's `data_file_at`). A FIFO,
+      a character or block device, or anything else that is not a regular
+      file is refused, with `Unable to open FILE.  Ethernet vendor correlation
+      will not be performed : Not a regular file` (or the protocols form), and
+      every lookup in it is nil. 7.94 blocks for ever in `fopen` on a FIFO
+      (measured: still hung at 20 s, `--script-timeout 2`, which cannot
+      interrupt a C call; nor could the port's stall watchdog, which runs
+      between Lua slices), reads `/dev/zero` as one bad line for the MAC file
+      and loops for ever on it for the protocols file. A UNIX socket fails
+      `open` with `ENXIO`, reported as 7.94 reports it. Pinned by
+      `a_fifo_a_device_and_an_oversize_file_are_refused`,
+      `a_socket_is_unreadable_with_the_cs_reason` (`cli`) and
+      `the_search_stops_at_a_directory_and_at_a_fifo` (`sys::datadir`).
+- [x] `datafile-size-cap` — a data file `nmapdb` reads is read only up to
+      `DATA_FILE_MAX`, 64 MiB; a larger one is refused (`File is larger than
+      67108864 bytes`), where step a's `std::fs::read` grew without bound (to
+      2.07 GB under a 3 GB limit on `/dev/zero`, M6.6 review security D2) and
+      C's `fgets` loop reads any size. The shipped `nmap-mac-prefixes` is under
+      1 MiB. Pinned with a sparse 64 MiB + 1 file.
+- [x] `protocols-parse-warning-cap` — C prints `Parse error in protocols file
+      FILE line N` for every bad line, and so did step a, which also kept a
+      24-byte warning per line for the whole run (20 MiB of bad lines: 288 MB
+      peak against 7.94's 18 MB, M6.6 review security D3). Now the parser
+      keeps the first ten and counts the rest, `nmapdb` prints those ten, then
+      `... and M more parse errors in FILE`, and keeps no warning with the
+      table. Same file: 43 MB peak with the MAC file of bad lines too, 11
+      lines of stderr for each file. Pinned by
+      `warnings_past_the_cap_are_counted_not_kept` (`core::protocols`) and
+      `a_file_of_bad_lines_is_reported_in_a_dozen_lines`.
+- [x] `datadir-readable-without-access` — `nmap_fetchfile` stops at the first
+      name `file_is_readable` accepts: `stat`, then `access(R_OK)`, never
+      opening it. `access` is not in `std`, and `nmap-sys` keeps its FFI behind
+      `raw-ffi`, so `readable` decides without it and without opening anything
+      that could block: a directory if it can be listed, a regular file if it
+      can be opened (neither blocks), and a FIFO, socket or device counts as
+      readable unopened, as `access(R_OK)` says of it to root. Step a opened
+      every candidate, so a FIFO blocked the search itself and a socket was
+      passed over (fidelity D2). Where this still differs from C: a non-root
+      user, and a FIFO, socket or device without read permission, which C
+      passes over and this stops at, then reports.
 
 ### Drift from 7.94, following this tree
 
@@ -3780,7 +3895,11 @@ loads (531 / 33 / 47, no pins); and eleven sabotages, each caught.
       has a slot for 255 (`efa0dc36f`); the port follows the tree
       (M6.5 D1(c)), and answers from the table: nil, since the shipped file
       names no protocol 255. The four quarantined spellings (`255`, `255.0`,
-      `"255"`, `"0xff"`) are pinned to the table's answer, and
+      `"255"`, `"0xff"`) are pinned to the constant `PROTOCOL_255` (`nil`) —
+      not to the port's own parse of the file, which would agree with itself
+      whatever it answered (M6.6 review, S33) — and
+      `the_shipped_protocols_file_names_no_255` checks, without the port's
+      parser, that the shipped file has no line for 255;
       `getprotbynum_255_answers_from_the_table` pins a file that does name
       255.
 
@@ -3812,21 +3931,111 @@ loads (531 / 33 / 47, no pins); and eleven sabotages, each caught.
 
 ### Differences in error *messages* only
 
-- [x] `nmapdb-bad-argument-naming` — `luaL_argerror` names the function from
-      its call site. The port does what it can see: a call from Lua code
-      names the field it was called through (`'getservbyport'`, as for
-      `nmapdb.getservbyport(...)`, the only shape in `nselib/`), and a call
+- [x] `nmapdb-bad-argument-naming` — `luaL_argerror` names the function as
+      `getfuncname` describes its call site. The port names it by one rule: a
+      call from Lua code names the function by its **registered name**
+      (`'getservbyport'`), whatever the code called it through, and a call
       from anything else (`pcall(nmapdb.getservbyport, ...)`) gets the name
-      `pushglobalfuncname` finds, `'nmapdb.getservbyport'`. Both shapes match
-      7.94 (the probe's lines, the unit tests). A call through a local alias,
-      `local f = nmapdb.getservbyport; f(x)`, names `'f'` in 7.94 and
-      `'getservbyport'` here (`stdlib-bad-argument-naming`). Errors carry
-      `luaL_where(L, 1)`'s position, as in C.
+      `pushglobalfuncname` finds, `'nmapdb.getservbyport'`
+      (`nmapdb.rs`, `function_name`). The two agree with 7.94 on the direct
+      call `nmapdb.X(...)` — the only shape in `nselib/` — and on `pcall`,
+      tail calls, `coroutine.wrap`/`resume` of the function, `xpcall`,
+      `__tostring` and `gsub` callbacks (the probe's lines, the unit tests).
+      They differ on every other shape (36 of 66 shapes the review tried
+      match; `stdlib-bad-argument-naming`). `X` is the function, `N` the
+      argument:
+
+      | call shape | 7.94 names it | port names it |
+      |---|---|---|
+      | method call `nmapdb:X()` | `calling 'X' on bad self (...)`; later arguments numbered one lower | `bad argument #N to 'X'` |
+      | local alias `f` | `'f'` | `'X'` |
+      | upvalue alias `upf` | `'upf'` | `'X'` |
+      | global alias `G` | `'G'` | `'X'` |
+      | field under another name `t.g` | `'g'` | `'X'` |
+      | dynamic key `nmapdb[k]` | `'?'` | `'X'` |
+      | integer key `a[1]` | `'integer index'` | `'X'` |
+      | parameter `f` | `'f'` | `'X'` |
+      | vararg, call result, `select` | `'nmapdb.X'` | `'X'` |
+      | metamethods | `'index'`, `'newindex'`, `'add'`, `'concat'`, `'len'`, `'unm'`, `'eq'`, `'lt'` | `'X'` |
+      | `__call` on a local `c` | `'c'` | `'X'` |
+      | generic `for` | `'for iterator'` | `'X'` |
+      | `table.sort` comparator | `bad argument #1 to 'nmapdb.X'`, no position | `[string "table/sort.lua"]:24: bad argument #1 to 'X'` |
+
+      Errors carry `luaL_where(L, 1)`'s position, as in C.
 
 ### Differences, open and documented
 
+- [ ] `services-protocols-hardcoded` — C resolves `nmap-services`' protocol
+      column through `nmap-protocols` (`services.cc:194`), and loads
+      `nmap-protocols` on every services init. `ServiceTable` knows `tcp`,
+      `udp` and `sctp` by name and reads `nmap-protocols` only inside
+      `nmapdb`. The shipped files agree; an operator's `nmap-protocols` does
+      not (measured on 7.94, M6.6 review fidelity D3):
+
+      | crafted `nmap-protocols` | 7.94 | port |
+      |---|---|---|
+      | no `tcp` line | no tcp names at all: `1/tcp closed unknown`, `getservbyport(22, "tcp")` nil | 6,483 tcp names, `tcpmux`, `ssh` |
+      | `tcp 17` and `udp 6` | the tcp and udp tables swapped | unchanged |
+      | a bad line, and a script calls only `getservbyport` | `Parse error in protocols file F line 5` | nothing |
+      | missing | `Unable to find nmap-protocols!  Resorting to /etc/protocols` in any scan that loads services | the message only when a script calls `getprot*` |
+
+      `nmapdb_reads_the_files_the_search_finds` (`cli`) keeps a `tcp 6` line in
+      its marker file for this reason. The coupling predates M6.6
+      (`docs/M6.6-ANALYSIS.md`).
+- [ ] `nmapdb-no-duplicate-debug-messages` — at `-d2` 7.94 reports duplicate
+      entries as it loads: `MAC prefix 000000 is duplicated in F; ignoring
+      duplicates.` (`MACLookup.cc:162`), `Protocol 50 (dup) has duplicate
+      number (51) in protocols file F` and `... duplicate name (other) ...`
+      (`protocols.cc:136`, `:143`). The port prints none of them; the answers
+      to lookups are the same (first wins, `nmapdb-first-wins-duplicates`).
+- [ ] `nmapdb-errors-not-in-normal-output` — `nmapdb`'s `error()` lines
+      (`Cannot find nmap-mac-prefixes: ...`, `Unable to find nmap-protocols!`,
+      the parse errors) go to stderr and to the `-oN` file in 7.94
+      (`nmap_error.cc:147-149`, `LOG_NORMAL|LOG_STDERR`). The CLI routes
+      `LogTarget::Error` to stderr only (`crates/cli/src/nse.rs`), so the
+      `-oN` file lacks them. `nse-log-lines-terminal-only` covers only
+      `LOG_STDOUT`/`LOG_PLAIN`.
+- [ ] `services-name-field-differences` — `ServiceTable::parse`
+      (`core::ports`) reads some `nmap-services` lines differently from
+      7.94's `sscanf` (M6.6 review fidelity D7, measured; now visible to
+      scripts through `getservbyport`):
+
+      | line | 7.94 | port |
+      |---|---|---|
+      | `zero -0/tcp` | port 0 named `zero` | skipped |
+      | `ss\0h 23/tcp` | skipped | named `ss\x00h` |
+      | a 128-byte name, `24/tcp` | skipped | kept |
+      | `nulproto 40/tcp\0junk` | kept | skipped |
+      | `nbsp\xc2\xa0x 25/tcp`, `ideo\xe3\x80\x80x 44/tcp` | the name kept whole | the line dropped (Rust splits on Unicode whitespace) |
+
+      The shipped file has none of these lines.
+- [x] `sv-nomatch-table-name` — **a port defect, predating M6.6, found in the
+      M6.6 review (fidelity D4) and fixed there.** Under `-sV`, a port no probe
+      matched was recorded `method="probed"` with no name, so scripts saw
+      `service=nil name=nil conf=3.0 dtype=probed`, where 7.94's see the
+      table's name (`s_name`) with `dtype=table`, conf 3
+      (`PortList::setServiceProbeResults`, `portlist.cc:333-345`). Now
+      `merge_version` records exactly that: the table's stored name (none for
+      `unknown` or an unlisted port), `method="table"`, conf 3. The SERVICE
+      column's `?` follows C's rule (`Port::getNmapServiceName`,
+      `portlist.cc:159-162`): under `-sV`, an open port with a name other than
+      `unknown` and no record or confidence 5 or less; so a closed port is no
+      longer printed `unknown?`. Measured with a junk listener on 8081 and
+      46025, `-sT -sV -p 4,8081,46025`: script output, normal (`8081/tcp open
+      blackice-icecap?`, `46025/tcp open unknown`), the `<service>` elements'
+      name, method and conf, and grepable all as 7.94's. Pinned by
+      `an_unmatched_port_keeps_the_table_name_for_scripts` (`cli`) and
+      `sv_marks_unconfirmed_open_names_as_7_94_does` (`core::output`). Still
+      different there, and not new: the port's `<service>` has no `servicefp`
+      attribute, and a soft match is recorded at confidence 8 where C gives 10.
 - [ ] `nse-datafiles-not-reported` — nmap lists the data files it read
-      lazily in a `Read data files from:` line (`printdatafilepaths`,
-      `output.cc:2583-2659`), `nmap-mac-prefixes` and `nmap-protocols` among
-      them. The port prints no such line for any file. `nmapdb` records
-      where it read each one (`Tables::loaded`), for when it does.
+      lazily (`printdatafilepaths`, `output.cc:2583-2659`), `nmap-mac-prefixes`
+      and `nmap-protocols` among them: at `-v`, one `Read data files from:
+      DIR` line when they all came from one directory, and **at default
+      verbosity** one `Read from DIR: FILES.` line per directory when they came
+      from more than one (`output.cc:2650`; measured on 7.94, M6.6 review:
+      `Read from /etc: protocols.` and `Read from D: nmap-mac-prefixes.`). The
+      port prints neither, for any file. `nmapdb` records where it read each
+      one (`Tables::loaded`, asserted by `mac2corp_looks_up_most_specific_first`
+      and `getprotbynum_and_getprotbyname_answer_from_nmap_protocols`), for when
+      it does.

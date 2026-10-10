@@ -81,6 +81,42 @@ fn missing(detail: Option<&str>, not_found: &[String], module: &str) -> bool {
         && (d.contains(&format!("module '{module}' not found")) || d.starts_with("table: "))
 }
 
+/// [`missing`] tells one missing module from another, and a failure from
+/// a load that never looked for the module (M6.6 review, sabotage S25: a
+/// `missing` that accepted any table or any "not found" let `libssh2-utility`
+/// be pinned to the wrong module).
+#[test]
+fn missing_names_one_module_and_only_that_one() {
+    let libssh2 = ["libssh2".to_string()];
+    let lpeg = ["lpeg".to_string()];
+    // The right module, either way of failing.
+    assert!(missing(Some("table: 0x1"), &libssh2, "libssh2"));
+    assert!(missing(
+        Some("module 'lpeg' not found:\n\tno field"),
+        &lpeg,
+        "lpeg"
+    ));
+    // Another module was the one not found.
+    assert!(!missing(Some("table: 0x1"), &libssh2, "openssl"));
+    assert!(!missing(
+        Some("module 'lpeg' not found"),
+        &["openssl".to_string()],
+        "lpeg"
+    ));
+    // No module was looked for and not found.
+    assert!(!missing(Some("module 'lpeg' not found"), &[], "lpeg"));
+    assert!(!missing(Some("table: 0x1"), &[], "openssl"));
+    // A failure that is neither the message nor `silent_require`'s table.
+    assert!(!missing(
+        Some("x.lua:3: attempt to index a nil value"),
+        &lpeg,
+        "lpeg"
+    ));
+    assert!(!missing(Some("module 'openssl' not found"), &lpeg, "lpeg"));
+    // No failure at all.
+    assert!(!missing(None, &lpeg, "lpeg"));
+}
+
 #[test]
 fn every_library_loads_as_under_nmap() {
     let dir = nse_host::repo_root();

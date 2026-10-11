@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Emit the differential corpus for the tail of the standard library.
 
-`core::nse::stdlib::base` binds `_G`, `rawequal`, `xpcall`, `load` and
-`coroutine.wrap`, and `core::nse::stdlib::strrep` ports `string.rep`. The
+`core::nse::stdlib::base` binds the base library (`lbaselib.c`), the
+coroutine library (`lcorolib.c`), `string.char`, the string metatable's
+arithmetic and the argument checks of `table.insert`, `table.remove` and
+`table.concat`, and `core::nse::stdlib::strrep` ports `string.rep`. The
 oracle is nmap's own `liblua/`. The corpus reaches every decision in each:
 
   A. string.rep over strings (empty, one byte, NUL bytes, numbers) crossed
@@ -23,14 +25,32 @@ oracle is nmap's own `liblua/`. The corpus reaches every decision in each:
      around `luaO_chunkid`'s limits, syntax errors at known lines, and reader
      functions (pieces, numbers, empty-string and nil termination, bad
      returns, errors);
-  F. _G.
+  F. _G;
+  G. the rest of the base library: `pcall`, `rawlen`/`rawget`/`rawset`,
+     `next`/`pairs`/`ipairs`, `select`, `type`, `tostring`, `tonumber`,
+     `getmetatable`/`setmetatable`, `collectgarbage`, `assert`, `error`,
+     `warn` -- each over a pool of argument kinds (none, nil, booleans,
+     numbers, strings, tables with and without a `__name`, functions,
+     threads), and each decision of the C (protected metatables, `__pairs`
+     truncated and padded to three, `ipairs` through `__index`, `tostring`'s
+     `__tostring` results, `b_str2int`'s numerals in every base, `select`'s
+     ranges, `error`'s levels, `collectgarbage`'s options with the state they
+     change put back);
+  H. the coroutine library: `create`, `resume`, `status` (`normal`
+     included), `isyieldable`, `running`, `close` (suspended, dead, dead of an
+     error and closed twice, running, normal), and `wrap`'s positioned errors;
+  I. `string.char` and the string metatable's arithmetic metamethods called
+     directly, over numeric and other strings, numbers, absent arguments and
+     a table's own metamethod;
+  J. the argument checks of `table.insert`, `table.remove` and
+     `table.concat`.
 
 Each row is `name<TAB>chunk_hex<TAB>note`. Chunks call the function under
 test through `pcall` directly so that C adds no position prefix to an error
-message, and compare every message byte for byte with two exceptions, both in
-the open:
+message, or from a Lua function to pin the position it adds, and compare
+every message byte for byte with two exceptions, both in the open:
 
-  * `'string.rep'` and `'coroutine.wrap'` become `'rep'` and `'wrap'` inside a
+  * `'string.X'`, `'coroutine.X'` and `'table.X'` become `'X'` inside a
     chunk, because `luaL_argerror` names a function called by `pcall` by its
     global path and the binding always says the short name (DIVERGENCES.md,
     `tail-bad-argument-naming`);
@@ -56,8 +76,8 @@ _seen: set[str] = set()
 PROLOGUE = r"""
 local function fix(v)
   if type(v) == "string" then
-    v = v:gsub("'string%.rep'", "'rep'")
-    v = v:gsub("'coroutine%.wrap'", "'wrap'")
+    v = v:gsub("'string%.(%a+)'", "'%1'")
+    v = v:gsub("'coroutine%.(%a+)'", "'%1'"):gsub("'table%.(%a+)'", "'%1'")
   end
   return v
 end
@@ -540,6 +560,10 @@ def gen_load() -> None:
     add("load_reader_mode",
         "local i = 0 return R(load(function() i = i + 1 return ({'return 1'})[i] end, 'c', 'b'))",
         "a reader under a mode that refuses text")
+    add("load_reader_bad_positioned", "return load(function() return {} end)",
+        "generic_reader's error carries load's caller's position")
+    add("load_reader_bad_nested", "local function f() return load(function() return true end) end return f()",
+        "generic_reader's error carries load's caller's position")
     add("load_reader_env",
         "local i = 0 local f = load(function() i = i + 1 return ({'return x'})[i] end, 'c', 't', {x = 'env x'}) return f()",
         "a reader with an environment")
@@ -558,6 +582,468 @@ def gen_g() -> None:
     add("g_rebind", "local old = _G _G = 1 local r = old._G return r, old.rawequal ~= nil", "_G is an ordinary global")
 
 
+# --------------------------------------------------------------------------
+# G. the rest of the base library
+
+# Argument kinds: (name, Lua expression or None for no argument at all). The
+# references render as `table:<table>` and so on, never as addresses.
+POOL = [
+    ("none", None),
+    ("nil", "nil"),
+    ("false", "false"),
+    ("true", "true"),
+    ("int", "7"),
+    ("float", "2.5"),
+    ("str", '"s"'),
+    ("numstr", '"10"'),
+    ("table", "{}"),
+    ("named", 'setmetatable({}, {__name = "Named"})'),
+    ("func", "function() end"),
+    ("thread", "coroutine.create(function() end)"),
+]
+
+
+def args(*parts: str | None) -> str:
+    """`, a, b` for the arguments that are there (a `None` ends the list)."""
+    out = []
+    for p in parts:
+        if p is None:
+            break
+        out.append(p)
+    return "".join(", " + a for a in out)
+
+
+def gen_base() -> None:
+    for fn in ["type", "rawlen", "getmetatable", "tostring", "next", "pairs", "ipairs",
+               "setmetatable", "rawget", "select", "assert", "tonumber"]:
+        for pn, pv in POOL:
+            add("base_arg_%s_%s" % (fn, pn),
+                "return R(pcall(function(...) local t = table.pack(%s(...)) "
+                "for i = 1, t.n do local v = t[i] if type(v) == 'string' and v:match('^%%a+: ') "
+                "then t[i] = v:match('^(%%a+): ') end end return table.unpack(t, 1, t.n) end%s))"
+                % (fn, args(pv)),
+                "%s of each kind of argument" % fn)
+    # Positioned: called from a Lua function, an argument error carries its
+    # caller's position, as `luaL_where(L, 1)` gives it.
+    for name, call in [
+        ("rawlen", "rawlen(5)"), ("rawget", "rawget(5, 1)"), ("rawset", "rawset({}, 1)"),
+        ("type", "type()"), ("select", "select(0)"), ("next", "next()"),
+        ("pairs", "pairs()"), ("ipairs", "ipairs()"), ("tostring", "tostring()"),
+        ("tonumber", "tonumber()"), ("tonumber_base", "tonumber('1', 99)"),
+        ("getmetatable", "getmetatable()"), ("setmetatable", "setmetatable({}, 1)"),
+        ("protected", "setmetatable(setmetatable({}, {__metatable = 1}), {})"),
+        ("assert", "assert(false, 'msg')"), ("assert_default", "assert(nil)"),
+        ("error_level", "error('e', {})"), ("collectgarbage", "collectgarbage('x')"),
+        ("warn", "warn()"), ("pcall", "pcall()"), ("xpcall", "xpcall(print)"),
+        ("tostring_result", "tostring(setmetatable({}, {__tostring = function() return true end}))"),
+        ("load", "load({})"),
+    ]:
+        add("base_positioned_" + name,
+            "local function f()\n  return %s\nend\nreturn R(pcall(f))" % call,
+            "an error raised for a Lua caller has its position")
+        add("base_escaped_" + name, "return %s" % call,
+            "an error that escapes the chunk, position and all")
+
+    # rawlen, rawget, rawset
+    for name, body in [
+        ("rawlen_holes", "local t = {1, 2, 3} return rawlen(t), rawlen(''), rawlen('a\\0b')"),
+        ("rawlen_lenmt", "return rawlen(setmetatable({1, 2}, {__len = function() return 9 end}))"),
+        ("rawget_index", "local t = setmetatable({}, {__index = function() return 'mm' end}) return rawget(t, 1), t[1]"),
+        ("rawget_keys", "local t = {10, 20, x = 'x'} return rawget(t, 1.0), rawget(t, 'x'), rawget(t, 0/0), rawget(t, nil), rawget(t, 3)"),
+        ("rawget_extra", "return rawget({5}, 1, 2, 3)"),
+        ("rawset_newindex", "local log = 0 local t = setmetatable({}, {__newindex = function() log = log + 1 end}) rawset(t, 1, 'a') t[2] = 'b' return t[1], rawget(t, 2), log"),
+        ("rawset_float_key", "local t = {} rawset(t, 2.0, 'x') local k = next(t) return t[2], math.type(k)"),
+        ("rawset_ret", "local t = {} return rawequal(rawset(t, 'k', 1), t), t.k"),
+        ("rawset_delete", "local t = {k = 1} rawset(t, 'k', nil) return t.k, next(t)"),
+        ("rawset_nil_key", "return R(pcall(rawset, {}, nil, 1))"),
+        ("rawset_nan_key", "return R(pcall(rawset, {}, 0/0, 1))"),
+        ("rawset_nil_key_nil_value", "return R(pcall(rawset, {}, nil, nil))"),
+        ("rawset_nan_key_nil_value", "return R(pcall(rawset, {}, 0/0, nil))"),
+        ("rawset_two", "return R(pcall(rawset, {}, 'k'))"),
+        ("rawset_one", "return R(pcall(rawset, {}))"),
+        ("rawset_named", "return R(pcall(rawset, setmetatable({}, {__name = 'N'}), 1, 2))"),
+        ("rawset_string", "return R(pcall(rawset, 's', 1, 2))"),
+    ]:
+        add("base_" + name, body, "raw access")
+
+    # next, pairs, ipairs
+    for name, body in [
+        ("next_empty", "return select('#', next({})), next({})"),
+        ("next_array_hole", "local t = {1, 2, 3} t[2] = nil return next(t, 2)"),
+        ("next_last", "local t = {7} return select('#', next(t, 1)), next(t, 1)"),
+        ("next_absent_key", "return R(pcall(next, {a = 1}, 'b'))"),
+        ("next_absent_int", "return R(pcall(next, {1, 2}, 10))"),
+        ("next_absent_float", "return R(pcall(next, {1, 2}, 1.5))"),
+        ("next_float_key", "local t = {10, 20} return next(t, 1.0)"),
+        ("next_extra", "return next({5}, nil, 'x')"),
+        ("pairs_is_next", "return pairs({}) == next, select(2, pairs('x')), select(3, pairs({}))"),
+        ("pairs_sorted", "local t = {1, 2, a = 3, b = 4} local k = {} for x in pairs(t) do k[#k + 1] = tostring(x) end table.sort(k) return table.concat(k, ',')"),
+        ("pairs_mt_arg", "local t = setmetatable({}, {__pairs = function(...) return select('#', ...), (...) end}) local n, s = pairs(t) return n, rawequal(s, t)"),
+        ("pairs_mt_callable", "local t = setmetatable({}, {__pairs = setmetatable({}, {__call = function(self, x) return 'f', 's', 'c', 'd' end})}) return pairs(t)"),
+        ("pairs_mt_not_callable", "return R(pcall(pairs, setmetatable({}, {__pairs = 5})))"),
+        ("pairs_mt_raises", "return R(pcall(pairs, setmetatable({}, {__pairs = function() error('inner', 0) end})))"),
+        ("pairs_mt_loop", "local t = setmetatable({}, {__pairs = function(t) local i = 0 return function() i = i + 1 if i <= 3 then return i, i * i end end, t, nil end}) local s = 0 for k, v in pairs(t) do s = s + v end return s"),
+        ("ipairs_holes", "local t = {1, 2, nil, 4} local n = 0 for _ in ipairs(t) do n = n + 1 end return n"),
+        ("ipairs_false_values", "local t = {false, false, 3} local n = 0 for _ in ipairs(t) do n = n + 1 end return n"),
+        ("ipairs_index_fn", "local t = setmetatable({}, {__index = function(t, i) if i <= 3 then return i * 10 end end}) local s = 0 for i, v in ipairs(t) do s = s + v end return s"),
+        ("ipairs_index_chain", "local t = setmetatable({1}, {__index = setmetatable({nil, 2}, {__index = {nil, nil, 3}})}) local s = {} for i, v in ipairs(t) do s[#s + 1] = v end return table.concat(s, ',')"),
+        ("ipairs_index_raises", "local t = setmetatable({}, {__index = function() error('idx', 0) end}) return R(pcall(function() for _ in ipairs(t) do end end))"),
+        ("ipairs_string_iter", "local n = 0 for _ in ipairs('abc') do n = n + 1 end return n"),
+        ("ipairs_number_iter", "return R(pcall(function() for _ in ipairs(5) do end end))"),
+        ("ipairs_nil_iter", "return R(pcall(function() for _ in ipairs(nil) do end end))"),
+        ("ipairs_named_iter", "return R(pcall(function() for _ in ipairs(setmetatable({}, {__name = 'N', __index = 5})) do end end))"),
+        ("ipairs_aux_direct", "local f = ipairs({}) return f({10, 20}, 0), f({10, 20}, 1), select('#', f({10, 20}, 2))"),
+        ("ipairs_aux_bad", "local f = ipairs({}) return R(pcall(f, {}, 'x'))"),
+        ("ipairs_aux_float", "local f = ipairs({}) return f({10, 20}, 1.0)"),
+        ("ipairs_aux_wrap", "local f = ipairs({}) return select('#', f({}, math.maxinteger))"),
+        ("ipairs_same_aux", "return ipairs({}) == ipairs({1}), select(3, ipairs({}))"),
+    ]:
+        add("base_" + name, body, "iteration")
+
+    # select
+    for idx in ["'#'", "'#x'", "''", "0", "1", "2", "3", "4", "-1", "-3", "-4", "1.0", "1.5",
+                "'2'", "'x'", "nil", "{}", "math.mininteger", "math.maxinteger", None]:
+        for an, al in [("noargs", ""), ("one", ", 'a'"), ("three", ", 'a', nil, 'c'")]:
+            if idx is None:
+                body = "return R(pcall(select))"
+                if an != "noargs":
+                    continue
+            else:
+                body = "return R(pcall(select, %s%s))" % (idx, al)
+            add("base_select_%s_%s" % (
+                "none" if idx is None else idx.replace("'", "q").replace(".", "p").replace("-", "m")
+                .replace("{}", "tbl").replace("#", "hash").replace("math", "").replace(" ", ""), an),
+                body, "select's index and its range")
+
+    # tostring
+    for name, body in [
+        ("tostring_prims", "return tostring(nil), tostring(true), tostring(false), tostring(-0.0), tostring(1e100), tostring(3), tostring(2^63), tostring(math.mininteger)"),
+        ("tostring_string", "return tostring('a\\0b')"),
+        ("tostring_mt_str", "return tostring(setmetatable({}, {__tostring = function() return 'obj' end}))"),
+        ("tostring_mt_int", "local s = tostring(setmetatable({}, {__tostring = function() return 42 end})) return s, math.type(s)"),
+        ("tostring_mt_float", "return tostring(setmetatable({}, {__tostring = function() return 1.5 end}))"),
+        ("tostring_mt_table", "return R(pcall(tostring, setmetatable({}, {__tostring = function() return {} end})))"),
+        ("tostring_mt_nil", "return R(pcall(tostring, setmetatable({}, {__tostring = function() end})))"),
+        ("tostring_mt_bool", "return R(pcall(tostring, setmetatable({}, {__tostring = function() return true end})))"),
+        ("tostring_mt_multi", "return tostring(setmetatable({}, {__tostring = function() return 'a', 'b' end}))"),
+        ("tostring_mt_not_callable", "return R(pcall(tostring, setmetatable({}, {__tostring = 5})))"),
+        ("tostring_mt_callable", "return tostring(setmetatable({}, {__tostring = setmetatable({}, {__call = function() return 'called' end})}))"),
+        ("tostring_mt_raises", "return R(pcall(tostring, setmetatable({}, {__tostring = function() error('ts', 0) end})))"),
+        ("tostring_mt_arg", "local t = setmetatable({}, {__tostring = function(...) return tostring(select('#', ...)) end}) return tostring(t)"),
+        ("tostring_name", "return (tostring(setmetatable({}, {__name = 'My.Type'})):match('^My%.Type: '))"),
+        ("tostring_name_not_string", "return (tostring(setmetatable({}, {__name = 5})):match('^table: '))"),
+        ("tostring_name_and_mt", "return tostring(setmetatable({}, {__name = 'N', __tostring = function() return 'ts' end}))"),
+        ("tostring_extra", "return tostring(1, 2, 3)"),
+    ]:
+        add("base_" + name, body, "tostring")
+
+    # tonumber: strings in every base, and the argument checks
+    strs = ['"10"', '"0x10"', '" 10 "', '"1e1"', '"z"', '"-ff"', '"+ff"', '""', '" "', '"1 0"',
+            '"10\\0"', '"1.5"', '"inf"', '"nan"', '"0x"', '"7fffffffffffffff"', '"8000000000000000"',
+            '"zzzzzzzzzzzzzz"', '"\\t\\n12\\v\\f\\r"', '"- 1"', '"1_0"']
+    bases = [None, "nil", "2", "8", "10", "16", "36", "1", "37", "'16'", "16.0", "16.5", "{}"]
+    for i, sv in enumerate(strs):
+        for j, b in enumerate(bases):
+            add("base_tonumber_%02d_%02d" % (i, j),
+                "return R(pcall(tonumber, %s%s))" % (sv, "" if b is None else ", " + b),
+                "tonumber of a string, in a base")
+    for name, body in [
+        ("tonumber_num_base", "return R(pcall(tonumber, 10, 16))"),
+        ("tonumber_nums", "return tonumber(10), tonumber(2.5), math.type(tonumber('10')), math.type(tonumber('10.0'))"),
+        ("tonumber_others", "return tonumber({}), tonumber(true), tonumber(nil), select('#', tonumber(nil))"),
+        ("tonumber_nil_base", "return tonumber('10', nil)"),
+        ("tonumber_none_base", "return R(pcall(tonumber, nil, 10))"),
+    ]:
+        add("base_" + name, body, "tonumber")
+
+    # getmetatable / setmetatable
+    for name, body in [
+        ("getmt_kinds", "return getmetatable(1), getmetatable(nil), getmetatable(print), getmetatable(coroutine.create(print)), getmetatable('').__index == string"),
+        ("getmt_protected", "return getmetatable(setmetatable({}, {__metatable = 'locked'}))"),
+        ("getmt_protected_false", "return getmetatable(setmetatable({}, {__metatable = false}))"),
+        ("getmt_protected_table", "local p = {} return rawequal(getmetatable(setmetatable({}, {__metatable = p})), p)"),
+        ("getmt_plain", "local m = {} return rawequal(getmetatable(setmetatable({}, m)), m)"),
+        ("getmt_index_ignored", "local m = setmetatable({}, {__index = function() return 'via index' end}) return rawequal(getmetatable(setmetatable({}, m)), m)"),
+        ("setmt_protected", "return R(pcall(setmetatable, setmetatable({}, {__metatable = 'locked'}), {}))"),
+        ("setmt_protected_false", "return R(pcall(setmetatable, setmetatable({}, {__metatable = false}), {}))"),
+        ("setmt_protected_nil", "return R(pcall(setmetatable, setmetatable({}, {__metatable = 1}), nil))"),
+        ("setmt_unprotect", "local t = setmetatable({}, {}) setmetatable(t, nil) return getmetatable(t)"),
+        ("setmt_ret", "local t = {} return rawequal(setmetatable(t, {}), t)"),
+        ("setmt_nil_arg2", "return getmetatable(setmetatable({}, nil))"),
+        ("setmt_extra", "local t = {} local m = {} setmetatable(t, m, 5) return rawequal(getmetatable(t), m)"),
+    ]:
+        add("base_" + name, body, "metatables")
+    for pn, pv in POOL:
+        add("base_arg_setmt2_" + pn, "return R(pcall(function() return type(setmetatable({}%s)) end))" % args(pv),
+            "setmetatable's second argument")
+
+    # pcall
+    for pn, pv in POOL:
+        add("base_arg_pcall_" + pn, "return R(pcall(pcall%s))" % args(pv), "pcall of each kind of value")
+    for name, body in [
+        ("pcall_nil_count", "return select('#', pcall(nil))"),
+        ("pcall_pcall_nil", "return R(pcall(pcall, nil))"),
+        ("pcall_args", "return pcall(function(...) return select('#', ...), ... end, 1, nil, 3)"),
+        ("pcall_results", "return select('#', pcall(function() return 1, 2, 3 end))"),
+        ("pcall_error_nil", "return R(pcall(error))"),
+        ("pcall_error_table", "local e = {} local ok, x = pcall(error, e) return ok, rawequal(x, e)"),
+        ("pcall_callable", "return pcall(setmetatable({}, {__call = function(self, a) return a end}), 7)"),
+        ("pcall_call_number", "return R(pcall(setmetatable({}, {__call = 5})))"),
+        ("pcall_call_chain", "return pcall(setmetatable({}, {__call = setmetatable({}, {__call = function(a, b, c) return type(a), type(b), c end})}), 'x')"),
+        ("pcall_named", "return R(pcall(setmetatable({}, {__name = 'Foo'})))"),
+        ("pcall_named_call", "return R(pcall(setmetatable({}, {__name = 'Foo', __call = 5})))"),
+        ("pcall_nested", "return pcall(pcall, pcall, error, 'x', 0)"),
+        ("xpcall_named", "return xpcall(setmetatable({}, {__name = 'Foo'}), function(m) return 'H:' .. m end)"),
+        ("xpcall_call_number", "return xpcall(setmetatable({}, {__call = 5}), function(m) return 'H:' .. m end)"),
+    ]:
+        add("base_" + name, body, "pcall")
+
+    # error and assert
+    for i, lvl in enumerate([None, "nil", "0", "1", "2", "3", "100", "-1", "'2'", "1.0", "1.5", "'x'", "{}",
+                             "math.maxinteger", "math.mininteger", "2^31 + 1"]):
+        add("base_error_level_%02d" % i,
+            "local function inner() error('m'%s) end\nlocal function outer() inner() end\nreturn R(pcall(outer))"
+            % ("" if lvl is None else ", " + lvl),
+            "error's level")
+    for name, body in [
+        ("error_number", "return R(pcall(error, 42))"),
+        ("error_number_level", "local function f() error(42, 1) end return R(pcall(f))"),
+        ("error_table_level", "local e = {} local function f() error(e, 1) end local ok, x = pcall(f) return ok, rawequal(x, e)"),
+        ("error_tail", "local function f() return error('t') end return R(pcall(f))"),
+        ("assert_true", "return assert(1, 2, 3)"),
+        ("assert_true_count", "return select('#', assert(true))"),
+        ("assert_none", "return R(pcall(assert))"),
+        ("assert_nil", "return R(pcall(assert, nil))"),
+        ("assert_false_nil", "return R(pcall(assert, false, nil))"),
+        ("assert_false_msg", "return R(pcall(assert, false, 'msg'))"),
+        ("assert_false_num", "return R(pcall(assert, false, 5))"),
+        ("assert_false_table", "local e = {} local ok, x = pcall(assert, false, e) return ok, rawequal(x, e)"),
+        ("assert_false_extra", "return R(pcall(assert, false, 'm', 'extra'))"),
+        ("assert_in_function", "local function f() assert(false, 'in f') end return R(pcall(f))"),
+        ("assert_default_in_function", "local function f() assert(false) end return R(pcall(f))"),
+    ]:
+        add("base_" + name, body, "error and assert")
+
+    # collectgarbage: every option, with whatever state it changes put back
+    # (the oracle runs every row in one state). The standalone `lua` runs its
+    # collector in generational mode and nmap in incremental, so no row shows
+    # which mode a state starts in.
+    for name, body in [
+        ("cg_default", "return collectgarbage()"),
+        ("cg_collect", "return collectgarbage('collect')"),
+        ("cg_nil", "return collectgarbage(nil)"),
+        ("cg_count", "return math.type(collectgarbage('count')), collectgarbage('count') > 0"),
+        ("cg_step", "return type(collectgarbage('step')), type(collectgarbage('step', 0)), type(collectgarbage('step', 10))"),
+        ("cg_stop_restart", "local a = collectgarbage('stop') local b = collectgarbage('isrunning') local c = collectgarbage('restart') return a, b, c, collectgarbage('isrunning')"),
+        ("cg_isrunning", "return collectgarbage('isrunning')"),
+        ("cg_setpause", "local a = collectgarbage('setpause', 150) local b = collectgarbage('setpause', a) return a, b"),
+        ("cg_setpause_none", "local a = collectgarbage('setpause') local b = collectgarbage('setpause', a) return a, b"),
+        ("cg_setpause_odd", "local a = collectgarbage('setpause', 1001) local b = collectgarbage('setpause', 2000) local c = collectgarbage('setpause', a) return a, b, c"),
+        ("cg_setstepmul", "local a = collectgarbage('setstepmul', 300) local b = collectgarbage('setstepmul', a) return a, b"),
+        ("cg_mode_roundtrip", "local a = collectgarbage('incremental') local b = collectgarbage(a) collectgarbage(a) return b, type(a)"),
+        ("cg_mode_generational", "local a = collectgarbage('generational') local b = collectgarbage('generational', 10, 50) local c = collectgarbage(a) collectgarbage(a) return b, c == 'generational'"),
+        ("cg_incremental_params", "local a = collectgarbage('incremental', 0, 0, 0) local p = collectgarbage('setpause', 200) collectgarbage(a) return p"),
+        ("cg_incremental_pause", "local p0 = collectgarbage('setpause', 200) local a = collectgarbage('incremental', 120) local p = collectgarbage('setpause', p0) collectgarbage(a) return p"),
+        ("cg_bad_option", "return R(pcall(collectgarbage, 'bogus'))"),
+        ("cg_number_option", "return R(pcall(collectgarbage, 1))"),
+        ("cg_table_option", "return R(pcall(collectgarbage, {}))"),
+        ("cg_nul_option", "return math.type(collectgarbage('count\\0junk'))"),
+        ("cg_bad_step_arg", "return R(pcall(collectgarbage, 'step', 'x'))"),
+        ("cg_bad_pause_arg", "return R(pcall(collectgarbage, 'setpause', 1.5))"),
+        ("cg_bad_gen_arg", "return R(pcall(collectgarbage, 'generational', {}))"),
+        ("cg_bad_inc_arg", "return R(pcall(collectgarbage, 'incremental', 1, 2, 'x'))"),
+    ]:
+        add("base_" + name, body, "collectgarbage")
+
+    # warn: warnings stay off (`luaL_newstate`'s default), so nothing is
+    # written; the arguments are checked all the same.
+    for name, body in [
+        ("warn_off", "return select('#', warn('hidden'))"),
+        ("warn_pieces", "return select('#', warn('a', 'b', 3))"),
+        ("warn_control_off", "warn('@off') return select('#', warn('@unknown'))"),
+        ("warn_none", "return R(pcall(warn))"),
+        ("warn_table", "return R(pcall(warn, {}))"),
+        ("warn_second", "return R(pcall(warn, 'a', nil))"),
+        ("warn_third", "return R(pcall(warn, 'a', 'b', true))"),
+        ("warn_named", "return R(pcall(warn, setmetatable({}, {__name = 'N'})))"),
+    ]:
+        add("base_" + name, body, "warn")
+
+    add("base_version", "return _VERSION", "_VERSION")
+    # Not through `_G`: section F's `g_rebind` leaves the oracle's `_G` a
+    # number for the rows after it.
+    add("base_globals", "return type(assert), type(collectgarbage), type(error), type(getmetatable), "
+        "type(ipairs), type(load), type(next), type(pairs), type(pcall), type(rawequal), type(rawget), "
+        "type(rawlen), type(rawset), type(select), type(setmetatable), type(tonumber), type(tostring), "
+        "type(type), type(warn), type(xpcall)", "the base library's functions")
+
+
+# --------------------------------------------------------------------------
+# H. the coroutine library
+
+def gen_coroutine() -> None:
+    for fn in ["create", "resume", "status", "close", "isyieldable", "wrap"]:
+        for pn, pv in POOL:
+            if fn == "isyieldable" and pv is None:
+                continue
+            add("co_arg_%s_%s" % (fn, pn),
+                "return R(pcall(function(...) local r = table.pack(coroutine.%s(...)) "
+                "for i = 1, r.n do r[i] = type(r[i]) == 'string' and r[i] or type(r[i]) end "
+                "return table.unpack(r, 1, r.n) end%s))" % (fn, args(pv)),
+                "coroutine.%s of each kind of argument" % fn)
+    for name, body in [
+        ("create_callable", "return R(pcall(coroutine.create, setmetatable({}, {__call = function() end})))"),
+        ("create_named", "return R(pcall(coroutine.create, setmetatable({}, {__name = 'N'})))"),
+        ("status_cycle", "local co = coroutine.create(function() coroutine.yield() end) local a = coroutine.status(co) coroutine.resume(co) local b = coroutine.status(co) coroutine.resume(co) return a, b, coroutine.status(co)"),
+        ("status_running", "return coroutine.wrap(function() return coroutine.status((coroutine.running())) end)()"),
+        ("status_main", "return coroutine.status((coroutine.running()))"),
+        ("status_normal", "local co1, co2 co2 = coroutine.create(function() return coroutine.status(co1) end) co1 = coroutine.create(function() return select(2, coroutine.resume(co2)) end) return select(2, coroutine.resume(co1))"),
+        ("status_main_from_inside", "local main = coroutine.running() return coroutine.wrap(function() return coroutine.status(main) end)()"),
+        ("status_error", "local co = coroutine.create(function() error('x') end) coroutine.resume(co) return coroutine.status(co)"),
+        ("resume_values", "local co = coroutine.create(function(a, b) local c, d = coroutine.yield(a + b, nil) return c, d, 'end' end) local r1 = table.pack(coroutine.resume(co, 1, 2)) local r2 = table.pack(coroutine.resume(co, 'x')) return r1.n, r1[2], r1[3], r2.n, r2[2], r2[3], r2[4]"),
+        ("resume_dead", "local co = coroutine.create(function() end) coroutine.resume(co) return coroutine.resume(co)"),
+        ("resume_dead_error", "local co = coroutine.create(function() error('boom', 0) end) local a, b = coroutine.resume(co) return a, b, coroutine.resume(co)"),
+        ("resume_self", "return coroutine.wrap(function() return coroutine.resume((coroutine.running())) end)()"),
+        ("resume_main", "return coroutine.resume((coroutine.running()))"),
+        ("resume_normal", "local co1, co2 co2 = coroutine.create(function() return coroutine.resume(co1) end) co1 = coroutine.create(function() return coroutine.resume(co2) end) local r = table.pack(coroutine.resume(co1)) return r.n, r[1], r[2], r[3], r[4]"),
+        ("resume_error_table", "local e = {} local co = coroutine.create(function() error(e) end) local ok, x = coroutine.resume(co) return ok, rawequal(x, e)"),
+        ("resume_error_position", "local co = coroutine.create(function() error('pos') end) return coroutine.resume(co)"),
+        ("resume_runtime_error", "local co = coroutine.create(function() local x = nil return x.y end) local ok, e = coroutine.resume(co) return ok, (e:gsub(' %(.*%)$', ''))"),
+        ("resume_count", "local co = coroutine.create(function() coroutine.yield() end) return select('#', coroutine.resume(co))"),
+        ("isyieldable_main", "return coroutine.isyieldable()"),
+        ("isyieldable_inside", "return coroutine.wrap(function() return coroutine.isyieldable() end)()"),
+        ("isyieldable_self", "return coroutine.wrap(function() return coroutine.isyieldable((coroutine.running())) end)()"),
+        ("isyieldable_main_arg", "return coroutine.isyieldable((coroutine.running()))"),
+        ("isyieldable_main_from_inside", "local main = coroutine.running() return coroutine.wrap(function() return coroutine.isyieldable(main) end)()"),
+        ("isyieldable_suspended", "local co = coroutine.create(function() coroutine.yield() end) local a = coroutine.isyieldable(co) coroutine.resume(co) return a, coroutine.isyieldable(co)"),
+        ("isyieldable_dead", "local co = coroutine.create(function() end) coroutine.resume(co) return coroutine.isyieldable(co)"),
+        ("isyieldable_normal", "local co1, co2 co2 = coroutine.create(function() return coroutine.isyieldable(co1) end) co1 = coroutine.create(function() return select(2, coroutine.resume(co2)) end) return select(2, coroutine.resume(co1))"),
+        ("isyieldable_nil", "return R(pcall(coroutine.isyieldable, nil))"),
+        ("running_main", "local co, main = coroutine.running() return type(co), main, select('#', coroutine.running())"),
+        ("running_inside", "local co co = coroutine.create(function() local c, m = coroutine.running() return rawequal(c, co), m end) return select(2, coroutine.resume(co))"),
+        ("close_fresh", "local co = coroutine.create(function() end) return coroutine.close(co), coroutine.status(co)"),
+        ("close_suspended", "local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) return coroutine.close(co), coroutine.status(co), coroutine.resume(co)"),
+        ("close_dead", "local co = coroutine.create(function() return 1 end) coroutine.resume(co) return coroutine.close(co)"),
+        ("close_dead_error", "local co = coroutine.create(function() error('boom') end) coroutine.resume(co) local r = table.pack(coroutine.close(co)) return r.n, r[1], r[2], coroutine.close(co)"),
+        ("close_dead_error_table", "local e = {} local co = coroutine.create(function() error(e) end) coroutine.resume(co) local ok, x = coroutine.close(co) return ok, rawequal(x, e)"),
+        ("close_dead_error_nil", "local co = coroutine.create(function() error(nil) end) coroutine.resume(co) local r = table.pack(coroutine.close(co)) return r.n, r[1], r[2]"),
+        ("close_dead_error_after_yield", "local co = coroutine.create(function() coroutine.yield() error('late', 0) end) coroutine.resume(co) coroutine.resume(co) return coroutine.close(co)"),
+        ("close_running", "return R(coroutine.wrap(function() return pcall(coroutine.close, (coroutine.running())) end)())"),
+        ("close_main", "return R(pcall(coroutine.close, (coroutine.running())))"),
+        ("close_normal", "local co1, co2 co2 = coroutine.create(function() return pcall(coroutine.close, co1) end) co1 = coroutine.create(function() return select(3, coroutine.resume(co2)) end) return R(select(2, coroutine.resume(co1)))"),
+        ("close_running_positioned", "local function f() return coroutine.close((coroutine.running())) end return R(pcall(f))"),
+        ("close_wrapped_error", "local co local w = coroutine.wrap(function() co = coroutine.running() error('w', 0) end) pcall(w) return coroutine.status(co), coroutine.close(co)"),
+        ("close_then_resume", "local co = coroutine.create(function() coroutine.yield(1) end) coroutine.resume(co) coroutine.close(co) return coroutine.resume(co)"),
+        ("wrap_error_positioned", "local w = coroutine.wrap(function() error('inner', 0) end) local function f() return w() end return R(pcall(f))"),
+        ("wrap_error_table_positioned", "local e = {} local w = coroutine.wrap(function() error(e) end) local function f() return w() end local ok, x = pcall(f) return ok, rawequal(x, e)"),
+        ("wrap_dead_positioned", "local w = coroutine.wrap(function() end) w() local function f() return w() end return R(pcall(f))"),
+        ("wrap_error_number", "local w = coroutine.wrap(function() error(5) end) local function f() return w() end return R(pcall(f))"),
+        ("wrap_running_positioned", "local w w = coroutine.wrap(function() local function f() return w() end return pcall(f) end) return R(w())"),
+        # The VM's own `continue` and `yieldto` are removed by the NSE
+        # runtime, not here (`vm-nonstandard-coroutine-functions`).
+        ("coroutine_functions", "local k = {} for _, n in ipairs({'close', 'create', 'isyieldable', 'resume', 'running', 'status', 'wrap', 'yield'}) do k[#k + 1] = type(coroutine[n]) end return table.concat(k, ',')"),
+    ]:
+        add("co_" + name, body, "coroutines")
+
+
+# --------------------------------------------------------------------------
+# I. string.char and the string metatable's arithmetic
+
+STR_OPERANDS = [
+    ("i3", '"3"'), ("f15", '"1.5"'), ("hex", '"0x10"'), ("sp", '" 4 "'), ("bad", '"a"'),
+    ("nul", '"1\\0"'), ("n4", "4"), ("n25", "2.5"), ("zero", "0"), ("szero", '"0"'),
+    ("nil", "nil"), ("tbl", "{}"), ("tmm", "T"), ("bool", "true"),
+]
+EVENTS = ["__add", "__sub", "__mul", "__mod", "__pow", "__div", "__idiv", "__unm"]
+
+
+def gen_string() -> None:
+    setup = ("local mt = getmetatable('')\n"
+             "local T = setmetatable({}, {__add = function(a, b) return 'T+' .. type(a) end, "
+             "__unm = function(a, b) return 'T-' .. type(a) .. type(b) end, __idiv = 5})\n")
+    for ev in EVENTS:
+        for an, av in STR_OPERANDS:
+            for bn, bv in [("i3", '"3"'), ("n2", "2"), ("bad", '"x"'), ("zero", '"0"'), ("tmm", "T"),
+                           ("tbl", "{}"), ("none", None)]:
+                add("str_%s_%s_%s" % (ev[2:], an, bn),
+                    setup + "return R(pcall(mt.%s, %s%s))" % (ev, av, "" if bv is None else ", " + bv),
+                    "the string metatable's %s called directly" % ev)
+        add("str_%s_none" % ev[2:], setup + "return R(pcall(mt.%s))" % ev, "no arguments at all")
+        add("str_%s_positioned" % ev[2:],
+            setup + "local function f() return mt.%s('a', 1) end\nreturn R(pcall(f))" % ev,
+            "trymt's error is positioned")
+    for name, body in [
+        ("mt_keys", "local k = {} for n in pairs(getmetatable('')) do k[#k + 1] = n end table.sort(k) return table.concat(k, ',')"),
+        ("mt_add_types", "local mt = getmetatable('') return math.type(mt.__add('1', '2')), math.type(mt.__add('1', '2.0')), math.type(mt.__div('4', '2')), math.type(mt.__idiv('7', '2'))"),
+        ("mt_unm_second", "return getmetatable('').__unm('2', '3')"),
+        ("mt_unm_one", "return R(pcall(getmetatable('').__unm, '2'))"),
+        ("mt_add_overflow", "return getmetatable('').__add(tostring(math.maxinteger), '1') == math.mininteger"),
+        ("mt_same_fn", "local mt = getmetatable('') return mt.__add == mt.__add, mt.__add ~= mt.__sub"),
+        ("mt_called_mm_raises", "local T = setmetatable({}, {__add = function() error('in mm', 0) end}) return R(pcall(getmetatable('').__add, 'x', T))"),
+        ("mt_called_mm_multi", "local T = setmetatable({}, {__add = function() return 1, 2, 3 end}) return select('#', getmetatable('').__add('x', T))"),
+        ("ops_unchanged", "return '10' + 1, '3' * '4', -'2', '7' // '2', '2' ^ '2', '7' % '4', '1' / '4'"),
+    ]:
+        add("str_" + name, body, "string arithmetic")
+    for pn, pv in POOL:
+        add("str_arg_char_" + pn, "return R(pcall(string.char%s))" % args(pv), "string.char of each kind of argument")
+    for name, body in [
+        ("char_range", "return string.char(0, 65, 255) == '\\0A\\255', #string.char()"),
+        ("char_256", "return R(pcall(string.char, 256))"),
+        ("char_neg", "return R(pcall(string.char, -1))"),
+        ("char_float", "return string.char(65.0), R(pcall(string.char, 65.5))"),
+        ("char_strnum", "return string.char('65', ' 66 ', '0x43')"),
+        ("char_third", "return R(pcall(string.char, 65, 66, 'x'))"),
+        ("char_huge", "return R(pcall(string.char, math.maxinteger))"),
+        ("char_minint", "return R(pcall(string.char, math.mininteger))"),
+        ("char_positioned", "local function f() return string.char(256) end return R(pcall(f))"),
+        ("char_method", "return ('x').char(104, 105)"),
+    ]:
+        add("str_" + name, body, "string.char")
+
+
+# --------------------------------------------------------------------------
+# J. table.insert, table.remove and table.concat's checks
+
+def gen_table() -> None:
+    show = ("local function show(t) local o = {} for i = 1, 6 do o[i] = tostring(rawget(t, i)) end "
+            "return table.concat(o, ',') end\n")
+    for i, call in enumerate([
+        "table.insert()", "table.insert(T)", "table.insert(T, 'x')", "table.insert(T, 1, 'x')",
+        "table.insert(T, 1, 'x', 'y')", "table.insert(T, 0, 'x')", "table.insert(T, 4, 'x')",
+        "table.insert(T, 5, 'x')", "table.insert(T, -1, 'x')", "table.insert(T, '2', 'x')",
+        "table.insert(T, 2.0, 'x')", "table.insert(T, 2.5, 'x')", "table.insert(T, 'x', 'x')",
+        "table.insert(T, nil, 'x')", "table.insert(T, math.mininteger, 'x')",
+        "table.insert(T, math.maxinteger, 'x')", "table.insert('s', 'x')", "table.insert(nil, 'x')",
+        "table.insert(setmetatable({}, {__name = 'N'}), 1, 2, 3)",
+        "table.insert(setmetatable({1}, {__index = function() end}), 'x')",
+        "table.remove()", "table.remove(T)", "table.remove(T, 1)", "table.remove(T, 3)",
+        "table.remove(T, 4)", "table.remove(T, 5)", "table.remove(T, 0)", "table.remove(T, -1)",
+        "table.remove(T, '1')", "table.remove(T, 1.5)", "table.remove(T, 'x')", "table.remove(T, nil)",
+        "table.remove({}, 0)", "table.remove({}, 1)", "table.remove({}, 2)", "table.remove({}, -1)",
+        "table.remove('s')", "table.remove(5, 1)",
+        "table.concat(T)", "table.concat(T, ',')", "table.concat(T, 1)", "table.concat(T, {})",
+        "table.concat(T, ',', 2)", "table.concat(T, ',', 2, 3)", "table.concat(T, ',', 3, 2)",
+        "table.concat(T, ',', 1, 4)", "table.concat(T, ',', 0)", "table.concat(T, ',', 'x')",
+        "table.concat(T, ',', 1, 'x')", "table.concat(T, ',', 1.5)", "table.concat({1, {}, 3})",
+        "table.concat({1, 2.5, 'x'}, '-')", "table.concat({true})", "table.concat({1, nil, 3}, ',', 1, 3)",
+        "table.concat({}, ',', 1, 1e15)", "table.concat('s')", "table.concat()",
+        "table.concat({print})", "table.concat({1, 2}, nil, nil, nil)",
+    ]):
+        add("tab_%02d" % i, show + "local T = {1, 2, 3}\nreturn R(pcall(function() local r = table.pack(%s) "
+            "return r.n, r[1], show(T) end))" % call, "table library argument checks")
+    for name, body in [
+        ("insert_positioned", "local function f() table.insert({}, 1, 2, 3) end return R(pcall(f))"),
+        ("insert_bounds_positioned", "local function f() table.insert({}, 5, 1) end return R(pcall(f))"),
+        ("remove_positioned", "local function f() table.remove({}, 5) end return R(pcall(f))"),
+        ("concat_positioned", "local function f() return table.concat({1, {}}) end return R(pcall(f))"),
+        ("concat_type_positioned", "local function f() return table.concat(5) end return R(pcall(f))"),
+        ("insert_newindex", "local log = {} local t = setmetatable({}, {__newindex = function(t, k, v) log[#log + 1] = k rawset(t, k, v) end}) table.insert(t, 'a') table.insert(t, 1, 'b') return table.concat(log, ','), t[1], t[2]"),
+        ("remove_shift", "local t = {1, 2, 3, 4} local r = table.remove(t, 2) return r, table.concat(t, ','), #t"),
+        ("insert_shift", "local t = {1, 2, 3} table.insert(t, 1, 0) table.insert(t, 5, 4) return table.concat(t, ',')"),
+    ]:
+        add("tab_" + name, body, "table library")
+
+
 def main() -> None:
     gen_rep()
     gen_rawequal()
@@ -565,6 +1051,10 @@ def main() -> None:
     gen_wrap()
     gen_load()
     gen_g()
+    gen_base()
+    gen_coroutine()
+    gen_string()
+    gen_table()
     out = sys.stdout
     out.write("# name\tchunk_hex\tnote\n")
     out.write("# Generated by oracle/gen_m6_tail.py; regenerate with ./regen_m6_tail.sh.\n")

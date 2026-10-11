@@ -2408,7 +2408,7 @@ holds the same list as `KNOWN_DIVERGENCES` and fails if a **new** divergence
 appears *or* if a listed one is silently fixed — so this section cannot drift
 from reality in either direction. Measured against
 [`m60_semantics_golden.txt`](tests/differential/m6/m60_semantics_golden.txt),
-99 cases evaluated by `liblua/` from this repository.
+133 cases evaluated by `liblua/` from this repository.
 
 Count at M6.0: **3 of 99**, down from 16 when the VM was vendored, and the
 corpus has grown by 31 cases over the same period rather than shrinking. **None
@@ -2418,7 +2418,14 @@ will, and `string.rep` closed `method_rep_literal`. Now **1 of 99**: M6.4a's
 VM patch (`0008`) gave `error` its position and closed
 `error_string_gets_position`. Entries
 the port has closed are removed rather than ticked, because they are simply
-correct now.
+correct now. Now **17 of 133**: the base-library port added 34 cases — 18
+pins of the table borders vendored patch `0013` gives (each matching only
+with its piece of the patch in place) and 16 of what is still open, each
+ledgered under "the base and coroutine libraries" below
+(`vm-table-border-is-not-luas` 3, `string-dump-absent`,
+`vm-string-arith-hooks-ignored`, `vm-sort-is-not-luas-quicksort` 2,
+`vm-sort-comparator-may-yield` 2, `vm-table-library-argument-checks` 3,
+`vm-yield-from-a-main-thread`) or under `vm-base-library-argument-errors` 3.
 
 Three further corpora sit beside this one and carry **no exemptions at all**:
 
@@ -2780,7 +2787,8 @@ accepts, it calls glibc's own `snprintf` in-process and requires the same bytes
 The last of the approved standard-library functions: bindings to the VM's own
 call, resume and compile machinery, plus a port of `lstrlib.c`'s `str_rep`.
 Gated by [`m6_tail_cases.txt`](tests/differential/m6/m6_tail_cases.txt): 1,019
-cases compared with `liblua/` on every value **and every error message**, with
+cases (2,742 since the base-library port, below) compared with `liblua/` on
+every value **and every error message**, with
 no exemption list. The `nse_tail` fuzz target checks `string.rep` against a
 naive concatenation and the C's size bound, and `chunk_id` against a
 transliteration of `luaO_chunkid` into a 60-byte buffer (2.9 million inputs in
@@ -2852,13 +2860,20 @@ reader never stops, since a number is never the empty string.
       compiler's ("unexpected end of token stream", where `llex.c` says
       "unexpected symbol near <eof>"). The corpus compares the prefix.
 - [x] `tail-bad-argument-naming`: as `pattern-bad-argument-naming` — the
-      bindings say `'rep'` and `'wrap'` where PUC-Lua names a function called
-      by `pcall` `'string.rep'` and `'coroutine.wrap'`. The corpus rewrites
-      those two names inside its chunks and compares the rest.
-- [x] `tail-no-position-prefix`: `auxwrap` prefixes a string error leaving a
-      `coroutine.wrap` function with the caller's `chunk:LINE:`, and
-      `generic_reader`'s "reader function must return a string" carries the
-      same prefix; this port adds neither. That is `stdlib-errors-have-no-position`.
+      bindings say `'rep'`, `'char'`, `'wrap'`, `'status'`, `'insert'` and so
+      on where PUC-Lua names a function called by `pcall` by its global path,
+      `'string.rep'`, `'coroutine.status'`, `'table.insert'`; called by its
+      field from Lua (`coroutine.status(5)`) the C says the short name too.
+      The base library's own names are the same either way. `ipairs`'s
+      iterator, which the C finds no name for, is `'?'`. The corpus rewrites
+      the `string.`, `coroutine.` and `table.` prefixes inside its chunks and
+      compares the rest.
+- [x] `tail-no-position-prefix` — **closed by the base-library port.**
+      `auxwrap` prefixes a string error leaving a `coroutine.wrap` function
+      with the caller's `chunk:LINE:`, and `generic_reader`'s "reader
+      function must return a string" carries the same prefix; both now do
+      here (rows `wrap_many_values`, `co_wrap_*_positioned`,
+      `load_reader_bad_*`).
 
 ### Differences that belong to the VM, not to these bindings
 
@@ -2901,6 +2916,179 @@ reader never stops, since a number is never the empty string.
       tables and userdata only, as the C does; they still print a `__name`
       whole and as UTF-8 (lossily), where the C's `%s` stops at a NUL —
       open, and only a `__name` holding a NUL or a byte past ASCII shows it.
+
+## Milestone 6 stdlib — the base and coroutine libraries (`core::nse::stdlib::base`) and table borders (vendored VM patch `0013`)
+
+`lbaselib.c` and `lcorolib.c` ported first-party, replacing the vendored VM's
+own base and coroutine functions, which no corpus had reached: `pcall`,
+`rawlen`/`rawget`/`rawset`, `next`/`pairs`/`ipairs`, `select`, `type`,
+`tostring`, `tonumber`, `getmetatable`/`setmetatable`, `collectgarbage`,
+`assert`, `error`, `warn` (new), and `coroutine.create`/`resume`/`status`/
+`running`/`isyieldable` (new)/`close` (new) beside the existing `rawequal`,
+`xpcall`, `load` and `wrap`. With them `string.char`, the string metatable's
+arithmetic metamethods (`lstrlib.c`'s `stringmetamethods`) and the argument
+checks of `table.insert`, `table.remove` and `table.concat`. Every message
+is the C's, positioned as `luaL_where(L, 1)` positions it. Left to others,
+each for its reason: `print` (the `io` binding, `iolib`), `dofile` and
+`loadfile` (absent, `require-searches-only-nselib`), the work of the three
+table functions after their checks, `table.sort` and `coroutine.yield` (the
+VM's, below).
+
+Gated by [`m6_tail_cases.txt`](tests/differential/m6/m6_tail_cases.txt),
+now 2,742 cases (1,723 added: sections G-J and two rows of `load`'s
+reader), compared with `liblua/` on every
+value and every message, escaped errors and their positions included, with no
+exemption list; by in-module tests Miri runs; by `lua_semantics_differential`
+for the VM's half; and by a prerule probe run under nmap 7.94 and through the
+port's own NSE runtime, which agree on every row but the two below that are
+open (`#t` of a sparse table, `'char'` for `'string.char'`), and write the
+same `warn` output byte for byte.
+
+### Behaviour now matched that the corpora pin
+
+- [x] `vm-pcall-raises-for-a-non-callable` — `pcall(nil)` raised "attempt
+      to call a nil value" where PUC-Lua returns `false` and the message, so
+      a script holding a nil function died where nmap's goes on; `pcall()`
+      is now `luaL_checkany`'s error. The call keeps its C level (patch
+      `0009`'s counting holds: `limits_differential` passes). Rows
+      `base_arg_pcall_*`, `base_pcall_*`.
+- [x] `vm-pairs-returns-two-values` — `pairs` and `ipairs` returned two
+      values; they return three (`next, t, nil`; `ipairsaux, t, 0`), a
+      `__pairs`'s results are cut or padded to three, and `ipairs` reads
+      through `__index` with its own iterator. Rows `base_arg_pairs_*`,
+      `base_pairs_*`, `base_ipairs_*`.
+- [x] `vm-raw-access-argument-checks` — `rawlen("abc")` raised (it is 3),
+      `rawset(t, k)` and `rawget(t)` succeeded (the C requires the value and
+      the key). Rows `base_rawlen_*`, `base_rawset_*`, `base_rawget_*`.
+- [x] `vm-protected-metatable-ignored` — `getmetatable` ignored
+      `__metatable` and `setmetatable` overwrote a protected metatable;
+      "cannot change a protected metatable" now, and the field stands in for
+      the metatable. Rows `base_getmt_*`, `base_setmt_*`.
+- [x] `vm-collectgarbage-options-raise` — every option but `"count"`
+      raised; each now answers what `lua_gc` answers: 0 for `"collect"`,
+      `"stop"`, `"restart"`; the previous mode for `"generational"` and
+      `"incremental"` (incremental to start with, as `luaL_newstate` leaves
+      nmap's state; the standalone `lua` starts generational, so no corpus row
+      shows the starting mode, and the 7.94 probe pins it); the previous
+      value for `"setpause"`/`"setstepmul"`, kept as `setgcparam` keeps it, a
+      quarter in a byte. Rows `base_cg_*`.
+- [x] `vm-tostring-accepts-any-result` — a `__tostring` returning a table
+      was returned; it is "'__tostring' must return a string", and a number
+      it returns is converted. Rows `base_tostring_*`.
+- [x] `vm-coroutine-normal-reported-running`,
+      `vm-coroutine-resume-messages`, `vm-coroutine-create-accepts-callables`
+      — a coroutine that resumed another said "running" (C: "normal");
+      resuming a dead or running one gave "bad thread mode: …" (C: "cannot
+      resume dead coroutine", "cannot resume non-suspended coroutine");
+      `coroutine.create` took a callable table. Rows `co_*`.
+- [x] `coroutine-close-and-isyieldable-missing` — both now exist. `close`
+      returns `false` and the error for a coroutine that died of one (kept,
+      weakly keyed, from its resume until it is closed, once) and refuses a
+      running or normal one; `isyieldable` is whether the coroutine is not a
+      main thread — true inside an NSE script, false at the top of a chunk —
+      and a main thread is known by `coroutine.running`, which is the only way
+      Lua code can hold one. Rows `co_close_*`, `co_isyieldable_*`.
+- [x] `vm-string-metatable-has-no-arithmetic` — the string metatable held
+      only `__index`; it has `lstrlib.c`'s eight arithmetic metamethods, which
+      a script that looks one up and calls it gets: `getmetatable("").__add("3",
+      4)` is 7, and with one argument the operation is on it twice, as
+      `tonum`'s pushes leave the C's stack (`__add("3")` is 6). Rows `str_*`.
+- [x] `vm-next-normalises-float-keys` — `next(t, 1.0)` went on from key 1;
+      the C looks a float key up as a float, finds none, and raises "invalid
+      key to 'next'". Row `base_next_float_key`.
+- [x] `table-checks-the-vms` — `table.insert` with four arguments succeeded,
+      and positions out of range, a bad separator and a value `concat`
+      cannot join had the VM's words; the C's checks run first now. Rows
+      `tab_*`.
+
+### Differences, open and documented
+
+- [ ] `vm-table-border-is-not-luas` — `#t` on a table with holes is one of
+      its borders in both, and which one depends on the size of the array
+      part. Patch `0013` (stage 1) searches as `luaH_getn` searches and sizes
+      the array as PUC-Lua does wherever that is decided at once: a
+      constructor's `SETLIST` (`{...}`, `{f()}`, `{1, nil, 3}`), `table.pack`,
+      exact growth, `table.insert`'s doubling. On 1,500 random rows against
+      the tree's Lua: B (dense, then holes) and D (constructors with nils)
+      300/300, from 284 and 258; A (sparse assignment) 254/300 from 229, C
+      (copying nil-holed lists) 268/300 from 241, E (integer keys among string
+      keys) 228/300 from 204. What remains (stage 2) is the array size
+      PUC-Lua reaches through the rehashes of its node vector — powers of
+      two, filled by every new key, string keys included, and shrinking the
+      array — and `luaH_getn`'s `alimit` hint, which a `#` changes for the
+      next: `t[1],t[2],t[4],t[6],t[8]` is 8 there and 4 here, and two `#`s
+      across a deletion give `7,6` there and `7,3` here. A model of
+      `ltable.c` (the scoping report's `luatable.py`) matches the C on all
+      1,500 integer-key rows, so the gap can be closed; it cannot be closed
+      for a table whose string (or reference) keys were deleted, because
+      there the C's own answer follows its string hash seed, which comes
+      from the time and addresses (`lstate.c:71`): one such row gave 0 or 16
+      across six oracle runs. No corpus row deletes string keys and then takes
+      `#`. The shipped tree takes `#` of a list with nils in `rmi.lua`'s
+      `dbg`/`doh` (`{...}`, fixed by stage 1), `stdnse.format_output_sub`,
+      `redis.lua` and `mssql.lua`'s `list_of`. Pinned by `m60_semantics`:
+      the 18 `border_*` rows that match (each needs one piece of stage 1),
+      and `border_sparse_assign`, `border_len_twice`, `border_insert_holes`
+      in `KNOWN_DIVERGENCES`.
+- [x] `string-dump-absent` — `string.dump` does not exist: the VM has no
+      bytecode format, and `load` refuses binary chunks
+      (`load-never-loads-bytecode`). No shipped script calls it. Pinned by
+      `m60_semantics`'s `string_dump_absent`.
+- [ ] `vm-string-arith-hooks-ignored` — the VM does arithmetic on strings
+      itself, as the string metatable's metamethods would, and never calls
+      them; so replacing `getmetatable("").__add` changes `"1" + 1` in C
+      ("hooked") and not here (2). Making it take effect would put a lookup
+      on every string operand's arithmetic. No shipped code touches the
+      string metatable. Pinned by `string_arith_hook_ignored` (it puts the
+      metamethod back).
+- [ ] `vm-sort-is-not-luas-quicksort` — the VM's `table.sort` is a stable
+      merge sort written in Lua (`table/sort.lua`), so elements its order
+      function finds equal come out in their input order, where the C's
+      quicksort permutes them (twelve records sorted on `i % 3`:
+      `12,9,3,6,1,4,7,10,2,8,11,5` there, `12,9,6,3,10,7,4,1,11,8,5,2`
+      here); an inconsistent order function never raises "invalid order
+      function for sorting" (the C detects it only inside its partition
+      loop); and the order function is called in another sequence. A script
+      that sorts records with ties prints them in another order. Pinned by
+      `sort_tie_order` and `sort_invalid_order`. Closing it is porting
+      `ltablib.c`'s `auxsort` (its pivot is randomised past 100 elements,
+      from the clock, so the C is not deterministic there either).
+- [ ] `vm-sort-comparator-may-yield` — `table.sort` calls its order function
+      from Lua, so a `coroutine.yield` in it yields, where PUC-Lua raises
+      "attempt to yield across a C-call boundary", and `coroutine.isyieldable()`
+      in it is true where the C's is false; as `pattern-gsub-callback-may-yield`
+      is for `gsub` (where `isyieldable` is true here too). Only programs the
+      C rejects behave differently. Pinned by `sort_comparator_yield` and
+      `sort_comparator_isyieldable`.
+- [ ] `vm-table-library-argument-checks` — what the first-party checks of
+      `table.insert`, `table.remove` and `table.concat` cannot see ahead of
+      the VM's own work, which they hand the call to: a table with `__len`
+      (the bounds error of a position is the VM's "Invalid index passed to
+      table.insert", and `__len` is called after the argument count is
+      checked, not before), a `concat` over a table with `__index` (a value
+      it cannot join is the VM's "attempt to concatenate a table value"), a
+      non-table that has the metamethods to behave as one (the C accepts it,
+      the VM raises its type error), and the other table functions'
+      argument errors (`sort`, `unpack`, `move`), which are the VM's. Pinned
+      by `insert_len_mt_bounds`, `remove_len_mt_bounds` and
+      `concat_index_mt_value`.
+- [ ] `vm-collectgarbage-drives-no-collector` — `collectgarbage` answers as
+      `lua_gc` would, but the collector is the VM's, on its own schedule:
+      `"collect"` and `"step"` collect nothing (`"step"` reports that no cycle
+      finished, which in C depends on the heap), `"stop"` stops nothing (only
+      `"isrunning"` reports it), and the pause and step multiplier are kept to
+      be reported, not used. `"count"` is the VM's heap. nmap calls it twice,
+      as hints (`nse_main.lua`, which the prelude stubs).
+- [ ] `vm-yield-from-a-main-thread` — `coroutine.yield` (the VM's) in a main
+      thread suspends the executor, handing the values to whoever steps it,
+      where PUC-Lua raises "attempt to yield from outside a coroutine"; a
+      chunk's `pcall(coroutine.yield, 1)` ends the chunk with 1. In the NSE
+      runtime the only main thread is the engine's own, which does not
+      yield; every script runs in a coroutine, where `yield` is the C's, and
+      `coroutine.isyieldable()` says so (true; false only in a main thread).
+      Found while porting `isyieldable`; not changed, because the executor's
+      suspension is how the embedding drives the VM. Pinned by
+      `yield_outside_coroutine`.
 
 ## Milestone 6.3 — the `nmap` module's non-I/O half (`core::nse::nmaplib`) and `--script-args` (`core::nse::scriptargs`)
 
@@ -3118,7 +3306,12 @@ wrong types, and errors on later lines. Two VM defects closed:
       prefix their message with the position of the Lua function that called
       the C function (`luaL_where(L, 1)`), as `coroutine.wrap` does for an
       error it propagates. The first-party stdlib and the `nmap` module raise
-      without it. `require` and, since M6.6, `nmapdb` raise with it. A call made by `pcall` directly has no Lua caller and no
+      without it. `require` and, since M6.6, `nmapdb` raise with it, and so,
+      since the base-library port, do the base and coroutine libraries,
+      `coroutine.wrap`, `load`'s reader, `string.rep`, `string.char`, the
+      string metatable's arithmetic and the table functions' checks
+      (`core::nse::stdlib::base`; the tail corpus compares their escaped
+      errors exactly). A call made by `pcall` directly has no Lua caller and no
       prefix in either, which is how the corpora compare those messages
       exactly; an escaped one is compared without nmap's prefix. The LPeg
       corpus gate (`lpeg_corpus_differential`) accepts a row differing only
@@ -4181,8 +4374,9 @@ quarantined rows excluded, compared with `m66_lpeg_golden.txt` under the
 hashorder mask; a row that differs passes only under a named class, each
 ledgered — `position` (`stdlib-errors-have-no-position`), `argname`
 (`stdlib-bad-argument-naming`: 2 rows, `pcall(string.rep, …)`) and `vmbase`
-(`vm-base-library-argument-errors`: 2 rows, `pcall(setmetatable, P'a', {})`)
-— and the step is one constant, which steps c and d raise. Also gated: unit
+(`vm-base-library-argument-errors`: 2 rows, `pcall(setmetatable, P'a', {})`;
+retired by the base-library port) — and the step is one constant, which
+steps c and d raise. Also gated: unit
 tests in `tree/tests.rs` against transliterations of the C's recursive
 walkers on random trees and grammars, in step slices of one to seven, each
 within a bound on its steps; `lpeg_tree_limits` (pre-emption, depth, sizes,
@@ -4573,27 +4767,30 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       error). The port's stack is not involved: past `MAXRULES` it is always
       `bad argument #n to 'P' (grammar has too many rules)`. Both refuse.
 - [ ] `vm-base-library-argument-errors` — **found by this step's corpus, not
-      LPeg's.** The VM's own base library raises its argument errors in its
-      own words: `setmetatable`, `next`, `rawlen`, `rawget` give "type error,
-      expected Table, found number", `select('x')` "Bad argument to
-      'select'", and `ipairs()` returns a function where PUC-Lua raises
-      "bad argument #1 to 'ipairs' (value expected)" (measured against the
-      tree's Lua). The corpus checks `setmetatable` on a pattern for its
-      outcome only (`J.setmt`), and leaves out Phase 0's row that compared
-      its message. **Tolerated by a gate:** step 0b's corpus has two such
-      rows at step b (`A.setmt`, `X.name.setmt`: `pcall(setmetatable, P'a',
-      {})`), and `lpeg_corpus_differential` accepts them only under its
-      named class `vmbase`, which maps the VM's wording and Lua's `bad
-      argument #N to 'setmetatable'|'next'|'rawlen'|'rawget'|'rawset'|
-      'ipairs'|'select'|'char' (...)` to one marker; fixing these messages
-      retires the class. Step d adds `string.char` ("type error, expected
-      u8, found nil", with no position, where the C says
-      `lpeg-utility.lua:144: bad argument #1 to 'char' (number expected, got
-      nil)`): lpeg-utility's `get_response` and `parse_fp` hand it the
-      `tonumber` of a bad `\xHH` escape, from a `/function` after the match —
-      a fingerprint string a peer's response can make (row
-      `K.parse_fp.badesc`, under `vmbase` and `position`; the step d brief's
-      U01 in `lpeg_callback_quirks`).
+      LPeg's; shrunk by the base-library port.** The VM's own base library
+      raised its argument errors in its own words ("type error, expected
+      Table, found number" from `setmetatable`, `next`, `rawlen`, `rawget`;
+      "Bad argument to 'select'"; `ipairs()` returning a function), and
+      `string.char` its "type error, expected u8, found nil". Those are all
+      first-party now, in the C's words and positioned
+      (`core::nse::stdlib::base`, under "the base and coroutine libraries"):
+      step 0b's rows `A.setmt` and `X.name.setmt`, and lpeg-utility's
+      `string.char` of a bad `\xHH` escape that a peer's fingerprint can
+      reach (`K.parse_fp.badesc`, the step d brief's U01: `…/lpeg-utility.lua:144:
+      bad argument #1 to 'char' (number expected, got nil)`), are the C's
+      byte for byte, and `lpeg_corpus_differential`'s named class `vmbase`
+      that tolerated them is gone, as is U01's pin under this entry in
+      `lpeg_callback_quirks`. **What remains** is the VM's string and math
+      functions: `string.len`, `byte`, `sub`, `lower`, `upper` and `reverse`
+      say "type error, expected i64, found table" where the C says "bad
+      argument #2 to 'sub' (number expected, got table)", and the math
+      library likewise ("type error, expected f64", "Bad argument to
+      random", "value expected"). Two of the math functions differ in more
+      than words: `math.fmod(1, 0)` with integers is NaN here and "bad
+      argument #2 to 'fmod' (zero)" in C, and `math.tointeger()` is `nil`
+      here and "bad argument #1 to 'tointeger' (value expected)" in C.
+      Pinned by `m60_semantics`'s `string_sub_type_error`,
+      `math_fmod_int_zero` and `math_tointeger_none`.
 
 ## Milestone 6.6 step c — LPeg's compiler, matching machine and the captures that call no Lua (`core::nse::lpeg`, `core::nse::lpeg::code`, `core::nse::lpeg::vm`)
 
@@ -4610,7 +4807,8 @@ module is still not registered.
 
 **Gated** by `lpeg_corpus_differential` at step c: all 37,367 rows the step
 map gives steps b and c, compared with the golden, accepted only as equal or
-under a named class — `argname` 2 rows, `vmbase` 2, and `cdepth` 1
+under a named class — `argname` 2 rows, `vmbase` 2 (retired since, by the
+base-library port), and `cdepth` 1
 (`H.stackcaps.999950`, `lpeg-capture-ceiling-is-the-embeddings`); and by
 `every_quarantined_step_row_matches_its_pin`: the 119 quarantined rows step c
 runs, each held to its pin in `m66c_quarantine_pins.txt` (149 rows: 142 the
@@ -4887,17 +5085,20 @@ after each call it makes. The module is still not registered.
 **Gated** by `lpeg_corpus_differential` at step d: all 62,599 rows of step
 0b's corpus — every family, J, K and Q through the tree's `re.lua` and
 `lpeg-utility.lua` — compared with the golden, accepted only as equal or under
-a named class (`argname` 2 rows, `vmbase` 2, `vmbase+position` 1
-(`K.parse_fp.badesc`), `method` 1 (`J.compile.nil`), `cdepth` 7); and by
+a named class (`argname` 2 rows, `method` 1 (`J.compile.nil`), `cdepth` 7;
+`vmbase` 2 and `vmbase+position` 1 (`K.parse_fp.badesc`) until the
+base-library port made those three the C's byte for byte and retired the
+class); and by
 `every_quarantined_step_row_matches_its_pin`: 157 quarantined rows, each held
 to its pin — `m66c_quarantine_pins.txt`'s 149 and `m66d_quarantine_pins.txt`'s
 8, the answers of the tree's `lpeg.c` with the doublecap over-read, the
 16-bit runtime-capture index and the code `__gc` frees fixed as well
 (`oracle/gen_m66d_quarantine_pins.py`, local only). Also gated:
 `lpeg_callback_quirks` (the step d brief's 207 pins, the C's answers, the
-port's own beside them under a named class for 15: `lpeg-callback-may-yield`
+port's own beside them under a named class for 14: `lpeg-callback-may-yield`
 4, `lpeg-runtime-capture-index-16bit` 3, `lpeg-capture-ceiling-is-the-embeddings`
-7, `vm-base-library-argument-errors` 1); `lpeg_callback_limits` (the JSON
+7; U01, under `vm-base-library-argument-errors` until the base-library port,
+is the C's answer now); `lpeg_callback_limits` (the JSON
 ceilings 34/32/32 through `json.lua`; each of the six ways into Lua one C
 level below `gsub`, passing its error object on unchanged, and allowed to
 yield; two threads sharing patterns whose callbacks collect and call

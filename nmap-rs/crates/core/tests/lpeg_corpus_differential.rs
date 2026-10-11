@@ -142,8 +142,6 @@ struct Masks {
     not_a_pattern: Regex,
     position: Regex,
     argname: Regex,
-    vm_base_c: Regex,
-    vm_base_port: Regex,
 }
 
 impl Masks {
@@ -164,12 +162,6 @@ impl Masks {
             not_a_pattern: re(r"(initial )?rule '[^']*' is not a pattern"),
             position: re(r#""(?:\.\.\.)?[^"\s:\\]+:\d+: "#),
             argname: re(r"bad argument #(\d+) to '[^']*'"),
-            // The base functions whose argument errors the VM words its own
-            // way (`vm-base-library-argument-errors`), and that wording.
-            vm_base_c: re(
-                r"bad argument #\d+ to '(?:setmetatable|next|rawlen|rawget|rawset|ipairs|select|char)' \([^)]*\)",
-            ),
-            vm_base_port: re(r"type error, expected \w+, found \w+|Bad argument to 'select'"),
         }
     }
 
@@ -208,12 +200,6 @@ impl Masks {
                 .argname
                 .replace_all(s, "bad argument #${1} to '?'")
                 .into_owned(),
-            "vmbase" => {
-                let s = self.vm_base_c.replace_all(s, "<vm-base-argument-error>");
-                self.vm_base_port
-                    .replace_all(&s, "<vm-base-argument-error>")
-                    .into_owned()
-            }
             _ => unreachable!("{class}"),
         }
     }
@@ -221,20 +207,14 @@ impl Masks {
 
 /// The named classes a differing row may agree under, each with its ledger
 /// entry: `position` and `argname` are `classify_m66_lpeg.py`'s ("Named
-/// classes"); `vmbase` is the VM's own base library, whose argument errors
-/// are worded the VM's way (`type error, expected Table, found userdata`
-/// where Lua says `bad argument #1 to 'setmetatable' (table expected, got
-/// lpeg-pattern)`): the corpus's two rows that hand a pattern to
-/// `setmetatable`, and, from step d, lpeg-utility's `string.char` of a bad
-/// escape (`K.parse_fp.badesc`); `method` is a method call's argument
+/// classes"); `method` is a method call's argument
 /// numbering, which the port starts at the receiver
 /// (`lpeg-bad-argument-naming`): `re.compile(nil)`'s `pattern:match(nil)`
 /// (`J.compile.nil`). Tried alone, then in pairs, then all together; the
 /// smallest set under which a row agrees is the one it is counted under.
-const CLASSES: [(&str, &str); 4] = [
+const CLASSES: [(&str, &str); 3] = [
     ("position", "stdlib-errors-have-no-position"),
     ("argname", "stdlib-bad-argument-naming"),
-    ("vmbase", "vm-base-library-argument-errors"),
     ("method", "lpeg-bad-argument-naming"),
 ];
 

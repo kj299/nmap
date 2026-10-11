@@ -208,6 +208,18 @@ All of `table` is implemented; `math` is complete; `string.byte/char/len/lower/
 reverse/sub/upper`, `pcall`, `tonumber`, `rawlen`, `_VERSION`, `next`, `pairs`,
 `setmetatable` and `coroutine.create/resume/running/status/yield` are done.
 
+> **Correction (after M6.6 step d).** "Done" here meant present, not equal to
+> PUC-Lua: no corpus reached these functions. Step d's fidelity review found
+> `pcall` raising for a non-callable value, `pairs`/`ipairs` returning two
+> values, `rawlen`/`rawset` unchecked, `__metatable` ignored, `collectgarbage`
+> raising for most options, `coroutine.isyieldable`/`close` missing and `#t`
+> picking other borders. The base and coroutine libraries are now first-party
+> ports of `lbaselib.c`/`lcorolib.c` (`core::nse::stdlib::base`), the table
+> library checks its arguments as `ltablib.c` does, and vendored patch `0013`
+> ports `luaH_getn`'s border search; what remains is ledgered
+> (`vm-table-border-is-not-luas` and the entries beside it in
+> DIVERGENCES.md).
+
 The gap that matters, weighted by what the 744 shipped Lua files actually call:
 
 | missing surface | call sites | files |

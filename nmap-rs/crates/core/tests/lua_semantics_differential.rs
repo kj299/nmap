@@ -27,6 +27,33 @@ use std::path::{Path, PathBuf};
 const KNOWN_DIVERGENCES: &[&str] = &[
     // Integer/float comparison at the extreme: `maxinteger + 0.0 == maxinteger`.
     "max_int_vs_float",
+    // `vm-table-border-is-not-luas`: the array part's size where PUC-Lua's
+    // follows the rehashes of its node vector, and `luaH_getn`'s `alimit`.
+    "border_sparse_assign",
+    "border_len_twice",
+    "border_insert_holes",
+    // `string-dump-absent`: no bytecode, so no `string.dump`.
+    "string_dump_absent",
+    // `vm-string-arith-hooks-ignored`: the VM does string arithmetic itself.
+    "string_arith_hook_ignored",
+    // `vm-sort-is-not-luas-quicksort`: a stable merge sort, which never finds
+    // an order function invalid.
+    "sort_tie_order",
+    "sort_invalid_order",
+    // `vm-sort-comparator-may-yield`: the comparator is called from Lua.
+    "sort_comparator_yield",
+    "sort_comparator_isyieldable",
+    // `vm-table-library-argument-checks`: a `__len` or `__index` the checks
+    // cannot read ahead of the VM's own work.
+    "insert_len_mt_bounds",
+    "remove_len_mt_bounds",
+    "concat_index_mt_value",
+    // `vm-base-library-argument-errors`: the VM's string and math functions.
+    "string_sub_type_error",
+    "math_fmod_int_zero",
+    "math_tointeger_none",
+    // `vm-yield-from-a-main-thread`: the executor is suspended instead.
+    "yield_outside_coroutine",
 ];
 
 /// Render a value the way `oracle/m60_arith_driver.lua` does: floats as raw
@@ -192,7 +219,7 @@ fn run_corpus() -> Vec<(String, bool)> {
 fn vm_matches_nmaps_own_lua_except_where_ledgered() {
     let results = run_corpus();
     assert!(
-        results.len() >= 99,
+        results.len() >= 133,
         "corpus shrank to {} cases — regenerate with regen_m60.sh",
         results.len()
     );

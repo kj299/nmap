@@ -1284,13 +1284,6 @@ const CLASSED: &[(&str, &str, &str)] = &[
     ("X09", "lpeg-callback-may-yield", r#"n=1:"Y""#),
     ("L07", "lpeg-callback-may-yield", r#"n=0:"#),
     ("B03", "lpeg-callback-may-yield", r#"n=0:"#),
-    // `string.char` is the VM's, its argument error in its own words (and,
-    // a Rust function's, with no position).
-    (
-        "U01",
-        "vm-base-library-argument-errors",
-        r#"n=2:false,"type error, expected u8, found nil""#,
-    ),
 ];
 
 /// A path into the tree's `nselib/`, as an error position carries it, made

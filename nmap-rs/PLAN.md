@@ -50,7 +50,9 @@ record; edit it as milestones complete.
 > spike and adversarial search, which confirmed D3) and step b (LPeg trees,
 > constructors and the verifier) (#132). Step c (the compiler, the VM and
 > the captures that do not call Lua) and its review fixes are merged (#134,
-> #135); step d (the captures that call Lua) is built and in review. The
+> #135); step d (the captures that call Lua) is built and in review, with
+> the base and coroutine libraries its review found unequal to PUC-Lua now
+> first-party ports (`core::nse::stdlib::base`, vendored patch `0013`). The
 > vendored VM now matches nmap's own Lua on all but 1 of 99 semantics cases, and the
 > standard library it lacks has been written first-party in `core::nse::stdlib`,
 > leaf-first by how many shipped files each function unblocks: `string.pack`/

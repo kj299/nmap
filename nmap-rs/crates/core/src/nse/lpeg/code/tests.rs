@@ -257,9 +257,50 @@ fn fixedlen_follows_calls_to_the_cs_limit() {
 // ------------------------------------------------------------------------
 // Compiling.
 
+/// Compile in slices of `slice`, holding the compiler's running count of
+/// what its grammar frames hold to a walk of them at every slice.
 fn compile(t: &Tree, slice: u32) -> Result<Program, CodeError> {
     let mut c = Compiler::new();
-    drive(slice, |b| c.step(t, b))
+    drive(slice, |b| {
+        let r = c.step(t, b);
+        assert_eq!(c.heap_bytes(), c.heap_bytes_walked(), "the running count");
+        r
+    })
+}
+
+/// Grammars nested `d` deep, each one rule calling nothing: `P{P{...P{'a'}}}`.
+fn nested_grammars(d: usize) -> Tree {
+    use crate::nse::lpeg::tree::Node;
+    let mut nodes = Vec::with_capacity(3 * d + 1);
+    for j in 0..d {
+        nodes.push(Node {
+            u: 1,
+            ..Node::new(Tag::Grammar)
+        });
+        nodes.push(Node {
+            key: 1,
+            u: i32::try_from(3 * (d - j - 1) + 2).unwrap(),
+            ..Node::new(Tag::Rule)
+        });
+    }
+    nodes.push(Node {
+        u: i32::from(b'a'),
+        ..Node::new(Tag::Char)
+    });
+    nodes.extend(std::iter::repeat_n(Node::new(Tag::True), d));
+    Tree::from_nodes(nodes)
+}
+
+/// The compiler's count of what its grammar frames hold is kept as they
+/// grow and go, not walked when it is asked (after every slice): grammars
+/// nested 2,000 deep compiled a unit a slice, the count what a walk finds
+/// at each (`compile`), and back to nothing past the last.
+#[test]
+fn what_nested_grammars_hold_is_counted_as_it_changes() {
+    let d = if cfg!(miri) { 20 } else { 2_000 };
+    let t = nested_grammars(d);
+    let whole = compile(&t, u32::MAX).expect("compiles");
+    assert_eq!(compile(&t, 1).expect("compiles"), whole);
 }
 
 /// Code is the same however the budget is sliced: each job asks for its

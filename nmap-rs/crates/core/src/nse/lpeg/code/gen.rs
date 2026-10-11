@@ -32,6 +32,26 @@ fn reserve<T>(v: &mut Vec<T>, n: usize) -> bool {
     grow(v, n) != Grown::Refused
 }
 
+/// [`reserve`] of one more in a list a [`GrammarFrame`] holds, its growth
+/// added to the running count of what the frames' lists hold
+/// ([`Compiler::heap_bytes`]).
+fn reserve_frame_list(v: &mut Vec<usize>, held: &mut usize) -> bool {
+    if v.len() < v.capacity() {
+        return true;
+    }
+    let before = v.capacity();
+    if !reserve(v, 1) {
+        return false;
+    }
+    *held = held.saturating_add(list_bytes(v.capacity().saturating_sub(before)));
+    true
+}
+
+/// What `n` slots of a [`GrammarFrame`]'s lists take.
+fn list_bytes(n: usize) -> usize {
+    n.saturating_mul(std::mem::size_of::<usize>())
+}
+
 /// `MAXBEHIND` (`lpeg.c:121`): the most an and-predicate may look behind
 /// to undo its match.
 const MAXBEHIND: i64 = 255;
@@ -138,6 +158,10 @@ pub struct Compiler {
     code: Vec<Slot>,
     jobs: Vec<Job>,
     grammars: Vec<GrammarFrame>,
+    /// What the frames' lists hold, kept as they grow and as a frame goes,
+    /// so that [`Compiler::heap_bytes`], asked after every slice, is O(1)
+    /// however deep grammars nest.
+    grammar_bytes: usize,
     calls_lua: bool,
     /// Walks along chains of `Jmp`s (`finaltarget`) under way or done, for
     /// the instruction being worked on: the peephole's two, or
@@ -192,6 +216,7 @@ impl Compiler {
             code: Vec::new(),
             jobs: Vec::new(),
             grammars: Vec::new(),
+            grammar_bytes: 0,
             calls_lua: false,
             chains: [None, None],
             spent: 0,
@@ -208,12 +233,11 @@ impl Compiler {
             self.an.heap_bytes(),
             b(self.code.capacity(), std::mem::size_of::<Slot>()),
             b(self.jobs.capacity(), std::mem::size_of::<Job>()),
-            self.grammars.iter().fold(0usize, |n, g| {
-                n.saturating_add(b(
-                    g.positions.capacity().saturating_add(g.calls.capacity()),
-                    std::mem::size_of::<usize>(),
-                ))
-            }),
+            b(
+                self.grammars.capacity(),
+                std::mem::size_of::<GrammarFrame>(),
+            ),
+            self.grammar_bytes,
             match &self.phase {
                 Phase::Fix(f) => f.heap_bytes(),
                 _ => 0,
@@ -221,6 +245,18 @@ impl Compiler {
         ]
         .into_iter()
         .fold(0, usize::saturating_add)
+    }
+
+    /// [`Compiler::heap_bytes`] with the grammar frames' lists walked: for
+    /// the tests, which hold the running count to it.
+    #[cfg(test)]
+    pub(crate) fn heap_bytes_walked(&self) -> usize {
+        let walked = self.grammars.iter().fold(0usize, |n, g| {
+            n.saturating_add(list_bytes(
+                g.positions.capacity().saturating_add(g.calls.capacity()),
+            ))
+        });
+        self.heap_bytes() - self.grammar_bytes + walked
     }
 
     /// For the tests: units of budget spent, and the nodes whose `getfirst`
@@ -763,7 +799,7 @@ impl Compiler {
                     *key = Key::from(rule.cap);
                 }
                 let frame = self.grammars.last_mut().ok_or_else(malformed)?;
-                if frame.calls.len() == frame.calls.capacity() && !reserve(&mut frame.calls, 1) {
+                if !reserve_frame_list(&mut frame.calls, &mut self.grammar_bytes) {
                     return Err(CodeError::NotEnoughMemory);
                 }
                 frame.calls.push(c);
@@ -1021,9 +1057,7 @@ impl Compiler {
         let here = self.here();
         let frame = self.grammars.last_mut().ok_or_else(malformed)?;
         if node.tag == Tag::Rule {
-            if frame.positions.len() == frame.positions.capacity()
-                && !reserve(&mut frame.positions, 1)
-            {
+            if !reserve_frame_list(&mut frame.positions, &mut self.grammar_bytes) {
                 return Err(CodeError::NotEnoughMemory);
             }
             frame.positions.push(here);
@@ -1086,7 +1120,11 @@ impl Compiler {
             k += 1;
         }
         self.jobs.pop();
-        self.grammars.pop();
+        if let Some(g) = self.grammars.pop() {
+            self.grammar_bytes = self.grammar_bytes.saturating_sub(list_bytes(
+                g.positions.capacity().saturating_add(g.calls.capacity()),
+            ));
+        }
         Ok(Some(()))
     }
 

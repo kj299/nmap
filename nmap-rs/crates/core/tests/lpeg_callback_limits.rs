@@ -342,3 +342,208 @@ fn a_collection_mid_match_changes_nothing() {
         }
     }
 }
+
+/// Step `ex` to its end in slices of `slice`, the LPeg work of each slice
+/// (`lpeg::take_work`) held to what its fuel pays for — a step's
+/// `BYTES_PER_FUEL` bytes a unit, four times over, and a few units' slack,
+/// as `no_slice_does_more_work_than_its_fuel_pays_for` holds it — and after
+/// each, `then` (a collection, a measure); the work in all, and the slices.
+fn step_counting_work(
+    lua: &mut Lua,
+    ex: &StashedExecutor,
+    slice: i32,
+    mut then: impl FnMut(&mut Lua),
+) -> (u64, u64) {
+    use nmap_core::nse::lpeg::{take_work, BYTES_PER_FUEL};
+    let per = u64::try_from(BYTES_PER_FUEL).expect("small");
+    let _ = take_work();
+    let (mut total, mut slices) = (0u64, 0u64);
+    loop {
+        let mut fuel = Fuel::with(slice);
+        let done = lua
+            .enter(|ctx| ctx.fetch(ex).step(ctx, &mut fuel))
+            .expect("steps");
+        let used = u64::try_from(i64::from(slice).saturating_sub(i64::from(fuel.remaining())))
+            .unwrap_or(0)
+            .max(1);
+        let work = take_work();
+        let paid = per.saturating_mul(4).saturating_mul(used);
+        assert!(
+            work <= paid.saturating_add(per.saturating_mul(8)),
+            "slice {slices} did {work} bytes' work on {used} units of fuel"
+        );
+        total = total.saturating_add(work);
+        slices = slices.saturating_add(1);
+        then(lua);
+        if done {
+            return (total, slices);
+        }
+        assert!(slices < 10_000_000, "runs on");
+    }
+}
+
+/// What `ex` returned, each value as `tostring` shows it.
+fn results(lua: &mut Lua, ex: &StashedExecutor) -> Vec<String> {
+    lua.enter(
+        |ctx| match ctx.fetch(ex).take_result::<Variadic<Vec<Value>>>(ctx) {
+            Ok(Ok(vs)) => vs.0.iter().map(|v| v.display().to_string()).collect(),
+            Ok(Err(e)) => vec![format!("raised: {e:#}")],
+            Err(e) => vec![format!("not done: {e}")],
+        },
+    )
+}
+
+/// The step d review's F1. Capture evaluation that calls Lua once for each
+/// of `n` tables or strings it makes — `json.parse` of `n` strings (each a
+/// table of its characters handed to `table.concat`), `(Ct(C(1)) / f)^0`,
+/// `(Cs(C(1)) / f)^0` — took time in `n²` that no fuel paid for: after
+/// every call the binding walked everything the cursor held, to account it
+/// to the heap (270 s for 1.8 MB of JSON in a release build, where the C
+/// takes 0.17 s, and slices past 100 ms). The count is now kept as it
+/// changes, and what bookkeeping still walks (a table freed, values dropped)
+/// is counted as work. Each shape at `n` and `4n`, in the engine's slices
+/// (4,096 units): no slice does more work than its fuel pays for, and the
+/// work in all grows at most five times.
+#[test]
+fn the_work_of_a_match_that_calls_lua_is_linear_in_its_calls() {
+    /// A shape's name, and its chunk at `n`.
+    type Shape = (&'static str, fn(usize) -> String);
+    const N: usize = 2_500;
+    let shapes: [Shape; 3] = [
+        ("json", |n| {
+            format!(
+                "local body = '[' .. ('\"\",'):rep({n}) .. '\"\"]' \
+                 local ok, v = json.parse(body) return ok, #v"
+            )
+        }),
+        ("Ct / f", |n| {
+            format!(
+                "local f = function(x) return 1 end \
+                 return lpeg.match((lpeg.Ct(lpeg.C(1)) / f)^0 * lpeg.Cp(), ('a'):rep({n}))"
+            )
+        }),
+        ("Cs / f", |n| {
+            format!(
+                "local f = function(x) return 1 end \
+                 return lpeg.match((lpeg.Cs(lpeg.C(1)) / f)^0 * lpeg.Cp(), ('a'):rep({n}))"
+            )
+        }),
+    ];
+    let mut lua = new_lua_with_nselib();
+    for (name, src) in shapes {
+        let mut work = |n: usize| -> u64 {
+            let ex = start(&mut lua, &src(n));
+            let (total, _) = step_counting_work(&mut lua, &ex, 4096, |_| {});
+            let out = results(&mut lua, &ex);
+            let want = if name == "json" {
+                vec!["true".to_string(), (n + 1).to_string()]
+            } else {
+                let mut v = vec!["1".to_string(); n];
+                v.push((n + 1).to_string());
+                v
+            };
+            assert_eq!(out, want, "{name} at {n}");
+            total
+        };
+        let (one, four) = (work(N), work(4 * N));
+        eprintln!("{name}: {one} bytes' work at {N}, {four} at {}", 4 * N);
+        assert!(
+            four <= 5 * one,
+            "{name}: {one} bytes' work at {N}, {four} at {}",
+            4 * N
+        );
+    }
+}
+
+/// The step d review's F2: a group holding a substitution of `L` bytes,
+/// referenced once for each of `n` calls that take only its length
+/// (`r_strings`: `Cg(Cs(P'x'^0), 'k') * ((Cb'k' / f) * 1)^0`), kept a
+/// string of `L` for each call until the match ended — 131, 263 and 525 MB
+/// at 500, 1,000 and 2,000 calls of 256 KiB, where the C's peak stays at
+/// 4 MB, and "not enough memory" under a 64 MiB budget. A string is now
+/// given back once made the call's argument. At 64 KiB, 32 and 128 calls,
+/// with a full collection after every slice: what stays live peaks no
+/// higher at 128 calls than at 32, within a few strings; and under a budget
+/// 4 MiB above the state's — half what 128 such strings take — both match.
+#[test]
+fn a_string_made_for_a_call_is_not_kept_after_it() {
+    const L: usize = 64 << 10;
+    let src = |n: usize| {
+        format!(
+            "local s = ('x'):rep({L}) .. ('y'):rep({n}) \
+             local p = lpeg.Cg(lpeg.Cs(lpeg.P'x'^0), 'k') \
+               * ((lpeg.Cb'k' / function(v) return #v end) * 1)^0 * lpeg.Cc'end' \
+             collectgarbage() \
+             local r = table.pack(lpeg.match(p, s)) \
+             return r.n, r[1], r[r.n]"
+        )
+    };
+    let want = |n: usize| vec![(n + 1).to_string(), L.to_string(), "end".to_string()];
+    let peak = |n: usize| -> usize {
+        let mut lua = new_lua();
+        lua.gc_collect();
+        let base = lua.total_memory();
+        let ex = start(&mut lua, &src(n));
+        let mut peak = 0usize;
+        step_counting_work(&mut lua, &ex, 4096, |lua| {
+            lua.gc_collect();
+            peak = peak.max(lua.total_memory());
+        });
+        assert_eq!(results(&mut lua, &ex), want(n));
+        peak.saturating_sub(base)
+    };
+    let (one, four) = (peak(32), peak(128));
+    eprintln!("live at 32 calls: {one}; at 128: {four}");
+    assert!(
+        four < one + 4 * L && four < 16 * L,
+        "what stays live grew with the calls: {one} bytes at 32, {four} at 128"
+    );
+    for n in [32, 128] {
+        let mut lua = new_lua();
+        lua.gc_collect();
+        lua.set_memory_limit(lua.total_memory() + (4 << 20));
+        let ex = start(&mut lua, &src(n));
+        step_counting_work(&mut lua, &ex, 4096, |_| {});
+        assert_eq!(results(&mut lua, &ex), want(n), "under the budget");
+    }
+}
+
+/// The step d review's F3: a callback's results stand on the Lua stack
+/// over the values below them, and count against `LUAI_MAXSTACK` as those
+/// do (`pushcapture`'s check). 600,000 values, then a `/function` returning
+/// 600,000 more (the review's `s1_over_stack.lua`): Lua's bare "stack
+/// overflow", where the match returned all 1,200,000 before. The C's callee,
+/// which has less room, fails first, in `table.unpack`: "too many results to
+/// unpack" (`lpeg-capture-ceiling-is-the-embeddings`). Inside a table
+/// capture the values go into the table as they come, and the same match
+/// fills one of 1,200,000, as the C's does.
+#[test]
+fn a_callbacks_results_count_against_the_lua_stack() {
+    let mut lua = new_lua();
+    let src = "local T = {} for i = 1, 600000 do T[i] = i end \
+        local s = ('a'):rep(600000) \
+        local f = function() return table.unpack(T) end \
+        local p = lpeg.C(1)^0 * (lpeg.P(0) / f) \
+        local q = lpeg.C(1)^0 * (lpeg.P(0) / f) * (lpeg.P(0) / f) \
+        local r = lpeg.Ct(lpeg.C(1)^0 * (lpeg.P(0) / f)) \
+        local a = table.pack(pcall(lpeg.match, p, s)) \
+        local b = table.pack(pcall(lpeg.match, q, s)) \
+        local c = table.pack(pcall(lpeg.match, r, s)) \
+        local d = table.pack(pcall(function() return select('#', lpeg.match(p, s)) end)) \
+        return a.n, a[1], a[2], b.n, b[1], b[2], c[1], #c[2], d[1], d[2]";
+    assert_eq!(
+        run_in(&mut lua, src),
+        returned(&[
+            "2",
+            "false",
+            "stack overflow",
+            "2",
+            "false",
+            "stack overflow",
+            "true",
+            "1200000",
+            "false",
+            "stack overflow"
+        ])
+    );
+}

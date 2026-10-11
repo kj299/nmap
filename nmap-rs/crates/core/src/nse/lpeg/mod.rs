@@ -2976,12 +2976,11 @@ impl<'gc> MatchJob<'gc> {
                 MStage::Values(i) => {
                     let p = self.pattern(ctx)?;
                     let subj = self.subject()?;
-                    let Some(cursor) = self.cursor.as_ref() else {
+                    let Some(cursor) = self.cursor.as_mut() else {
                         return Err(Fail::err("lpeg: captures lost").into());
                     };
-                    let vals = cursor.values();
                     let mut i = i;
-                    while let Some(&v) = vals.get(i) {
+                    while let Some(&v) = cursor.values().get(i) {
                         if spend.budget == 0 || ctx.collection_requested() {
                             self.stage = MStage::Values(i);
                             return Ok(Flow::Pending);
@@ -3005,6 +3004,11 @@ impl<'gc> MatchJob<'gc> {
     /// unit per [`BYTES_PER_FUEL`] bytes more (hashed, compared with the
     /// strings of its hash, copied), charged in full before it is made — a
     /// string is made whole, past the budget if it must ([`Spend::over`]).
+    /// Each value is made once — a call's argument or a query's key, a
+    /// table's assignment, a result — and a string the cursor built for it
+    /// is given back then ([`CapCursor::consumed`]): the C's is garbage once
+    /// the call it went to returns, and a string kept for each of `n` calls
+    /// held `n` times what the C holds (the step d review's F2).
     #[allow(
         clippy::too_many_arguments,
         reason = "the job's fields, borrowed apart"
@@ -3013,7 +3017,7 @@ impl<'gc> MatchJob<'gc> {
         ctx: Context<'gc>,
         p: &'gc Pattern<'gc>,
         subj: piccolo::String<'gc>,
-        cursor: &CapCursor<Value<'gc>>,
+        cursor: &mut CapCursor<Value<'gc>>,
         args: &[Value<'gc>],
         tables: &[Table<'gc>],
         v: CapVal<Value<'gc>>,
@@ -3029,7 +3033,9 @@ impl<'gc> MatchJob<'gc> {
         did_steps(1);
         did_bytes(bytes);
         if let Some(text) = text {
-            return Value::String(ctx.intern(text));
+            let s = Value::String(ctx.intern(text));
+            cursor.consumed(v);
+            return s;
         }
         match v {
             CapVal::Int(i) => Value::Integer(i),
@@ -3160,6 +3166,9 @@ fn cap_failure<'gc>(ctx: Context<'gc>, ktable: Option<Table<'gc>>, e: CapError) 
     let f = |m: String| Failure::Lua(Fail::err(m));
     match e {
         CapError::StackOverflow => f("stack overflow (too many captures)".into()),
+        // Lua's own, raised as the stack grows (`luaD_growstack`), from
+        // inside a C function: no position.
+        CapError::LuaStackOverflow => Failure::Raised(lua_error_bytes(ctx, b"stack overflow")),
         CapError::BackrefNotFound(k) => {
             // `lua_tostring` of the name, printed with `%s`.
             let mut m = b"back reference '".to_vec();

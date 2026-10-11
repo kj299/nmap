@@ -208,6 +208,9 @@ pub enum CallKind {
 pub enum CapError {
     /// "stack overflow (too many captures)".
     StackOverflow,
+    /// Lua's bare "stack overflow": a call's results do not fit on the
+    /// stack over the values below them ([`CapCursor::returned`]).
+    LuaStackOverflow,
     /// "back reference '%s' not found", naming the constant.
     BackrefNotFound(Key),
     /// "reference to absent argument #%d".
@@ -326,6 +329,17 @@ enum Frame {
     /// `runtimecap`'s `pushnestedvalues(cs, 0)` (`lpeg.c:675`): the values
     /// of the match-time capture whose open entry is at `open`.
     Runtime { open: usize, started: bool },
+    /// Dropping `vs[from..]`, but `keep`, which goes to `from`
+    /// ([`CapCursor::discard`]): the values from `at`, then the tables among
+    /// them, `table` the one being looked at and its next assignment.
+    Discard {
+        from: usize,
+        at: usize,
+        keep: Option<usize>,
+        table: Option<(u32, usize)>,
+    },
+    /// Return `n` values (after a [`Frame::Discard`]).
+    Return { n: usize },
 }
 
 /// Where `foldcap` is.
@@ -385,8 +399,10 @@ enum StrStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TableWait {
     Start,
-    /// A named group's value, its name below it.
+    /// A named group's values, its name below them.
     Named,
+    /// Its first value, its name below it.
+    NamedKept,
     /// A positional capture's values.
     Positional,
 }
@@ -394,7 +410,7 @@ enum TableWait {
 /// Capture evaluation of one match (`getcaptures`, `lpeg.c:902`), or of one
 /// match-time capture's values ([`CapCursor::nested_at`]). `V` is the
 /// binding's Lua value: traced, when it is one, with the cursor.
-#[derive(Debug, Clone, Collect)]
+#[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct CapCursor<V = NoLua> {
     #[collect(require_static)]
@@ -406,7 +422,8 @@ pub struct CapCursor<V = NoLua> {
     /// The buffers of the string captures being built, innermost last.
     #[collect(require_static)]
     bufs: Vec<Vec<u8>>,
-    /// The strings built.
+    /// The strings built, each given back once used: made a Lua value
+    /// ([`CapCursor::consumed`]), copied into another buffer, or dropped.
     #[collect(require_static)]
     strings: Vec<Vec<u8>>,
     /// The tables made, as their assignments in order, in chunks of
@@ -415,6 +432,9 @@ pub struct CapCursor<V = NoLua> {
     /// `/string`'s capture arrays, [`MAXSTRCAPS`] slots each.
     #[collect(require_static)]
     strcaps: Vec<StrAux>,
+    /// The tables a [`Frame::Discard`] has still to look at.
+    #[collect(require_static)]
+    dropping: Vec<u32>,
     /// The last returned count.
     #[collect(require_static)]
     ret: usize,
@@ -441,6 +461,17 @@ pub struct CapCursor<V = NoLua> {
     /// The call evaluation waits on ([`Step::Call`]).
     #[collect(require_static)]
     pending: Option<CallReq>,
+    /// The bytes the outer lists' elements hold — each buffer, each string
+    /// built, each table's list of chunks and its chunks — kept up to date
+    /// where they grow ([`grow_inner`]) and where they are given back (a
+    /// table freed or given back a chunk at a time, a string released), so
+    /// that [`CapCursor::heap_bytes`] is O(1). The binding asks it after
+    /// every slice and every call it makes, and a walk there made a match
+    /// that calls Lua `n` times over `n` tables or strings take time in
+    /// `n²` that no fuel paid for (the step d review's F1: `json.parse` of
+    /// 1.8 MB, 270 s).
+    #[collect(require_static)]
+    inner: usize,
 }
 
 impl CapCursor<NoLua> {
@@ -463,6 +494,7 @@ impl<V: Copy> CapCursor<V> {
             strings: Vec::new(),
             tables: Vec::new(),
             strcaps: Vec::new(),
+            dropping: Vec::new(),
             ret: 0,
             end,
             u0,
@@ -472,6 +504,7 @@ impl<V: Copy> CapCursor<V> {
             stop: false,
             over: 0,
             pending: None,
+            inner: 0,
         }
     }
 
@@ -542,6 +575,14 @@ impl<V: Copy> CapCursor<V> {
         if keep > self.vs.len() {
             return Err(CapError::Malformed);
         }
+        // The results stand on the stack where the call's slots were, over
+        // what is below them: past `LUAI_MAXSTACK`, Lua's bare "stack
+        // overflow", the check `pushcapture` makes of the values below
+        // (`lpeg-capture-ceiling-is-the-embeddings`: the C's callee, which
+        // has less room, fails first).
+        if self.u0.saturating_add(keep).saturating_add(results.len()) > LUAI_MAXSTACK {
+            return Err(CapError::LuaStackOverflow);
+        }
         self.vs.truncate(keep);
         grow(&mut self.vs, results.len(), &mut self.stop)?;
         self.vs.extend(results.iter().map(|&v| CapVal::Lua(v)));
@@ -563,7 +604,8 @@ impl<V: Copy> CapCursor<V> {
         }
     }
 
-    /// The string a [`CapVal::Bytes`] refers to.
+    /// The string a [`CapVal::Bytes`] refers to (empty once given back:
+    /// [`CapCursor::consumed`]).
     #[must_use]
     pub fn string(&self, i: u32) -> &[u8] {
         self.strings
@@ -599,26 +641,68 @@ impl<V: Copy> CapCursor<V> {
     }
 
     /// Give back the assignments of table `i`, once they are made: it reads
-    /// as empty from then on.
+    /// as empty from then on. The chunks given back already
+    /// ([`CapCursor::give_back`]) are the first ones, and hold nothing (a
+    /// chunk in use holds at least an assignment): only those after them
+    /// are counted, the last one or two of a table given back as it filled.
     pub fn free_table(&mut self, i: u32) {
         if let Some(t) = self
             .tables
             .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
         {
-            *t = Vec::new();
+            let chunks = std::mem::take(t);
+            let held = chunks
+                .iter()
+                .rev()
+                .take_while(|c| c.capacity() > 0)
+                .map(vec_bytes)
+                .fold(vec_bytes(&chunks), usize::saturating_add);
+            self.inner = self.inner.saturating_sub(held);
         }
     }
 
     /// Give back the chunks of table `i` whose assignments are all below
-    /// `e`, once they are made.
+    /// `e`, once they are made. The binding gives a table back as it fills
+    /// it, at every [`TABLE_CHUNK`]th assignment, so the chunks given back
+    /// are the first ones: the scan goes back from `e` to the first chunk
+    /// given back already, and each chunk is looked at once.
     pub fn give_back(&mut self, i: u32, e: usize) {
         if let Some(chunks) = self
             .tables
             .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
         {
-            for chunk in chunks.iter_mut().take(e / TABLE_CHUNK) {
-                *chunk = Vec::new();
+            let below = (e / TABLE_CHUNK).min(chunks.len());
+            for chunk in chunks.iter_mut().take(below).rev() {
+                if chunk.capacity() == 0 {
+                    break;
+                }
+                let chunk = std::mem::take(chunk);
+                self.inner = self.inner.saturating_sub(vec_bytes(&chunk));
             }
+        }
+    }
+
+    /// The binding has made `v` — one of the values, or a table's
+    /// assignment — a Lua value, and does not ask for it again: a string
+    /// the cursor built for it is given back (it reads as empty from then
+    /// on), where the C's would be garbage once the call it went to returned.
+    /// Each string is named by one value or assignment only: a back
+    /// reference, or a `/string` slot, evaluates its capture again, and
+    /// builds a string of its own.
+    pub fn consumed(&mut self, v: CapVal<V>) {
+        if let CapVal::Bytes(i) = v {
+            self.release_string(i);
+        }
+    }
+
+    /// Give back string `i`.
+    fn release_string(&mut self, i: u32) {
+        if let Some(s) = self
+            .strings
+            .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
+        {
+            let s = std::mem::take(s);
+            self.inner = self.inner.saturating_sub(s.capacity());
         }
     }
 
@@ -628,16 +712,35 @@ impl<V: Copy> CapCursor<V> {
         self.steps
     }
 
-    /// The bytes it holds outside the VM's heap.
+    /// The bytes it holds outside the VM's heap: the outer lists' own, and
+    /// the running count of what their elements hold ([`CapCursor::inner`]).
+    /// O(1).
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        fn b<T>(v: &Vec<T>) -> usize {
-            v.capacity().saturating_mul(std::mem::size_of::<T>())
-        }
         [
-            b(&self.frames),
-            b(&self.vs),
-            b(&self.strcaps),
+            vec_bytes(&self.frames),
+            vec_bytes(&self.vs),
+            vec_bytes(&self.strcaps),
+            vec_bytes(&self.dropping),
+            vec_bytes(&self.bufs),
+            vec_bytes(&self.strings),
+            vec_bytes(&self.tables),
+            self.inner,
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
+    /// [`CapCursor::heap_bytes`], every element walked: for the tests and
+    /// the fuzz target, which hold the running count to it at every step.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn heap_bytes_walked(&self) -> usize {
+        [
+            vec_bytes(&self.frames),
+            vec_bytes(&self.vs),
+            vec_bytes(&self.strcaps),
+            vec_bytes(&self.dropping),
             self.bufs
                 .iter()
                 .map(Vec::capacity)
@@ -648,11 +751,11 @@ impl<V: Copy> CapCursor<V> {
                 .fold(0, usize::saturating_add),
             self.tables
                 .iter()
-                .map(|chunks| chunks.iter().map(b).fold(b(chunks), usize::saturating_add))
+                .map(chunks_bytes)
                 .fold(0, usize::saturating_add),
-            b(&self.bufs),
-            b(&self.strings),
-            b(&self.tables),
+            vec_bytes(&self.bufs),
+            vec_bytes(&self.strings),
+            vec_bytes(&self.tables),
         ]
         .into_iter()
         .fold(0, usize::saturating_add)
@@ -740,6 +843,113 @@ impl<V: Copy> CapCursor<V> {
         self.vs.pop().ok_or(CapError::Malformed)
     }
 
+    /// `lua_settop` down to `from` (`lua_pop` of the values a capture keeps
+    /// none of; for a `/n`, all but `keep`, which goes to `from`), and what
+    /// the cursor built for the values dropped given back — a string, and a
+    /// table with everything it holds, the tables in it included (a table is
+    /// made before the tables it holds, and each string or table is named by
+    /// one value or assignment only, so nothing else reaches them) — where
+    /// the C's would be garbage. While the cursor holds nothing
+    /// ([`CapCursor::inner`]: every string's and table's room is counted
+    /// there), nothing a dropped value names can hold anything, and they are
+    /// dropped at once; else a [`Frame::Discard`] looks at them, a unit a
+    /// value and an assignment, across slices. The caller sets the frame it
+    /// goes on in first.
+    fn discard(&mut self, from: usize, keep: Option<usize>) -> Result<(), CapError> {
+        if self.inner == 0 || from >= self.vs.len() {
+            self.drop_values(from, keep);
+            return Ok(());
+        }
+        self.call(Frame::Discard {
+            from,
+            at: from,
+            keep,
+            table: None,
+        })
+    }
+
+    /// Drop `vs[from..]`, but `keep`, which goes to `from`.
+    fn drop_values(&mut self, from: usize, keep: Option<usize>) {
+        if let Some(k) = keep {
+            if let Some(&v) = self.vs.get(k) {
+                if let Some(slot) = self.vs.get_mut(from) {
+                    *slot = v;
+                }
+                self.vs.truncate(from + 1);
+                return;
+            }
+        }
+        self.vs.truncate(from);
+    }
+
+    /// A step of a [`Frame::Discard`]: the values from `at`, then the tables
+    /// among them (and in them), table `table` from its assignment `e`, a
+    /// unit each, the frame's step paying for the first; strings given back
+    /// as they are met, a table once all it holds is looked at.
+    fn discard_step(
+        &mut self,
+        from: usize,
+        mut at: usize,
+        keep: Option<usize>,
+        mut table: Option<(u32, usize)>,
+        budget: &mut u32,
+    ) -> Result<(), CapError> {
+        let mut looked = 0u64;
+        let r = loop {
+            if looked > 0 {
+                if *budget == 0 {
+                    self.set(Frame::Discard {
+                        from,
+                        at,
+                        keep,
+                        table,
+                    });
+                    break Ok(());
+                }
+                *budget -= 1;
+            }
+            looked += 1;
+            let v = if let Some(&v) = self.vs.get(at) {
+                at += 1;
+                if keep == Some(at - 1) {
+                    continue;
+                }
+                v
+            } else if let Some((t, e)) = table {
+                match self.table_entry(t, e) {
+                    Some((_, v)) => {
+                        table = Some((t, e + 1));
+                        v
+                    }
+                    None => {
+                        self.free_table(t);
+                        table = None;
+                        continue;
+                    }
+                }
+            } else if let Some(t) = self.dropping.pop() {
+                table = Some((t, 0));
+                continue;
+            } else {
+                self.frames.pop();
+                self.drop_values(from, keep);
+                break Ok(());
+            };
+            match v {
+                CapVal::Bytes(s) => self.release_string(s),
+                CapVal::Table(t) => {
+                    if let Err(e) = grow(&mut self.dropping, 1, &mut self.stop) {
+                        break Err(e);
+                    }
+                    self.dropping.push(t);
+                }
+                _ => {}
+            }
+        };
+        did_steps(looked.saturating_sub(1));
+        r
+    }
+
     fn call(&mut self, f: Frame) -> Result<(), CapError> {
         grow(&mut self.frames, 1, &mut self.stop)?;
         self.frames.push(f);
@@ -768,7 +978,7 @@ impl<V: Copy> CapCursor<V> {
     /// the buffer being built (`luaL_addlstring`); the step's unit pays.
     fn add(&mut self, bytes: &[u8]) -> Result<(), CapError> {
         let buf = self.bufs.last_mut().ok_or(CapError::Malformed)?;
-        grow(buf, bytes.len(), &mut self.stop)?;
+        grow_inner(buf, bytes.len(), &mut self.stop, &mut self.inner)?;
         buf.extend_from_slice(bytes);
         did_bytes(bytes.len());
         Ok(())
@@ -919,11 +1129,8 @@ impl<V: Copy> CapCursor<V> {
                     return Err(CapError::NoCapture(idx));
                 }
                 let base = self.vs.len() - n;
-                let v = self.vs[base + want - 1];
-                self.vs.truncate(base);
-                self.push(v)?;
-                self.ret(1);
-                Ok(())
+                self.set(Frame::Return { n: 1 });
+                self.discard(base, Some(base + want - 1))
             }
             Frame::NextCap { cap, depth } => self.next_cap(caps, cap, depth, budget),
             Frame::StrCaps {
@@ -950,6 +1157,16 @@ impl<V: Copy> CapCursor<V> {
             // `runtimecap`'s `pushnestedvalues(cs, 0)`: from the open entry,
             // over the whole list (`cs->ocap`), so a back-reference sees the
             // groups before it.
+            Frame::Discard {
+                from,
+                at,
+                keep,
+                table,
+            } => self.discard_step(from, at, keep, table, budget),
+            Frame::Return { n } => {
+                self.ret(n);
+                Ok(())
+            }
             Frame::Runtime { open, started } => {
                 if started {
                     self.frames.pop();
@@ -1010,12 +1227,11 @@ impl<V: Copy> CapCursor<V> {
                     return Err(CapError::NoInitialFold);
                 }
                 // `lua_pop(L, n - 1)`: the first value stays.
-                self.vs.truncate(self.vs.len() - (n - 1));
                 self.set(Frame::Fold {
                     key,
                     stage: FoldStage::Loop,
                 });
-                Ok(())
+                self.discard(self.vs.len() - (n - 1), None)
             }
             FoldStage::Loop => {
                 if self.cap(caps, self.pos)?.is_close() {
@@ -1048,20 +1264,28 @@ impl<V: Copy> CapCursor<V> {
     /// `querycap` (`lpeg.c:570`): the first nested value (the whole match if
     /// none) indexes the table.
     fn query_cap(&mut self, key: Key, stage: u8) -> Result<(), CapError> {
-        if stage == 0 {
-            self.set(Frame::Query { key, stage: 1 });
-            return self.call(nested(false));
+        match stage {
+            0 => {
+                self.set(Frame::Query { key, stage: 1 });
+                self.call(nested(false))
+            }
+            // `pushonenestedvalue`: the first value stays.
+            1 => {
+                let n = self.ret;
+                let first = self.vs.len().checked_sub(n).ok_or(CapError::Malformed)?;
+                self.set(Frame::Query { key, stage: 2 });
+                self.discard(first + 1, None)
+            }
+            // The table indexed by it.
+            _ => {
+                self.pending = Some(CallReq {
+                    kind: CallKind::Query,
+                    key,
+                    args: self.vs.len().checked_sub(1).ok_or(CapError::Malformed)?,
+                });
+                Ok(())
+            }
         }
-        // `pushonenestedvalue`: the first value stays.
-        let n = self.ret;
-        let first = self.vs.len().checked_sub(n).ok_or(CapError::Malformed)?;
-        self.vs.truncate(first + 1);
-        self.pending = Some(CallReq {
-            kind: CallKind::Query,
-            key,
-            args: first,
-        });
-        Ok(())
     }
 
     /// `lua_insert(L, -k)` after a simple capture's nested values: the whole
@@ -1131,7 +1355,7 @@ impl<V: Copy> CapCursor<V> {
         );
         let n = remaining.min(room);
         let buf = self.bufs.last_mut().ok_or(CapError::Malformed)?;
-        grow(buf, remaining, &mut self.stop)?;
+        grow_inner(buf, remaining, &mut self.stop, &mut self.inner)?;
         let view;
         let from: &[u8] = match src {
             Src::Subject => subj,
@@ -1460,7 +1684,14 @@ impl<V: Copy> CapCursor<V> {
                     .len()
                     .checked_sub(k.saturating_sub(1))
                     .ok_or(CapError::Malformed)?;
-                self.vs.truncate(keep);
+                self.set(Frame::Table {
+                    t,
+                    n,
+                    wait: TableWait::NamedKept,
+                });
+                return self.discard(keep, None);
+            }
+            TableWait::NamedKept => {
                 let v = self.pop()?;
                 let name = match self.pop()? {
                     CapVal::K(k) => k,
@@ -1511,15 +1742,15 @@ impl<V: Copy> CapCursor<V> {
         if chunks.last().is_none_or(|c| c.len() == TABLE_CHUNK) {
             // The first chunk grows as a list does; the others are made
             // whole, so no chunk is ever moved.
+            grow_inner(chunks, 1, &mut self.stop, &mut self.inner)?;
             let mut chunk = Vec::new();
             if !chunks.is_empty() {
-                grow(&mut chunk, TABLE_CHUNK, &mut self.stop)?;
+                grow_inner(&mut chunk, TABLE_CHUNK, &mut self.stop, &mut self.inner)?;
             }
-            grow(chunks, 1, &mut self.stop)?;
             chunks.push(chunk);
         }
         let chunk = chunks.last_mut().ok_or(CapError::Malformed)?;
-        grow(chunk, 1, &mut self.stop)?;
+        grow_inner(chunk, 1, &mut self.stop, &mut self.inner)?;
         chunk.push((k, v));
         Ok(())
     }
@@ -1895,7 +2126,10 @@ impl<V: Copy> CapCursor<V> {
                     .len()
                     .checked_sub(n - 1)
                     .ok_or(CapError::Malformed)?;
-                self.vs.truncate(keep);
+                self.set(Frame::AddOne { what, stage: 4, n });
+                self.discard(keep, None)
+            }
+            4 => {
                 let v = *self.vs.last().ok_or(CapError::Malformed)?;
                 let invalid = || CapError::InvalidValue {
                     what,
@@ -1936,9 +2170,11 @@ impl<V: Copy> CapCursor<V> {
                     CapVal::Buf | CapVal::Callee => Err(CapError::Malformed),
                 }
             }
-            // The value is in: off the stack.
+            // The value is in: off the stack, and a string the cursor built
+            // for it given back.
             _ => {
-                self.pop()?;
+                let v = self.pop()?;
+                self.consumed(v);
                 self.ret(n);
                 Ok(())
             }
@@ -2029,4 +2265,36 @@ fn grow<T>(v: &mut Vec<T>, n: usize, stop: &mut bool) -> Result<(), CapError> {
         }
         Grown::Refused => Err(CapError::NotEnoughMemory),
     }
+}
+
+/// [`grow`] of an element of the cursor's outer lists — a buffer, a table's
+/// list of chunks, a chunk — its growth added to the running count `inner`
+/// ([`CapCursor::heap_bytes`]).
+fn grow_inner<T>(
+    v: &mut Vec<T>,
+    n: usize,
+    stop: &mut bool,
+    inner: &mut usize,
+) -> Result<(), CapError> {
+    let before = v.capacity();
+    grow(v, n, stop)?;
+    *inner = inner.saturating_add(vec_bytes_of::<T>(v.capacity().saturating_sub(before)));
+    Ok(())
+}
+
+/// What a list's room takes.
+fn vec_bytes<T>(v: &Vec<T>) -> usize {
+    vec_bytes_of::<T>(v.capacity())
+}
+
+fn vec_bytes_of<T>(capacity: usize) -> usize {
+    capacity.saturating_mul(std::mem::size_of::<T>())
+}
+
+/// What a table's list of chunks and its chunks take.
+fn chunks_bytes<T>(chunks: &Vec<Vec<T>>) -> usize {
+    chunks
+        .iter()
+        .map(vec_bytes)
+        .fold(vec_bytes(chunks), usize::saturating_add)
 }

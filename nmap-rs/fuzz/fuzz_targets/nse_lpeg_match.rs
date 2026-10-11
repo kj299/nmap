@@ -20,6 +20,9 @@
 //     grammar is `finalfix`'s, run first); the machine never fails;
 //   * compiling, matching and evaluating in slices of 1 to 64 units of
 //     budget gives what one slice gives (a slice boundary is invisible);
+//   * what capture evaluation holds — buffers, strings, tables' chunks — is
+//     counted as it changes, and the count is what a walk finds at every
+//     slice;
 //   * the answer — no match, or the match's end and its values, or the
 //     error evaluation raises — is what a direct interpreter of the tree
 //     gives: PEG semantics over the tree itself, recursively, with the
@@ -29,7 +32,11 @@
 //     following no call), evaluated by a transliteration of `lpcap.c`.
 //   Where either side runs past its bound — the interpreter's recursion or
 //   step count, the machine's budget (an exponential grammar), a compile
-//   that refuses a left call through `B` — the case is not compared.
+//   that refuses a left call through `B` — the case is not compared; nor is
+//   a program with a partial commit in a loop coded with a test, where
+//   0.12's code generation departs from PEG semantics and the interpreter
+//   does not follow it (`commits_through_a_test_loop`: seed
+//   `opt_partial_commit_in_a_test_loop`, which was artefact `crash-bd846150...`).
 //
 // Through the binding, when the first byte's top three bits are set (the same
 // program as Lua, built by the constructors and run by `lpeg.match` in a
@@ -37,45 +44,54 @@
 // `MatchJob` and `LuaEnv`, `init`, extra arguments, the values' conversion,
 // what a match holds accounted to the heap), and, from step d, the captures
 // that call Lua: a quarter of its composite nodes (op bytes from 200) are a
-// `Cmt`, a function
-// coerced as `P(f)`, a `/function`, a `Cf` or a `/table`, with callbacks from
-// a fixed set (`chunk`'s `F`, `G`, `H`, `T`): returning false, true,
-// positions (the current, one on, one back, past the end, `3.5`, a padded
-// string), the captures' values or their count, a table, nothing; raising an
-// error table or a string; running a nested match; calling `setmaxstack`;
-// `__index` functions and tables. A pattern holding one is checked through
-// the binding alone. Constants are larger here:
-// strings of up to 3,600 bytes by repetition, `/string` formats of up to
-// 128 copies of theirs (256 `%n`), a subject repeated up to 64 times (3 KiB),
-// `init` from -3 to 3, a backtrack ceiling of 100 or 150, a memory budget of
-// 16 MiB. Checked:
+// `Cmt`, a function coerced as `P(f)`, a `/function`, a `Cf` or a `/table`,
+// with callbacks from a fixed set (`chunk`'s `F`, `G`, `H`, `T`): returning
+// false, true, positions (the current, one on, one back, past the end,
+// `3.5`, a padded string), the captures' values or their count, a table,
+// nothing, or 300 values; raising an error table or a string; running a
+// nested match; calling `setmaxstack`, `collectgarbage()` or the pattern's
+// `__gc`; yielding (the match runs in a coroutine, resumed with what it
+// yields until it ends, so a callback that yields returns what it yielded:
+// `lpeg-callback-may-yield`); `__index` functions and tables. A pattern
+// holding one is checked through the binding alone. Constants are larger
+// here: strings of up to 3,600 bytes by repetition, `/string` formats of up
+// to 128 copies of theirs (256 `%n`), a subject repeated up to 64 times
+// (3 KiB), `init` from -3 to 3, a backtrack ceiling of 100 or 150, a memory
+// budget of 16 MiB. Checked:
 //   * the same chunk run in one slice and in slices of 64 to 4,096 units of
 //     fuel (a match takes 1,024 at least), one after the other in one state,
 //     with a full collection before each and every 64th slice, gives the
-//     same answer — what `pcall` of the match returns, serialised here, a
-//     table by its sorted pairs — or "not enough memory" on either side
-//     (`lpeg-memory-errors-depend-on-slicing`);
+//     same answer — what `pcall` of the match returns, and how often it
+//     yielded, serialised here, a table by its sorted pairs — or "not enough
+//     memory" on either side (`lpeg-memory-errors-depend-on-slicing`);
+//   * in every slice of both runs, LPeg's work (`lpeg::take_work`) is within
+//     four times what the slice's fuel pays for, and a few units: the step d
+//     review's F1 (bookkeeping after each call, in proportion to what the
+//     cursor held) would fail it on the seeds `binding_*_to_calls_in_a_loop`;
 //   * no error the binding raises for its own defects ("lpeg: malformed
 //     program", "lpeg: ... lost", "lpeg: capture call refused") is ever
 //     seen.
 //   A run past 300,000 units of fuel is not compared. Seeds
-//   `close_after_kept_capture_binding`, `binding_table_of_many_captures`
-//   and the `binding_cmt_*`, `binding_function_*`, `binding_fold_*` and
-//   `binding_query_*` ones reach the two checks.
+//   `close_after_kept_capture_binding`, `binding_table_of_many_captures`,
+//   the `binding_cmt_*`, `binding_function_*`, `binding_fold_*` and
+//   `binding_query_*` ones, and from the step d review `binding_callbacks_yield`,
+//   `binding_fold_and_query_yield`, `binding_collect_and_gc`,
+//   `binding_many_results` and the two `binding_*_to_calls_in_a_loop`, reach
+//   the checks.
 #![no_main]
 
 use std::borrow::Cow;
 use std::task::Poll;
 
 use libfuzzer_sys::fuzz_target;
-use nmap_core::nse::lpeg::code::{CodeError, Compiler};
-use nmap_core::nse::lpeg::register_for_tests;
+use nmap_core::nse::lpeg::code::{CodeError, Compiler, Op, Program};
 use nmap_core::nse::lpeg::tree::{
     CapKind, Charset, CheckAux, FinalFix, FixedLen, GrammarLayout, Key, Pred, Tag, Tree,
     VerifyGrammar,
 };
 use nmap_core::nse::lpeg::vm::capture::{CapCursor, CapEnv, CapError, CapVal, TableKey, View};
 use nmap_core::nse::lpeg::vm::{Capture, Vm, VmPoll};
+use nmap_core::nse::lpeg::{register_for_tests, take_work, BYTES_PER_FUEL};
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{Closure, Executor, Fuel, Lua, Value, Variadic};
 
@@ -375,11 +391,11 @@ fn lua_capture(inp: &mut Input, d: u32, rules: u32) -> (Tree, String) {
     let (t, lt) = pattern(inp, d - 1, rules);
     let k = usize::from(inp.byte());
     let lua = match k % 5 {
-        0 => format!("Cmt({lt}, F[{}])", 1 + k / 5 % 12),
-        1 => format!("({lt} / G[{}])", 1 + k / 5 % 6),
-        2 => format!("Cf({lt}, H[{}])", 1 + k / 5 % 3),
-        3 => format!("({lt} / T[{}])", 1 + k / 5 % 3),
-        _ => format!("({lt} * P(F[{}]))", 1 + k / 5 % 12),
+        0 => format!("Cmt({lt}, F[{}])", 1 + k / 5 % 16),
+        1 => format!("({lt} / G[{}])", 1 + k / 5 % 10),
+        2 => format!("Cf({lt}, H[{}])", 1 + k / 5 % 5),
+        3 => format!("({lt} / T[{}])", 1 + k / 5 % 4),
+        _ => format!("({lt} * P(F[{}]))", 1 + k / 5 % 16),
     };
     (Tree::capture(CapKind::Function, 0, &t).unwrap(), lua)
 }
@@ -993,9 +1009,50 @@ fn port_error(e: CapError) -> Err {
     }
 }
 
+/// Whether `p` holds a partial commit that `lpeg.c:1656` puts in a loop
+/// coded with a test (`L1: test -> L2; <p>; jmp L1; L2:`, which pushes no
+/// choice of its own): 0.12's `coderep` codes such a loop's body under the
+/// `opt` it was given, so an optional `q + ''` in it (`codechoice`'s
+/// `IPartialCommit; q`) or a loop in it coded for `opt` commits the frame of
+/// the choice around the loop, and a `q` that fails there ends that choice
+/// — the C's answer and the port's (`lpeg-coderep-opt-reaches-a-test-loop`),
+/// where the PEG semantics the interpreter has go on looping. Such a
+/// program is not compared with the interpreter. A loop is found as a jump
+/// back to a test; a tail call to a rule that starts with one is taken for a
+/// loop too, which only leaves more out.
+fn commits_through_a_test_loop(p: &Program) -> bool {
+    let insts = || {
+        let mut i = 0;
+        std::iter::from_fn(move || {
+            let (op, _, _) = p.inst(i)?;
+            let at = i;
+            i += op.size();
+            Some((at, op))
+        })
+    };
+    let loops: Vec<(usize, usize)> = insts()
+        .filter(|&(_, op)| op == Op::Jmp)
+        .filter_map(|(i, _)| {
+            let t = p.target(i)?;
+            let test = matches!(
+                p.inst(t),
+                Some((Op::TestAny | Op::TestChar | Op::TestSet, _, _))
+            );
+            (t < i && test).then_some((t, i))
+        })
+        .collect();
+    insts().any(|(i, op)| {
+        op == Op::PartialCommit
+            && p.target(i) == Some(i + op.size())
+            && loops.iter().any(|&(a, b)| a < i && i < b)
+    })
+}
+
 /// Compile, match and evaluate in slices of `slice`: `None` past the budget
 /// or where the compiler refuses what the C refuses at compile time.
-fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>> {
+/// `quirk` is set where the program is one the interpreter cannot model
+/// ([`commits_through_a_test_loop`]).
+fn port(t: &Tree, s: &[u8], slice: u32, quirk: &mut bool) -> Option<Result<Option<Vec<Val>>, Err>> {
     let mut spent = 0u64;
     let mut c = Compiler::new();
     let program = loop {
@@ -1018,6 +1075,7 @@ fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>>
             return None;
         }
     };
+    *quirk = commits_through_a_test_loop(&program);
     let mut vm = Vm::new(0);
     let end = loop {
         let mut b = slice;
@@ -1037,7 +1095,15 @@ fn port(t: &Tree, s: &[u8], slice: u32) -> Option<Result<Option<Vec<Val>>, Err>>
     let mut cur = CapCursor::new(end, 0, PTOP);
     loop {
         let mut b = slice;
-        match cur.step(&caps, s, &Env, &mut b) {
+        let r = cur.step(&caps, s, &Env, &mut b);
+        // What the cursor holds is counted as it changes, never walked when
+        // asked (the step d review's F1): the count is what a walk finds.
+        assert_eq!(
+            cur.heap_bytes(),
+            cur.heap_bytes_walked(),
+            "the cursor's count"
+        );
+        match r {
             Ok(Some(())) => break,
             Ok(None) => {}
             Err(e) => return Some(Err(port_error(e))),
@@ -1088,13 +1154,27 @@ fn run_lua(lua: &mut Lua, src: &str, slice: i32) -> Option<String> {
     });
     lua.set_memory_limit(lua.total_memory() + LUA_BUDGET);
     let (mut used, mut slices) = (0i64, 0u64);
+    let per = BYTES_PER_FUEL as u64;
+    let _ = take_work();
     loop {
         let mut fuel = Fuel::with(slice);
         let done = lua
             .enter(|ctx| ctx.fetch(&ex).step(ctx, &mut fuel))
             .expect("steps");
-        used += i64::from(slice) - i64::from(fuel.remaining());
+        let this = i64::from(slice) - i64::from(fuel.remaining());
+        used += this;
         slices += 1;
+        // LPeg's work in the slice (`take_work`: a step `BYTES_PER_FUEL`
+        // bytes, every byte copied, hashed, compared, moved or filled one),
+        // within what its fuel pays for, four times over, and a few units'
+        // slack: what a match does after each call it makes — its
+        // bookkeeping included — must be paid for.
+        let work = take_work();
+        let fuel_used = this.max(1) as u64;
+        assert!(
+            work <= 4 * per * fuel_used + 8 * per,
+            "slice {slices} did {work} bytes' work on {fuel_used} units of fuel:\n{src}"
+        );
         if done {
             break;
         }
@@ -1157,6 +1237,10 @@ local function show(v)
   if type(v) == 'table' then return '{{' .. #v .. '}}' end
   return tostring(v)
 end
+local MANY = {{}} for i = 1, 300 do MANY[i] = i end
+local PAT
+-- The pattern's `__gc`, called from a callback (inert: it frees nothing).
+local function gc() if PAT then getmetatable(PAT).__gc(PAT) end end
 local F = {{
   function(s, i) return false end,
   function(s, i) return true end,
@@ -1170,6 +1254,10 @@ local F = {{
   function(s, i) L.setmaxstack(150) return true end,
   function(s, i) return 3.5 end,
   function(s, i, a) return ' ' .. i .. ' ', a end,
+  function(s, i) collectgarbage() return true end,
+  function(s, i) gc() collectgarbage() return i end,
+  function(s, i, ...) return coroutine.yield(i, ...) end,
+  function(s, i) return true, table.unpack(MANY) end,
 }}
 local G = {{
   function(...) return ... end,
@@ -1178,21 +1266,40 @@ local G = {{
   function(a) return {{ a }} end,
   function() error('G', 0) end,
   function(a) return L.match(C(1), show(a)) end,
+  function() return table.unpack(MANY) end,
+  function(...) collectgarbage() return ... end,
+  function(...) gc() return select('#', ...), ... end,
+  function(...) return coroutine.yield(...) end,
 }}
 local H = {{
   function(a, b) return show(a) .. show(b) end,
   function(a, ...) return select('#', ...) end,
   function(a) return nil end,
+  function(a, b) return coroutine.yield(show(a) .. show(b)) end,
+  function(a, ...) gc() collectgarbage() return select('#', ...) end,
 }}
 local T = {{
   {{ a = 'A', b = false }},
   setmetatable({{}}, {{ __index = function(t, k) return type(k) end }}),
   setmetatable({{}}, {{ __index = {{ c = 'C' }} }}),
+  setmetatable({{}}, {{ __index = function(t, k) return coroutine.yield(k) end }}),
 }}
 L.setmaxstack({max})
 local ok, p = pcall(function() return {expr} end)
 if not ok then return "build", p end
-return pcall(L.match, p, ("{subject}"):rep({times}), {init}, "x", 2.5)
+PAT = p
+-- The match in a coroutine, resumed with what it yields until it ends: a
+-- callback that yields returns what it yielded.
+local co = coroutine.create(function()
+  return pcall(L.match, p, ("{subject}"):rep({times}), {init}, "x", 2.5)
+end)
+local r, yields = table.pack(coroutine.resume(co)), 0
+while coroutine.status(co) == "suspended" do
+  yields = yields + 1
+  r = table.pack(coroutine.resume(co, table.unpack(r, 2, r.n)))
+end
+if not r[1] then return "resume", r[2] end
+return yields, table.unpack(r, 2, r.n)
 "#,
         subject = String::from_utf8_lossy(subject),
     )
@@ -1256,12 +1363,16 @@ fuzz_target!(|data: &[u8]| {
     if drive(u32::MAX, |b| w.step(&mut fixed, &|_| 0, b)).is_err() {
         return;
     }
-    let whole = port(&fixed, &subject, BUDGET as u32);
-    let sliced = port(&fixed, &subject, slice);
+    let mut quirk = false;
+    let whole = port(&fixed, &subject, BUDGET as u32, &mut quirk);
+    let sliced = port(&fixed, &subject, slice, &mut false);
     if let (Some(a), Some(b)) = (&whole, &sliced) {
         assert_eq!(a, b, "a slice boundary changed the answer");
     }
     let Some(got) = whole else { return };
+    if quirk {
+        return;
+    }
     let mut interp = Interp {
         t: &fixed,
         s: &subject,

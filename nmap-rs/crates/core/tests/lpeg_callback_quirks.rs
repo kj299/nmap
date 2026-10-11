@@ -6,7 +6,10 @@
 //! decoding of its results, dynamic captures through backtracking and
 //! `#p`, when a `/f` runs and how often, `Cf`, `/table` and `__index`,
 //! error objects, re-entry and C levels, `locale(t)`, a grammar's `__index`,
-//! and the corpus's `json.lua`, `lpeg-utility.lua` and `re.lua` over them.
+//! and the corpus's `json.lua`, `lpeg-utility.lua` and `re.lua` over them;
+//! then the step d review's six ([`REVIEW`]: `#p`'s orphans under a
+//! match-time capture, a method call's argument number reached through
+//! `lpeg-utility`, and what the C's 16-bit index loses on a failure).
 //!
 //! Each case is a chunk, named `=case`, run in an environment over the
 //! globals, with `lpeg`, `re`, `json` and `U` (lpeg-utility) loaded as the
@@ -17,10 +20,11 @@
 //!
 //! **No exemption list.** A case answers as the C does, or the port's
 //! answer is pinned beside the C's under a named class, each a ledger entry
-//! ([`CLASSED`]): the port's deliberate departures (wide indices, the
+//! ([`CLASSED`], and [`CLASSED_COUNT`] where a count depends on the
+//! process's history): the port's deliberate departures (wide indices, the
 //! callbacks' yields), the ceilings that are the embedding's (the Lua
 //! stack's slots, C levels), and the tree's own file paths.
-#![cfg(not(miri))] // the VM over 207 cases, a million-step few among them
+#![cfg(not(miri))] // the VM over 213 cases, a million-step few among them
 
 mod lpeg_eval;
 
@@ -1111,22 +1115,122 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// The cases the port answers otherwise, deliberately, and why: (id, the
-/// named class — a ledger entry — and the port's own answer, pinned).
-const CLASSED: &[(&str, &str, &str)] = &[
-    // The Lua stack's ceiling on live dynamic values (orphans of `#p`
-    // included, N15) is where the embedding's frames leave it: 999,957
-    // calls in the C's standalone harness, 999,986 here, then Lua's bare
-    // "stack overflow" as the next callback's frame is pushed.
+/// The step d review's fidelity pins (the review's F3, F5 and F6), run
+/// after the brief's in the same state: (id, chunk, the C's answer). Each is
+/// the tree's standalone oracle's, except `RF3b`, which crashes it (SIGSEGV:
+/// its orphans take the 16-bit runtime-capture index past 32,767, and the
+/// wrapped index then drives `runtimecap`'s removal,
+/// `lpeg-runtime-capture-index-16bit`), and whose answer is the tree's
+/// `lpeg.c` with that index wide (`oracle/gen_m66d_quarantine_pins.py`'s
+/// build). No golden records the crash.
+const REVIEW: &[(&str, &str, &str)] = &[
+    // `runtimecap` drops only the dynamic values from the first live one
+    // its body holds: orphans of `#p` below it stay. Here the body's only
+    // values are orphans, so none goes, and they fill the stack.
+    (
+        "RF3a",
+        r###"local n = 0 local ok, e = pcall(lpeg.match, (lpeg.Cmt(#lpeg.Cmt(1, function() n = n + 1 return true, 1 end), function() return true end) * 1)^0, ("a"):rep(1100000)) return n, ok, e"###,
+        r###"n=3:999957,false,"stack overflow""###,
+    ),
+    // The orphan comes before the body's live value: it stays.
+    (
+        "RF3b",
+        r###"local n = 0 local ok, e = pcall(lpeg.match, (lpeg.Cmt(#lpeg.Cmt(1, function() n = n + 1 return true, 1 end) * lpeg.Cmt(0, function() return true, 2 end), function() return true end) * 1)^0, ("a"):rep(1100000)) return n, ok, e"###,
+        r###"n=3:999955,false,"stack overflow (too many captures)""###,
+    ),
+    // The orphan comes after it: it goes with it, and the loop runs to the
+    // end.
+    (
+        "RF3c",
+        r###"local n = 0 local ok, e = pcall(lpeg.match, (lpeg.Cmt(lpeg.Cmt(0, function() return true, 2 end) * #lpeg.Cmt(1, function() n = n + 1 return true, 1 end), function() return true end) * 1)^0, ("a"):rep(1100000)) return n, ok, e"###,
+        r###"n=3:1100000,true,1100001"###,
+    ),
+    // `get_response` on a fingerprint whose quoted response is not closed:
+    // `getquote:match` gives nil, then `unescape:match(nil)` (lpeg-utility.lua:155),
+    // a method call, whose arguments the C numbers from the receiver.
+    (
+        "RF5",
+        r###"return pcall(U.get_response, 'SF-Port80-TCP:V=7%r(NULL,5,"unterminated', 'NULL')"###,
+        r###"n=2:false,"/home/user/nmap/nselib/lpeg-utility.lua:155: bad argument #1 to 'match' (string expected, got nil)""###,
+    ),
+    // 33,000 live values, then a failure past the 32,762nd: the C's wrapped
+    // index drives `removedyncap`'s `settop`, and the table loses all but
+    // 473 of them; below the threshold (32,000), every one is kept.
+    (
+        "RF6",
+        r###"local t = lpeg.match(lpeg.Ct(lpeg.Cmt(lpeg.P'a', function() return true, 1 end)^0 * (lpeg.Cmt(lpeg.P'b', function() return true, 2 end) * 'z' + 'b')), ('a'):rep(33000) .. 'b') local ones = 0 for i = 1, #t do if t[i] == 1 then ones = ones + 1 end end return #t, ones"###,
+        r###"n=2:473,472"###,
+    ),
+    (
+        "RF6s",
+        r###"local t = lpeg.match(lpeg.Ct(lpeg.Cmt(lpeg.P'a', function() return true, 1 end)^0 * (lpeg.Cmt(lpeg.P'b', function() return true, 2 end) * 'z' + 'b')), ('a'):rep(32000) .. 'b') local ones = 0 for i = 1, #t do if t[i] == 1 then ones = ones + 1 end end return #t, ones"###,
+        r###"n=2:32000,32000"###,
+    ),
+];
+
+/// The cases whose count is the embedding's and depends on what the process
+/// did before, the port's answer pinned as a range and the rest exactly:
+/// (id, the named class, the counts allowed, what follows the count). The
+/// Lua stack's ceiling on live dynamic values (orphans of `#p` included,
+/// N15, RF3a, RF3b) is where the embedding's frames leave it — 999,957 calls
+/// in the C's standalone harness (999,955 in RF3b, whose body's value is
+/// evaluated in the stack's last slots, "stack overflow (too many
+/// captures)") — then Lua's bare "stack overflow" as the next callback's
+/// frame is pushed. Here it was 999,986 in this test's order, and
+/// 999,971 to 999,986 in the step d review's harnesses, which ran the cases
+/// in other orders and in fresh processes: how far the thread's stack has
+/// grown before decides where its last growth falls
+/// (`lpeg-capture-ceiling-is-the-embeddings`).
+const CLASSED_COUNT: &[(&str, &str, std::ops::RangeInclusive<u64>, &str)] = &[
     (
         "N15",
         "lpeg-capture-ceiling-is-the-embeddings",
-        r#"n=3:999986,false,"stack overflow""#,
+        999_900..=1_000_000,
+        r#",false,"stack overflow""#,
     ),
     (
         "N17",
         "lpeg-capture-ceiling-is-the-embeddings",
-        r#"n=3:999986,false,"stack overflow""#,
+        999_900..=1_000_000,
+        r#",false,"stack overflow""#,
+    ),
+    (
+        "RF3a",
+        "lpeg-capture-ceiling-is-the-embeddings",
+        999_900..=1_000_000,
+        r#",false,"stack overflow""#,
+    ),
+    (
+        "RF3b",
+        "lpeg-capture-ceiling-is-the-embeddings",
+        999_900..=1_000_000,
+        r#",false,"stack overflow (too many captures)""#,
+    ),
+];
+
+/// The count after `n=3:` in `got`, and what follows it.
+fn count_then(got: &str) -> Option<(u64, &str)> {
+    let rest = got.strip_prefix("n=3:")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    Some((rest[..digits].parse().ok()?, &rest[digits..]))
+}
+
+/// The cases the port answers otherwise, deliberately, and why: (id, the
+/// named class — a ledger entry — and the port's own answer, pinned).
+const CLASSED: &[(&str, &str, &str)] = &[
+    // The step d review's F6: every value is kept where the C's wrapped
+    // index drops all but 473.
+    (
+        "RF6",
+        "lpeg-runtime-capture-index-16bit",
+        r#"n=2:33000,33000"#,
+    ),
+    // The step d review's F5: a method call's arguments numbered from the
+    // first, where the C numbers them from the receiver.
+    (
+        "RF5",
+        "lpeg-bad-argument-naming",
+        r#"n=2:false,"/home/user/nmap/nselib/lpeg-utility.lua:155: bad argument #2 to 'match' (string expected, got nil)""#,
     ),
     // Wide runtime-capture indices (D4): every value is the one returned,
     // where the C's `short` wraps from the 32,762nd.
@@ -1220,7 +1324,7 @@ fn callback_quirks_are_the_cs() {
     });
     let mut bad = Vec::new();
     let mut classed = std::collections::BTreeMap::<&str, Vec<&str>>::new();
-    for &(id, chunk, c) in CASES {
+    for &(id, chunk, c) in CASES.iter().chain(REVIEW) {
         let ex = lua.enter(|ctx| {
             let f: Function = ctx.get_global("run_case").expect("run_case");
             ctx.stash(Executor::start(ctx, f, ctx.intern(chunk.as_bytes())))
@@ -1240,22 +1344,28 @@ fn callback_quirks_are_the_cs() {
         } else {
             "UNFINISHED".to_string()
         };
-        let want = match CLASSED.iter().find(|(i, _, _)| *i == id) {
-            Some(&(_, class, port)) => {
-                classed.entry(class).or_default().push(id);
-                port
-            }
-            None => c,
+        let (ok, want) = if let Some((_, class, counts, then)) =
+            CLASSED_COUNT.iter().find(|(i, ..)| *i == id)
+        {
+            classed.entry(class).or_default().push(id);
+            let ok = count_then(&got).is_some_and(|(n, rest)| counts.contains(&n) && rest == *then);
+            (ok, format!("n=3:{counts:?}{then}"))
+        } else if let Some(&(_, class, port)) = CLASSED.iter().find(|(i, _, _)| *i == id) {
+            classed.entry(class).or_default().push(id);
+            (got == port, port.to_string())
+        } else {
+            (got == c, c.to_string())
         };
-        if got != want {
+        if !ok {
             bad.push(format!(
                 "  {id}: {chunk}\n    C    = {c}\n    want = {want}\n    port = {got}"
             ));
         }
     }
     eprintln!(
-        "{} cases; the port's own answer under a named class: {classed:?}",
-        CASES.len()
+        "{} cases and {} of the review's; the port's own answer under a named class: {classed:?}",
+        CASES.len(),
+        REVIEW.len()
     );
     // Each LPeg path re-enters one C level less deep than `gsub`, as in
     // the C (X03-X06 against X07).
@@ -1282,7 +1392,7 @@ fn callback_quirks_are_the_cs() {
         bad.is_empty(),
         "{} of {} cases differ:\n{}",
         bad.len(),
-        CASES.len(),
+        CASES.len() + REVIEW.len(),
         bad.join("\n")
     );
 }

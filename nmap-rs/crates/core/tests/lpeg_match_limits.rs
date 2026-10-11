@@ -15,7 +15,9 @@ mod lpeg_eval;
 
 use std::path::Path;
 
-use lpeg_eval::{new_lua, run, start, step_only, step_to_end, step_traced, Outcome};
+use lpeg_eval::{
+    new_lua, new_lua_with_nselib, run, start, step_only, step_to_end, step_traced, Outcome,
+};
 use piccolo::{Fuel, Value, Variadic};
 
 fn returned(v: &[&str]) -> Outcome {
@@ -452,6 +454,16 @@ fn every_stage_of_a_match_is_pre_empted() {
             "return lpeg.match(p, 'x')",
             "x!",
         ),
+        // Values dropped while the cursor holds something (a table being
+        // filled): a named group in a table keeps its first of 200,000, and
+        // the others are looked at for strings and tables to give back, a
+        // unit each, across slices (the step d review round's F2).
+        (
+            "p = lpeg.Ct(lpeg.Cc(1) * lpeg.Cg(lpeg.C(1)^0, 'k')) lpeg.match(p, 'a') \
+             s = ('a'):rep(200000)",
+            "return lpeg.match(p, s).k",
+            "a",
+        ),
     ];
     for (setup, src, want) in cases {
         let mut lua = new_lua();
@@ -602,6 +614,36 @@ const BYTE_WORK: &[(&str, &str, &str)] = &[
         "return lpeg.match(p, s) + lpeg.match(q, s)",
         "200000",
     ),
+    // The step d review's F1, whose bookkeeping after each call walked what
+    // the cursor held: a call for each of 20,000 tables, and for each of
+    // 20,000 strings the cursor built.
+    (
+        "s = ('a'):rep(20000) f = function(x) return 1 end \
+         p = (lpeg.Ct(lpeg.C(1)) / f)^0 * lpeg.Cp()",
+        "return select('#', lpeg.match(p, s))",
+        "20001",
+    ),
+    (
+        "s = ('a'):rep(20000) f = function(x) return 1 end \
+         p = (lpeg.Cs(lpeg.C(1)) / f)^0 * lpeg.Cp()",
+        "return select('#', lpeg.match(p, s))",
+        "20001",
+    ),
+    // Values dropped while the cursor holds something (a table being
+    // filled): the 199,999 a named group in a table does not keep, looked at
+    // for strings and tables to give back, a unit each.
+    (
+        "s = ('a'):rep(200000) p = lpeg.Ct(lpeg.Cc(1) * lpeg.Cg(lpeg.C(1)^0, 'k'))",
+        "return lpeg.match(p, s).k",
+        "a",
+    ),
+    // And through `json.lua` (the tree's, with `re` and lpeg-utility): an
+    // array of 10,000 strings, each a table handed to `table.concat`.
+    (
+        "body = '[' .. ('\"\",'):rep(10000) .. '\"\"]'",
+        "local ok, v = json.parse(body) return #v",
+        "10001",
+    ),
 ];
 
 /// D3, counted: no slice of a match does more than a few times the work its
@@ -620,7 +662,11 @@ fn no_slice_does_more_work_than_its_fuel_pays_for() {
     const SLICE: i32 = 4096;
     let per = u64::try_from(BYTES_PER_FUEL).unwrap();
     for &(setup, src, want) in BYTE_WORK {
-        let mut lua = new_lua();
+        let mut lua = if src.contains("json.") {
+            new_lua_with_nselib()
+        } else {
+            new_lua()
+        };
         let ex = start(&mut lua, setup);
         assert_eq!(
             step_to_end(&mut lua, &ex, 1_000_000, 10_000).0,

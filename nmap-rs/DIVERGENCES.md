@@ -4451,6 +4451,22 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       1.25 of its fuel's worth a slice). What a callback does in a slice is
       the VM's: a Lua function handed 8,192 arguments that walks them runs
       15,000 units past its slice, as `f(table.unpack(t))` does in plain Lua.
+      **The step d review** (its F1) found work no fuel paid for: after every
+      slice and every call a match accounted what it holds to the heap by
+      walking the capture cursor's tables, strings and buffers, so `n` calls
+      over `n` tables or strings took time in `n²` — `json.parse` of
+      `'[' .. ('"",'):rep(n) .. '""]'` (each string a table handed to
+      `table.concat`) took 3.5 s at 80,000, 106 s at 400,000 and 243 s at
+      600,000 (1.8 MB, a slice of 103 ms) in a release build, where the C
+      takes 0.02 to 0.17 s; `(Ct(C(1)) / f)^0` and `(Cs(C(1)) / f)^0` the
+      same. The cursor (and the compiler, for its grammars' lists) now keep
+      that count as it changes, so asking it is O(1): 0.09, 0.53 and 0.72 s,
+      no slice past 9 ms (`the_work_of_a_match_that_calls_lua_is_linear_in_its_calls`:
+      the work at `4n` within five times `n`'s, and each slice within its
+      fuel's worth; `what_the_cursor_holds_is_counted_as_it_changes` and
+      `what_nested_grammars_hold_is_counted_as_it_changes` hold the count
+      to a walk at every step; `nse_lpeg_match` checks LPeg's work against
+      each slice's fuel in its binding mode).
 - [ ] `lpeg-callback-may-yield` — the Lua LPeg calls runs as a VM call
       (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
       coroutine, and the constructor or the match goes on where it was when
@@ -4509,7 +4525,21 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       budget each; match-time captures keeping 1,000 values each, 3.9 MB,
       the stack's doubling from 2^18 values). The fuzz target
       `nse_lpeg_match` runs its binding mode under a budget, with the same
-      tolerance.
+      tolerance. **The step d review** (its F2) found a match holding what
+      the C lets go: a string a substitution or `/string` built stayed in
+      the capture cursor until evaluation ended, after a call had taken it,
+      so a group holding a substitution of 256 KiB referenced once for each
+      of 500, 1,000 and 2,000 calls (`Cg(Cs(P'x'^0), 'k') * ((Cb'k' / f) *
+      1)^0`) peaked at 131, 263 and 525 MB, where the C's stays near 4 MB,
+      and failed "not enough memory" under a 64 MiB budget. Each string is
+      now given back once used — made a Lua value (a call's argument, a
+      query's key, an assignment, a result), copied into another buffer, or
+      dropped by a capture that keeps one value of several (`/n`, `Cf`'s
+      first, a query's, a named group's, `addonestring`'s), with a table so
+      dropped and all it holds, the drop a unit a value across slices: 0.9
+      to 1.1 MB at those counts, and the budget holds
+      (`a_string_made_for_a_call_is_not_kept_after_it`,
+      `a_string_built_for_a_call_is_given_back_once_used`).
 - [ ] `lpeg-bad-argument-naming` — as `nmapdb-bad-argument-naming`: from Lua
       code a function is named by its registered name (`'P'`) and a
       metamethod by its event (`'mul'`), as an operator names it; otherwise
@@ -4523,11 +4553,19 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       `re.compile(nil)` runs `pattern:match(nil, 1, defs)` (`re.lua:269`),
       and the C, whose `luaL_argerror` takes one off the number of a call
       `lua_getinfo` names a "method", says `bad argument #1 to 'match'`
-      where the port says `#2` (row `J.compile.nil`). Telling a method call
-      apart needs the calling instruction, which the VM does not show a Rust
-      function. **Tolerated by a gate:** `lpeg_corpus_differential`'s named
-      class `method`, which takes one off the port's argument numbers and
-      nothing off the C's — that row alone at step d.
+      where the port says `#2` (row `J.compile.nil`). So can a peer (the
+      step d review's F5): lpeg-utility's `get_response`, on a fingerprint
+      whose quoted response is not closed, gets nil from `getquote:match`
+      and runs `unescape:match(nil)` (`lpeg-utility.lua:155`);
+      `U.get_response('SF-Port80-TCP:V=7%r(NULL,5,"unterminated', 'NULL')`
+      raises `bad argument #1 to 'match' (string expected, got nil)` in the
+      C and `#2` here. Both raise; only the number differs (RF5 in
+      `lpeg_callback_quirks`, the port's message pinned under this class).
+      Telling a method call apart needs the calling instruction, which the
+      VM does not show a Rust function. **Tolerated by a gate:**
+      `lpeg_corpus_differential`'s named class `method`, which takes one off
+      the port's argument numbers and nothing off the C's — that row alone
+      at step d.
 - [ ] `lpeg-grammar-stack-overflow-message` — `collectrules` checks the Lua
       stack for each rule (`luaL_checkstack`), so a grammar of about half a
       million rules or more fails with "stack overflow (grammar has too many
@@ -4744,6 +4782,28 @@ review fixes'.
       memory" otherwise (`luaL_prepbuffsize`, Lua 5.4). Reproduced
       (`vm::capture`); quirks `Qbuf1` to `Qbuf4`, measured on the tree's
       oracle.
+- [x] `lpeg-coderep-opt-reaches-a-test-loop` — `coderep` codes a loop whose
+      body fails at its head (or whose first set is disjoint from what
+      follows) as `L1: test -> L2; <p>; jmp L1; L2:`, which pushes no
+      choice of its own, and codes the body under the `opt` it was given
+      (`lpeg.c:1656`). `opt` says a choice's frame is on top, to be
+      committed partially: so where such a loop is coded under it — as the
+      first alternative of `p^2 + ""`, which `codechoice` codes with `opt`
+      when the second is empty — an optional `q + ""` in the body becomes
+      `IPartialCommit; q` on the frame of the choice around the loop, and a
+      `q` that fails ends that choice at the position the partial commit
+      saved, where PEG semantics go on looping: `(P(1) * (P"xy" + ""))^2 +
+      ""` on "abcd" is 4 in the C, not 5 (5 without the `+ ""`). The
+      compiler is the C's instruction for instruction (D2), so the port
+      gives the C's answers: quirks `QO1a` to `QO1d` in
+      `lpeg_match_quirks`, measured on the tree's oracle. Found by
+      `nse_lpeg_match` (artefact `crash-bd846150...`, left from step c's
+      review round and kept as the seed `opt_partial_commit_in_a_test_loop`),
+      whose PEG interpreter does not follow it: the fuzz target leaves
+      programs with a partial commit to the next instruction inside a loop
+      coded with a test out of that comparison, and still checks them for
+      slicing. Whether a corpus row has the shape is not known; every row's
+      answer is the C's either way.
 
 ### Differences, open and documented
 
@@ -4767,7 +4827,11 @@ review fixes'.
       stack as the C keeps them (`Cmt(1, →true, 1)^0`, the brief's N17, and
       `#p`'s orphans, N15: 999,957 calls under the standalone oracle, then
       Lua's bare "stack overflow" as the next callback's frame is pushed;
-      999,986 here); and the C levels left to re-entry (`C stack overflow`
+      999,971 to 999,986 here, by what the process did before — how far the
+      thread's stack had grown decides where its last growth falls: the
+      step d review measured 999,974 and 999,973 in one process in two
+      slicings and 999,971 in a fresh one, where `lpeg_callback_quirks`'
+      order gives 999,986); and the C levels left to re-entry (`C stack overflow`
       after 195 levels of `Cmt`, `/function`, `/table` or `Cf` re-entry and
       196 of `gsub` in the brief's harness, which `lua.c` enters two C calls
       deep; 197 and 198 here, where an `Executor` enters none). Relative to
@@ -4775,8 +4839,29 @@ review fixes'.
       (`each_way_into_lua_takes_one_c_level`, the six paths; `H.reenter.rel`
       at the golden's 0). The corpus's `cdepth` rows at step d:
       `H.stackcaps.999950` and `H.reenter.196` to `.200` and `.250`. In
-      `lpeg_callback_quirks` N15, N17 and X03 to X07 are pinned at the
-      port's numbers under this class.
+      `lpeg_callback_quirks` X03 to X07 are pinned at the port's numbers
+      under this class, and N15, N17 and the step d review's RF3a and RF3b
+      (`lpeg-and-predicate-keeps-dynamic-captures`) as a range, 999,900 to
+      1,000,000 calls, the error's text exact. **The step d review**
+      measured the other relative ceilings, each the most `n` less
+      `table.unpack`'s most in the same frame (C / port): `C(1)^0`, −11 /
+      −10; live dynamic values until the callback's frame does not fit (N15
+      and N17), −13 / −17; `n` values passed to a C function by
+      `Cmt(C(1)^0, type)`, `C(1)^0 / type` and `Cf(…, rawequal)`, −32 / −14,
+      −30 / −12 and −31 / −13; the results a `/function` returns (a Lua
+      function's, `table.unpack`'s), −15 / −7 and −16 / −6. So the ceilings
+      on a callback's arguments, its results and live dynamic values differ
+      from the C's by up to 18 slots, in either direction: the C's
+      `luaD_precall` reserves `LUA_MINSTACK` (20 slots) for a C callee, and
+      piccolo lays its frames out otherwise. Since that review a callback's
+      results count against `LUAI_MAXSTACK` with the values below them, as
+      `pushcapture` counts captures (before, a match could return more than
+      `LUAI_MAXSTACK` values): 600,000 values, then a `/function` returning
+      600,000 more (the review's `s1_over_stack.lua`), is Lua's bare "stack
+      overflow" here, where the C's callee, which has less room, fails
+      first, in `table.unpack`: "too many results to unpack". Inside a table
+      capture both fill a table of 1,200,000
+      (`a_callbacks_results_count_against_the_lua_stack`).
 
 ## Milestone 6.6 step d — LPeg's captures that call Lua (`core::nse::lpeg`, `core::nse::lpeg::vm`)
 
@@ -4837,7 +4922,30 @@ destructive with the code cache read again after a call, the window's values
 held weakly while a callback runs, `setmaxstack` not read after a call or
 read at every slice, an and-predicate's orphans dropped (N15), and a call's
 results taken without fuel; `__gc` made destructive alone passes, the
-match's own program protecting it.
+match's own program protecting it. **Since the step d review**, also:
+`lpeg_callback_limits`' `the_work_of_a_match_that_calls_lua_is_linear_in_its_calls`
+(its F1, `lpeg-stall-limit-ends-finite-work`),
+`a_string_made_for_a_call_is_not_kept_after_it` (F2,
+`lpeg-memory-errors-depend-on-slicing`) and
+`a_callbacks_results_count_against_the_lua_stack` (F3,
+`lpeg-capture-ceiling-is-the-embeddings`); the shapes of F1 and of values
+dropped across slices in `no_slice_does_more_work_than_its_fuel_pays_for`
+and `every_stage_of_a_match_is_pre_empted`; unit tests holding the
+cursor's and the compiler's running counts to a walk at every step, and
+strings given back once used through the mock; the review's six pins
+(`REVIEW` in `lpeg_callback_quirks`, its F3, F5 and F6); and
+`nse_lpeg_match`'s binding mode with callbacks that yield (the match run in
+a coroutine), collect, call `__gc` and return 300 values, and LPeg's work in
+each slice held to its fuel. Each fix has a sabotage a gate catches: the
+count not lowered when a table is freed, or a grammar's lists go; the walk
+after every call put back (counted as work); a string kept after a call took
+it, after a substitution copied it, or when dropped, and a dropped table
+kept; values dropped in one step, charged past the slice or not charged; a
+callback's results not counted against the stack; the fuzz target's
+`coderep` exclusion off (`lpeg-coderep-opt-reaches-a-test-loop`); and, for
+the pins, a match-time capture's stack check moved by 396 slots, the
+runtime index wrapped at 32,768, `match`'s subject numbered `#1`, and a
+match-time capture's body values not removed.
 
 ### Security / robustness (divergence from the C, deliberately)
 
@@ -4846,7 +4954,15 @@ match's own program protecting it.
       `:3461`, read by `lua_pushvalue` at `:857-858`), so from the k-th live
       dynamic value, k ≥ 32,764 − (`match`'s arguments) — 32,762 for
       `match(p, s)` and for `json.parse` — it wraps and reads another live
-      object; `finddyncap`'s `settop(id - 1)` goes wrong with it. A peer
+      object. The wrapped index also drives what the C removes: a failure's
+      `removedyncap` (`lua_settop(L, id - 1)`) and a match-time capture's
+      `runtimecap` (its `lua_remove`s from `finddyncap`'s index), so past
+      the threshold the C loses or corrupts live values on the stack, not
+      only reads aliased ones (the step d review's F6, on script-built
+      patterns: `Ct(Cmt(P'a', →true, 1)^0 * (Cmt(P'b', →true, 2) * 'z' +
+      'b'))` on a³³⁰⁰⁰b fills 473 entries in the C, 33,000 here, RF6 in
+      `lpeg_callback_quirks`, 32,000 on both below it, RF6s; and RF3b,
+      `lpeg-and-predicate-keeps-dynamic-captures`, crashes it). A peer
       reaches it: `json.lua` decodes each `\uXXXX` escape with a `Cmt`
       (`json.lua:133`), so a JSON string of 33,000 escapes parses to a
       string wrong from its 32,762nd character on 7.94, and one of exactly
@@ -4894,15 +5010,29 @@ match's own program protecting it.
       orphans, until a failure below them drops them (`removedyncap`
       truncates the stack from the first runtime capture it drops, orphans
       above it included) or a match-time capture closing over them drops
-      them with its body's (`runtimecap`'s `lua_remove`s). A
-      `(#Cmt(1, →true, 1) * 1)^0` loop over 1.1 MB therefore fills the Lua
-      stack and ends in Lua's bare "stack overflow" (the brief's N15: after
-      999,957 calls in the C, 999,986 here,
-      `lpeg-capture-ceiling-is-the-embeddings`), where the same loop
-      returning only `true` matches (N16: 1,100,000 calls, 1,100,001).
-      Deterministic and crash-free, and no corpus pattern has `#Cmt`:
-      reproduced. The window keeps the orphans exactly as the C's stack
-      does, so every count of dynamic values is the C's
+      the orphans above the first live runtime value its body holds, with
+      that value and those after it (`runtimecap`'s `lua_remove`s, from
+      the index `finddyncap` found); orphans below it, or in a body that
+      holds no live value, stay. A `(#Cmt(1, →true, 1) * 1)^0` loop over
+      1.1 MB therefore fills the Lua stack and ends in Lua's bare "stack
+      overflow" (the brief's N15: after 999,957 calls in the C, 999,971 to
+      999,986 here, `lpeg-capture-ceiling-is-the-embeddings`), where the
+      same loop returning only `true` matches (N16: 1,100,000 calls,
+      1,100,001). So do these, from the step d review (its F3), each pinned
+      in `lpeg_callback_quirks`: `(Cmt(#Cmt(1, →true, 1), →true) * 1)^0`,
+      whose body holds only orphans, fills the stack (RF3a: 999,957 calls,
+      "stack overflow"); `(Cmt(#Cmt(1, →true, 1) * Cmt(0, →true, 2),
+      →true) * 1)^0`, whose orphan comes before the body's live value, too
+      (RF3b: 999,955 calls in the tree's `lpeg.c` with its runtime index
+      wide, "stack overflow (too many captures)", as the body's value is
+      evaluated in the stack's last slots; the tree's own crashes, SIGSEGV,
+      once the orphans take its 16-bit index past 32,767,
+      `lpeg-runtime-capture-index-16bit`); and `(Cmt(Cmt(0, →true, 2) *
+      #Cmt(1, →true, 1), →true) * 1)^0`, whose orphan comes after it, drops
+      them and matches (RF3c: 1,100,000 calls, 1,100,001). Deterministic and
+      crash-free here, and no corpus pattern has `#Cmt`: reproduced. The
+      window keeps the orphans exactly as the C's stack does, so every count
+      of dynamic values is the C's
       (`dynamic_values_go_with_their_captures_but_not_through_and_predicates`).
 - [x] `lpeg-capture-callbacks-run-lazily` — capture evaluation is lazy and
       runs where the C runs it, so a callback runs zero times, once or many:
@@ -4927,8 +5057,9 @@ match's own program protecting it.
       positions; `3.5`, NaN, `2^63`, a table or `"x"` are 0), and one before
       the current position or past the subject's end, 0 and
       `math.mininteger` included, is "invalid position returned by
-      match-time capture"; a capture whose function returns no values leaves
-      no entry, so a `Cf` does not see it as a capture without values and a
+      match-time capture"; a capture whose function returns nothing besides
+      its position or `true` leaves no entry, so a `Cf` does not see it as a
+      capture without values and a
       `/f` around it gets the whole match (N23, N25, C14); its function gets
       the subject as `match` converted it, the position after its body from
       the subject's start, and its body's values or the whole match. And

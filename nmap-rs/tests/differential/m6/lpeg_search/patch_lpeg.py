@@ -4,7 +4,8 @@
     patch_lpeg.py SRC_LPEG_C DST_LPEG_C
 
 Two counters are added: one per VM instruction (the top of the match loop)
-and one per capture-evaluation step (each pushcapture call). `lpeg.__steps()`
+plus one per byte a span instruction examines, and one per
+capture-evaluation step (each pushcapture call). `lpeg.__steps()`
 returns both, as (vm_steps, cap_steps), and resets them. Every edit is
 anchored on text that must occur exactly once; a moved anchor is a hard
 failure, so the counters can never silently go missing. SRC is only read.
@@ -43,6 +44,16 @@ vm_anchor = '''  lua_pushlightuserdata(L, stackbase);
   for (;;) {'''
 once(vm_anchor, "VM loop")
 src = src.replace(vm_anchor, vm_anchor + '\n    lpeg_vm_steps++;', 1)
+
+# 2b. One count per byte a span instruction examines (M6.6 step e). ISpan
+# (`S(...)^0`, `(P(1) - x)^0`) scans a whole run of bytes in one
+# instruction, so counting instructions alone hides a span rescanned from
+# many start positions: quadratic in time and linear in steps. Each byte
+# tested against the set counts, the one that ends the run included.
+span_anchor = '''      case ISpan: {
+        for (; s < e; s++) {'''
+once(span_anchor, "ISpan loop")
+src = src.replace(span_anchor, span_anchor + '\n          lpeg_vm_steps++;', 1)
 
 # 3. One count per capture-evaluation step (each pushcapture call).
 cap_anchor = '''static int pushcapture (CapState *cs) {

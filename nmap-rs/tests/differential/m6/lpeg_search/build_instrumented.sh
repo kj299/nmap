@@ -24,4 +24,11 @@ bash "$HERE/build_patched_lua.sh" "$WORK/src/lpeg.instrumented.c" "$WORK/lua-ins
   assert(vm > 0 and cap > 0, "counters did not move")
   local vm2, cap2 = l.__steps()
   assert(vm2 == 0 and cap2 == 0, "counters did not reset")
+  -- a span counts each byte it examines: 1,000 matched and the end tested
+  -- against nothing (s == e stops the loop before a test), plus the span
+  -- and IEnd instructions
+  assert(l.match(l.P"a"^0, ("a"):rep(1000)) == 1001)
+  local span = l.__steps()
+  assert(span >= 1000, "span bytes are not counted: vm=" .. span)
+  print(string.format("lpeg.__steps ok: span of 1000 bytes counts vm=%d", span))
   print(string.format("lpeg.__steps ok: vm=%d cap=%d for C(P\"a\"^1) on \"aaa\"", vm, cap))'

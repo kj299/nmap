@@ -21,9 +21,19 @@
 //!   and [`CDEPTH`] for the rows the cases file tags `cdepth`. Every class's
 //!   count is printed, and a class may be used only by rows of the kind it
 //!   names.
+//!
+//! Since M6.6 step e the module is registered, and
+//! [`every_row_through_the_registered_module_matches_the_trees_own_lpeg`]
+//! runs the whole corpus again as nmap 7.94 ran it for step 0b's agreement
+//! check: `oracle/m66_lpeg_probe.nse`, a prerule, through the port's own
+//! engine (`runtime::new_state`, `load_chosen`, `run_phase`), with `lpeg`,
+//! `re`, `lpeg-utility` and `stdnse` as scripts get them — `require` finding
+//! the module nmap's way, not this file's test-only registration — under
+//! the same comparison.
 #![cfg(not(miri))] // reads the corpus from disk; minutes of VM time under Miri
 
 mod lpeg_eval;
+mod nse_host;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -355,20 +365,41 @@ fn every_step_row_matches_the_trees_own_lpeg() {
             assert!(n >= min, "step {step} has {n} rows, fewer than {min}");
         }
     }
-    let golden: HashMap<String, (String, String, String)> = lines("m66_lpeg_golden.txt")
+    let mut lua = corpus_lua();
+    let masks = Masks::new();
+    let (by_class, mismatches) = compare(&rows, &golden(), &masks, |id, tags, chunk| {
+        run_case(&mut lua, &masks, id, tags, chunk)
+    });
+    report(&format!("step {STEP}"), rows.len(), &by_class, &mismatches);
+}
+
+/// The golden: id to status, values and log.
+fn golden() -> HashMap<String, (String, String, String)> {
+    lines("m66_lpeg_golden.txt")
         .into_iter()
         .map(|r| {
             assert_eq!(r.len(), 4, "{}: malformed golden row", r[0]);
             (r[0].clone(), (r[1].clone(), r[2].clone(), r[3].clone()))
         })
-        .collect();
+        .collect()
+}
 
-    let mut lua = corpus_lua();
-    let masks = Masks::new();
-    let mut by_class: HashMap<String, Vec<String>> = HashMap::new();
+/// Rows that agree only under a named class, by class (or set of classes).
+type ByClass = HashMap<String, Vec<String>>;
+
+/// Compare each row's answer (`get`) with the golden's: equal, or equal under
+/// [`CDEPTH`] for a row tagged with it, or under the smallest set of
+/// [`CLASSES`] that makes it so; anything else is a mismatch.
+fn compare(
+    rows: &[(String, String, Vec<u8>)],
+    golden: &HashMap<String, (String, String, String)>,
+    masks: &Masks,
+    mut get: impl FnMut(&str, &str, &[u8]) -> (String, String, String),
+) -> (ByClass, Vec<String>) {
+    let mut by_class: ByClass = HashMap::new();
     let mut mismatches = Vec::new();
-    for (id, tags, chunk) in &rows {
-        let got = run_case(&mut lua, &masks, id, tags, chunk);
+    for (id, tags, chunk) in rows {
+        let got = get(id, tags, chunk);
         let want = golden
             .get(id)
             .unwrap_or_else(|| panic!("{id}: in the cases but not the golden"));
@@ -410,9 +441,13 @@ fn every_step_row_matches_the_trees_own_lpeg() {
             )),
         }
     }
+    (by_class, mismatches)
+}
+
+/// Print the classes used, and fail on any mismatch.
+fn report(what: &str, rows: usize, by_class: &ByClass, mismatches: &[String]) {
     eprintln!(
-        "step {STEP}: {} rows; agreeing only under a named class: {by_class:?} ({})",
-        rows.len(),
+        "{what}: {rows} rows; agreeing only under a named class: {by_class:?} ({})",
         CLASSES
             .iter()
             .chain([&CDEPTH])
@@ -422,9 +457,8 @@ fn every_step_row_matches_the_trees_own_lpeg() {
     );
     assert!(
         mismatches.is_empty(),
-        "{} of {} step-{STEP} rows diverge from the tree's LPeg:\n{}",
+        "{what}: {} of {rows} rows diverge from the tree's LPeg:\n{}",
         mismatches.len(),
-        rows.len(),
         mismatches
             .iter()
             .take(80)
@@ -434,15 +468,204 @@ fn every_step_row_matches_the_trees_own_lpeg() {
     );
 }
 
+/// The name the probe's output file goes by; the file system below keeps it
+/// in memory.
+const PROBE_OUT: &str = "/m66-lpeg-probe.out";
+
+/// The probe's output file, in memory.
+struct Capture(Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl ScriptFile for Capture {
+    fn read(&mut self, _: &mut [u8]) -> Result<usize, FsError> {
+        Ok(0)
+    }
+    fn write(&mut self, data: &[u8]) -> Result<(), FsError> {
+        self.0.borrow_mut().extend_from_slice(data);
+        Ok(())
+    }
+    fn seek(&mut self, _: Whence, _: i64) -> Result<u64, FsError> {
+        Ok(0)
+    }
+    fn flush(&mut self) -> Result<(), FsError> {
+        Ok(())
+    }
+}
+
+/// Every file for reading (the core and the cases), [`PROBE_OUT`] for
+/// writing.
+struct ProbeFs(Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl ScriptFs for ProbeFs {
+    fn open(&self, path: &[u8], mode: OpenMode) -> Result<Box<dyn ScriptFile>, FsError> {
+        if path == PROBE_OUT.as_bytes() && mode.writes() {
+            self.0.borrow_mut().clear();
+            return Ok(Box::new(Capture(Rc::clone(&self.0))));
+        }
+        nse_host::ReadOnlyFs.open(path, mode)
+    }
+    fn stdout(&self) -> Box<dyn ScriptFile> {
+        nse_host::ReadOnlyFs.stdout()
+    }
+}
+
+/// Run `oracle/m66_lpeg_probe.nse` over `cases` as nmap 7.94 runs it for
+/// step 0b's agreement check (`regen_m66_lpeg.sh --check-794`): a prerule
+/// through the port's engine over this repository's `nselib/`, with the
+/// module registered as scripts get it, no memory budget (the command
+/// line's, `nse-cli-no-memory-budget`). Each row's status, values and log,
+/// the last two masked for hash order as the golden is.
+fn run_registered(cases: &Path, masks: &Masks) -> HashMap<String, (String, String, String)> {
+    use nmap_core::nse::choose::{choose, RuleOptions};
+    use nmap_core::nse::nmaplib::{NmapEnv, NmapLib, Phase};
+    use nmap_core::nse::runtime::{new_state, StateConfig};
+    use nmap_core::nse::script::parse_script_db;
+    use nmap_core::nse::scriptargs::registry_args;
+
+    let dir = nse_host::repo_root();
+    let out = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&log);
+    let probe = m6("oracle/m66_lpeg_probe.nse");
+    let rules = vec![probe.to_string_lossy().into_owned().into_bytes()];
+    let db = parse_script_db(&std::fs::read(dir.join("scripts/script.db")).expect("script.db"))
+        .expect("script.db parses");
+    let chosen = choose(
+        &rules,
+        RuleOptions::default(),
+        &db,
+        &nse_host::scenarios::Locator(dir.clone()),
+    );
+    let args = format!(
+        "core={},cases={},out={PROBE_OUT}",
+        m6("oracle/m66_lpeg_core.lua").display(),
+        cases.display()
+    );
+    let mut st = new_state(&StateConfig {
+        lib: NmapLib::new(NmapEnv {
+            log: Box::new(move |_, b| sink.borrow_mut().extend_from_slice(b)),
+            ..nse_host::env(dir.clone())
+        }),
+        args: registry_args(None, args.as_bytes()).expect("arguments parse"),
+        source: Rc::new(nse_host::Dir(dir.clone())),
+        fs: Rc::new(ProbeFs(Rc::clone(&out))),
+        os: Rc::new(nse_host::os_env()),
+        memory_limit: None,
+        engine: Default::default(),
+        net: Rc::new(std::cell::RefCell::new(nmap_core::nse::net::NoNet)),
+    })
+    .expect("state");
+    const BUDGET: Option<u64> = Some(1 << 42);
+    st.load_chosen(&chosen, BUDGET).expect("the probe loads");
+    let r = st.run_phase(Phase::PreScan, vec![], BUDGET);
+    assert_eq!(r.aborted, None, "the probe's phase aborted");
+    let text = String::from_utf8_lossy(&out.borrow()).into_owned();
+    let mut lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.last().copied(),
+        Some("done"),
+        "the probe did not finish; the engine logged:\n{}",
+        String::from_utf8_lossy(&log.borrow())
+    );
+    lines.pop();
+    let mut got = HashMap::new();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        assert_eq!(f.len(), 4, "a malformed probe line: {line}");
+        let prev = got.insert(
+            f[0].to_string(),
+            (
+                f[1].to_string(),
+                masks.hashorder(f[2]),
+                masks.hashorder(f[3]),
+            ),
+        );
+        assert!(prev.is_none(), "{}: written twice", f[0]);
+    }
+    got
+}
+
+/// The whole corpus — every row of `m66_lpeg_cases.txt`, all steps — through
+/// the registered module (M6.6 step e): the probe nmap 7.94 runs, run by the
+/// port's engine, and every row's answer compared with the golden as
+/// [`every_step_row_matches_the_trees_own_lpeg`] compares it, through named
+/// classes only. Then the quarantined rows, which no golden holds, against
+/// their pins, the same way (the probe runs the quarantine file as it runs
+/// the cases).
+#[test]
+fn every_row_through_the_registered_module_matches_the_trees_own_lpeg() {
+    let masks = Masks::new();
+    let got = run_registered(&m6("m66_lpeg_cases.txt"), &masks);
+    let rows: Vec<(String, String, Vec<u8>)> = lines("m66_lpeg_cases.txt")
+        .into_iter()
+        .map(|r| (r[0].clone(), r[1].clone(), Vec::new()))
+        .collect();
+    assert_eq!(got.len(), rows.len(), "the probe ran another set of rows");
+    assert!(rows.len() >= 62_599, "only {} rows", rows.len());
+    let (by_class, mismatches) = compare(&rows, &golden(), &masks, |id, _, _| {
+        got.get(id)
+            .cloned()
+            .unwrap_or_else(|| ("MISSING".into(), String::new(), String::new()))
+    });
+    report("registered module", rows.len(), &by_class, &mismatches);
+
+    let q = run_registered(&m6("m66_lpeg_quarantine.txt"), &masks);
+    let mut wrong = Vec::new();
+    let pins = pins();
+    for pin in &pins {
+        let want = (
+            pin[3].clone(),
+            masks.hashorder(&pin[4]),
+            masks.hashorder(&pin[5]),
+        );
+        if q.get(&pin[0]) != Some(&want) {
+            wrong.push(format!(
+                "  {}: pin {want:?}, port {:?}",
+                pin[0],
+                q.get(&pin[0])
+            ));
+        }
+    }
+    assert_eq!(
+        q.len(),
+        pins.len(),
+        "the probe ran another set of quarantined rows"
+    );
+    assert!(
+        wrong.is_empty(),
+        "registered module: {} of {} quarantined rows differ from their pins:\n{}",
+        wrong.len(),
+        pins.len(),
+        wrong.join("\n")
+    );
+}
+
+/// Every pin, from every file in [`PIN_FILES`].
+fn pins() -> Vec<Vec<String>> {
+    let pins: Vec<Vec<String>> = PIN_FILES.into_iter().flat_map(lines).collect();
+    for pin in &pins {
+        assert_eq!(pin.len(), 6, "{}: malformed pin", pin[0]);
+    }
+    pins
+}
+
 /// The fewest quarantined rows pinned at or below [`STEP`]: at step c, the
 /// peephole's 10, `Cc(nil)`'s 99 and `init`'s 3 that the fixed C answers,
 /// and 7 semantic pins; at step d, the 30 more of those ids that run
-/// captures calling Lua, and the 8 of `m66d_quarantine_pins.txt`.
-const MIN_PINS: usize = 157;
+/// captures calling Lua, and the 8 of `m66d_quarantine_pins.txt`; at step e,
+/// the 7 construction rows of `m66e_quarantine_pins.txt` — every
+/// quarantined row (M6.6-ANALYSIS §3).
+const MIN_PINS: usize = 164;
 
-/// The pin files: step c's, and step d's for the rows of the three ids
-/// whose defects only a match-time capture reaches.
-const PIN_FILES: [&str; 2] = ["m66c_quarantine_pins.txt", "m66d_quarantine_pins.txt"];
+/// The pin files: step c's, step d's for the rows of the three ids whose
+/// defects only a match-time capture reaches, and step e's for the last 7,
+/// construction rows that steps c and d left to step b's unit tests
+/// (`lpeg-tree-size-int-overflow`, `lpeg-pattern-string-size-overflow`,
+/// `lpeg-getfirst-unbounded-recursion`).
+const PIN_FILES: [&str; 3] = [
+    "m66c_quarantine_pins.txt",
+    "m66d_quarantine_pins.txt",
+    "m66e_quarantine_pins.txt",
+];
 
 /// The quarantined rows (`m66_lpeg_quarantine.txt`: they crash or are
 /// undefined in the C, so no golden holds them, LESSONS #033) that the step
@@ -454,8 +677,10 @@ const PIN_FILES: [&str; 2] = ["m66c_quarantine_pins.txt", "m66d_quarantine_pins.
 /// `m66d_quarantine_pins.txt` (`oracle/gen_m66d_quarantine_pins.py`), the
 /// answers of that build with the three match-time capture defects fixed
 /// as well (`lpeg-doublecap-stack-overread`,
-/// `lpeg-runtime-capture-index-16bit`, `lpeg-code-freed-during-match`).
-/// Compared exactly, with no class.
+/// `lpeg-runtime-capture-index-16bit`, `lpeg-code-freed-during-match`); and
+/// `m66e_quarantine_pins.txt`, the last 7, by hand (the tree's answer where
+/// it gives one, a correct LPeg's where it crashes). Compared exactly, with
+/// no class; every quarantined row has exactly one pin.
 #[test]
 fn every_quarantined_step_row_matches_its_pin() {
     let chunks: HashMap<String, Vec<u8>> = lines("m66_lpeg_quarantine.txt")
@@ -465,8 +690,14 @@ fn every_quarantined_step_row_matches_its_pin() {
     let masks = Masks::new();
     let mut lua = corpus_lua();
     let (mut ran, mut mismatches) = (0usize, Vec::new());
-    for pin in PIN_FILES.into_iter().flat_map(lines) {
-        assert_eq!(pin.len(), 6, "{}: malformed pin", pin[0]);
+    // Every quarantined row has a pin, and only those (M6.6-ANALYSIS §3:
+    // "every quarantined id has a port pin by step e").
+    let mut pinned: Vec<String> = pins().into_iter().map(|p| p[0].clone()).collect();
+    let mut quarantined: Vec<String> = chunks.keys().cloned().collect();
+    pinned.sort();
+    quarantined.sort();
+    assert_eq!(pinned, quarantined, "the pins are not the quarantine");
+    for pin in pins() {
         let step = pin[1].chars().next().unwrap_or('?');
         if step > STEP {
             continue;

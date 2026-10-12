@@ -1,0 +1,35 @@
+# M6.6 step e: pins for the last 7 quarantined rows of m66_lpeg_cases.txt's
+# generator, which steps c and d left to step b's unit tests (M6.6-ANALYSIS
+# §13). id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log, as in
+# m66c_quarantine_pins.txt. Written by hand, each answer measured: source
+# `tree` is what the tree's standalone lpeg.c (oracle/lua, m66_lpeg_driver.lua)
+# answers when run on the row alone, which it does without crashing; `semantic`
+# a correct LPeg's answer where it crashes (SIGSEGV, measured) and no build of
+# the C answers, the C's own fix being the checked arithmetic itself.
+# - A.Pbig.0 and .3 (P(2^31-1); P(2^32-1+2^31), which narrows to it), tree:
+#   the int size wraps to -3 or below, and luaM_toobig refuses before anything
+#   is written (lpeg-tree-size-int-overflow, reproduced).
+# - A.Pbig.1 and .2 (P(2^31+1), P(-(2^31)+1), both n = -(2^31-1)), semantic:
+#   the size wraps short and the C writes past its allocation; "not enough
+#   memory" here (lpeg-tree-size-int-overflow).
+# - X.ub.starsize (P'a'^(2^31), n narrowed to INT_MIN), semantic: lp_star's
+#   size wraps short and the C writes past it; "not enough memory" here
+#   (lpeg-tree-size-int-overflow).
+# - X.ub.bigstr, tree: string.rep('a', 2^31) is refused by string.rep itself,
+#   whose MAXSIZE is INT_MAX in the C (lstrlib.c) as here (strrep-size-bound-
+#   is-the-cs), so the row never reaches LPeg in either; its tag,
+#   lpeg-pattern-string-size-overflow, was the generator's, not a crash's. A
+#   string of exactly 2 GiB, which only concatenation can make, is what
+#   reaches the C's overflow; the port's answer to its size ("not enough
+#   memory") is pinned without making it, by step b's
+#   sizes_are_judged_as_the_cs_wrapped_int.
+# - X.ub.getfirst (P{'A', A = B(P'a' - V'A')}), tree: a left call through B,
+#   which the C's verifier does not follow, built as the C builds it
+#   (lpeg-getfirst-unbounded-recursion; a match raises at its compile).
+A.Pbig.0	b	tree	err	s"memory allocation error: block too big"	-
+A.Pbig.1	b	semantic	err	s"not enough memory"	-
+A.Pbig.2	b	semantic	err	s"not enough memory"	-
+A.Pbig.3	b	tree	err	s"memory allocation error: block too big"	-
+X.ub.starsize	b	semantic	err	s"not enough memory"	-
+X.ub.bigstr	b	tree	xerr	s"chunk:1: resulting string too large"	-
+X.ub.getfirst	b	tree	ok	s"pattern"	-

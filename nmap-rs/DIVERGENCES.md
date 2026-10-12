@@ -3468,9 +3468,10 @@ Gated by three things:
   fresh state, and how each one ends, ok or the error, must match nmap 7.94
   run against this tree's `nselib/` (`m64_nselib_golden.txt`, regenerated
   live in CI).
-  - 116 load as they do under nmap (114 before M6.6 step a).
-  - 17 are pinned to fail, each only because a C module it requires is not
-    ported yet: `openssl` (11), `lpeg` (5) or `libssh2` (1). A pin holds only
+  - 121 load as they do under nmap (116 before M6.6 step e, 114 before step
+    a).
+  - 12 are pinned to fail, each only because a C module it requires is not
+    ported yet: `openssl` (11) or `libssh2` (1). A pin holds only
     if the module its library failed on, the last one no searcher found while
     it loaded, is the pinned one, and the error is what that module's absence
     causes (`missing()`).
@@ -3480,11 +3481,20 @@ Gated by three things:
     (`libssh2-utility.lua:15`, a `silent_require`): with `missing()`
     tightened, the old pin fails with `got error table: 0x…, modules not
     found ["libssh2"]`, and it is re-pinned to `libssh2`.
+  - **Changed in M6.6 step e.** `coap`, `json`, `lpeg-utility`, `mobileme`
+    and `re`, pinned to `lpeg`, load now that it is registered.
 - **Every unit-test suite passes.** Each library's `test_suite` runs as
   nmap's `--script-args=unittest` runs it.
-  - 22 of 26 suites pass.
-  - `coap`, `json`, `mongodb` and `ssh2` are pinned to the same missing
-    modules.
+  - 24 of 26 suites pass. Since M6.6 step e each passes by its count: as many
+    tests as nmap runs without the port's missing C modules (the golden's
+    `unittest-emu` rows), which is nmap's own count for all but four
+    (`nse-c-modules-pending`). `json` runs 69 and `coap` 1,060.
+  - `mongodb` and `ssh2` are pinned to the same missing modules (`coap` and
+    `json` were too, until step e).
+  - `unittest.run_tests()` over every library `unittest.lua` lists, as the
+    shipped `unittest.nse` runs it, fails on exactly the 16 libraries nmap
+    fails on without those modules, each on the same module (22 before step
+    e).
 - **A stdlib corpus** (`m64_stdlib_cases.txt`): 2,012 chunks against nmap's
   own `liblua/` under `TZ=UTC`, covering all of `utf8`, `os.date`/`time`/
   `difftime`/`clock`, `io` over fixture files, and `debug.getinfo`/
@@ -3585,11 +3595,22 @@ Gated by three things:
       and 100 userdata with a `__gc`, collected in full collections, are never
       finalized, and the review's repro, with a full collection after every
       slice, sees no finalizer call and no match past the ceiling.
-- [ ] `nse-c-modules-pending` — `openssl`, `lpeg` (and `re` on it), `lfs`,
-      `libssh2` and `zlib` are not preloaded yet. The 17 libraries and 4
-      suites above fail to load where they need them, and are pinned so that
-      each failure must be exactly the absence of its module. `nmapdb` was
-      ported in M6.6 step a.
+- [ ] `nse-c-modules-pending` — `openssl`, `lfs`, `libssh2` and `zlib` are
+      not preloaded yet. The 12 libraries and 2 suites above fail to load
+      where they need them, and are pinned so that each failure must be
+      exactly the absence of its module. `nmapdb` was ported in M6.6 step a,
+      and `lpeg` (with `re`, `lpeg-utility`, `json`, `coap` and `mobileme` on
+      it) registered in step e. Four suites that load run only their tests
+      that need no `openssl`, which they add only when `pcall(require,
+      'openssl')` succeeds: http 75 of nmap's 105, sasl 0 of 3, smbauth 0 of
+      4 and vnc 0 of 4. The suite gate holds each to the count nmap gives
+      without the port's missing modules (`unittest-emu`), so it passes by
+      that count now and must reach nmap's own when `openssl` lands.
+      `unittest.run_tests()` over all of `unittest.lua`'s libraries fails on
+      16 (`bitcoin`, `bittorrent`, `iax2`, `iscsi`, `lfs`, `libssh2`,
+      `libssh2-utility`, `mongodb`, `openssl`, `pgsql`, `rsync`, `sip`,
+      `ssh1`, `ssh2`, `tns`, `zlib`), each on the same module as under nmap
+      without them.
 
       Two C modules carry the unterminated option list behind
       `nse-condvar-option-overread` and
@@ -3611,8 +3632,24 @@ Gated by three things:
       Found in M6.5 Phase 0 (`docs/M6.5-ANALYSIS.md` §1.4). Whether the
       command line should set a default budget is a user-visible change,
       left to M7.
-- [ ] `nse-sc-aborts-on-unported-modules` — on the shipped `scripts/`, these
-      stop at start-up with `could not load script` and `QUITTING!` (measured):
+- [x] `nse-sc-aborts-on-unported-modules` — **closed in M6.6 step e.** With
+      `lpeg` registered, `-sC`, `-A`, `--script default` and `--script
+      version` load the shipped scripts on the real data directory: `default`
+      selects 127, loads 121 and drops six quietly for want of `openssl`
+      (`nse-sc-openssl-quiet-drops`); `version` selects and loads 48. `-A`
+      selects the `default` set only while `nse-sv-version-scripts-pending`
+      is open (7.94 selects 158, `default` and `version`). Each ends rc 0
+      with no `QUITTING!`. Gated by the exit scenarios of
+      `nse_exit_differential` (`oracle/gen_m66_exit.py`), which read the
+      `-d2` selection and load lines of both programs on `--datadir REPO`,
+      require every script path under that directory's `scripts/`, and
+      assert 127, 127, 48 and 158 `selected` lines on 7.94's side, so a
+      fixture data directory cannot pass them (the blind spot below). The
+      categories that still stop are `nse-categories-abort-on-unported-modules`.
+      What this entry said until then:
+
+      On the shipped `scripts/`, these stopped at start-up with `could not
+      load script` and `QUITTING!` (measured):
       - `-sC` and `-A`;
       - `--script default`, `version`, `safe`, `vuln`, `intrusive`,
         `exploit` and `all`.
@@ -3639,6 +3676,72 @@ Gated by three things:
         removed.
       - M6.6 replaces this entry with one for those categories, naming its
         retiring milestones (`docs/M6.6-ANALYSIS.md` §0, D1).
+- [ ] `nse-categories-abort-on-unported-modules` — on the shipped
+      `scripts/`, these categories stop at start-up with `could not load
+      script` and `QUITTING!` (rc 1), before any scan:
+      - `safe` and `all`: `http-fetch.nse:4: module 'lfs' not found`.
+        http-fetch comes before http-vuln-cve2014-3704 in `script.db`, and
+        nmap loads each script as it selects it, so `all` stops on `lfs`
+        first;
+      - `vuln`, `intrusive` and `exploit`:
+        `http-vuln-cve2014-3704.nse:8: module 'openssl' not found`.
+
+      Measured on 7.94 with `openssl`, `lfs`, `libssh2` and `zlib` removed
+      (`gen_m66_scriptload.py`'s emulation): it selects 125 (`safe`), 56
+      (`vuln`), 82 (`intrusive`), 29 (`exploit`) and 192 (`all`) scripts
+      and stops on the same `file:line`, and so does the port, line for line
+      (the exit scenarios' `abort` blocks, `nse_exit_differential`). Every
+      nmap build registers these modules (`nse_main.cc:564-581`), so this
+      matches no real nmap.
+
+      **Retired by:**
+      - the minimal-`lfs` step after M6.6 (D1(c)) for `safe`, which then
+        selects 352 and loads 334, 18 dropped quietly (measured on 7.94 with
+        `lfs` present); `all` then stops on `openssl`;
+      - M6.5 (`openssl`) for `vuln` (105 load), `intrusive` (213 load, 4
+        quiet) and `exploit` (45 load);
+      - both, for `all` (611 selected, 607 load, 4 quiet on `libssh2` and
+        `zlib`).
+
+      The scenario asserts each category's failing script and its
+      `file:line`, and refuses to run a category whose module has left the
+      port's missing set (it would scan): either way it fails, and this
+      entry must change, when either module lands.
+- [ ] `nse-sc-openssl-quiet-drops` — six `default` scripts reach `openssl`
+      through `stdnse.silent_require` and are dropped quietly, where 7.94,
+      built with OpenSSL, loads them:
+      - http-favicon (`http-favicon.nse:9`);
+      - iscsi-info (`iscsi.lua:41`);
+      - mongodb-databases and mongodb-info (`mongodb.lua:17`);
+      - sip-methods (`sip.lua:40`);
+      - ssh-hostkey (`ssh1.lua:18`).
+
+      Each prints `NSE: Failed to load 'DATADIR/scripts/NAME.nse'.` at `-v`
+      or `-d` (`nse_main.lua:632`, `prelude.lua:915`), after the require's
+      traceback at `-d2`, and the run goes on. So `-sC` loads 121 of 127, and
+      none of the six runs: no SSH host keys, favicon hashes, iSCSI, MongoDB
+      or SIP results. Measured on 7.94 with `openssl` removed: exactly these
+      six, in `script.db` order, for `-sC`, `--script default` and `-A`;
+      none for `version`.
+
+      **The harness tolerance is part of this entry** (LESSONS #031): the
+      exit scenarios (`oracle/gen_m66_exit.py`, `OPENSSL_QUIET`) accept
+      exactly these six as the difference between the port's `Loaded` lines
+      and 7.94's, and require them as its only `Failed to load` lines.
+      Generation checks the list against 7.94 with the port's missing
+      modules removed, and fails if it differs.
+
+      **Retired by M6.5** (`openssl`): the list must then be empty, and the
+      tolerance goes with this entry.
+- [ ] `nse-lpeg-utility-not-preloaded` — nmap's engine requires `lpeg` and
+      `lpeg-utility` before any script loads (`nse_main.lua:150-151`), for
+      its own selection and `--script-args` grammars. The port's engine has
+      those grammars in Rust (M6.2, M6.3), so only `lpeg` is preloaded, as
+      `luaL_requiref` leaves it (`runtime.rs`); `lpeg-utility` is loaded by
+      the first script that requires it. Every script that requires it gets
+      the same table either way. Only enumerating `package.loaded` before
+      that, or a broken `lpeg-utility.lua` (which would stop nmap's engine at
+      start-up, and here the first script that needs it), can tell.
 - [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
       `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
       Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered
@@ -4001,7 +4104,28 @@ of ten points is caught:
 - [ ] `nse-sv-version-scripts-pending` — in nmap, `-sV` also opens NSE and
       runs the `version` category during the scan phase
       (`o.scriptversion`, `nmap.cc:2084`). The port's `-sV` does not run
-      scripts yet.
+      scripts yet, so its `-A` selects `default` alone, where 7.94's adds the
+      `version` rule (`nmap.cc:2084-2085`, `nse_main.lua:708`): 158 scripts,
+      17 in both.
+
+      **Harness tolerance** (M6.6 step e, LESSONS #031): the `-A` exit
+      scenario (`oracle/gen_m66_exit.py`, `SV_PENDING`, `SV_VERSION_ONLY`)
+      holds the port's `-A` to 7.94's `-sC` lists (127 selected, 121 loaded,
+      the six of `nse-sc-openssl-quiet-drops` quiet), and requires that none
+      of the 31 `version`-only scripts 7.94's `-A` adds appears: allseeingeye-info,
+      bacnet-info, cccam-version, db2-das-info, docker-version, drda-info,
+      enip-info, fingerprint-strings, fox-info, http-server-header,
+      http-trane-info, https-redirect, iax2-version, iec61850-mms,
+      jdwp-version, mcafee-epo-agent, mqtt-subscribe, murmur-version,
+      ndmp-version, netbus-version, omron-info, oracle-tns-version,
+      ovs-agent-version, pptp-version, rfc868-time, rpc-grind, s7-info,
+      skypev2-version, stun-version, teamspeak2-version and vmware-version.
+      Generation checks that list against 7.94. The oracle for `-A` is
+      7.94's `-sC -sV`, which selects the same 158 in the same order: 7.94
+      cannot run `-A` on `--datadir REPO`, whose `nmap-os-db` is for 7.94.2
+      and later (an assertion abort, `osscan.cc:681`, rc 134). When this
+      entry closes, `SV_PENDING` goes false and the port's `-A` is compared
+      with all 158 (152 loaded, the same six quiet).
 - [ ] `nse-host-os-pending` — `host.os` and `host.os_fp` are not given to
       scripts after `-O`. nmap derives them from its overall OS
       classification, which the port's report does not carry in that form.
@@ -4351,9 +4475,10 @@ are closed by gates added in the review.
 LPeg 0.12's pattern construction: every constructor and operator, the
 grammar builder and its verifier, `type`, `version`, `setmaxstack`, `locale`,
 the `ptree`/`pcode` stubs and the `lpeg-pattern` metatable. Nothing matches
-yet — the compiler and matching machine are steps c and d — and the module is
-not registered: only the test suites install it
-(`lpeg::register_for_tests`; `runtime::tests::lpeg_is_not_registered`).
+yet — the compiler and matching machine are steps c and d — and the module was
+not registered: only the test suites installed it (`lpeg::register_for_tests`),
+until step e registered it as nmap does, a global and in `package.loaded`
+(`lpeg::load_lpeg`; `runtime::tests::lpeg_is_registered_as_nmap_registers_it`).
 
 **Gated** by `lpeg_tree_differential`: 5,710 constructions
 (`tests/differential/m6/m66b_tree_cases.txt`, `oracle/gen_m66b_trees.py`;
@@ -4415,7 +4540,11 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       `sizes_past_the_cs_int_are_its_errors` (also under a 64 MiB budget),
       corpus rows `A.size.*`, `F.size.*`, `D.size.*`, and fuzzed
       (`nse_lpeg_build`, adversarial integers under a budget). Before the
-      step b review every such size was `not enough memory`.
+      step b review every such size was `not enough memory`. Since step e
+      its quarantined rows are pinned too (`m66e_quarantine_pins.txt`):
+      `A.Pbig.0` and `.3` with the tree's own answer, block too big, and
+      `A.Pbig.1`, `.2` and `X.ub.starsize`, which crash it, with `not enough
+      memory`.
 - [x] `lpeg-pattern-string-size-overflow` — `getpatt`'s `2*(slen-1)+1` for a
       string pattern is computed in `size_t` and passed to `newtree` as an
       `int`: from 1 GiB + 1 bytes to 2 GiB - 1 it wraps to -3 or below and
@@ -4424,7 +4553,13 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       wraps short again, the C's `newtree` allocates too little and
       `fillseq` writes past it (ASan, M6.6 Phase 0): `not enough memory`
       here. Pinned by `sizes_are_judged_as_the_cs_wrapped_int` on the sizes
-      alone (a test string of a gigabyte is not made).
+      alone (a test string of a gigabyte is not made). Its corpus row,
+      `X.ub.bigstr` (`P(string.rep('a', 2^31))`), never reaches LPeg:
+      `string.rep` refuses a result past `MAXSIZE`, `INT_MAX`, in the C as
+      here (`strrep-size-bound-is-the-cs`), so the tree answers it without
+      crashing, "resulting string too large", and step e pins it with that
+      answer (`m66e_quarantine_pins.txt`). Only concatenation makes a string
+      of exactly 2 GiB, the size that reaches the C's overflow.
 - [x] `lpeg-getfirst-unbounded-recursion` — a class, not one grammar: the
       verifier misses left calls of two kinds, and the C's `getfirst`
       (`lpeg.c:1175`) then recurses without bound when it compiles some uses
@@ -4480,7 +4615,9 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       compile that fails (`lpeg-partial-program-not-cached`). Pinned by
       `a_left_call_through_behind_raises_at_compile` and
       `left_calls_through_behind_compile_where_the_c_does`; sabotage: the
-      re-entry check removed fails both.
+      re-entry check removed fails both. Its quarantined construction row,
+      `X.ub.getfirst` (`P{'A', A = B(P'a' - V'A')}`), is pinned since step e
+      with the tree's own answer, a pattern (`m66e_quarantine_pins.txt`).
 - [x] `lpeg-recursive-walkers-stack-overflow` (construction) — `finalfix`,
       `verifyrule`, `checkloops`, `checkaux` and `fixedlenx` recurse on the C
       stack with no bound. Here each is a loop over an explicit stack grown
@@ -4660,7 +4797,28 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       fuel's worth; `what_the_cursor_holds_is_counted_as_it_changes` and
       `what_nested_grammars_hold_is_counted_as_it_changes` hold the count
       to a walk at every step; `nse_lpeg_match` checks LPeg's work against
-      each slice's fuel in its binding mode).
+      each slice's fuel in its binding mode). **Step e** registers the module,
+      and gates this end to end through the binary at `--script-timeout 2`
+      (`nse_exit_differential`, fixtures `tests/differential/m6/nse_lpeg_dos/`):
+      an exponential grammar built at a script's top level (the choice chain,
+      K = 36) fails start-up at the limit, `loading scripts: no script thread
+      yielded …` and `QUITTING!`, rc 1, nothing to keep (2.2 s, debug build);
+      and in a prerule action after another script stored a result, one row
+      per stage — the chain's build (n = 36), a 6-million-node compile (the
+      port compiles in linear time what C compiles exponentially, E10, so
+      that row's work is large rather than exponential: about 8 s here, 0.3 s
+      in C), `S <- 'a' S 'b' / 'a' S 'c' / ''` on `a³⁴d`, and back-references
+      nested 32 deep — each ends the phase at the limit in that stage (the
+      fixture's last `m66dos:` marker), `Script Engine Scan Aborted`, the
+      stored result kept, the scan reported, rc 0. 7.94 hangs in every row,
+      in the same stage, `--script-timeout` never firing (measured: killed by
+      `timeout 60`, rc 124, in each; at K = 32 and n = 32 it finishes the
+      build within the minute and hangs in the compile after it). And the
+      search behind D3 now counts the bytes a span examines, in the C and in
+      the port's counters; its 600-second run per pattern found all 11
+      network-facing patterns linear, and `lpeg_slowness_regression` holds
+      each to 1.25 times its adversarial maximum, in the C's units
+      (`tests/differential/m6/lpeg_search/README.md`).
 - [ ] `lpeg-callback-may-yield` — the Lua LPeg calls runs as a VM call
       (`SequencePoll::Call`), so a `coroutine.yield` in it yields the
       coroutine, and the constructor or the match goes on where it was when
@@ -4803,7 +4961,7 @@ explicit `Vec` with the C's ceilings, D2), capture evaluation
 `/string`, `/number`) and `match`'s arguments. Each stage is resumable and
 burns fuel; a match takes a handle to its pattern's program when it starts
 (E3), and a program is kept on the pattern only once it is whole (E13). The
-module is still not registered.
+module was still not registered (step e registered it).
 
 **Gated** by `lpeg_corpus_differential` at step c: all 37,367 rows the step
 map gives steps b and c, compared with the golden, accepted only as equal or
@@ -5080,7 +5238,8 @@ against `LUAI_MAXSTACK`; the machine counts them (`Vm::dyn_top`) and drops
 those a failure drops (`removedyncap`); a call's arguments and results, and
 the cursor's Lua values (`CapVal::Lua`), are traced with the job. A match
 runs the program it took when it started (E3), and reads `setmaxstack`'s value
-after each call it makes. The module is still not registered.
+after each call it makes. The module was still not registered (step e
+registered it).
 
 **Gated** by `lpeg_corpus_differential` at step d: all 62,599 rows of step
 0b's corpus — every family, J, K and Q through the tree's `re.lua` and
@@ -5270,3 +5429,46 @@ match-time capture's body values not removed.
       callable table given to `/` is a query, not a call (F21). Reproduced;
       the brief's M, R, C and N pins in `lpeg_callback_quirks`, corpus
       rows C, F, X.
+
+## Milestone 6.6 step e — `lpeg` registered (`core::nse::runtime`, `core::nse::lpeg`)
+
+`lpeg` is registered as `set_nmap_libraries` registers it,
+`luaL_requiref(L, "lpeg", luaopen_lpeg, 1)` (`nse_main.cc:567,581`): one table,
+a global and in `package.loaded`, after `nmapdb` (`lpeg::load_lpeg`). `re`,
+`lpeg-utility`, `json`, `coap` and `mobileme` load from `nselib/` unmodified.
+This closes `nse-sc-aborts-on-unported-modules` and opens
+`nse-categories-abort-on-unported-modules`, `nse-sc-openssl-quiet-drops` and
+`nse-lpeg-utility-not-preloaded` (all under Milestone 6.4c1 above, beside
+the entry they replace).
+
+**Gated** by:
+- `runtime::tests::lpeg_is_registered_as_nmap_registers_it` and
+  `the_registered_c_modules_are_exactly_the_ported_ones`: `require`, the
+  global and `package.loaded` are one table; the pattern metatable is
+  reachable, with no `__metatable`, its `__index` that table.
+- `lpeg_corpus_differential`'s
+  `every_row_through_the_registered_module_matches_the_trees_own_lpeg`: all
+  62,599 rows of step 0b's corpus through step 0b's own 7.94 probe
+  (`oracle/m66_lpeg_probe.nse`), run as a prerule by the port's engine,
+  compared under the same named classes only (`argname` 2, `method` 1,
+  `cdepth` 7, as through the test-only registration); and the 164
+  quarantined rows, every one now pinned, against their pins the same way.
+- `nselib_differential`: the five libraries pinned to `lpeg` load; every
+  suite passes by its count (`json` 69 tests, `coap` 1,060);
+  `unittest.run_tests()` fails on the 16 libraries nmap fails on without the
+  port's missing modules.
+- `scriptload_differential`: 560 scripts load, 2 stop loudly (http-fetch on
+  `lfs`, http-vuln-cve2014-3704 on `openssl`), 49 are dropped quietly, as
+  under 7.94 without `openssl`, `lfs`, `libssh2` and `zlib`.
+- `nse_exit_differential` (`oracle/gen_m66_exit.py`, against 7.94 on
+  `--datadir REPO`): `-sC`, `--script default`, `--script version` and `-A`
+  select, load and drop what 7.94 does, but for the two tolerances of
+  `nse-sc-openssl-quiet-drops` and `nse-sv-version-scripts-pending`; the
+  categories of `nse-categories-abort-on-unported-modules` stop where 7.94
+  without those modules stops; address-info (`nmapdb`), riak-http-info and
+  bitcoinrpc-info (`lpeg` through `json.lua`: `\uXXXX` escapes, and the
+  backtrack ceiling end to end, 29 / 30 and 28 / 29) and http-affiliate-id
+  (`re`) print 7.94's rows byte for byte; and the denial-of-service rows of
+  `lpeg-stall-limit-ends-finite-work`.
+- `lpeg_slowness_regression`: the adversarial-slowness gate (D3 condition 4)
+  of `lpeg-stall-limit-ends-finite-work`.

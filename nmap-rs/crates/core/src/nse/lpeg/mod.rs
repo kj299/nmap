@@ -24,9 +24,11 @@
 //! metatable, and `match` with every capture: those that call no Lua (`C`,
 //! `Cc`, `Cp`, `Ct`, `Cg`, `Cb`, `Carg`, `Cs`, `/string`, `/number`, steps b
 //! and c) and those that do (`Cmt` and `P(function)`, `/function`, `Cf`,
-//! `/table`, step d). The module is not registered — no script can
-//! `require` it (E9); [`register_for_tests`] installs it for the test suites
-//! only, until step e.
+//! `/table`, step d). The NSE runtime registers it as nmap does, a global
+//! and in `package.loaded` ([`load_lpeg`], `luaL_requiref(L, "lpeg",
+//! luaopen_lpeg, 1)`, step e); [`register_for_tests`] opens it in the bare
+//! states of the module's own tests, the integration tests and the fuzz
+//! targets.
 //!
 //! **Calling Lua.** Six things call Lua: a grammar table's `__index` (read
 //! for its initial rule), `locale(t)`'s `__newindex`, and, in a match, a
@@ -235,6 +237,8 @@ thread_local! {
     static MOST_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// [`take_work`]'s count.
     static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`take_steps`]'s counts: the machine's and capture evaluation's.
+    static STEPS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Bytes one unit of fuel pays for where a match copies, hashes, compares,
@@ -285,6 +289,36 @@ pub(crate) fn did_steps(steps: u64) {
 #[must_use]
 pub fn take_work() -> u64 {
     WORK.with(|w| w.replace(0))
+}
+
+/// Count `n` steps of the matching machine, for [`take_steps`].
+pub(crate) fn did_vm_steps(n: u64) {
+    STEPS.with(|c| {
+        let (vm, cap) = c.get();
+        c.set((vm.saturating_add(n), cap));
+    });
+}
+
+/// Count `n` captures evaluated (`pushcapture` calls), for [`take_steps`].
+pub(crate) fn did_cap_steps(n: u64) {
+    STEPS.with(|c| {
+        let (vm, cap) = c.get();
+        c.set((vm, cap.saturating_add(n)));
+    });
+}
+
+/// For the adversarial-slowness regression gate (M6.6 step e,
+/// `tests/lpeg_slowness_regression.rs`): the steps `lpeg.match` took on this
+/// thread since this was last asked, as `lpeg_search`'s instrumented C counts
+/// them — the machine's instructions and every byte a span instruction tests,
+/// and capture evaluation's `pushcapture` calls — and nothing else (no
+/// compile, no failure's unwinding, no byte work, and not the frames a
+/// capture's evaluation takes inside it, a substitution's walk of its nested
+/// captures, say, which the work counter and the fuel see).
+#[doc(hidden)]
+#[must_use]
+pub fn take_steps() -> (u64, u64) {
+    STEPS.with(|c| c.replace((0, 0)))
 }
 
 /// What a match grows outside the VM's heap, accounted to the heap as it
@@ -3312,12 +3346,20 @@ fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {
     lib
 }
 
-/// **For tests only.** Open `lpeg` in this state and put it in `loaded`
-/// (the state's `package.loaded`), and return it.
+/// `luaopen_lpeg` as `set_nmap_libraries` calls it (`nse_main.cc:567,581`):
+/// the library table, which the NSE runtime puts in `package.loaded` and in
+/// the globals, as `luaL_requiref(L, "lpeg", luaopen_lpeg, 1)` leaves it
+/// (M6.6 step e; E9: registered once every capture kind works).
+pub fn load_lpeg<'gc>(ctx: Context<'gc>) -> Table<'gc> {
+    open(ctx)
+}
+
+/// **For tests only.** Open `lpeg` in a bare state (no NSE runtime), put it
+/// in `loaded` (the state's `package.loaded`) when given, and return it.
 ///
-/// No script can reach the module yet (E9): the NSE runtime never calls this
-/// (`runtime::tests::lpeg_is_not_registered`). Step e registers the module
-/// for real.
+/// The NSE runtime registers the module through [`load_lpeg`]; this is for
+/// the states the module's own tests, the integration tests and the fuzz
+/// targets build without one (`runtime::tests::only_tests_register_lpeg`).
 pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) -> Table<'gc> {
     let lib = open(ctx);
     if let Some(loaded) = loaded {

@@ -1,7 +1,7 @@
 # script	outcome	detail: how each shipped script loads, alone, under
 # Nmap version 7.94SVN ( https://nmap.org ) with these C modules removed (--datadir this repository).
-# missing: lfs,libssh2,lpeg,openssl,zlib
-# totals: 531 OK, 33 LOUD, 47 QUIET
+# missing: lfs,libssh2,openssl,zlib
+# totals: 560 OK, 2 LOUD, 49 QUIET
 # Regenerate from nmap-rs/ with
 # python3 tests/differential/m6/oracle/gen_m66_scriptload.py tests/differential/m6
 acarsd-info	OK	
@@ -24,10 +24,10 @@ auth-spoof	OK
 backorifice-brute	OK	
 backorifice-info	OK	
 bacnet-info	OK	
-banner	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+banner	OK	
 bitcoin-getaddr	QUIET	
 bitcoin-info	QUIET	
-bitcoinrpc-info	LOUD	json.lua:30: module 'lpeg' not found
+bitcoinrpc-info	OK	
 bittorrent-discovery	QUIET	
 bjnp-discover	OK	
 broadcast-ataoe-discover	OK	
@@ -37,7 +37,7 @@ broadcast-db2-discover	OK
 broadcast-dhcp-discover	OK	
 broadcast-dhcp6-discover	OK	
 broadcast-dns-service-discovery	OK	
-broadcast-dropbox-listener	LOUD	json.lua:30: module 'lpeg' not found
+broadcast-dropbox-listener	OK	
 broadcast-eigrp-discovery	OK	
 broadcast-hid-discoveryd	OK	
 broadcast-igmp-discovery	OK	
@@ -78,9 +78,9 @@ citrix-enum-servers	OK
 citrix-enum-servers-xml	OK	
 clamav-exec	OK	
 clock-skew	OK	
-coap-resources	LOUD	json.lua:30: module 'lpeg' not found
-couchdb-databases	LOUD	json.lua:30: module 'lpeg' not found
-couchdb-stats	LOUD	json.lua:30: module 'lpeg' not found
+coap-resources	OK	
+couchdb-databases	OK	
+couchdb-stats	OK	
 creds-summary	OK	
 cups-info	OK	
 cups-queue-info	OK	
@@ -113,7 +113,7 @@ dns-srv-enum	OK
 dns-update	OK	
 dns-zeustracker	OK	
 dns-zone-transfer	OK	
-docker-version	LOUD	json.lua:30: module 'lpeg' not found
+docker-version	OK	
 domcon-brute	OK	
 domcon-cmd	OK	
 domino-enum-users	OK	
@@ -127,7 +127,7 @@ epmd-info	OK
 eppc-enum-processes	OK	
 fcrdns	OK	
 finger	OK	
-fingerprint-strings	LOUD	fingerprint-strings.nse:3: module 'lpeg' not found
+fingerprint-strings	OK	
 firewalk	OK	
 firewall-bypass	OK	
 flume-master-info	OK	
@@ -156,10 +156,10 @@ hbase-master-info	OK
 hbase-region-info	OK	
 hddtemp-info	OK	
 hnap-info	OK	
-hostmap-crtsh	LOUD	json.lua:30: module 'lpeg' not found
+hostmap-crtsh	OK	
 hostmap-robtex	OK	
 http-adobe-coldfusion-apsa1301	OK	
-http-affiliate-id	LOUD	re.lua:67: module 'lpeg' not found
+http-affiliate-id	OK	
 http-apache-negotiation	OK	
 http-apache-server-status	OK	
 http-aspnet-debug	OK	
@@ -189,7 +189,7 @@ http-dlink-backdoor	OK
 http-dombased-xss	OK	
 http-domino-enum-passwords	OK	
 http-drupal-enum	OK	
-http-drupal-enum-users	LOUD	json.lua:30: module 'lpeg' not found
+http-drupal-enum-users	OK	
 http-enum	OK	
 http-errors	OK	
 http-exif-spider	OK	
@@ -208,13 +208,13 @@ http-grep	OK
 http-headers	OK	
 http-hp-ilo-info	OK	
 http-huawei-hg5xx-vuln	OK	
-http-icloud-findmyiphone	LOUD	json.lua:30: module 'lpeg' not found
-http-icloud-sendmsg	LOUD	json.lua:30: module 'lpeg' not found
+http-icloud-findmyiphone	OK	
+http-icloud-sendmsg	OK	
 http-iis-short-name-brute	OK	
 http-iis-webdav-vuln	OK	
 http-internal-ip-disclosure	OK	
 http-joomla-brute	OK	
-http-jsonp-detection	LOUD	json.lua:30: module 'lpeg' not found
+http-jsonp-detection	OK	
 http-litespeed-sourcecode-download	OK	
 http-ls	OK	
 http-majordomo2-dir-traversal	OK	
@@ -240,7 +240,7 @@ http-robtex-reverse-ip	OK
 http-robtex-shared-ns	OK	
 http-sap-netweaver-leak	OK	
 http-security-headers	OK	
-http-server-header	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+http-server-header	OK	
 http-shellshock	OK	
 http-sitemap-generator	OK	
 http-slowloris	OK	
@@ -258,8 +258,8 @@ http-unsafe-output-escaping	OK
 http-useragent-tester	OK	
 http-userdir-enum	OK	
 http-vhosts	OK	
-http-virustotal	LOUD	json.lua:30: module 'lpeg' not found
-http-vlcstreamer-ls	LOUD	json.lua:30: module 'lpeg' not found
+http-virustotal	QUIET	
+http-vlcstreamer-ls	OK	
 http-vmware-path-vuln	OK	
 http-vuln-cve2006-3392	OK	
 http-vuln-cve2009-3960	OK	
@@ -277,9 +277,9 @@ http-vuln-cve2014-2128	OK
 http-vuln-cve2014-2129	OK	
 http-vuln-cve2014-3704	LOUD	http-vuln-cve2014-3704.nse:8: module 'openssl' not found
 http-vuln-cve2014-8877	OK	
-http-vuln-cve2015-1427	LOUD	json.lua:30: module 'lpeg' not found
+http-vuln-cve2015-1427	OK	
 http-vuln-cve2015-1635	OK	
-http-vuln-cve2017-1001000	LOUD	json.lua:30: module 'lpeg' not found
+http-vuln-cve2017-1001000	OK	
 http-vuln-cve2017-5638	OK	
 http-vuln-cve2017-5689	OK	
 http-vuln-cve2017-8917	OK	
@@ -292,7 +292,7 @@ http-wordpress-brute	OK
 http-wordpress-enum	OK	
 http-wordpress-users	OK	
 http-xssed	OK	
-https-redirect	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+https-redirect	OK	
 iax2-brute	QUIET	
 iax2-version	OK	
 icap-info	OK	
@@ -307,8 +307,8 @@ informix-brute	OK
 informix-query	OK	
 informix-tables	OK	
 ip-forwarding	OK	
-ip-geolocation-geoplugin	LOUD	json.lua:30: module 'lpeg' not found
-ip-geolocation-ipinfodb	LOUD	json.lua:30: module 'lpeg' not found
+ip-geolocation-geoplugin	OK	
+ip-geolocation-ipinfodb	OK	
 ip-geolocation-map-bing	OK	
 ip-geolocation-map-google	OK	
 ip-geolocation-map-kml	OK	
@@ -347,7 +347,7 @@ lu-enum	OK
 maxdb-info	OK	
 mcafee-epo-agent	OK	
 membase-brute	OK	
-membase-http-info	LOUD	json.lua:30: module 'lpeg' not found
+membase-http-info	OK	
 memcached-info	OK	
 metasploit-info	OK	
 metasploit-msgrpc-brute	OK	
@@ -413,7 +413,7 @@ nje-pass-brute	OK
 nntp-ntlm-info	OK	
 nping-brute	QUIET	
 nrpe-enum	OK	
-ntp-info	LOUD	ntp-info.nse:9: module 'lpeg' not found
+ntp-info	OK	
 ntp-monlist	OK	
 omp2-brute	OK	
 omp2-enum-targets	OK	
@@ -426,7 +426,7 @@ oracle-brute	QUIET
 oracle-brute-stealth	QUIET	
 oracle-enum-users	QUIET	
 oracle-sid-brute	OK	
-oracle-tns-version	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+oracle-tns-version	OK	
 ovs-agent-version	OK	
 p2p-conficker	OK	
 path-mtu	OK	
@@ -456,7 +456,7 @@ resolveall	OK
 reverse-index	OK	
 rexec-brute	OK	
 rfc868-time	OK	
-riak-http-info	LOUD	json.lua:30: module 'lpeg' not found
+riak-http-info	OK	
 rlogin-brute	OK	
 rmi-dumpregistry	OK	
 rmi-vuln-classloader	OK	
@@ -473,12 +473,12 @@ rusers	OK
 s7-info	OK	
 samba-vuln-cve-2012-1182	OK	
 servicetags	OK	
-shodan-api	LOUD	json.lua:30: module 'lpeg' not found
+shodan-api	QUIET	
 sip-brute	QUIET	
 sip-call-spoof	QUIET	
 sip-enum-users	QUIET	
 sip-methods	QUIET	
-skypev2-version	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+skypev2-version	OK	
 smb-brute	OK	
 smb-double-pulsar-backdoor	OK	
 smb-enum-domains	OK	
@@ -526,7 +526,7 @@ smtp-vuln-cve2011-1764	OK
 sniffer-detect	OK	
 snmp-brute	OK	
 snmp-hh3c-logins	OK	
-snmp-info	LOUD	lpeg-utility.lua:10: module 'lpeg' not found
+snmp-info	OK	
 snmp-interfaces	OK	
 snmp-ios-config	OK	
 snmp-netstat	OK	
@@ -585,7 +585,7 @@ tls-nextprotoneg	OK
 tls-ticketbleed	OK	
 tn3270-screen	OK	
 tor-consensus-checker	OK	
-traceroute-geolocation	LOUD	json.lua:30: module 'lpeg' not found
+traceroute-geolocation	OK	
 tso-brute	OK	
 tso-enum	OK	
 ubiquiti-discovery	OK	
@@ -603,7 +603,7 @@ vnc-info	OK
 vnc-title	OK	
 voldemort-info	OK	
 vtam-enum	OK	
-vulners	LOUD	json.lua:30: module 'lpeg' not found
+vulners	OK	
 vuze-dht-info	OK	
 wdb-version	OK	
 weblogic-t3-info	OK	

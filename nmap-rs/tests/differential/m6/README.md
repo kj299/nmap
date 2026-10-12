@@ -27,13 +27,14 @@ any difference.
 | `m64_limits_*` | C-call depth, stack, `MAXTAGLOOP` (M6.4b) | `regen_m64_limits.sh` | `limits_differential` | 335 |
 | `m64_memory_*` | the memory budget, vs `ulimit -v` (M6.4b) | `regen_m64_memory.sh` | `memory_differential` | 41 |
 | `m64_stdlib_*` | `utf8`, `os`, `io`, `debug` (M6.4c1) | `regen_m64_stdlib.sh` | `stdlib_differential` | 2,012 |
-| `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 |
+| `m64_nselib_golden.txt` | every `nselib/` library loads; unit-test suites pass, by their test counts (since M6.6 step e); `unittest.run_tests()` over every library fails as without the port's missing C modules, vs nmap 7.94 | `oracle/gen_m64_nselib.py` (live in CI) | `nselib_differential` | 133 + 26 (+ 26 counted without the missing modules) + 16 |
 | `m64_scripts_golden.txt` | running scripts: rules, threads, runlevels, selection, output (M6.4c2), vs nmap 7.94 | `oracle/gen_m64_scripts.py` (live in CI) | `scripts_differential` | 37 scenarios |
 | `m64_net_golden.txt` | sockets, timers, `resolve`, `mutex`, `condvar`, socket limits, shipped `http-*` scripts (M6.4d), vs nmap 7.94 | `oracle/gen_m64_net.py` (live in CI) | `nse_net_differential` (in `nmap-sys`) | 3 scenarios, 17 scripts |
 | `m64_cli_golden.txt` | `nmap-rs --script` as a whole program: every phase's results and port states in normal and XML output, script arguments, timeouts, start-up errors (M6.4e), vs nmap 7.94 | `oracle/gen_m64_cli.py` (live in CI) | `nse_cli_differential` (in `nmap-cli`) | 15 scenarios |
 | `m66_nmapdb_golden.txt`, `m66_nmapdb_quarantine.txt` | the C module `nmapdb` over this tree's data files (M6.6), vs nmap 7.94 | `regen_m66_nmapdb.sh`, `oracle/gen_m66_nmapdb.py` (live in CI) | `nmapdb_differential` | 115,064 lines; 36 calls quarantined, each pinned |
-| `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `regen_m66_scriptload.sh`, `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 531 OK, 33 LOUD, 47 QUIET |
-| `m66_lpeg_*` | the C module `lpeg` (LPeg 0.12) with `re` and `lpeg-utility` (M6.6 step 0b), vs this tree's Lua + LPeg, and nmap 7.94 | `regen_m66_lpeg.sh` (`--check`; `--check-794` live in CI) | none yet (steps b–e) | 62,599 rows; 164 quarantined |
+| `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `regen_m66_scriptload.sh`, `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 560 OK, 2 LOUD, 49 QUIET (531 / 33 / 47 before step e) |
+| `m66_lpeg_*`, `m66{c,d,e}_quarantine_pins.txt` | the C module `lpeg` (LPeg 0.12) with `re` and `lpeg-utility` (M6.6 step 0b), vs this tree's Lua + LPeg, and nmap 7.94 | `regen_m66_lpeg.sh` (`--check`; `--check-794` live in CI) | `lpeg_corpus_differential`: through the test-only registration, and since step e through the registered module, run by the port's engine under `oracle/m66_lpeg_probe.nse` | 62,599 rows; 164 quarantined, every one pinned |
+| `m66_exit_golden.txt` | M6.6's exit criterion (step e): what `-sC`, `--script default`, `--script version` and `-A` select, load and drop on `--datadir REPO`; the categories that still stop at start-up; address-info, riak-http-info, bitcoinrpc-info and http-affiliate-id run, vs nmap 7.94 | `regen_m66_exit.sh`, `oracle/gen_m66_exit.py` (live in CI) | `nse_exit_differential` (in `nmap-cli`) | 18 scenarios |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -419,7 +420,8 @@ three ways:
 
 The header's `missing:` line is the set removed. It is the generator's
 `PORT_MISSING` unless `--missing` says otherwise, and that is the port's set:
-`openssl`, `lpeg`, `lfs`, `libssh2` and `zlib` (`nmapdb` left it in step a).
+`openssl`, `lfs`, `libssh2` and `zlib` (`nmapdb` left it in step a, `lpeg` in
+step e).
 
 `scriptload_differential` loads each script the way the command line does:
 chosen by its path, in a fresh state at `-v`, through
@@ -441,9 +443,11 @@ the port registers, exactly, so porting or stubbing one means editing that
 list as well as `PORT_MISSING`.
 
 Measured with this generator: with every module missing, 7.94 gives
-514 / 51 / 46; once `nmapdb` leaves the set, 531 / 33 / 47 (the committed
-golden since step a, which the port matches with no pins); and once `lpeg`
-leaves it too, 560 / 2 / 49, as `docs/M6.6-ANALYSIS.md` §0 predicts.
+514 / 51 / 46; once `nmapdb` leaves the set, 531 / 33 / 47 (the golden from
+step a); and once `lpeg` leaves it too, 560 / 2 / 49, as
+`docs/M6.6-ANALYSIS.md` §0 predicts: the committed golden since step e, which
+the port matches with no pins. The 2 are http-fetch (`lfs`) and
+http-vuln-cve2014-3704 (`openssl`).
 
 **The `unknown` service name** (step a) is gated with the M6.4c2 scripts:
 the `service-names` scenario of `m64_scripts_golden.txt` runs the fixture
@@ -760,8 +764,9 @@ patterns do the most LPeg work per byte: `json.parse`, the coap link format,
 lpeg-utility's `get_response`, `parse_fp` and `escaped_quote`, ntp-info's
 `kvmatch`, fingerprint-strings, and http-affiliate-id's four `re` grammars.
 Every one is linear in subject size up to 64 KiB. Step e sets each pattern's
-regression ceiling from it. Its step counter cannot see work inside a span
-instruction; the README says what that misses.
+regression ceiling from it. Its step counter could not see work inside a span
+instruction until step e, which counts each byte a span examines; the README
+says what it still misses.
 
 ## M6.6 step c — matching, against the corpus and the C
 
@@ -835,3 +840,48 @@ input, compiles, matches and evaluates it in one slice and in slices of 1 to
 64 units, and checks both against a direct PEG interpreter of the tree with
 LPeg's capture placement, evaluated by a transliteration of `lpcap.c`.
 Seeds: `fuzz/seeds/nse_lpeg_match/`, one per capture kind and error.
+
+## M6.6 step e — `lpeg` registered, and the exit criterion
+
+**The corpus through the registered module.** `lpeg_corpus_differential`'s
+`every_row_through_the_registered_module_matches_the_trees_own_lpeg` runs
+`oracle/m66_lpeg_probe.nse` — the prerule nmap 7.94 runs for
+`regen_m66_lpeg.sh --check-794` — through the port's own engine, over
+`m66_lpeg_cases.txt` and then `m66_lpeg_quarantine.txt`: every row compared
+with the golden under the named classes only, every quarantined row with its
+pin. `m66e_quarantine_pins.txt` pins the last 7 quarantined rows (written by
+hand; its header says where each answer comes from), so every one of the 164
+has a pin, which `every_quarantined_step_row_matches_its_pin` now requires.
+
+**The exit criterion.** `oracle/gen_m66_exit.py` (docstring) runs nmap 7.94
+and, with `--check`, `nmap-rs` over the same scenarios on this repository's
+own data directory, parsed by one parser: the `-d2` selection and load lines
+of `-sC`, `--script default`, `--script version` and `-A` (7.94's oracle for
+`-A` is `-sC -sV`); the categories that stop at start-up without `lfs` or
+`openssl`; and four scripts run against loopback listeners (8098, 8332,
+8180). Its two tolerances, `OPENSSL_QUIET` and `SV_VERSION_ONLY`, are the
+ledger entries `nse-sc-openssl-quiet-drops` and
+`nse-sv-version-scripts-pending`, and generation fails if 7.94 disagrees with
+either.
+
+```sh
+./regen_m66_exit.sh            # regenerate in place (needs nmap)
+./regen_m66_exit.sh --check    # what CI runs: the committed golden is the live one
+```
+
+**Denial of service.** `nse_lpeg_dos/` holds the fixtures
+`nse_exit_differential` runs at `--script-timeout 2`: an exponential grammar
+built at load (`m66-expo-load.nse`, K = 36) and, in a prerule after
+`m66-quick.nse` stored a result, one row per stage (`m66-expo-run.nse`,
+`m66dos.stage=build|compile|match|capture`). nmap 7.94 hangs in each, in the
+stage named; to see it:
+
+```sh
+timeout 60 nmap --datadir REPO -d -Pn -n -sT -p 1 --script-timeout 2 \
+  --script nse_lpeg_dos/m66-quick.nse,nse_lpeg_dos/m66-expo-run.nse \
+  --script-args m66dos.stage=match 127.0.0.1        # rc 124
+```
+
+**Adversarial slowness.** `lpeg_search/adversarial/` and
+`crates/core/tests/lpeg_slowness_regression.rs`: see `lpeg_search/README.md`,
+"The regression gate".

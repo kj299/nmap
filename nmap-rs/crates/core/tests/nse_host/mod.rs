@@ -219,7 +219,8 @@ pub fn state(dir: &Path) -> Result<NseState, String> {
 
 /// `require(lib)`, or `unittest.run_tests({lib})` when `unittest`, in a fresh
 /// state over `dir`: the outcome as the oracle probes print it — `ok` or
-/// `error`, `pass` or `fail` — and any detail.
+/// `error`, `pass` or `fail` — and any detail: for a suite that passed, how
+/// many tests it ran, as `oracle/m64_probe_unittest.nse` records it.
 pub fn probe(dir: &Path, lib: &str, unittest: bool) -> (String, Option<String>) {
     let (status, detail, _) = probe_modules(dir, lib, unittest);
     (status, detail)
@@ -251,7 +252,11 @@ pub fn probe_modules(
              local u = require 'unittest'\n\
              local fails = u.run_tests({{{lib:?}}})\n\
              local f = fails[{lib:?}]\n\
-             if f == nil then return 'pass' end\n\
+             if f == nil then\n\
+               local m = package.loaded[{lib:?}]\n\
+               local suite = type(m) == 'table' and rawget(m, 'test_suite')\n\
+               return 'pass', tostring(suite and select(2, suite()) or 0)\n\
+             end\n\
              return 'fail', tostring(f)"
         )
     } else {

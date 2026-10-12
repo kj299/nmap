@@ -22,11 +22,21 @@ pub fn load_table<'gc>(ctx: Context<'gc>) {
         ctx,
         "pack",
         Callback::from_fn(&ctx, |ctx, _, stack| {
+            // `lua_createtable(L, n, 1)`: the array part exactly as long as the
+            // values packed, so that `#` finds the border C does when there are
+            // nils among them.
+            let length = stack.len();
+            let table =
+                if crate::budget::allows(length.saturating_mul(mem::size_of::<Value<'gc>>())) {
+                    Table::from_parts(&ctx, RawTable::with_capacity(&ctx, length, 1), None)
+                } else {
+                    Table::new(&ctx)
+                };
             Ok(CallbackReturn::Sequence(BoxSequence::new(
                 &ctx,
                 Pack::SetLength {
-                    table: Table::new(&ctx).into(),
-                    length: stack.len(),
+                    table: table.into(),
+                    length,
                 },
             )))
         }),
@@ -788,8 +798,20 @@ fn array_insert_shift<'gc>(
         assert!(index <= length);
 
         if length == array_len {
-            // If the array is full, grow it.
-            table.grow_array(1);
+            // If the array is full, grow it to the next power of two, as
+            // `computesizes` sizes a dense array: growing it by one at a time,
+            // now that growth is exact, would copy it on every insertion.
+            let size = array_len
+                .checked_add(1)
+                .and_then(usize::checked_next_power_of_two)
+                .unwrap_or(usize::MAX);
+            let additional = size - array_len;
+            // Refused by the memory budget, the element is set as any other
+            // is, which fails as `luaH_resize` fails.
+            if !crate::budget::allows(additional.saturating_mul(mem::size_of::<Value<'gc>>())) {
+                return RawArrayOpResult::Possible;
+            }
+            table.grow_array(additional);
         }
 
         let array = table.array_mut();

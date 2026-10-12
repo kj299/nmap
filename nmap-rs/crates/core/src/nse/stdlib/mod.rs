@@ -16,10 +16,12 @@
 //! **VM's own** conversions, and turning the results back. Nothing in this file
 //! parses a byte of script-supplied data.
 //!
-//! [`base`] is the exception that proves the rule: `_G`, `rawequal`, `xpcall`,
-//! `load` and `coroutine.wrap` are about calling, resuming and compiling, which
-//! only the VM can do, so they are bindings with no pure half — save
-//! [`base::chunk_id`], which names a chunk in an error message.
+//! [`base`] is the exception that proves the rule: the base and coroutine
+//! libraries (`lbaselib.c`, `lcorolib.c`), the string metatable's arithmetic
+//! and the table functions' argument checks are about calling, resuming,
+//! compiling and metatables, which only the VM can do, so they are bindings
+//! with no pure half — save [`base::chunk_id`], which names a chunk in an
+//! error message.
 
 pub mod base;
 pub mod debuglib;
@@ -243,7 +245,7 @@ impl<'gc> LuaArgs<'_, 'gc, '_> {
     }
 
     /// `luaL_optinteger(L, arg, def)`.
-    fn opt_integer(&self, arg: usize, def: i64) -> Result<i64, PackError> {
+    pub(crate) fn opt_integer(&self, arg: usize, def: i64) -> Result<i64, PackError> {
         match self.get(arg) {
             None | Some(Value::Nil) => Ok(def),
             Some(_) => self.check_integer(arg),

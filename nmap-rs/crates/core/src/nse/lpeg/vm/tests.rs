@@ -11,7 +11,9 @@
 
 use std::borrow::Cow;
 
-use super::capture::{CapCursor, CapEnv, CapError, CapVal, TableKey, View, LUAI_MAXSTACK};
+use super::capture::{
+    CallKind, CapCursor, CapEnv, CapError, CapVal, Step, TableKey, View, LUAI_MAXSTACK, TABLE_CHUNK,
+};
 use super::*;
 use crate::nse::lpeg::code::{Compiler, Program};
 use crate::nse::lpeg::testkit::*;
@@ -58,7 +60,7 @@ enum Out {
 
 fn out(c: &CapCursor, subj: &[u8], v: CapVal) -> Out {
     match v {
-        CapVal::Nil | CapVal::Buf => Out::Nil,
+        CapVal::Nil | CapVal::Buf | CapVal::Callee => Out::Nil,
         CapVal::Int(i) => Out::Int(i),
         CapVal::Str(a, b) => Out::Str(subj[a..b].to_vec()),
         CapVal::Bytes(i) => Out::Str(c.string(i).to_vec()),
@@ -99,6 +101,7 @@ fn run(
         match vm.run(p, subj, maxstack, &mut b) {
             Ok(VmPoll::Pending) => {}
             Ok(VmPoll::Done(d)) => break Ok(d),
+            Ok(VmPoll::RunTime(rt)) => panic!("a match-time capture in a pure run: {rt:?}"),
             Err(e) => break Err(e),
         }
     };
@@ -119,7 +122,9 @@ fn evaluate(
     loop {
         let mut b = slice;
         slices += 1;
-        match c.step(caps, subj, &Env, &mut b) {
+        let r = c.step(caps, subj, &Env, &mut b);
+        assert_eq!(c.heap_bytes(), c.heap_bytes_walked(), "the running count");
+        match r {
             Ok(None) => {}
             Ok(Some(())) => {
                 let vs = c.values().iter().map(|&v| out(&c, subj, v)).collect();
@@ -529,4 +534,609 @@ fn a_name_compared_byte_by_byte_is_charged() {
         spent + over >= (1 << 20) / per,
         "{spent} units and {over} past the budget for a 1 MiB comparison"
     );
+}
+
+// ---------------------------------------------------------------- step d
+
+/// A Lua value, as a mock binding hands the cursor one: the cursor holds
+/// its values without looking at them, but for their text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mv {
+    Nil,
+    True,
+    Int(i64),
+    /// A string, by its index in [`Mock::texts`].
+    Text(u32),
+}
+
+/// A binding for the cursor's and the machine's calls, the C's rules
+/// written out over [`Mv`]s (the real one is `lpeg::MatchJob`, through the
+/// VM): constants as [`Env`] has them, and the window of dynamic values.
+#[derive(Default)]
+struct Mock {
+    texts: Vec<Vec<u8>>,
+    window: Vec<Mv>,
+    /// Each call made, in order: its key and how many arguments it took.
+    calls: Vec<(Key, usize)>,
+    /// The most a cursor held ([`CapCursor::heap_bytes`]) after a step or a
+    /// call.
+    peak: usize,
+}
+
+/// Two `/string` formats, besides [`Env`]'s constants.
+const FMT_A: Key = 5;
+const FMT_B: Key = 6;
+
+impl CapEnv<Mv> for Mock {
+    fn constant(&self, k: Key) -> View<'_> {
+        match k {
+            FMT_A => View::Str(Cow::Borrowed(b"%1-%0%%")),
+            FMT_B => View::Str(Cow::Borrowed(b"<%2%9>")),
+            k => Env.constant(k),
+        }
+    }
+    fn argument(&self, n: u32) -> View<'_> {
+        Env.argument(n)
+    }
+    fn same_constant(&self, a: Key, b: Key) -> (bool, usize) {
+        Env.same_constant(a, b)
+    }
+    fn dynamic(&self, i: Key) -> Option<Mv> {
+        self.window.get(i as usize).copied()
+    }
+    fn value(&self, v: Mv) -> View<'_> {
+        match v {
+            Mv::Nil => View::Nil,
+            Mv::True => View::Other("boolean"),
+            Mv::Int(i) => View::Num(Cow::Owned(i.to_string().into_bytes())),
+            Mv::Text(t) => View::Str(Cow::Borrowed(&self.texts[t as usize])),
+        }
+    }
+}
+
+/// The match-time functions (keys 10-13), function captures (20-21), fold
+/// functions (30) and query tables (40) of the mock.
+const CMT_TRUE: Key = 10;
+const CMT_VALUE: Key = 11;
+const CMT_FALSE: Key = 12;
+const CMT_COUNT: Key = 13;
+const F_REVERSE: Key = 20;
+const F_NONE: Key = 21;
+const FOLD_ADD: Key = 30;
+const QUERY_ID: Key = 40;
+
+impl Mock {
+    fn text(&mut self, b: &[u8]) -> Mv {
+        self.texts.push(b.to_vec());
+        Mv::Text(self.texts.len() as u32 - 1)
+    }
+
+    /// A capture value as the binding makes it a Lua value, once: a string
+    /// the cursor built given back (`CapCursor::consumed`), a table filled
+    /// from its assignments and given back as it fills, a chunk at a time,
+    /// then whole (as `lpeg::MatchJob` fills one).
+    fn lua(&mut self, c: &mut CapCursor<Mv>, subj: &[u8], v: CapVal<Mv>) -> Mv {
+        let m = self.lua_of(c, subj, v);
+        c.consumed(v);
+        if let CapVal::Table(t) = v {
+            let mut e = 0;
+            while let Some((_, x)) = c.table_entry(t, e) {
+                self.lua(c, subj, x);
+                e += 1;
+                if e % TABLE_CHUNK == 0 {
+                    c.give_back(t, e);
+                    self.held(c);
+                }
+            }
+            c.free_table(t);
+            self.held(c);
+        }
+        m
+    }
+
+    /// The running count of what `c` holds is what a walk finds; and the
+    /// most it held.
+    fn held(&mut self, c: &CapCursor<Mv>) {
+        assert_eq!(c.heap_bytes(), c.heap_bytes_walked(), "the running count");
+        self.peak = self.peak.max(c.heap_bytes());
+    }
+
+    fn lua_of(&mut self, c: &CapCursor<Mv>, subj: &[u8], v: CapVal<Mv>) -> Mv {
+        match v {
+            CapVal::Int(i) => Mv::Int(i),
+            CapVal::Str(a, b) => self.text(&subj[a..b]),
+            CapVal::Bytes(i) => self.text(c.string(i)),
+            CapVal::K(k) => match Env.constant(k) {
+                View::Str(s) => self.text(&s),
+                View::Num(_) => Mv::Int(7),
+                _ => Mv::True,
+            },
+            CapVal::Lua(m) => m,
+            // A table, by its number (the real binding makes it).
+            CapVal::Table(t) => Mv::Int(-1 - i64::from(t)),
+            CapVal::Nil | CapVal::Arg(_) | CapVal::Buf | CapVal::Callee => Mv::Nil,
+        }
+    }
+
+    /// The function or table at `key`, called with `args`.
+    fn call(&mut self, key: Key, args: &[Mv]) -> Vec<Mv> {
+        self.calls.push((key, args.len()));
+        match key {
+            CMT_TRUE => vec![Mv::True],
+            // `i, "v"`: the position (the second argument) and a value.
+            CMT_VALUE => {
+                let v = self.text(b"v");
+                vec![args[1], v]
+            }
+            CMT_FALSE => vec![],
+            CMT_COUNT => vec![Mv::True, Mv::Int(args.len() as i64 - 2)],
+            F_REVERSE => args.iter().rev().copied().collect(),
+            F_NONE => vec![],
+            FOLD_ADD => {
+                let n = args
+                    .iter()
+                    .map(|a| if let Mv::Int(i) = a { *i } else { 1 })
+                    .sum();
+                vec![Mv::Int(n)]
+            }
+            QUERY_ID => args
+                .iter()
+                .take(1)
+                .copied()
+                .filter(|a| *a != Mv::Nil)
+                .collect(),
+            _ => vec![Mv::Nil],
+        }
+    }
+
+    /// Evaluate with `c` to its end, in slices of `slice`, making the calls
+    /// it asks for.
+    fn evaluate(
+        &mut self,
+        c: &mut CapCursor<Mv>,
+        caps: &[Capture],
+        subj: &[u8],
+        slice: u32,
+    ) -> Result<(), CapError> {
+        loop {
+            let mut b = slice;
+            let step = c.run_step(caps, subj, &*self, &mut b);
+            self.held(c);
+            match step? {
+                Step::Done => return Ok(()),
+                Step::Pending => {}
+                Step::Call(req) => {
+                    let vals: Vec<CapVal<Mv>> = c.values()[req.args..].to_vec();
+                    let args: Vec<Mv> = vals.into_iter().map(|v| self.lua(c, subj, v)).collect();
+                    let mut r = self.call(req.key, &args);
+                    // What each capture keeps of the results.
+                    match req.kind {
+                        CallKind::Function => {}
+                        CallKind::Fold => r.resize(1, Mv::Nil),
+                        CallKind::Query => r.truncate(1),
+                    }
+                    let back = c.returned(&r);
+                    self.held(c);
+                    back?;
+                }
+            }
+        }
+    }
+
+    /// Match `p` on `subj` in slices of `slice`, a match-time capture's
+    /// function called as `runtimecap` calls it and its results decoded as
+    /// `resdyncaptures` decodes them; the outcome, and the window's size at
+    /// the end.
+    fn run(
+        &mut self,
+        p: &Program,
+        subj: &[u8],
+        slice: u32,
+    ) -> (Result<Option<Vec<Mv>>, String>, usize) {
+        let mut vm = Vm::new(0);
+        let err = |e: &dyn std::fmt::Debug| format!("{e:?}");
+        let end = loop {
+            let mut b = slice;
+            let r = vm.run(p, subj, i32::MAX, &mut b);
+            self.window.truncate(vm.dyn_top());
+            match r {
+                Ok(VmPoll::Pending) => {}
+                Ok(VmPoll::Done(None)) => return (Ok(None), self.window.len()),
+                Ok(VmPoll::Done(Some(end))) => break end,
+                Ok(VmPoll::RunTime(rt)) => {
+                    let mut c = CapCursor::<Mv>::nested_at(rt.open, 0, 5);
+                    if let Err(e) = self.evaluate(&mut c, vm.captures(), subj, slice) {
+                        return (Err(err(&e)), self.window.len());
+                    }
+                    let mut args = vec![Mv::Nil, Mv::Int(rt.s as i64 + 1)];
+                    let vals: Vec<CapVal<Mv>> = c.values().to_vec();
+                    for v in vals {
+                        let m = self.lua(&mut c, subj, v);
+                        args.push(m);
+                    }
+                    let res = self.call(rt.key, &args);
+                    let fr = rt.first_dyn.unwrap_or(self.window.len());
+                    self.window.truncate(fr);
+                    let mut b = u32::MAX;
+                    match res.first() {
+                        None | Some(Mv::Nil) => vm.runtime_failed(fr).unwrap(),
+                        Some(&first) => {
+                            let s = match first {
+                                Mv::True => rt.s,
+                                Mv::Int(i) if i > rt.s as i64 && i - 1 <= subj.len() as i64 => {
+                                    (i - 1) as usize
+                                }
+                                _ => {
+                                    return (Err("invalid position".to_string()), self.window.len())
+                                }
+                            };
+                            self.window.extend_from_slice(&res[1..]);
+                            vm.runtime_kept(s, fr, res.len() - 1, &mut b).unwrap();
+                        }
+                    }
+                }
+                Err(e) => return (Err(err(&e)), self.window.len()),
+            }
+        };
+        let caps = vm.take_captures();
+        let mut c = CapCursor::<Mv>::with_values(end, 0, 5);
+        if let Err(e) = self.evaluate(&mut c, &caps, subj, slice) {
+            return (Err(err(&e)), self.window.len());
+        }
+        let vals: Vec<CapVal<Mv>> = c.values().to_vec();
+        let out = vals
+            .into_iter()
+            .map(|v| self.lua(&mut c, subj, v))
+            .collect();
+        (Ok(Some(out)), self.window.len())
+    }
+
+    /// A value's text, for comparing.
+    fn show(&self, v: Mv) -> String {
+        match v {
+            Mv::Text(t) => String::from_utf8_lossy(&self.texts[t as usize]).into_owned(),
+            v => format!("{v:?}"),
+        }
+    }
+}
+
+fn cmt(body: &Tree, key: Key) -> Tree {
+    let mut t = Tree::root1(Tag::RunTime, body).unwrap();
+    t.set_key(0, key);
+    t
+}
+
+/// Run `t` through the mock, whole: its values as text, and the window.
+fn mock_matched(t: &Tree, subj: &[u8]) -> (Result<Option<Vec<String>>, String>, usize, Mock) {
+    let p = compile(&fix(t).unwrap());
+    let mut m = Mock::default();
+    let (r, w) = m.run(&p, subj, u32::MAX);
+    let r = r.map(|o| o.map(|vs| vs.into_iter().map(|v| m.show(v)).collect()));
+    (r, w, m)
+}
+
+/// S08, white-box: a failure drops the dynamic values of the match-time
+/// captures it drops, and every one above them (`removedyncap`), so the
+/// window holds only the values of the captures that stand; an
+/// and-predicate's back-commit drops a capture's entries and keeps its
+/// values, as orphans, where the C keeps them on its Lua stack
+/// (`lpeg-and-predicate-keeps-dynamic-captures`).
+#[test]
+fn dynamic_values_go_with_their_captures_but_not_through_and_predicates() {
+    let n = if cfg!(miri) { 5 } else { 200 };
+    let subj = vec![b'a'; n];
+    let simple = |t: &Tree| Tree::capture(CapKind::Simple, 0, t).unwrap();
+    // `(Cmt(1, i, "v") * 'z' + C(1))^0`: each value goes on the failure.
+    let t = star(
+        &choice(
+            &seq(&cmt(&Tree::number(1).unwrap(), CMT_VALUE), &lit(b"z")),
+            &simple(&Tree::number(1).unwrap()),
+        ),
+        0,
+    );
+    let (r, window, m) = mock_matched(&t, &subj);
+    assert_eq!(r, Ok(Some(vec!["a".to_string(); n])));
+    assert_eq!(window, 0, "a backtrack kept dynamic values");
+    assert_eq!(m.calls.len(), n);
+    // `Cmt(1, i, "v")^0`: each kept, one value a capture.
+    let t = star(&cmt(&Tree::number(1).unwrap(), CMT_VALUE), 0);
+    let (r, window, _) = mock_matched(&t, &subj);
+    assert_eq!(r, Ok(Some(vec!["v".to_string(); n])));
+    assert_eq!(window, n);
+    // `(#Cmt(1, i, "v") * 1)^0`: the entries go, the values stay.
+    let t = star(
+        &seq(
+            &Tree::root1(Tag::And, &cmt(&Tree::number(1).unwrap(), CMT_VALUE)).unwrap(),
+            &Tree::number(1).unwrap(),
+        ),
+        0,
+    );
+    let (r, window, _) = mock_matched(&t, &subj);
+    assert_eq!(r, Ok(Some(vec![format!("Int({})", n + 1)])));
+    assert_eq!(window, n, "an and-predicate dropped its orphans");
+    // The same returning only `true`: nothing kept.
+    let t = star(
+        &seq(
+            &Tree::root1(Tag::And, &cmt(&Tree::number(1).unwrap(), CMT_TRUE)).unwrap(),
+            &Tree::number(1).unwrap(),
+        ),
+        0,
+    );
+    let (_, window, _) = mock_matched(&t, &subj);
+    assert_eq!(window, 0);
+    // A match-time capture over orphans: its call drops its body's values
+    // and every one above them, orphans included (`runtimecap`).
+    let body = seq(
+        &cmt(&Tree::number(1).unwrap(), CMT_VALUE),
+        &star(
+            &seq(
+                &Tree::root1(Tag::And, &cmt(&Tree::number(1).unwrap(), CMT_VALUE)).unwrap(),
+                &Tree::number(1).unwrap(),
+            ),
+            0,
+        ),
+    );
+    let (r, window, _) = mock_matched(&cmt(&body, CMT_COUNT), &subj);
+    assert_eq!(r, Ok(Some(vec!["Int(1)".to_string()])));
+    assert_eq!(window, 1, "the call kept what its body left");
+}
+
+/// The order and timing of the calls, as the C's (the brief's F01, F12,
+/// F22, F28 and C05): a `/f` inside a match-time capture runs when the
+/// capture closes, inner ones first; nested values before the capture's
+/// own call; a fold's accumulator first, then each value's call.
+#[test]
+fn calls_come_in_the_cs_order() {
+    let c1 = || Tree::capture(CapKind::Simple, 0, &Tree::number(1).unwrap()).unwrap();
+    let f = |t: &Tree, k: Key| Tree::capture(CapKind::Function, k, t).unwrap();
+    // F28: `Cmt((C(1)/f) * Cmt(C(1)/f, g), g)/f` on "xy": the inner
+    // capture's `/f`, its function, the outer's `/f`, its function, the
+    // match's.
+    let t = f(
+        &cmt(
+            &seq(&f(&c1(), F_REVERSE), &cmt(&f(&c1(), F_REVERSE), CMT_COUNT)),
+            CMT_COUNT,
+        ),
+        F_REVERSE,
+    );
+    let (r, _, m) = mock_matched(&t, b"xy");
+    assert_eq!(r, Ok(Some(vec!["Int(2)".to_string()])));
+    assert_eq!(
+        m.calls,
+        [
+            (F_REVERSE, 1),
+            (CMT_COUNT, 3),
+            (F_REVERSE, 1),
+            (CMT_COUNT, 4),
+            (F_REVERSE, 1)
+        ]
+    );
+    // A fold: `Cf(C(1) * C(1) * C(1), add)`: two calls, the accumulator and
+    // a value each (the mock's add counts a string as 1: 1 + 1, then 2 + 1).
+    let fold = Tree::capture(CapKind::Fold, FOLD_ADD, &seq(&c1(), &seq(&c1(), &c1()))).unwrap();
+    let (r, _, m) = mock_matched(&fold, b"abc");
+    assert_eq!(r, Ok(Some(vec!["Int(3)".to_string()])));
+    assert_eq!(m.calls, [(FOLD_ADD, 2), (FOLD_ADD, 2)]);
+    // No initial value: a fold of a capture with none.
+    let fold = Tree::capture(CapKind::Fold, FOLD_ADD, &lit(b"a")).unwrap();
+    assert_eq!(
+        mock_matched(&fold, b"a").0,
+        Err("NoInitialFold".to_string())
+    );
+    // A query keeps its first value; nil is none.
+    let q = Tree::capture(CapKind::Query, QUERY_ID, &seq(&c1(), &c1())).unwrap();
+    assert_eq!(mock_matched(&q, b"ab").0, Ok(Some(vec!["a".to_string()])));
+    // A function capture returning nothing gives no value.
+    let t = seq(&f(&c1(), F_NONE), &c1());
+    assert_eq!(mock_matched(&t, b"ab").0, Ok(Some(vec!["b".to_string()])));
+}
+
+/// Calls do not depend on where the slices fall: random patterns holding
+/// match-time captures, function captures, folds and queries, through the
+/// mock, give the same values, window and calls in slices of one to seven
+/// units as in one.
+#[test]
+fn calls_do_not_depend_on_the_slicing() {
+    let mut r = Rng(0x5eed_d00d_0000_0001);
+    let rounds = if cfg!(miri) { 6 } else { 600 };
+    let mut called = 0usize;
+    let keys = [CMT_TRUE, CMT_VALUE, CMT_FALSE, CMT_COUNT];
+    for round in 0..rounds {
+        let base = random_tree(&mut r, 4, 0);
+        let k = r.below(4) as usize;
+        let t = match r.below(4) {
+            0 => cmt(&base, keys[k]),
+            1 => Tree::capture(CapKind::Function, [F_REVERSE, F_NONE][k % 2], &base).unwrap(),
+            2 => Tree::capture(CapKind::Fold, FOLD_ADD, &base).unwrap(),
+            _ => seq(
+                &cmt(&base, keys[k]),
+                &star(&cmt(&Tree::number(1).unwrap(), CMT_VALUE), 0),
+            ),
+        };
+        let Ok(fixed) = fix(&t) else { continue };
+        let mut c = Compiler::new();
+        let Ok(p) = drive(1_000, |b| c.step(&fixed, b)) else {
+            continue;
+        };
+        for _ in 0..3 {
+            let n = r.below(6) as usize;
+            let subj: Vec<u8> = (0..n).map(|_| b"abc"[r.below(3) as usize]).collect();
+            let slice = 1 + (round % 7) as u32;
+            let mut a = Mock::default();
+            let (ra, wa) = a.run(&p, &subj, u32::MAX);
+            let mut b = Mock::default();
+            let (rb, wb) = b.run(&p, &subj, slice);
+            let show = |m: &Mock, r: Result<Option<Vec<Mv>>, String>| {
+                r.map(|o| o.map(|vs| vs.into_iter().map(|v| m.show(v)).collect::<Vec<_>>()))
+            };
+            assert_eq!(show(&a, ra), show(&b, rb), "{:?}", p.dump());
+            assert_eq!(wa, wb);
+            assert_eq!(a.calls, b.calls);
+            called += a.calls.len();
+        }
+    }
+    assert!(called > if cfg!(miri) { 2 } else { 500 }, "{called}");
+}
+
+/// A random pattern of depth at most `d` built of the captures that hold
+/// what the cursor counts — tables, substitutions, `/string`, `/n`, named
+/// groups and back-references to them — and those that call Lua (`/f`,
+/// `Cf`, `/table`, match-time captures).
+fn rich_tree(r: &mut Rng, d: u32) -> Tree {
+    if d == 0 || r.below(4) == 0 {
+        return random_tree(r, 1, 0);
+    }
+    let sub = |r: &mut Rng| rich_tree(r, d - 1);
+    let cap = |kind: CapKind, k: Key, t: &Tree| Tree::capture(kind, k, t).unwrap();
+    match r.below(15) {
+        0 => seq(&sub(r), &sub(r)),
+        1 => choice(&sub(r), &sub(r)),
+        // A body that takes a byte first: never empty.
+        2 => star(&seq(&Tree::number(1).unwrap(), &sub(r)), 0),
+        3 => cap(CapKind::Simple, 0, &sub(r)),
+        4 => cap(CapKind::Table, 0, &sub(r)),
+        5 => cap(CapKind::Subst, 0, &sub(r)),
+        6 => cap(
+            CapKind::String,
+            [FMT_A, FMT_B][r.below(2) as usize],
+            &sub(r),
+        ),
+        7 => cap(CapKind::Num, r.below(3) as Key, &sub(r)),
+        8 => cap(CapKind::Group, 1 + r.below(2) as Key, &sub(r)),
+        9 => seq(
+            &sub(r),
+            &Tree::empty_capture(CapKind::Backref, 1 + r.below(2) as Key).unwrap(),
+        ),
+        10 => cap(
+            CapKind::Function,
+            [F_REVERSE, F_NONE][r.below(2) as usize],
+            &sub(r),
+        ),
+        11 => cap(CapKind::Fold, FOLD_ADD, &sub(r)),
+        12 => cap(CapKind::Query, QUERY_ID, &sub(r)),
+        13 => cmt(&sub(r), [CMT_VALUE, CMT_COUNT][r.below(2) as usize]),
+        _ => cap(CapKind::Group, 0, &sub(r)),
+    }
+}
+
+/// The step d review's F1, white-box: what the cursor holds — its buffers,
+/// the strings it built, its tables' chunks — is a running count, kept where
+/// they grow and where they are given back, and `heap_bytes` reads it
+/// without a walk. Random patterns of the captures that hold them, through
+/// the mock (which fills and gives back tables, and makes each value once,
+/// as the binding does), in slices of one to seven units and in one: after
+/// every step and every call the count is what a walk finds (the mock's
+/// `held`), and the answers do not depend on the slicing. Then tables past
+/// a chunk, given back a chunk at a time.
+#[test]
+fn what_the_cursor_holds_is_counted_as_it_changes() {
+    let mut r = Rng(0x0f1f_2f3f_4f5f_6f7f);
+    let rounds = if cfg!(miri) { 8 } else { 800 };
+    let mut called = 0usize;
+    for round in 0..rounds {
+        let Ok(t) = fix(&rich_tree(&mut r, 5)) else {
+            continue;
+        };
+        let mut c = Compiler::new();
+        let Ok(p) = drive(1_000, |b| c.step(&t, b)) else {
+            continue;
+        };
+        for _ in 0..3 {
+            let n = r.below(9) as usize;
+            let subj: Vec<u8> = (0..n).map(|_| b"abc"[r.below(3) as usize]).collect();
+            let slice = 1 + (round % 7) as u32;
+            let mut a = Mock::default();
+            let (ra, wa) = a.run(&p, &subj, u32::MAX);
+            let mut b = Mock::default();
+            let (rb, wb) = b.run(&p, &subj, slice);
+            let show = |m: &Mock, r: Result<Option<Vec<Mv>>, String>| {
+                r.map(|o| o.map(|vs| vs.into_iter().map(|v| m.show(v)).collect::<Vec<_>>()))
+            };
+            assert_eq!(show(&a, ra), show(&b, rb), "{:?}", p.dump());
+            assert_eq!(wa, wb);
+            assert_eq!(a.calls, b.calls);
+            called += a.calls.len();
+        }
+    }
+    assert!(called > if cfg!(miri) { 2 } else { 500 }, "{called}");
+    // `Ct(C(1)^0)` and `Ct(Ct(C(1))^0) / f` past a chunk or two.
+    let n = if cfg!(miri) { 40 } else { 3 * TABLE_CHUNK + 5 };
+    let subj = vec![b'a'; n];
+    let c1 = Tree::capture(CapKind::Simple, 0, &Tree::number(1).unwrap()).unwrap();
+    let ct = |t: &Tree| Tree::capture(CapKind::Table, 0, t).unwrap();
+    for t in [
+        ct(&star(&c1, 0)),
+        Tree::capture(CapKind::Function, F_REVERSE, &ct(&star(&ct(&c1), 0))).unwrap(),
+    ] {
+        let (r, _, m) = mock_matched(&t, &subj);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(m.peak > 0);
+    }
+}
+
+/// The step d review's F2, white-box: a string the cursor built is given
+/// back once it is used — made a call's argument (`consumed`), copied into
+/// another buffer (a substitution's), or dropped (`/n`, and a table dropped
+/// whole) — so a group holding a substitution of `L` bytes, referenced
+/// once for each of `n` calls, holds a few strings of `L` at most, as the
+/// C's stack does, not `n` of them. Each shape at `n` and `4n` references:
+/// the most the cursor held does not grow with `n`. (`L` is large beside
+/// what each reference adds besides — a value and its slots, some tens of
+/// bytes — under Miri too.)
+#[test]
+fn a_string_built_for_a_call_is_given_back_once_used() {
+    let (l, n) = if cfg!(miri) { (4_096, 2) } else { (16_384, 16) };
+    let c = |kind: CapKind, k: Key, t: &Tree| Tree::capture(kind, k, t).unwrap();
+    let cb = || Tree::empty_capture(CapKind::Backref, 1).unwrap();
+    // `Cg(Cs(P'x'^0), 'a')`.
+    let group = c(
+        CapKind::Group,
+        1,
+        &c(CapKind::Subst, 0, &star(&lit(b"x"), 0)),
+    );
+    let shapes = [
+        // `(Cb'a' / f) * 'y'`: an argument.
+        ("argument", c(CapKind::Function, F_REVERSE, &cb())),
+        // `Cs(Cb'a') / f`: copied into the substitution's buffer.
+        (
+            "copied",
+            c(CapKind::Function, F_REVERSE, &c(CapKind::Subst, 0, &cb())),
+        ),
+        // `(Cb'a' * Cb'a') / 2 / f`: the first dropped.
+        (
+            "dropped",
+            c(
+                CapKind::Function,
+                F_REVERSE,
+                &c(CapKind::Num, 2, &seq(&cb(), &cb())),
+            ),
+        ),
+        // `(Ct(Cb'a') * Cb'a') / 2 / f`: a table holding one dropped.
+        (
+            "dropped table",
+            c(
+                CapKind::Function,
+                F_REVERSE,
+                &c(CapKind::Num, 2, &seq(&c(CapKind::Table, 0, &cb()), &cb())),
+            ),
+        ),
+    ];
+    for (what, each) in shapes {
+        let t = seq(&group, &star(&seq(&each, &lit(b"y")), 0));
+        let peak = |k: usize| {
+            let mut subj = vec![b'x'; l];
+            subj.extend(std::iter::repeat_n(b'y', k));
+            let (r, _, m) = mock_matched(&t, &subj);
+            let out = r.expect("matches").expect("matches");
+            assert_eq!(out.len(), k, "{what}");
+            assert!(out.iter().all(|s| s.len() == l), "{what}: {out:?}");
+            m.peak
+        };
+        let (one, four) = (peak(n), peak(4 * n));
+        assert!(
+            four < one + l / 2 && one < 4 * l,
+            "{what}: the cursor held {one} bytes at {n} references, {four} at {}",
+            4 * n
+        );
+    }
 }

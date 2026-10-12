@@ -14,13 +14,13 @@ any difference.
 |---|---|---|---|---|
 | `m6_scriptdb_*`, `m6_nse_*` | `.nse` metadata, `script.db` (M6.1) | `regen_m6.sh` | `nse_differential`, `nse_corpus` | 58 + 31 |
 | `m62_*` | `--script` selection (M6.2) | `regen_m62.sh` | `selection_differential`, `selection_corpus` | 98 + 15, 27,495-verdict sweep |
-| `m60_semantics_*` | VM semantics (M6.0) | `regen_m60.sh` | `lua_semantics_differential` | 99 (1 pinned) |
+| `m60_semantics_*` | VM semantics (M6.0), table borders (patch 0013) | `regen_m60.sh` | `lua_semantics_differential` | 133 (17 pinned) |
 | `m60_arith_*`, `m60_coerce_*` | modulo and shifts; string-to-number coercion | `regen_m60.sh` | `lua_semantics_differential` | 2,955; 1,975 |
 | `m60_floatfmt_*` | float formatting | `regen_m60.sh` | `lua_float_format_differential` | 7,917 |
 | `m6_strpack_*` | `string.pack` / `unpack` / `packsize` | `regen_m6_strpack.sh` | `strpack_differential` | 4,804 |
 | `m6_pattern_*` | `string.find` / `match` / `gmatch` / `gsub` | `regen_m6_pattern.sh` | `pattern_differential` | 11,408 |
 | `m6_format_*` | `string.format` | `regen_m6_format.sh` | `format_differential` | 6,037 |
-| `m6_tail_*` | `_G`, `rawequal`, `xpcall`, `load`, `coroutine.wrap`, `string.rep` | `regen_m6_tail.sh` | `tail_differential` | 1,019 |
+| `m6_tail_*` | the base library (`pcall`, `xpcall`, `rawequal`/`rawlen`/`rawget`/`rawset`, `next`/`pairs`/`ipairs`, `select`, `type`, `tostring`, `tonumber`, `getmetatable`/`setmetatable`, `collectgarbage`, `assert`, `error`, `warn`, `load`, `_G`), the coroutine library, `string.rep`, `string.char`, the string metatable's arithmetic, `table.insert`/`remove`/`concat`'s checks | `regen_m6_tail.sh` | `tail_differential` | 2,742 |
 | `m63_args_*` | `--script-args` (M6.3) | `regen_m63.sh` | `scriptargs_differential` | 20,517 |
 | `m63_nmap_golden.txt` | the `nmap` module's non-I/O half, vs nmap 7.94 | `oracle/gen_m63_nmap.py` (live in CI) | `nmaplib_differential` | 10 scenarios (9 without IPv6 loopback, as in the committed golden) |
 | `m64_errors_*` | VM runtime errors, numeric `for` (M6.4a) | `regen_m64_errors.sh` | `errors_differential` | 12,438 |

@@ -258,73 +258,100 @@ impl<'gc> RawTable<'gc> {
         Ok(Value::Nil)
     }
 
-    /// Returns a 'border' for this table.
+    /// Returns a 'border' for this table, the one PUC-Lua's `luaH_getn`
+    /// (`ltable.c`) finds when the array part is the same size as this one.
     ///
     /// See [`Table::length`] for a more full description of what this means.
+    ///
+    /// Which border a table with holes reports depends on how the search
+    /// runs, so it runs as `luaH_getn` runs: with `t[size]` absent, the
+    /// border just below it if `t[size - 1]` is present, else a binary search
+    /// of the array; with the array full, `size` if `t[size + 1]` is absent,
+    /// else `hash_search`'s doubling from `size` and binary search. What it
+    /// does not reproduce is the size of the array itself, which in PUC-Lua
+    /// follows the rehashes of its node vector, and the `alimit` hint
+    /// `luaH_getn` keeps between calls (`vm-table-border-is-not-luas`).
     pub fn length(&self) -> i64 {
-        // Binary search for a border. Entry at max must be Nil, min must be 0 or entry at min must
-        // be != Nil.
-        fn binary_search<F: Fn(i64) -> bool>(mut min: i64, mut max: i64, is_nil: F) -> i64 {
-            while max - min > 1 {
-                let mid = min + (max - min) / 2;
-                if is_nil(mid) {
-                    max = mid;
+        // `binsearch`: a border in `(i, j)` of the array, where `t[i]` is
+        // present (or `i` is 0) and `t[j]` absent.
+        fn binsearch(array: &[Value<'_>], mut i: usize, mut j: usize) -> usize {
+            while j - i > 1 {
+                let m = i + (j - i) / 2;
+                if array[m - 1].is_nil() {
+                    j = m;
                 } else {
-                    min = mid;
+                    i = m;
                 }
             }
-            min
+            i
         }
 
-        let array_len: i64 = self.array.len().try_into().unwrap();
-
-        if !self.array.is_empty() && self.array[array_len as usize - 1].is_nil() {
-            // If the array part ends in a Nil, there must be a border inside it
-            binary_search(0, array_len, |i| self.array[i as usize - 1].is_nil())
-        } else if self.map.is_empty() {
-            // If the array part does not end in a nil but the map part is empty, then the array
-            // length is a border.
-            array_len
-        } else {
-            // Otherwise, we check the map part for a border. We need to find some nil value in the
-            // map part as the max for a binary search.
-            let min = array_len;
-            let mut max = array_len.checked_add(1).unwrap();
-            while self
-                .map
-                .raw_entry()
-                .from_hash(
-                    self.hash_builder.hash_one(CanonicalKey::Integer(max)),
-                    |k| k.eq(CanonicalKey::Integer(max)),
-                )
-                .is_some_and(|(_, v)| !v.is_nil())
-            {
-                if max == i64::MAX {
-                    // If we can't find a nil entry by doubling, then the table is pathological. We
-                    // return the favor with a pathological answer: i64::MAX + 1 can't exist in the
-                    // table, therefore it is Nil, so since the table contains i64::MAX, i64::MAX is
-                    // a border.
-                    return i64::MAX;
-                } else if let Some(double_max) = max.checked_mul(2) {
-                    max = double_max;
-                } else {
-                    max = i64::MAX;
-                }
+        let limit = self.array.len();
+        if limit > 0 && self.array[limit - 1].is_nil() {
+            // There must be a border before `limit`: if `limit - 1` is one,
+            // it is the answer (the common case of an array one too big).
+            if limit >= 2 && !self.array[limit - 2].is_nil() {
+                return (limit - 1) as i64;
             }
+            return binsearch(&self.array, 0, limit) as i64;
+        }
 
-            // We have found a max where table[max] == nil, so we can now binary search
-            binary_search(min, max, |i| {
-                match self
-                    .map
+        // The array is full (or empty): `limit` is a border unless the map
+        // part holds `limit + 1`.
+        if self.map.is_empty() {
+            return limit as i64;
+        }
+        self.hash_border(limit as u64)
+    }
+
+    /// The border `luaH_getn` finds past a full array part of `limit`
+    /// elements: `limit` itself if the map part does not hold `limit + 1`,
+    /// else `hash_search`'s, which doubles `j` until `t[j]` is absent and
+    /// then searches between the last present `i` and `j`.
+    fn hash_border(&self, limit: u64) -> i64 {
+        let present = |i: u64| -> bool {
+            i64::try_from(i).is_ok_and(|i| {
+                self.map
                     .raw_entry()
                     .from_hash(self.hash_builder.hash_one(CanonicalKey::Integer(i)), |k| {
                         k.eq(CanonicalKey::Integer(i))
-                    }) {
-                    Some((_, v)) => v.is_nil(),
-                    None => true,
-                }
+                    })
+                    .is_some_and(|(_, v)| !v.is_nil())
             })
+        };
+        if !present(limit + 1) {
+            return limit as i64;
         }
+        // `LUA_MAXINTEGER`.
+        const MAX: u64 = u64::MAX >> 1;
+        let mut j = limit.max(1);
+        let mut i;
+        loop {
+            i = j;
+            if j <= MAX / 2 {
+                j *= 2;
+                if !present(j) {
+                    break;
+                }
+            } else {
+                j = MAX;
+                if !present(j) {
+                    break;
+                }
+                // Every key up to `maxinteger` doubling found present: that
+                // is a border too.
+                return j as i64;
+            }
+        }
+        while j - i > 1 {
+            let m = i + (j - i) / 2;
+            if !present(m) {
+                j = m;
+            } else {
+                i = m;
+            }
+        }
+        i as i64
     }
 
     /// Returns the next key for this table in iteration order following the given `key`.
@@ -451,16 +478,19 @@ impl<'gc> RawTable<'gc> {
         &mut self.array
     }
 
-    /// Grow the array part of the table to accommodate for at *least* `additional` more elements.
+    /// Grow the array part of the table by exactly `additional` elements, as `luaH_resize` sizes
+    /// PUC-Lua's: the size of the array part decides which border `#` finds in a table with
+    /// holes, so it is not rounded up to whatever the allocator's growth would give. A caller
+    /// appending one element at a time grows it geometrically itself.
     ///
-    /// The array part always has a length equal to its capacity, but may have trailing nil values
-    /// at the end.
+    /// The array part may have trailing nil values at the end.
     ///
     /// The map part of the table is forbidden from having keys that could be in the array part, so
     /// this may move elements from the map part of the table into the array part.
     pub fn grow_array(&mut self, additional: usize) {
-        self.array.reserve(additional);
-        self.array.resize(self.array.capacity(), Value::Nil);
+        let size = self.array.len().saturating_add(additional);
+        self.array.reserve_exact(additional);
+        self.array.resize(size, Value::Nil);
 
         // We need to take any newly valid array keys from the map part.
         self.map.retain(|k, v| {

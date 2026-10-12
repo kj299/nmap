@@ -1,7 +1,8 @@
 //! `lpeg.match` against the C, case by case: the observable quirks of LPeg
 //! 0.12's compiler, matching machine and non-calling captures that a naive
 //! implementation gets wrong (M6.6 step c's brief, §5: C-Q1 to C-Q13, K-Q1
-//! to K-Q21, and the `R`/`T` rows).
+//! to K-Q21, and the `R`/`T` rows), and those `nse_lpeg_match` found since
+//! (`QF1`, step c's review; `QO1`, step d's).
 //!
 //! Each case is a chunk, named `=c`, run with LPeg's functions as globals
 //! and its results serialised by the oracle's `run.lua`; the answers are
@@ -1247,6 +1248,43 @@ const CASES: &[(&str, &str, bool, usize, &str)] = &[
         true,
         2,
         r##""a", {}"##,
+    ),
+    // 0.12's `coderep` codes the body of a loop it codes with a test under
+    // the `opt` it was given (`lpeg.c:1656`), and the first alternative of
+    // `p^2 + ""` is coded so: its loop's optional `"xy" + ""` becomes
+    // `IPartialCommit; "xy"` on the frame of the choice around the loop, and
+    // a `"xy"` that fails ends that choice at the position the partial commit
+    // saved, where PEG semantics go on looping (4, not 5, on "abcd"; without
+    // the choice, 5). Measured on the tree's oracle; the first is the
+    // `nse_lpeg_match` artefact `crash-bd846150...`
+    // (`lpeg-coderep-opt-reaches-a-test-loop`).
+    (
+        "QO1a",
+        r##"return match(((((P(1) / 1) * (P"acc" + P"")) ^ 2) + P"") / "%1-%0%%", "baaaaabaaabaabcabbaabcabc")"##,
+        true,
+        1,
+        r##""b-baa%""##,
+    ),
+    (
+        "QO1b",
+        r##"return match((P(1) * (P"xy" + ""))^2 + "", "abcd")"##,
+        true,
+        1,
+        r##"4"##,
+    ),
+    (
+        "QO1c",
+        r##"return match((P(1) * (P"xy" + ""))^2, "abcd")"##,
+        true,
+        1,
+        r##"5"##,
+    ),
+    (
+        "QO1d",
+        r##"return match(C((P(1) * (P"xy" + ""))^2 + "") * Cp(), "abcdef")"##,
+        true,
+        2,
+        r##""abc", 4"##,
     ),
 ];
 

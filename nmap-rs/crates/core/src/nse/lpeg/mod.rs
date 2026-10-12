@@ -19,14 +19,25 @@
 //!   table only this module can reach, never a user value a script can
 //!   replace (`lpeg-uservalue-type-confusion`).
 //!
-//! **What steps b and c port.** Every constructor and operator, `type`,
-//! `version`, `setmaxstack`, `locale`, the `ptree`/`pcode` stubs, the
-//! pattern metatable, and `match` with every capture that calls no Lua
-//! (`C`, `Cc`, `Cp`, `Ct`, `Cg`, `Cb`, `Carg`, `Cs`, `/string`, `/number`).
-//! A pattern with a capture that calls Lua (`Cmt`, a function, `/function`,
-//! `Cf`, `/table`) compiles, and its match fails closed with an error naming
-//! step d. The module is not registered — no script can `require` it (E9);
-//! [`register_for_tests`] installs it for the test suites only.
+//! **What it ports.** Every constructor and operator, `type`, `version`,
+//! `setmaxstack`, `locale`, the `ptree`/`pcode` stubs, the pattern
+//! metatable, and `match` with every capture: those that call no Lua (`C`,
+//! `Cc`, `Cp`, `Ct`, `Cg`, `Cb`, `Carg`, `Cs`, `/string`, `/number`, steps b
+//! and c) and those that do (`Cmt` and `P(function)`, `/function`, `Cf`,
+//! `/table`, step d). The module is not registered — no script can
+//! `require` it (E9); [`register_for_tests`] installs it for the test suites
+//! only, until step e.
+//!
+//! **Calling Lua.** Six things call Lua: a grammar table's `__index` (read
+//! for its initial rule), `locale(t)`'s `__newindex`, and, in a match, a
+//! match-time capture's function and the calls capture evaluation makes
+//! (`/function`, `Cf`, a `/table`'s `__index`). Each is a call through the VM
+//! (`SequencePoll::Call`): one C level, the callee's error passed on
+//! unchanged, a `coroutine.yield` in it allowed (`lpeg-callback-may-yield`;
+//! the C refuses it). A match keeps the values its match-time captures
+//! returned at the bottom of its own stack, as the C keeps them on the Lua
+//! stack, so they are traced with the thread and counted against
+//! `LUAI_MAXSTACK`.
 //!
 //! **Calls take time.** Building a grammar copies its rules and their
 //! constant tables and runs the verifier, `B` measures its pattern and `+`
@@ -91,7 +102,8 @@ use self::tree::{
     Tag, Tree, TreeError, VerifyGrammar, MAXBEHIND, MAXRULES, SHRT_MAX,
 };
 use self::vm::capture::{
-    CapCursor, CapEnv, CapError, CapVal, TableKey, View, FIXEDARGS, LUAI_MAXSTACK, TABLE_CHUNK,
+    CallKind, CallReq, CapCursor, CapEnv, CapError, CapVal, Step, TableKey, View, FIXEDARGS,
+    LUAI_MAXSTACK, TABLE_CHUNK,
 };
 use self::vm::{Capture, Vm, VmError, VmPoll};
 use super::nmaplib::{c_str, Fail};
@@ -2133,12 +2145,15 @@ fn init_position(ii: i64, len: usize) -> usize {
     }
 }
 
-/// A pattern's constants and a match's arguments, as capture evaluation
-/// sees them.
+/// A pattern's constants, a match's arguments and the values its match-time
+/// captures left in its window, as capture evaluation sees them.
 struct LuaEnv<'a, 'gc> {
     ctx: Context<'gc>,
     ktable: Option<Table<'gc>>,
     args: &'a [Value<'gc>],
+    /// The window: the dynamic values, orphans included, at the bottom of the
+    /// match's stack.
+    window: &'a [Value<'gc>],
 }
 
 impl<'gc> LuaEnv<'_, 'gc> {
@@ -2166,7 +2181,7 @@ impl<'gc> LuaEnv<'_, 'gc> {
     }
 }
 
-impl CapEnv for LuaEnv<'_, '_> {
+impl<'gc> CapEnv<Value<'gc>> for LuaEnv<'_, 'gc> {
     fn constant(&self, k: Key) -> View<'_> {
         self.view(self.constant_value(k))
     }
@@ -2188,6 +2203,17 @@ impl CapEnv for LuaEnv<'_, '_> {
             (x, y) => (raw_equal(x, y), 0),
         }
     }
+
+    fn dynamic(&self, i: Key) -> Option<Value<'gc>> {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| self.window.get(i))
+            .copied()
+    }
+
+    fn value(&self, v: Value<'gc>) -> View<'_> {
+        self.view(v)
+    }
 }
 
 /// Where a match is.
@@ -2201,25 +2227,99 @@ enum MStage {
     Subject,
     /// The matching machine.
     Run,
+    /// A match-time capture the machine closed: its values evaluated, then
+    /// its function called (`runtimecap`).
+    RunTime(vm::RunTime),
     /// Capture evaluation.
     Captures,
-    /// The tables the captures made, from this one.
-    Tables(usize),
+    /// The tables the captures made, those not made already.
+    Tables,
     /// Their contents: table `t`, from entry `e`.
     Fill(usize, usize),
     /// The values, from this one.
     Values(usize),
 }
 
-/// The refusal of a match whose pattern holds a capture that calls Lua
-/// (`lpeg-lua-calling-captures-refused`). The program-level check raises it
-/// before the match runs; the machine's and capture evaluation's checks
-/// behind it say the same.
-const STEP_D: &str = "lpeg: match-time and function captures are not implemented until M6.6 step d";
+/// What a call made from a match is for, and so what its results become.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Await {
+    /// A grammar's `__index`, for its initial rule (`getfirstrule`).
+    Grammar,
+    /// A match-time capture's function (`runtimecap`'s `lua_call`).
+    RunTime(vm::RunTime),
+    /// A call capture evaluation asked for (`/f`, `Cf`, `/table`'s
+    /// `__index`).
+    Capture(CallKind),
+}
+
+/// A call a match is making ready: its arguments, capture values, made Lua
+/// values a unit at a time — the tables among them made and filled, the
+/// tables they hold too — so that a call with many arguments or large tables
+/// is pre-empted like everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Prep {
+    purpose: Purpose,
+    /// The cursor's next value to make an argument of.
+    next: usize,
+    /// The table being filled, and its next entry.
+    filling: Option<(u32, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// A match-time capture's function, after the subject and the position.
+    RunTime(vm::RunTime),
+    /// A call capture evaluation asked for.
+    Capture(CallReq),
+}
+
+/// What making a call ready came to.
+enum Prepared<'gc> {
+    /// The budget ran out.
+    Pending,
+    /// Make this call.
+    Call(Function<'gc>, Vec<Value<'gc>>),
+    /// A query a raw read answered (no `__index` to call): evaluation goes
+    /// on.
+    Answered,
+}
+
+/// The function a call capture's or a match-time capture's constant holds:
+/// the constructors take nothing else (`lp_matchtime`, `lp_foldcapture`,
+/// `lp_divcapture` and `getpatt` check for a function).
+fn function_at<'gc>(p: &Pattern<'gc>, k: Key) -> Result<Function<'gc>, Failure<'gc>> {
+    match constant(p, k) {
+        Value::Function(f) => Ok(f),
+        _ => Err(Fail::err("lpeg: capture function lost").into()),
+    }
+}
+
+/// Drop what the stack holds past `n`.
+fn truncate(stack: &mut Stack<'_, '_>, n: usize) {
+    if stack.len() > n {
+        stack.drain(n..);
+    }
+}
 
 /// One call of `lpeg.match` (`lp_match`, `lpeg.c:3201`), from its arguments
 /// to its results: resumable at every stage (D3), inline when it fits in the
-/// fuel the VM has left.
+/// fuel the VM has left and calls no Lua.
+///
+/// **Calls** (step d). A match-time capture's function, and the calls
+/// capture evaluation asks for (`/f`, `Cf`, a `/table`'s `__index`), are
+/// made through the VM: the job returns [`Flow::Call`], becomes a
+/// [`Sequence`] if it was not one, and the poll that follows the call takes
+/// its results — one C level each (`SequencePoll::Call`), the error of a
+/// callback passed through unchanged (`Sequence::error` is not overridden),
+/// and a `coroutine.yield` in one suspending the match where it is
+/// (`lpeg-callback-may-yield`). The values match-time captures keep — the C
+/// keeps them on the Lua stack, at `lp_match`'s top — are the bottom of the
+/// sequence's own stack, the window, `[0, window)`: traced with the thread,
+/// counted against `LUAI_MAXSTACK` as the C's are (a call that cannot fit its
+/// frame above them is Lua's bare "stack overflow"), and a call's arguments
+/// go above them. Everything else a match holds across a call is its own:
+/// the program it took when it started (E3), indices, and the capture
+/// cursor, whose Lua values this job traces.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct MatchJob<'gc> {
@@ -2238,30 +2338,46 @@ struct MatchJob<'gc> {
     program: Option<Rc<Compiled>>,
     #[collect(require_static)]
     vm: Option<Box<Vm>>,
-    /// `setmaxstack`'s value, read once the subject is known. The C reads it
-    /// at every growth of the backtrack stack. In a match that calls no Lua
-    /// nothing can change it in between, except a `__gc` finalizer that a
-    /// collection during the growth runs and that calls `setmaxstack`; the
-    /// port never runs a `__gc` metamethod (`vm-gc-metamethods-never-run`),
-    /// so no Lua runs inside a match at step c, and one read is the C's
-    /// value throughout. A read per slice would let another script's
-    /// `setmaxstack` reach a match it pre-empted. (Step d re-reads it after
-    /// each call a callback makes: `docs/M6.6-ANALYSIS.md` §1.3.)
+    /// `setmaxstack`'s value, as the C reads it at every growth of the
+    /// backtrack stack: read when the subject is known, and again after
+    /// each call the match makes returns, a match-time capture's or one
+    /// capture evaluation makes, so a `setmaxstack` in a callback reaches
+    /// the match it runs in as in the C (`docs/M6.6-ANALYSIS.md` §1.3).
+    /// Nothing else can change it in the C (the port never runs a `__gc`
+    /// finalizer, `vm-gc-metamethods-never-run`), so it is not read again
+    /// when a match merely runs out of fuel: another script's `setmaxstack`
+    /// between slices does not reach it.
     #[collect(require_static)]
     maxstack: vm::MaxStack,
     #[collect(require_static)]
     caps: Vec<Capture>,
-    #[collect(require_static)]
-    cursor: Option<Box<CapCursor>>,
-    /// The stack slots in use below the captures' values.
+    /// Capture evaluation: of the match's values, or of a match-time
+    /// capture's.
+    cursor: Option<Box<CapCursor<Value<'gc>>>>,
+    /// The stack slots in use below the captures' values, the window not
+    /// counted.
     #[collect(require_static)]
     u0: usize,
+    /// The window: how many dynamic values the bottom of the sequence's
+    /// stack holds ([`Vm::dyn_top`]).
+    #[collect(require_static)]
+    window: usize,
+    /// The Lua tables the cursor's tables have become, by index.
     tables: Vec<Table<'gc>>,
     out: Vec<Value<'gc>>,
+    /// A call being made ready.
+    #[collect(require_static)]
+    prep: Option<Prep>,
+    /// Tables to fill before that call.
+    #[collect(require_static)]
+    fill: Vec<u32>,
+    /// Its arguments, made so far.
+    call_args: Vec<Value<'gc>>,
     /// A call to make on the first poll.
     call: Option<(Function<'gc>, Vec<Value<'gc>>)>,
+    /// What the call made is for.
     #[collect(require_static)]
-    awaiting: bool,
+    awaiting: Option<Await>,
     #[collect(require_static)]
     held: Held,
 }
@@ -2282,10 +2398,14 @@ impl<'gc> MatchJob<'gc> {
             caps: Vec::new(),
             cursor: None,
             u0: in_use.saturating_add(MATCH_SLOTS),
+            window: 0,
             tables: Vec::new(),
             out: Vec::new(),
+            prep: None,
+            fill: Vec::new(),
+            call_args: Vec::new(),
             call: None,
-            awaiting: false,
+            awaiting: None,
             held: Held::new(ctx.metrics().clone()),
         }
     }
@@ -2302,6 +2422,8 @@ impl<'gc> MatchJob<'gc> {
             self.cursor.as_ref().map_or(0, |c| c.heap_bytes()),
             b(self.tables.capacity(), std::mem::size_of::<Table<'_>>()),
             b(self.out.capacity(), std::mem::size_of::<Value<'_>>()),
+            b(self.fill.capacity(), std::mem::size_of::<u32>()),
+            b(self.call_args.capacity(), std::mem::size_of::<Value<'_>>()),
         ]
         .into_iter()
         .fold(0, usize::saturating_add)
@@ -2324,19 +2446,329 @@ impl<'gc> MatchJob<'gc> {
         }
     }
 
-    /// The value a call made for this job returned.
-    fn resume(&mut self, ctx: Context<'gc>, v: Value<'gc>) -> Result<(), Failure<'gc>> {
-        if let Some(g) = &mut self.grammar {
-            return g.resume(ctx, v);
+    /// The results of the call the job made, at `stack[window..]`, taken as
+    /// what the call was for wants them.
+    fn returned(
+        &mut self,
+        ctx: Context<'gc>,
+        stack: &mut Stack<'gc, '_>,
+        aw: Await,
+        spend: &mut Spend,
+    ) -> Result<(), Failure<'gc>> {
+        let lost = || Failure::Lua(Fail::err("lpeg: call lost"));
+        match aw {
+            // `lua_gettable` keeps one result.
+            Await::Grammar => {
+                let v = stack.get(0);
+                stack.clear();
+                match &mut self.grammar {
+                    Some(g) => g.resume(ctx, v),
+                    None => Err(lost()),
+                }
+            }
+            Await::RunTime(rt) => self.runtime_returned(stack, rt, spend),
+            Await::Capture(kind) => {
+                let w = self.window;
+                let cursor = self.cursor.as_mut().ok_or_else(lost)?;
+                let n = stack.len().saturating_sub(w);
+                spend.pay(u32::try_from(n).unwrap_or(u32::MAX));
+                let r = match kind {
+                    CallKind::Function => cursor.returned(&stack[w..]),
+                    // `lua_call(L, n + 1, 1)`: one result, nil for none.
+                    CallKind::Fold => cursor.returned(&[stack.get(w)]),
+                    // `lua_gettable`'s one result, and nil no value.
+                    CallKind::Query => match stack.get(w) {
+                        Value::Nil => cursor.returned(&[]),
+                        v => cursor.returned(&[v]),
+                    },
+                };
+                truncate(stack, w);
+                r.map_err(|e| cap_failure(ctx, None, e))
+            }
         }
+    }
+
+    /// A match-time capture's function returned, its results at
+    /// `stack[window..]` (`runtimecap` after its `lua_call`, then
+    /// `resdyncaptures` and `adddyncaptures`).
+    fn runtime_returned(
+        &mut self,
+        stack: &mut Stack<'gc, '_>,
+        rt: vm::RunTime,
+        spend: &mut Spend,
+    ) -> Result<(), Failure<'gc>> {
+        let lost = || Failure::Lua(Fail::err("lpeg: match lost"));
+        let len = self.subject()?.as_bytes().len();
+        let top = self.window;
+        let vm = self.vm.as_mut().ok_or_else(lost)?;
+        // The dynamic values from the first the capture's body held to the
+        // top as the call began, orphans included, are removed
+        // (`lua_remove`), and the results come down in their place.
+        let fr = match rt.first_dyn {
+            Some(id) if id <= top => {
+                stack.drain(id..top);
+                id
+            }
+            Some(_) => return Err(lost()),
+            None => top,
+        };
+        spend.pay(u32::try_from(top.saturating_sub(fr)).unwrap_or(u32::MAX));
+        let first = stack.get(fr);
+        if !first.to_bool() {
+            // `false`, `nil` or nothing: the capture fails.
+            truncate(stack, fr);
+            self.window = fr;
+            vm.runtime_failed(fr).map_err(vm_failure)?;
+        } else {
+            // `true` keeps the position; anything else is one, read with
+            // `lua_tointeger` (0 where it is none), less one, within the
+            // current position and the subject's end.
+            let s = if matches!(first, Value::Boolean(true)) {
+                rt.s
+            } else {
+                match first
+                    .to_integer()
+                    .unwrap_or(0)
+                    .checked_sub(1)
+                    .and_then(|p| usize::try_from(p).ok())
+                {
+                    Some(p) if p >= rt.s && p <= len => p,
+                    _ => {
+                        return Err(
+                            Fail::err("invalid position returned by match-time capture").into()
+                        )
+                    }
+                }
+            };
+            stack.remove(fr);
+            let n = stack.len().saturating_sub(fr);
+            spend.pay(u32::try_from(n).unwrap_or(u32::MAX));
+            did_steps(u64::try_from(n).unwrap_or(u64::MAX));
+            vm.runtime_kept(s, fr, n, &mut spend.budget)
+                .map_err(vm_failure)?;
+            self.window = fr.saturating_add(n);
+        }
+        self.cursor = None;
+        self.tables.clear();
+        self.stage = MStage::Run;
         Ok(())
     }
 
+    /// Start making a call ready for `purpose`, its arguments from the
+    /// cursor's value `from` on.
+    fn start_call(&mut self, purpose: Purpose, from: usize) {
+        self.call_args.clear();
+        self.fill.clear();
+        self.prep = Some(Prep {
+            purpose,
+            next: from,
+            filling: None,
+        });
+    }
+
+    /// Make the call [`MatchJob::prep`] describes ready, within `spend`.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one resumable routine: tables, arguments, fills, the call"
+    )]
+    fn prepare(
+        &mut self,
+        ctx: Context<'gc>,
+        spend: &mut Spend,
+    ) -> Result<Prepared<'gc>, Failure<'gc>> {
+        let lost = || Failure::Lua(Fail::err("lpeg: call lost"));
+        let mut prep = self.prep.ok_or_else(lost)?;
+        let p = self.pattern(ctx)?;
+        let subj = self.subject()?;
+        let Some(cursor) = self.cursor.as_mut() else {
+            return Err(lost());
+        };
+        let out_of_fuel = |spend: &Spend| spend.budget == 0 || ctx.collection_requested();
+        // A Lua table for each table the cursor has made, a unit each, so
+        // that every table a value names exists, wherever it is filled from.
+        while self.tables.len() < cursor.tables() {
+            if out_of_fuel(spend) {
+                self.prep = Some(prep);
+                return Ok(Prepared::Pending);
+            }
+            spend.budget = spend.budget.saturating_sub(1);
+            did_steps(1);
+            if grow(&mut self.tables, 1) == Grown::Refused {
+                return Err(Failure::Memory);
+            }
+            self.tables.push(Table::new(&ctx));
+        }
+        // The arguments, a value a unit (and its text a unit per
+        // `BYTES_PER_FUEL` bytes).
+        while let Some(&v) = cursor.values().get(prep.next) {
+            if out_of_fuel(spend) {
+                self.prep = Some(prep);
+                return Ok(Prepared::Pending);
+            }
+            if let CapVal::Table(t) = v {
+                if grow(&mut self.fill, 1) == Grown::Refused {
+                    return Err(Failure::Memory);
+                }
+                self.fill.push(t);
+            }
+            let value = Self::value(ctx, p, subj, cursor, &self.args, &self.tables, v, spend);
+            if grow(&mut self.call_args, 1) == Grown::Refused {
+                return Err(Failure::Memory);
+            }
+            self.call_args.push(value);
+            prep.next = prep.next.saturating_add(1);
+        }
+        // The tables among them filled, and the tables those hold, an entry a
+        // unit, each given back to the cursor once filled.
+        loop {
+            let (t, e) = match prep.filling {
+                Some(at) => at,
+                None => match self.fill.pop() {
+                    Some(t) => (t, 0),
+                    None => break,
+                },
+            };
+            let Some((k, v)) = cursor.table_entry(t, e) else {
+                cursor.free_table(t);
+                prep.filling = None;
+                continue;
+            };
+            if out_of_fuel(spend) {
+                prep.filling = Some((t, e));
+                self.prep = Some(prep);
+                return Ok(Prepared::Pending);
+            }
+            if let CapVal::Table(u) = v {
+                if grow(&mut self.fill, 1) == Grown::Refused {
+                    return Err(Failure::Memory);
+                }
+                self.fill.push(u);
+            }
+            let key = match k {
+                TableKey::Int(i) => Value::Integer(i),
+                TableKey::K(k) => constant(p, k),
+            };
+            let value = Self::value(ctx, p, subj, cursor, &self.args, &self.tables, v, spend);
+            let table = usize::try_from(t)
+                .ok()
+                .and_then(|t| self.tables.get(t))
+                .ok_or_else(lost)?;
+            table
+                .set_raw(&ctx, key, value)
+                .map_err(|e| key_failure(ctx, e))?;
+            let e = e.saturating_add(1);
+            if e % TABLE_CHUNK == 0 {
+                cursor.give_back(t, e);
+            }
+            prep.filling = Some((t, e));
+        }
+        // The call, a unit.
+        self.prep = None;
+        spend.pay(1);
+        did_steps(1);
+        let args = std::mem::take(&mut self.call_args);
+        match prep.purpose {
+            Purpose::RunTime(rt) => {
+                self.awaiting = Some(Await::RunTime(rt));
+                Ok(Prepared::Call(function_at(p, rt.key)?, args))
+            }
+            Purpose::Capture(req) => match req.kind {
+                CallKind::Function | CallKind::Fold => {
+                    self.awaiting = Some(Await::Capture(req.kind));
+                    Ok(Prepared::Call(function_at(p, req.key)?, args))
+                }
+                // `lua_gettable(t, key)`: a raw hit, a chain of `__index`
+                // tables, or a call of an `__index` function.
+                CallKind::Query => {
+                    let key = args.first().copied().unwrap_or(Value::Nil);
+                    match meta_ops::index(ctx, constant(p, req.key), key)
+                        .map_err(|e| Failure::Raised(e.into()))?
+                    {
+                        MetaResult::Value(v) => {
+                            let r = if v.is_nil() {
+                                cursor.returned(&[])
+                            } else {
+                                cursor.returned(&[v])
+                            };
+                            r.map_err(|e| cap_failure(ctx, p.ktable(), e))?;
+                            Ok(Prepared::Answered)
+                        }
+                        MetaResult::Call(call) => {
+                            self.awaiting = Some(Await::Capture(CallKind::Query));
+                            Ok(Prepared::Call(call.function, call.args.to_vec()))
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// Capture evaluation, of a match-time capture's values or of the
+    /// match's, until it is done (`None`: the next stage), the budget runs
+    /// out or a call is to be made.
+    fn evaluate(
+        &mut self,
+        ctx: Context<'gc>,
+        stack: &Stack<'gc, '_>,
+        spend: &mut Spend,
+    ) -> Result<Option<Flow<'gc, Vec<Value<'gc>>>>, Failure<'gc>> {
+        let lost = || Failure::Lua(Fail::err("lpeg: captures lost"));
+        loop {
+            if self.prep.is_some() {
+                match self.prepare(ctx, spend)? {
+                    Prepared::Pending => return Ok(Some(Flow::Pending)),
+                    Prepared::Call(f, args) => return Ok(Some(Flow::Call(f, args))),
+                    Prepared::Answered => continue,
+                }
+            }
+            let p = self.pattern(ctx)?;
+            let subj = self.subject()?;
+            let env = LuaEnv {
+                ctx,
+                ktable: p.ktable(),
+                args: &self.args,
+                window: &stack[..self.window.min(stack.len())],
+            };
+            let caps: &[Capture] = match self.stage {
+                MStage::RunTime(_) => self.vm.as_ref().ok_or_else(lost)?.captures(),
+                _ => &self.caps,
+            };
+            let cursor = self.cursor.as_mut().ok_or_else(lost)?;
+            let r = cursor.run_step(caps, subj.as_bytes(), &env, &mut spend.budget);
+            spend.charge(cursor.take_over());
+            match r {
+                Ok(Step::Pending) => return Ok(Some(Flow::Pending)),
+                Ok(Step::Call(req)) => self.start_call(Purpose::Capture(req), req.args),
+                Ok(Step::Done) => match self.stage {
+                    // The subject (as converted) and the position after the
+                    // body, then the capture's values.
+                    MStage::RunTime(rt) => {
+                        let pos = i64::try_from(rt.s).unwrap_or(i64::MAX).saturating_add(1);
+                        self.start_call(Purpose::RunTime(rt), 0);
+                        if grow(&mut self.call_args, 2) == Grown::Refused {
+                            return Err(Failure::Memory);
+                        }
+                        self.call_args.push(Value::String(subj));
+                        self.call_args.push(Value::Integer(pos));
+                    }
+                    _ => {
+                        self.caps = Vec::new();
+                        self.stage = MStage::Tables;
+                        return Ok(None);
+                    }
+                },
+                Err(e) => return Err(cap_failure(ctx, p.ktable(), e)),
+            }
+        }
+    }
+
     /// Run until done, out of budget, or waiting on a call.
+    #[allow(clippy::too_many_lines, reason = "one stage machine, each stage short")]
     fn advance(
         &mut self,
         ctx: Context<'gc>,
         spend: &mut Spend,
+        stack: &mut Stack<'gc, '_>,
     ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         loop {
             match self.stage {
@@ -2350,7 +2782,10 @@ impl<'gc> MatchJob<'gc> {
                                 self.stage = MStage::Code;
                             }
                             Flow::Pending => return Ok(Flow::Pending),
-                            Flow::Call(f, args) => return Ok(Flow::Call(f, args)),
+                            Flow::Call(f, args) => {
+                                self.awaiting = Some(Await::Grammar);
+                                return Ok(Flow::Call(f, args));
+                            }
                         }
                         continue;
                     }
@@ -2372,7 +2807,8 @@ impl<'gc> MatchJob<'gc> {
                     }
                 }
                 // The program, compiled lazily and kept on the pattern only
-                // once it is whole (E13); then this match's own handle to it.
+                // once it is whole (E13); then this match's own handle to it,
+                // the only one it reads from then on (E3).
                 MStage::Code => {
                     let p = self.pattern(ctx)?;
                     if self.program.is_none() {
@@ -2394,11 +2830,6 @@ impl<'gc> MatchJob<'gc> {
                                 self.compiler = None;
                             }
                         }
-                    }
-                    // Captures that call Lua are step d's: refuse rather than
-                    // guess.
-                    if self.program.as_ref().is_some_and(|c| c.program.calls_lua()) {
-                        return Err(Fail::err(STEP_D).into());
                     }
                     self.stage = MStage::Subject;
                 }
@@ -2432,56 +2863,64 @@ impl<'gc> MatchJob<'gc> {
                         .vm
                         .as_mut()
                         .ok_or(Failure::Lua(Fail::err("lpeg: match lost")))?;
-                    match vm
+                    let r = vm
                         .run(
                             &compiled.program,
                             subj.as_bytes(),
                             self.maxstack,
                             &mut spend.budget,
                         )
-                        .map_err(vm_failure)?
-                    {
+                        .map_err(vm_failure)?;
+                    // A failure drops the dynamic values of the captures it
+                    // drops (`removedyncap`): the window keeps what the
+                    // machine says.
+                    self.window = vm.dyn_top();
+                    truncate(stack, self.window);
+                    match r {
                         VmPoll::Pending => return Ok(Flow::Pending),
                         VmPoll::Done(None) => return Ok(Flow::Done(vec![Value::Nil])),
                         VmPoll::Done(Some(end)) => {
                             self.caps = vm.take_captures();
-                            self.vm = None;
-                            self.cursor = Some(Box::new(CapCursor::new(end, self.u0, self.ptop)));
+                            self.cursor = Some(Box::new(CapCursor::with_values(
+                                end,
+                                self.u0.saturating_add(self.window),
+                                self.ptop,
+                            )));
+                            self.tables.clear();
                             self.stage = MStage::Captures;
                         }
-                    }
-                }
-                MStage::Captures => {
-                    let p = self.pattern(ctx)?;
-                    let subj = self.subject()?;
-                    let env = LuaEnv {
-                        ctx,
-                        ktable: p.ktable(),
-                        args: &self.args,
-                    };
-                    let cursor = self
-                        .cursor
-                        .as_mut()
-                        .ok_or(Failure::Lua(Fail::err("lpeg: captures lost")))?;
-                    let r = cursor.step(&self.caps, subj.as_bytes(), &env, &mut spend.budget);
-                    spend.charge(cursor.take_over());
-                    match r {
-                        Ok(None) => return Ok(Flow::Pending),
-                        Ok(Some(())) => {
-                            self.caps = Vec::new();
-                            self.stage = MStage::Tables(0);
+                        // `runtimecap`: `luaL_checkstack(L, 4, ...)`, then
+                        // the function, the subject and the position are
+                        // pushed below the capture's values.
+                        VmPoll::RunTime(rt) => {
+                            let at = self.u0.saturating_add(self.window);
+                            if at.saturating_add(4) > LUAI_MAXSTACK {
+                                return Err(Fail::err(
+                                    "stack overflow (too many runtime captures)",
+                                )
+                                .into());
+                            }
+                            self.cursor = Some(Box::new(CapCursor::nested_at(
+                                rt.open,
+                                at.saturating_add(3),
+                                self.ptop,
+                            )));
+                            self.tables.clear();
+                            self.stage = MStage::RunTime(rt);
                         }
-                        Err(e) => return Err(cap_failure(ctx, &env, e)),
                     }
                 }
-                // The tables, made in the order the captures made them, a
-                // unit each; then what each holds, in order.
-                MStage::Tables(i) => {
+                MStage::RunTime(_) | MStage::Captures => {
+                    if let Some(r) = self.evaluate(ctx, stack, spend)? {
+                        return Ok(r);
+                    }
+                }
+                // The tables the captures made and no call has made already,
+                // in order, a unit each; then what each holds, in order.
+                MStage::Tables => {
                     let n = self.cursor.as_ref().map_or(0, |c| c.tables());
-                    let mut i = i;
-                    while i < n {
+                    while self.tables.len() < n {
                         if spend.budget == 0 || ctx.collection_requested() {
-                            self.stage = MStage::Tables(i);
                             return Ok(Flow::Pending);
                         }
                         spend.budget = spend.budget.saturating_sub(1);
@@ -2490,13 +2929,13 @@ impl<'gc> MatchJob<'gc> {
                             return Err(Failure::Memory);
                         }
                         self.tables.push(Table::new(&ctx));
-                        i = i.saturating_add(1);
                     }
                     self.stage = MStage::Fill(0, 0);
                 }
                 // Each table's contents, in order. What the cursor holds for a
                 // table goes as the table fills, a chunk at a time, so the
                 // cursor's list and the Lua table are not both whole at once.
+                // A table a call took was filled then, and reads as empty.
                 MStage::Fill(t, e) => {
                     let (mut t, mut e) = (t, e);
                     let p = self.pattern(ctx)?;
@@ -2537,12 +2976,11 @@ impl<'gc> MatchJob<'gc> {
                 MStage::Values(i) => {
                     let p = self.pattern(ctx)?;
                     let subj = self.subject()?;
-                    let Some(cursor) = self.cursor.as_ref() else {
+                    let Some(cursor) = self.cursor.as_mut() else {
                         return Err(Fail::err("lpeg: captures lost").into());
                     };
-                    let vals = cursor.values();
                     let mut i = i;
-                    while let Some(&v) = vals.get(i) {
+                    while let Some(&v) = cursor.values().get(i) {
                         if spend.budget == 0 || ctx.collection_requested() {
                             self.stage = MStage::Values(i);
                             return Ok(Flow::Pending);
@@ -2566,6 +3004,11 @@ impl<'gc> MatchJob<'gc> {
     /// unit per [`BYTES_PER_FUEL`] bytes more (hashed, compared with the
     /// strings of its hash, copied), charged in full before it is made — a
     /// string is made whole, past the budget if it must ([`Spend::over`]).
+    /// Each value is made once — a call's argument or a query's key, a
+    /// table's assignment, a result — and a string the cursor built for it
+    /// is given back then ([`CapCursor::consumed`]): the C's is garbage once
+    /// the call it went to returns, and a string kept for each of `n` calls
+    /// held `n` times what the C holds (the step d review's F2).
     #[allow(
         clippy::too_many_arguments,
         reason = "the job's fields, borrowed apart"
@@ -2574,10 +3017,10 @@ impl<'gc> MatchJob<'gc> {
         ctx: Context<'gc>,
         p: &'gc Pattern<'gc>,
         subj: piccolo::String<'gc>,
-        cursor: &CapCursor,
+        cursor: &mut CapCursor<Value<'gc>>,
         args: &[Value<'gc>],
         tables: &[Table<'gc>],
-        v: CapVal,
+        v: CapVal<Value<'gc>>,
         spend: &mut Spend,
     ) -> Value<'gc> {
         let text = match v {
@@ -2590,7 +3033,9 @@ impl<'gc> MatchJob<'gc> {
         did_steps(1);
         did_bytes(bytes);
         if let Some(text) = text {
-            return Value::String(ctx.intern(text));
+            let s = Value::String(ctx.intern(text));
+            cursor.consumed(v);
+            return s;
         }
         match v {
             CapVal::Int(i) => Value::Integer(i),
@@ -2604,16 +3049,22 @@ impl<'gc> MatchJob<'gc> {
             CapVal::Table(t) => tables
                 .get(usize::try_from(t).unwrap_or(usize::MAX))
                 .map_or(Value::Nil, |t| Value::Table(*t)),
-            CapVal::Nil | CapVal::Buf | CapVal::Str(..) | CapVal::Bytes(_) => Value::Nil,
+            CapVal::Lua(v) => v,
+            CapVal::Nil | CapVal::Buf | CapVal::Callee | CapVal::Str(..) | CapVal::Bytes(_) => {
+                Value::Nil
+            }
         }
     }
 
     /// [`MatchJob::advance`] with the fuel the VM has left, at least
-    /// [`MIN_STEPS`] steps; as [`Job::run`].
+    /// [`MIN_STEPS`] steps, first taking the results of the call it made
+    /// (`awaited`); as [`Job::run`].
     fn run(
         &mut self,
         ctx: Context<'gc>,
         exec: &mut Execution<'gc, '_>,
+        stack: &mut Stack<'gc, '_>,
+        awaited: Option<Await>,
     ) -> Result<Flow<'gc, Vec<Value<'gc>>>, Failure<'gc>> {
         let fuel = exec.fuel();
         let start = u32::try_from(fuel.remaining()).unwrap_or(0).max(MIN_STEPS);
@@ -2623,7 +3074,16 @@ impl<'gc> MatchJob<'gc> {
             work: 0,
         };
         let meter = meter_enter(ctx);
-        let r = self.advance(ctx, &mut spend);
+        let r = match awaited {
+            Some(aw) => self.returned(ctx, stack, aw, &mut spend),
+            None => Ok(()),
+        };
+        // A callback may have called `setmaxstack`: the C reads it at the
+        // next growth.
+        if awaited.is_some() && self.vm.is_some() && r.is_ok() {
+            self.maxstack = max_stack(ctx);
+        }
+        let r = r.and_then(|()| self.advance(ctx, &mut spend, stack));
         self.held.absorb(meter.finish());
         let used = u64::from(start.saturating_sub(spend.budget)).saturating_add(spend.over);
         fuel.consume(i32::try_from(used).unwrap_or(i32::MAX));
@@ -2641,23 +3101,18 @@ impl<'gc> Sequence<'gc> for MatchJob<'gc> {
         mut stack: Stack<'gc, '_>,
     ) -> Result<SequencePoll<'gc>, Error<'gc>> {
         let this = self.get_mut();
+        // The call the match found it needed while it ran as a callback:
+        // its arguments above the window (empty then), one C level.
         if let Some((f, args)) = this.call.take() {
-            stack.clear();
+            truncate(&mut stack, this.window);
             stack.extend(args);
-            this.awaiting = true;
             return Ok(SequencePoll::Call {
-                bottom: 0,
+                bottom: this.window,
                 function: f,
             });
         }
-        if std::mem::take(&mut this.awaiting) {
-            let v = stack.get(0);
-            stack.clear();
-            if let Err(e) = this.resume(ctx, v) {
-                return Err(raise(ctx, &exec, Func::Match, e));
-            }
-        }
-        match this.run(ctx, &mut exec) {
+        let awaited = this.awaiting.take();
+        match this.run(ctx, &mut exec, &mut stack, awaited) {
             Ok(Flow::Done(vs)) => {
                 stack.clear();
                 stack.extend(vs);
@@ -2665,11 +3120,10 @@ impl<'gc> Sequence<'gc> for MatchJob<'gc> {
             }
             Ok(Flow::Pending) => Ok(SequencePoll::Pending),
             Ok(Flow::Call(f, args)) => {
-                stack.clear();
+                truncate(&mut stack, this.window);
                 stack.extend(args);
-                this.awaiting = true;
                 Ok(SequencePoll::Call {
-                    bottom: 0,
+                    bottom: this.window,
                     function: f,
                 })
             }
@@ -2702,20 +3156,27 @@ fn vm_failure<'gc>(e: VmError) -> Failure<'gc> {
         VmError::TooManyPending => Failure::Lua(Fail::err("too many pending calls/choices")),
         VmError::TooManyCaptures => Failure::Lua(Fail::err("too many captures")),
         VmError::NotEnoughMemory => Failure::Memory,
-        VmError::RunTime => Failure::Lua(Fail::err(STEP_D)),
         VmError::Malformed => Failure::Lua(Fail::err("lpeg: malformed program")),
     }
 }
 
-/// A [`CapError`] in the C's words.
-fn cap_failure<'gc>(ctx: Context<'gc>, env: &LuaEnv<'_, 'gc>, e: CapError) -> Failure<'gc> {
+/// A [`CapError`] in the C's words, naming a group by its constant in
+/// `ktable`.
+fn cap_failure<'gc>(ctx: Context<'gc>, ktable: Option<Table<'gc>>, e: CapError) -> Failure<'gc> {
     let f = |m: String| Failure::Lua(Fail::err(m));
     match e {
         CapError::StackOverflow => f("stack overflow (too many captures)".into()),
+        // Lua's own, raised as the stack grows (`luaD_growstack`), from
+        // inside a C function: no position.
+        CapError::LuaStackOverflow => Failure::Raised(lua_error_bytes(ctx, b"stack overflow")),
         CapError::BackrefNotFound(k) => {
             // `lua_tostring` of the name, printed with `%s`.
             let mut m = b"back reference '".to_vec();
-            match env.constant_value(k).into_string(ctx) {
+            let name = match (k, ktable) {
+                (0, _) | (_, None) => Value::Nil,
+                (k, Some(t)) => t.get_raw(Value::Integer(i64::from(k))),
+            };
+            match name.into_string(ctx) {
                 Some(s) => m.extend_from_slice(c_str(s.as_bytes())),
                 None => m.extend_from_slice(b"(null)"),
             }
@@ -2731,7 +3192,9 @@ fn cap_failure<'gc>(ctx: Context<'gc>, env: &LuaEnv<'_, 'gc>, e: CapError) -> Fa
         }
         CapError::BufferTooLarge => f("buffer too large".into()),
         CapError::NotEnoughMemory => Failure::Memory,
-        CapError::CallsLua => Failure::Lua(Fail::err(STEP_D)),
+        CapError::NoInitialFold => f("no initial value for fold capture".into()),
+        // Only a cursor that cannot call refuses one; the binding's calls.
+        CapError::CallsLua => f("lpeg: capture call refused".into()),
         CapError::Malformed => f("lpeg: malformed capture list".into()),
     }
 }
@@ -2760,7 +3223,7 @@ fn callback<'gc>(ctx: Context<'gc>, func: Func) -> Callback<'gc> {
         if func == Func::Match {
             let in_use = stack_in_use(&stack);
             let mut job = MatchJob::new(ctx, stack.drain(..).collect(), in_use);
-            return match job.run(ctx, &mut exec) {
+            return match job.run(ctx, &mut exec, &mut stack, None) {
                 Ok(Flow::Done(vs)) => {
                     stack.extend(vs);
                     Ok(CallbackReturn::Return)
@@ -2853,9 +3316,8 @@ fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 /// (the state's `package.loaded`), and return it.
 ///
 /// No script can reach the module yet (E9): the NSE runtime never calls this
-/// (`runtime::tests::lpeg_is_not_registered`), and `match` here refuses the
-/// captures that call Lua ("not implemented until M6.6 step d"). Step e
-/// registers the module for real, when every capture kind works.
+/// (`runtime::tests::lpeg_is_not_registered`). Step e registers the module
+/// for real.
 pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) -> Table<'gc> {
     let lib = open(ctx);
     if let Some(loaded) = loaded {
@@ -2865,11 +3327,11 @@ pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) ->
 }
 
 /// The value `setmaxstack` stored (`lpeg-maxstack`), as given: `100.0` until
-/// a script calls it. A match reads it once, when it starts. The C reads it
-/// at every growth of the backtrack stack, where the only Lua that can run
-/// in between in a match that calls none is a `__gc` finalizer the growth's
-/// allocation collects for, which the port never runs
-/// (`vm-gc-metamethods-never-run`).
+/// a script calls it. A match reads it when it starts and again after each
+/// call it makes returns. The C reads it at every growth of the backtrack
+/// stack, where the only Lua that can have run since is a callback the match
+/// called, or a `__gc` finalizer the growth's allocation collects for, which
+/// the port never runs (`vm-gc-metamethods-never-run`).
 #[must_use]
 pub fn max_stack_value<'gc>(ctx: Context<'gc>) -> Value<'gc> {
     registry(ctx).store.get_value(ctx, "maxstack")
@@ -3030,6 +3492,55 @@ mod tests {
         assert_eq!(
             to_integer_or_zero(Value::Number(-9_223_372_036_854_775_808.0)),
             i64::MIN
+        );
+    }
+
+    /// Matching with the captures that call Lua, through the VM (step d;
+    /// under Miri, the binding's calls, its window and the cursor's Lua
+    /// values): the brief's F28 call order, N04 a backtrack dropping a
+    /// match-time capture's value, N07 an and-predicate dropping its entry,
+    /// C05 a fold, Q04 a query's `__index`, E01 an error object, X01 a
+    /// nested match, X11 a collection in a callback, and a callback's yield
+    /// (`lpeg-callback-may-yield`).
+    #[test]
+    fn the_binding_calls_lua_as_the_c_does() {
+        let got = run("local C, Cmt, Cf, Cc = lpeg.C, lpeg.Cmt, lpeg.Cf, lpeg.Cc \
+             local log = {} \
+             local f = function(tag) return function(...) log[#log + 1] = tag return ... end end \
+             local p = Cmt((C(1) / f'a') * Cmt(C(1) / f'b', function(s, i, v) \
+                 log[#log + 1] = 'cmt-in' return true, v end), \
+               function(s, i, ...) log[#log + 1] = 'cmt-out' return true, ... end) / f'post' \
+             lpeg.match(p, 'xy') \
+             local t = {} \
+             local ok, e = pcall(lpeg.match, Cmt(1, function() error(t) end), 'a') \
+             local co = coroutine.wrap(function() \
+               return lpeg.match(C'a' / function(c) return coroutine.yield(c) end, 'a') end) \
+             local y = co() \
+             return table.concat(log, ' '), \
+               tostring(lpeg.match(Cmt(1, function() return true, 'x' end) * 'b' + C(1), 'ac')), \
+               tostring(lpeg.match(#Cmt(1, function() return true, 'x' end) * C(1), 'a')), \
+               tostring(lpeg.match(Cf(Cc(1, 2) * Cc(3), function(a, b) return a + b end), '')), \
+               tostring(lpeg.match(C(1) / setmetatable({}, { __index = function(_, k) \
+                 return k:upper() end }), 'a')), \
+               tostring(rawequal(e, t)), \
+               tostring(lpeg.match(Cmt(1, function(s, i) return true, lpeg.match(C(1), s, i) end), 'ab')), \
+               tostring(select(2, lpeg.match(Cmt(1, function() collectgarbage() return true, {} end) \
+                 * C(1), 'ab'))), \
+               y, co('Z')");
+        assert_eq!(
+            got,
+            [
+                "b cmt-in a cmt-out post",
+                "a",
+                "a",
+                "4",
+                "A",
+                "true",
+                "b",
+                "b",
+                "a",
+                "Z"
+            ]
         );
     }
 

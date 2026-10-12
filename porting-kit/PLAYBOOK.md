@@ -370,6 +370,9 @@ Then the loop — each step is a CI-enforced gate:
    is deterministically re-checked on every future run, and give the parser modules
    sitting on the untrusted boundary a longer budget than the 60s CI smoke at least
    once per milestone. The seed corpus is the port's accumulating regression memory.
+   Re-run every crash artefact on HEAD before deleting or dismissing it, whatever
+   run is thought to have written it: one filed as a sabotage leftover was a real C
+   quirk the target's oracle did not model (LESSONS #039).
 4. **Sanitize** (`harnesses/sanitizers/run_sanitizers.sh`): Miri over the pure
    logic and, for the `sys` layer, ASan (and TSan if threaded). winlsof's
    worker-thread hang fix is exactly the class TSan/Miri reasoning catches.

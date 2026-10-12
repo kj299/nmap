@@ -10,6 +10,7 @@ use gc_arena::{
 use thiserror::Error;
 
 use crate::{
+    budget,
     closure::{UpValue, UpValueState},
     fuel::count_fuel,
     limits::{CallLimit, LUAI_MAXCCALLS, LUAI_MAXCCALLS_ERR, LUAI_MAXSTACK},
@@ -820,6 +821,23 @@ impl<'gc, 'a> LuaFrame<'gc, 'a> {
 
         self.fuel
             .consume(count_fuel(Self::FUEL_PER_ITEM, set_count));
+        // `OP_SETLIST`: the array part is made exactly as long as the last
+        // index set (`luaH_resizearray`), all at once, and every value is
+        // stored into it, nils included, so that `#` finds the border C does.
+        if let Some(last) = usize::try_from(start)
+            .ok()
+            .and_then(|s| s.checked_add(set_count))
+        {
+            let mut table = table.into_inner().borrow_mut(mc);
+            let size = table.raw_table.array().len();
+            if last > size {
+                let additional = last - size;
+                // Refused, the elements are set one at a time, as before.
+                if budget::allows(additional.saturating_mul(std::mem::size_of::<Value<'gc>>())) {
+                    table.raw_table.grow_array(additional);
+                }
+            }
+        }
         for i in 0..set_count {
             if let Some(inc) = start.checked_add(1) {
                 start = inc;

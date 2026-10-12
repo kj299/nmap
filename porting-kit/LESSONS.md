@@ -1149,6 +1149,26 @@ These entries are the M2 retrospective.
   before mutating and puts them back from that copy.
 - **Section amended:** PLAYBOOK · Phase 4.
 
+## 039. A fuzz artefact filed as a sabotage leftover was a real finding
+
+- **Date:** 2026-10-11
+- **Codebase:** nmap — M6.6 step d
+- **What happened:** A crash file in `fuzz/artifacts/nse_lpeg_match/`, written
+  during step c's fix round while sabotages were running, was recorded as a
+  sabotage leftover and left in place. When step d's fix round was told to
+  confirm that and delete it, it reproduced on the unsabotaged code: LPeg
+  0.12's `coderep` passes `opt` into a loop body coded with a test, so an
+  optional choice there partially commits the enclosing one, and C answers
+  4 where PEG semantics give 5. The port matched C; the fuzz target's
+  reference interpreter did not model the quirk. A real C behaviour sat
+  unpinned and unledgered for a day because of a label nobody had checked.
+- **Root cause:** An artefact's origin was inferred from when it was
+  written, not established by running it on the code as it stands.
+- **Kit change:** PLAYBOOK Phase 4, step 3: re-run every crash artefact on
+  HEAD before deleting or dismissing it; one that reproduces is triaged like
+  any other finding (pinned, seeded, ledgered).
+- **Section amended:** PLAYBOOK · Phase 4.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole

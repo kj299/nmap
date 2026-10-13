@@ -37,6 +37,15 @@ subtle algorithm bug also has. nmap's port ranking matched for the top 250
 ports and diverged at 500, which read as a tie-break bug and was two versions
 of nmap-services disagreeing about one port's ratio.
 
+TOLERANCES ARE SCOPED, AND THEIR MEMBERSHIP IS PINNED (LESSONS #048). A rule that
+makes a ledgered difference compare equal (`--tolerances FILE`, [[tolerance]]
+entries; see normalize.py) applies only to the case ids it lists. A listed case
+that now matches WITHOUT its tolerance fails as STALE-TOLERANCE: the port has
+changed, so the ledger entry and the tolerance must be revisited, not left to
+widen silently. nmap's LPeg corpus tried its tolerances on every differing row;
+they reached 5,906 rows, and an argument-number regression passed on all of
+them.
+
 Two comparison modes:
   * same-binary-both-platforms: --oracle and --rust are real binaries.
   * oracle-substitution: when the reference can't run here, point --oracle at a
@@ -51,10 +60,11 @@ Matrix (TOML or JSON): a list of cases, each with a name and argv, e.g.
 
 Usage:
   diff_run.py --oracle PATH --rust PATH --matrix FILE [--ledger DIVERGENCES.md]
-              [--sort] [--mask-numbers] [--update-ledger] [--json]
+              [--tolerances FILE] [--sort] [--mask-numbers] [--json]
   diff_run.py --self-test
 
-Exit: 0 = all match or all divergences are ledgered; 1 = unexplained divergence.
+Exit: 0 = all match or all divergences are ledgered; 1 = unexplained divergence
+      or a stale tolerance.
 """
 from __future__ import annotations
 
@@ -132,23 +142,31 @@ def require_binary(path, label):
         sys.exit(f"error: --{label} is not executable: {path!r}")
 
 
-def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exit=False):
+def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exit=False,
+            tolerances=()):
     known = load_ledger(ledger)
     results = []
     for case in matrix:
         name = case["name"]
         o_out, o_rc = run_one(oracle_bin, case)
         r_out, r_rc = run_one(rust_bin, case)
-        norm = lambda t: N.normalize_text(t, sort=sort, strip_blank=True, mask_numbers=mask_numbers)
-        o_n, r_n = norm(o_out), norm(r_out)
+        norm = lambda t, tol=(): N.normalize_text(t, sort=sort, strip_blank=True,
+                                                   mask_numbers=mask_numbers,
+                                                   case_id=name, scoped=tol)
+        o_n, r_n = norm(o_out, tolerances), norm(r_out, tolerances)
+        used = [t[0] for t in tolerances if name in t[3]]
         # Fidelity is stdout AND exit code: a rewrite that prints the right thing
         # but returns the wrong status (lsof exits 1 on no-match; scripts branch
         # on it) is NOT a match. Exit-code drift was a real winlsof bug.
         # (LESSONS #4). `--ignore-exit` opts out for tools without stable codes.
         stdout_match = o_n == r_n
         exit_match = ignore_exit or (o_rc == r_rc)
-        if stdout_match and exit_match:
-            verdict = "MATCH"
+        if stdout_match and exit_match and used and norm(o_out) == norm(r_out):
+            # Pinned membership: a listed case that no longer needs its
+            # tolerance means the port changed under the ledger entry.
+            verdict = "STALE-TOLERANCE"
+        elif stdout_match and exit_match:
+            verdict = "MATCH(tolerated)" if used else "MATCH"
         elif name in known:
             verdict = "DIVERGE(ledgered)"
         else:
@@ -157,10 +175,13 @@ def compare(oracle_bin, rust_bin, matrix, ledger, sort, mask_numbers, ignore_exi
         body = "" if stdout_match else "".join(difflib.unified_diff(
             o_n.splitlines(keepends=True), r_n.splitlines(keepends=True),
             fromfile=f"oracle:{name}", tofile=f"rust:{name}"))
+        if verdict == "STALE-TOLERANCE":
+            body = (f"case matches without its tolerance(s) {', '.join(used)}: remove it "
+                    "from their case lists and revisit the ledger entry\n")
         results.append({
-            "name": name, "verdict": verdict,
+            "name": name, "verdict": verdict, "tolerances": used,
             "oracle_rc": o_rc, "rust_rc": r_rc, "exit_match": exit_match,
-            "diff": None if verdict == "MATCH" else (note + body),
+            "diff": None if verdict.startswith("MATCH") else (note + body),
         })
     return results
 
@@ -171,6 +192,7 @@ def main(argv=None):
     ap.add_argument("--rust", help="path to the Rust binary under test")
     ap.add_argument("--matrix", help="input matrix (.toml or .json)")
     ap.add_argument("--ledger", default="DIVERGENCES.md", help="known-intentional-divergence ledger")
+    ap.add_argument("--tolerances", help="TOML/JSON [[tolerance]] scoped rules (see normalize.py)")
     ap.add_argument("--sort", action="store_true", help="order-independent compare")
     ap.add_argument("--mask-numbers", action="store_true", help="mask bare numbers (PIDs) too")
     ap.add_argument("--ignore-exit", action="store_true", help="don't treat an exit-code difference as a divergence")
@@ -187,15 +209,23 @@ def main(argv=None):
     require_binary(args.oracle, "oracle")
     require_binary(args.rust, "rust")
 
+    tolerances = N.load_tolerances(args.tolerances)
+    names = {c["name"] for c in load_matrix(args.matrix)}
+    for t in tolerances:
+        missing = sorted(set(t[3]) - names)
+        if missing:
+            print(f"error: tolerance {t[0]!r} names cases not in the matrix: {', '.join(missing)}",
+                  file=sys.stderr)
+            return 1
     results = compare(args.oracle, args.rust, load_matrix(args.matrix),
-                      args.ledger, args.sort, args.mask_numbers, args.ignore_exit)
-    unexplained = [r for r in results if r["verdict"] == "DIVERGE"]
+                      args.ledger, args.sort, args.mask_numbers, args.ignore_exit, tolerances)
+    unexplained = [r for r in results if r["verdict"] in ("DIVERGE", "STALE-TOLERANCE")]
     if args.json:
         print(json.dumps(results, indent=2))
     else:
         for r in results:
             print(f"[{r['verdict']:18}] {r['name']}")
-            if r["verdict"] == "DIVERGE" and r["diff"]:
+            if r["verdict"] in ("DIVERGE", "STALE-TOLERANCE") and r["diff"]:
                 sys.stdout.write(r["diff"])
         print(f"\n{len(results)} cases, {len(unexplained)} unexplained divergence(s)")
         if unexplained:
@@ -256,6 +286,23 @@ def _self_test():
         check("require_binary rejects a directory", rejects(d))
         check("require_binary rejects a missing path", rejects(os.path.join(d, "nope")))
         check("require_binary accepts a real executable", not rejects(o))
+
+        # Scoped tolerances (LESSONS #048): one ledgered difference, absorbed on
+        # its own case, still a divergence on any other, and stale once fixed.
+        mk = lambda fn, body: (open(os.path.join(d, fn), "w").write("#!/bin/sh\n" + body),
+                               os.chmod(os.path.join(d, fn), 0o755), os.path.join(d, fn))[2]
+        c_bin = mk("c.sh", 'echo "bad argument #1 to $1"\n')
+        port = mk("p.sh", 'echo "bad argument #2 to $1"\n')
+        tol = [N.scoped_rule("argname", r"#\d+", "#N", ["typeerr"], ledger="x-argnum")]
+        cases = [{"name": "typeerr", "args": ["P"]}, {"name": "other", "args": ["Q"]}]
+        res = {r["name"]: r for r in compare(c_bin, port, cases, None, False, False, tolerances=tol)}
+        check("a tolerance absorbs its ledgered difference on its own case",
+              res["typeerr"]["verdict"] == "MATCH(tolerated)")
+        check("the same difference on another case still DIVERGEs",
+              res["other"]["verdict"] == "DIVERGE")
+        res = compare(c_bin, c_bin, cases[:1], None, False, False, tolerances=tol)
+        check("a listed case that no longer needs its tolerance fails as stale",
+              res[0]["verdict"] == "STALE-TOLERANCE")
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

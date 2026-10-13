@@ -25,6 +25,19 @@ args = []
 name = "json-format"
 args = ["--format", "json"]
 
+# Defaults are inputs (LESSONS #047). A matrix that always passes an option
+# never tests its absence: nmap's terminal report went silent whenever `-o`
+# wrote a file (since M1) and `-sU` scanned the TCP port list (since M4),
+# because every row passed `-p` and `-oX -`. Give each option a row where it is
+# OMITTED, and add the combinations users actually run.
+[[case]]
+name = "format-omitted-uses-default"
+args = ["--name", "x"]
+
+[[case]]
+name = "terminal-and-file-output-together"
+args = ["--output", "matrix-out.txt", "--name", "x"]
+
 # Edge / adversarial inputs - where a C rewrite most earns its safety. These
 # should behave *better* than C (no crash, no UB), and may be ledgered as
 # intentional divergences in DIVERGENCES.md.

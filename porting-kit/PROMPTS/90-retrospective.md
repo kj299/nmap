@@ -15,7 +15,18 @@ retrospective and **patch the Porting Kit** with what you learned.
    captured — and *none* surfaced from reading the playbook. A dry-run that
    doesn't execute the tools against the actual codebase is theater. Run
    `scan_c_flaws.py`, `audit_unsafe.py`, the differential, etc. against this
-   project and eyeball the signal-to-noise before trusting any of it.
+   project and eyeball the signal-to-noise before trusting any of it. Point the
+   scanner at the files where the port found C flaws, and measure a rule for
+   each miss (LESSONS #050). Then check that the gates ran and still vouch:
+   - **list merged SHAs with zero check runs** — a commit no gate ran on
+     (LESSONS #042): `gh api repos/OWNER/REPO/commits/SHA/check-runs --jq .total_count`
+     for each SHA in `git log --first-parent <base>..HEAD`;
+   - **stale ticks**: `progress.py --file <f> audit --src crates` (LESSONS #045);
+   - **a reach census** of the port's exposed functions against the corpus
+     (LESSONS #043);
+   - **decode the goldens before the UB sweep**, then re-screen every
+     C-generated golden under ASan+UBSan and the runtime's API checks
+     (LESSONS #049; `ORACLE-CHECKS.md` §6).
 
 1. **Reconstruct the experience from artifacts**, the way
    `RETROSPECTIVE-lsof.md` was built — lean on git history, especially:
@@ -39,10 +50,11 @@ retrospective and **patch the Porting Kit** with what you learned.
      That is the most important finding.
 
 3. **Patch the kit** — make the concrete edits, don't just describe them:
-   - amend `PLAYBOOK.md` phases/criteria,
+   - amend `PLAYBOOK.md` phases/criteria (under ~400 lines; detail in linked docs),
    - fix/extend a harness (add the normalization rule, the flaw pattern, the
      gate) and re-run `make -C porting-kit check-kit`,
-   - update `ARCHITECTURE-TEMPLATE.md` / prompts if the shape or loop changed.
+   - update `ARCHITECTURE-TEMPLATE.md` / prompts / skills if the shape or loop
+     changed, citing each new lesson where its phase runs (LESSONS #046).
 
 4. **Append to `LESSONS.md`** — one entry per lesson, in the required format
    (date, codebase, lesson, playbook section amended). If the kit already had

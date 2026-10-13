@@ -1169,6 +1169,511 @@ These entries are the M2 retrospective.
   any other finding (pinned, seeded, ledgered).
 - **Section amended:** PLAYBOOK · Phase 4.
 
+# M6.6 — nmap's `nmapdb`, LPeg 0.12, and a first-party Lua base library
+
+Nineteen commits (#129–#137, 2026-10-09 to 10-12). Every automated gate was green
+at every step commit, and every step that was reviewed still had defects. Of about
+15 substantive review findings, 9 were resource defects, including the milestone's
+only High. The whole milestone merged with zero CI runs. These entries are the M6.6
+retrospective. The evidence is in the port's commit messages, its per-step review
+reports, and four retrospective audits (history, harnesses, step e, consistency).
+
+## 040. Pre-emptible is not bounded: gate the work a slice does, and how total work and memory scale, on the port, by wall clock
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6
+- **What happened:** The LPeg port runs in a pre-emptible VM, and the plan gated
+  exactly that: "the match returns `Pending` on schedule". It did. The step
+  reviews still found nine resource defects at steps a to d:
+  - **step a:** 20 MiB of bad lines peaked at 1 GB. A FIFO data file blocked
+    forever, and `/dev/zero` looped to 2.07 GB.
+  - **step b:** a grammar build ran as one 13.66 s slice using 4.3 GB. In-flight
+    buffers were not counted (31 MB under a 16 MiB budget).
+  - **step c:** `/string` re-copied its format on every step. A 2 MB format took
+    ≈140 s against C's 0.033 s. Byte work cost one unit of fuel, giving a 1.04 s
+    slice. One slice reached 5.4× the memory budget (344 MB), and `Ct` peaked at
+    1.22 GB.
+  - **step d (High):** `json.parse` of a 1.8 MB network body took 270 s against
+    C's 0.17 s, about 1,600×. The cause was an uncharged per-poll walk of the heap
+    accounting. Strings were retained at 525 MB against C's ~4 MB. The same walk
+    had already run once per slice at step c: `Ct(Ct(C(1))^0)` at 999k took
+    34.6 s against 0.36 s, and step c's own security review missed it.
+
+  The meters could not see these costs. Step 0b's linearity search counted the
+  instrumented C's steps, and step e's ceiling `K` counted the port's VM steps.
+  One VM step scans a whole run of bytes, so a quadratic pattern read as a flat
+  6.00 steps per byte while CPU time grew 30×. Step 0b's spike passed 8
+  requirements, and none was about total work or the slice bound. Step d's
+  defects sat in the part the spike skipped (capture evaluation).
+- **Root cause:** The kit had no resource-bounds control at all. A grep of
+  PLAYBOOK, SECURITY-CHECKLIST and the CI template for DoS, complexity or
+  exhaustion found nothing. LESSONS #001's timeout backstop fires only on a hang
+  inside a small corpus case. The threat model named time as a threat, and the
+  kit gave no shape for gating it. A meter counts only what it is instrumented to
+  count. Wall clock and RSS count everything.
+- **Kit change:**
+  - PLAYBOOK Phase 4 gains **step 4b, Resource bounds**. For each untrusted edge,
+    run the port in a release build at n, 2n and 4n, and gate the time and
+    peak-memory exponents against the declared bound and against C's. For
+    self-metering code, assert work ≤ c·fuel per slice, with the work counted
+    independently of the charge, plus a wall-clock check on the longest slice.
+    Calibrate any step counter against wall clock once.
+  - The spike ritual's decision gate now covers **total work and the slice bound**
+    for a pre-emptible design, next to #017's teardown criterion.
+  - Phase 0 classifies path inputs as possibly blocking, and the threat model
+    records a time and memory bound per untrusted input. `skeleton/THREAT-MODEL.md`
+    has an availability column.
+  - New [`RESOURCE-BOUNDS.md`](RESOURCE-BOUNDS.md) holds the procedure and this
+    evidence.
+  - New `harnesses/scaling/scale_check.py` runs a command template at n, 2n,
+    4n, ... It measures wall time and the per-run peak RSS through `os.wait4`,
+    children included; `RUSAGE_CHILDREN` would report the maximum over every
+    earlier run. It fits exponents on successive differences, which cancels
+    start-up time and the interpreter's own RSS high-water mark; a floor
+    subtraction could not, because a 4 MiB allocation under a 12 MiB start-up
+    peak does not move the peak. It fails on a declared bound, on C's exponent
+    plus a tolerance, on a port/C ratio, or on an absolute RSS ceiling.
+    `--self-test` uses synthetic linear and quadratic commands (sleeps for time,
+    resident allocations for memory), against a declared bound and against an
+    "oracle". It is in `make check-kit`.
+  - SECURITY-CHECKLIST, the cross-cutting table and the CI template each gain a
+    resource-bounds row or step.
+- **Still not prevented:** a super-linear cost on an input shape nobody listed.
+  Step 0b's adversarial search hunted for slow inputs on the C, not on the port.
+  The missing tool is a differential performance search: hill-climb inputs,
+  seeded from the fuzz corpus, to maximise port time ÷ oracle time and port
+  peak ÷ oracle peak. It is recorded here and in OPERATING-GUIDE §5, and not
+  built.
+- **Section amended:** PLAYBOOK · Phase 0 (path inputs, threat model), Phase 4 (spike ritual; step 4b), cross-cutting controls; `RESOURCE-BOUNDS.md`; `harnesses/scaling/scale_check.py`; `Makefile`; `SECURITY-CHECKLIST.md`; `skeleton/THREAT-MODEL.md`; `harnesses/ci/porting-ci.template.yml`.
+
+## 041. Review each step for fidelity and security before the next; each finding's class becomes a standing gate
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6
+- **What happened:** Each of steps a to d was followed by its own "review fixes"
+  commit, and every review found real defects. The fix rounds were 57%, 57%, 28%
+  and 34% of their step's Rust churn, before counting the 2,473-line base-library
+  port that step d's review triggered. About 14.5 h of the ~66 h wall clock went
+  to fix rounds [INFERRED from commit times]. Two PRs merged before their reviews
+  ran: #130 and #134, whose bodies say "A review round … follows on this PR". The
+  step c defects sat on master from 17:30 to 20:52, and step e had no review
+  round at all. Step b's review recorded "fuel is charged per call, not per unit
+  of work", and the class recurred at steps c and d because each fix gated only
+  its own step's code. Step b's fidelity review also found that `next({})`
+  returns 2 values and that `tostring` skips the `__tostring` result check. It
+  filed them as "Incidental, not LPeg, not ledgered", and the base library stayed
+  wrong until step d's review found it again.
+- **Root cause:** PLAYBOOK gate 6 read "Review & merge. Update the `progress`
+  table". It defined no review, blocked no merge, and carried nothing forward.
+  LESSONS #018 had already noted that a user-prompted review found what the kit
+  did not.
+- **Kit change:**
+  - Gate 6 is rewritten. An independent reviewer applies two lenses, fidelity
+    (adversarial rows beyond the corpus) and security (time, memory and
+    totality), plus an independent sabotage set, and produces a severity table.
+    The fix round lands in the same PR, and the merge is blocked until each
+    finding is fixed or ledgered.
+  - **Each finding's class joins the entry gates of every later step**, and Phase
+    4's entry criteria name those standing gates.
+  - An out-of-scope finding gets a ledger or BACKLOG row the same day.
+  - New [`REVIEW-GATE.md`](REVIEW-GATE.md) holds the detail and a reviewer brief
+    to paste. PROMPTS/10 step 6 and the module skill's gate 6 now point at it.
+- **Section amended:** PLAYBOOK · Phase 4 (gate 6, entry and exit criteria); `REVIEW-GATE.md`; `PROMPTS/10-module-port.md`; `skills/porting-kit-module/SKILL.md`.
+
+## 042. A gate wired into CI is a gate only on commits CI ran on
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6
+- **What happened:** The last nmap-rs-ci run was on 2026-10-05 at 19:11Z (run
+  37361585230, on 1f3184592). Every M6.6 SHA from #130 to #137 has
+  `check-runs total_count 0`. Four workflow edits, 88 lines of regen checks,
+  `--check-794` and fixture ports, have never executed. The docs and every PR
+  body from #131 on said "CI has not run since 5 October", and the merges went
+  ahead. The local runs that stood in for CI were scoped, which is #030's exact
+  trap:
+  - Miri ran on `lpeg::` only ("43 passed … 930 filtered out", 727 s);
+  - fuzzing ran on the changed targets only;
+  - no commit mentions `cargo deny` or the ASan job.
+- **Root cause:** The kit treats CI as the enforcement point and never checks
+  that CI ran. #030 ("run the gate as CI runs it") and #027.1 ("a control in the
+  template but not the workflow") both presume a CI run as the backstop, so
+  neither fired. A PR body saying "CI did not run" was an annotation, not a block.
+- **Kit change:**
+  - PLAYBOOK Phase 4: **no check run on the head SHA means no gate ran.** When CI
+    cannot run, `make -C porting-kit ci-local` runs every workflow job unscoped,
+    and its summary goes into the PR. A PR with neither is blocked. The rule is
+    also a merge precondition in REVIEW-GATE.md and a row in the cross-cutting
+    table.
+  - New `harnesses/ci/ci_local.py`. It reads the workflow without PyYAML,
+    through a subset parser covering block maps and lists, multi-line flow
+    lists, and `|` and `>` scalars. It runs every job and matrix leg's `run:`
+    steps with the workflow's working directories, env, `strategy.job-total` and
+    step outputs. It lists every action and conditional step it did not run.
+    Its summary names the HEAD SHA and any uncommitted changes. Its self-test
+    parses the kit's own template and executes a synthetic workflow. It parses
+    nmap's real 710-line `nmap-rs-ci.yml` into 13 job legs.
+  - `make ci-local` (deliberately not part of `check-kit`).
+  - The retrospective's step 0 lists merged SHAs with zero check runs, and the
+    audit skill reports "CI ran on HEAD" as a gate row.
+- **Section amended:** PLAYBOOK · Phase 4, cross-cutting controls, compounding loop; `harnesses/ci/ci_local.py`; `Makefile`; `REVIEW-GATE.md`; `PROMPTS/90-retrospective.md`; `skills/porting-kit-{audit,module,retrospective}/SKILL.md`.
+
+## 043. A dependency's own compatibility list is not an oracle: census what the corpus reaches
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (base library of the vendored `piccolo` VM)
+- **What happened:** At M6's Phase 0, the vendored VM's base library was credited
+  from its own `COMPATIBILITY.md`, which marks it "implemented". Step d's fidelity
+  review found that:
+  - `pcall` raises on a non-callable;
+  - `pairs` and `ipairs` return 2 values;
+  - `#t` picks border 4 where C gives 8;
+  - `rawlen` and `rawset` are unchecked;
+  - `__metatable` is ignored;
+  - `collectgarbage` raises;
+  - `isyieldable` and `close` are missing.
+
+  The fix was first-party base and coroutine libraries (51bae54d2, 2,473 Rust
+  lines). The corpora had **0 rows** for `rawlen(`, `rawset(`, `pairs(`,
+  `ipairs(`, `collectgarbage` and `{...}`. The `vmbase` named tolerance class
+  absorbed the symptom from step b to step d.
+- **Root cause:** In piccolo's docs, "implemented" means present, and
+  COMPATIBILITY.md's own footnote hedges with "near 1:1". #018 vets reused crates
+  for safety only. M3's positive validation already said "library compatibility
+  estimated by grep is unreliable", and it was never made a rule.
+- **Kit change:**
+  - PLAYBOOK Phase 0: vet reused code for **fidelity** as well as safety.
+  - Phase 2 gains a **reach census**: count the corpus rows for each function the
+    port exposes. Zero rows means unverified.
+  - ORACLE-CHECKS.md §2 adds that a tolerance class covering a dependency's
+    divergence triggers an audit of that dependency's sibling functions.
+  - The oracle and kickoff skills carry both rules.
+  - `progress.py drift` still skips vendored trees, and reports them. The census,
+    not the tracker, is where a dependency's surface is counted.
+- **Section amended:** PLAYBOOK · Phase 0, Phase 2; `ORACLE-CHECKS.md`; `skills/porting-kit-{oracle,kickoff}/SKILL.md`.
+
+## 044. Sabotage is a measurement with failure modes of its own
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (steps a, b and d; step 0b)
+- **What happened:**
+  1. **A stale build.** Step a's review restored sabotaged files with
+     `shutil.copy2`, which keeps the old mtime. Cargo's fingerprint saw no change,
+     so the next run tested the stale, still-sabotaged build (the port's
+     `tests/differential/m6/README.md:461-469`). #038's fix, "put back the saved
+     bytes", causes this whenever it is done with `cp -p` or `copy2`.
+  2. **A kill counted as a catch.** Step b's S2 had been counted as caught by a
+     117 s kill. After its fix it "fails by assertion in 29 s".
+  3. **The author's blind spots.** At step a, the author's 11 sabotages were all
+     caught. Of the reviewers' independent 34, **8 were missed by every gate**.
+     Step d's S08 was unsound.
+  4. **No port sabotage probed inside a tolerance class's spans**, which is where
+     #048's argument-number regression hid.
+
+  One practice worked. At step 0b, 16 sabotaged builds of `lpeg.c` measured the
+  corpus, and one of them (keeping dynamic captures on backtrack) passed all
+  60,806 rows. At HEAD the harness runs 17 variants over 62,599 rows and catches
+  every one (455 s).
+- **Root cause:** The kit treated sabotage as a habit, not as a measurement with
+  failure modes. #038 fixed one failure mode (the restore source) and introduced
+  another (the mtime).
+- **Kit change:** PLAYBOOK Phase 4 amends #038 with four rules:
+  - restore from the byte copy **and bump the mtime**;
+  - **only a named assertion counts as a catch**, and a kill, timeout or harness
+    crash is inconclusive;
+  - each step gets **an independent sabotage set** with its catch rate reported;
+  - sabotage inside every tolerance.
+
+  Phase 2 adds **sabotage the C to measure the corpus**. REVIEW-GATE.md holds the
+  protocol, ORACLE-CHECKS.md §4 the C side. The module and oracle skills carry
+  both.
+- **Section amended:** PLAYBOOK · Phase 4, Phase 2; `REVIEW-GATE.md`; `ORACLE-CHECKS.md`; `skills/porting-kit-{module,oracle}/SKILL.md`.
+
+## 045. A gate tick outlives the code it vouches for
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (`core::nse::stdlib::base`)
+- **What happened:** `progress.json` maps `core::nse::stdlib::base` to the fuzz
+  target `nse_tail`, which exercises only `chunk_id` and `strrep`. In 51bae54d2,
+  base.rs grew from 756 to 2,499 lines and gained `str2int`, the byte parser
+  behind `tonumber(s, base)`, and nothing fuzzes it. The module's "fuzzed" tick
+  stayed, and `audit` stayed green, because `audit` checks that a mapping names a
+  real target, not that the target reaches the code.
+- **Root cause:** #027 records coverage once and never re-checks it. A tick is a
+  claim about code at a moment, and the table stored the claim without the moment.
+- **Kit change:**
+  - `progress.py stamp MODULE GATE --src crates` records a sha256 over the
+    module's source files: `a/b.rs` and everything under `a/b/`, path and
+    content, relative to its crate's `src/`. `set ... --src` stamps as it ticks.
+  - `audit --src crates` fails with `STALE-TICK` once a stamped module's files
+    change, a new file in a directory module included, until the gate is re-run
+    and re-stamped. That is the moment to ask whether the target still reaches
+    the new entry points.
+  - Stamps are opt-in. nmap's current table, which has none, audits exactly as
+    before (26 exemptions, 40 mappings, OK). The self-test covers all of this.
+  - PLAYBOOK gate 6 and the compounding loop now say to stamp and to audit
+    `--src`, and the CI template's audit step passes `--src crates`.
+  - **Next step, not done:** proving that a fuzz target reaches a module's *new*
+    entry points needs coverage instrumentation (`cargo fuzz coverage`). The
+    stamp forces the question, and the review lens answers it.
+- **Section amended:** `harnesses/progress/progress.py`; PLAYBOOK · Phase 4 (gate 6), cross-cutting controls, compounding loop; `harnesses/ci/porting-ci.template.yml`; `skills/porting-kit-{module,retrospective}/SKILL.md`.
+
+## 046. The skills lag the PLAYBOOK
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (the kit itself)
+- **What happened:** No skill cited #030, #036, #038 or #039. All four are Phase-4
+  rules, and #039's in-flight patch touched only LESSONS.md and PLAYBOOK.md. An
+  agent driven by `porting-kit-module` therefore ran a loop four lessons behind
+  the book. The new check, run on the kit before the back-fill, found more:
+  - `porting-kit-module` and PROMPTS/10 each missed 16 Phase-4 lessons (#001,
+    #004, #007 to #010, #012 to #015, #017, #021, #030, #036, #038, #039);
+  - the oracle skill missed #001, #033 and #034;
+  - kickoff missed #006, #018 and #032;
+  - cflaw-scan missed #001, #006 and #018.
+- **Root cause:** `check_skills.py` validated that a skill's paths and `make`
+  targets exist, not what the skill says. This is #022's shape again: an
+  integrity check that inspects less than its name claims.
+- **Kit change:**
+  - `check_skills.py` gains **check 5**. Every LESSONS entry whose "Section
+    amended" names `PLAYBOOK · Phase N` must be cited by number in that phase's
+    skills: Phase 4 in `porting-kit-module` and PROMPTS/10, Phase 2 in
+    `porting-kit-oracle`, Phase 0 in `porting-kit-kickoff` and
+    `porting-kit-cflaw-scan`.
+  - An entry with no "Section amended" field is read by its "Kit change" field,
+    since LESSONS is append-only. This is how #030 counts. The self-test covers
+    wrapped fields, ranges like `#2–#4`, and a phase named outside a PLAYBOOK
+    clause.
+  - The skills and PROMPTS/10 are back-filled through #051.
+- **Section amended:** `skills/check_skills.py`; `skills/*/SKILL.md`; `PROMPTS/10-module-port.md`; `CLAUDE.md` (Skills); PLAYBOOK · compounding loop.
+
+## 047. A matrix of explicit options never tests the defaults
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 side fixes (782a00881, 4fbc629c8)
+- **What happened:** Two defects lived for milestones and surfaced as M6.6 side
+  fixes:
+  - `cli-stdout-silenced-by-output-files`, present since M1: the terminal report
+    went silent whenever `-o` wrote a file;
+  - `udpscan-tcp-port-list`, present since M4: `-sU` scanned the TCP port list.
+
+  Every differential matrix passed `-p` and `-oX -`, so neither default was ever
+  exercised.
+- **Root cause:** A matrix of explicit options tests the options, never their
+  absence. #031's "implementing a flag is a good moment to check its default" is
+  adjacent, but it fires only when a flag is being implemented.
+- **Kit change:**
+  - PLAYBOOK Phase 2: each option gets a row where it is omitted, plus the
+    combinations users run, such as a report to the terminal and to a file at
+    once.
+  - ORACLE-CHECKS.md §1 holds the detail.
+  - `input-matrix.example.toml` gains both kinds of row.
+  - The oracle skill carries the rule.
+- **Section amended:** PLAYBOOK · Phase 2; `ORACLE-CHECKS.md`; `harnesses/differential/input-matrix.example.toml`; `skills/porting-kit-oracle/SKILL.md`.
+
+## 048. A tolerance class is an exemption: scope it to the rows it was ledgered for and pin its membership
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (`lpeg_corpus_differential.rs`)
+- **What happened:** The LPeg corpus gate's `compare()` tried its `position`,
+  `argname` and `method` normalisations on **every** differing row. Only `cdepth`
+  was limited to rows tagged for it. `report()` printed each class's members and
+  asserted nothing about them, so the ledger's "argname 2, method 1, cdepth 7"
+  was not enforced. The retrospective measured the reach directly. The
+  argname/method regex touches **5,906 of 62,599** golden rows, and a one-character
+  function-name change or an argument number off by one is accepted on all of
+  them. The position class touches 175 rows. On the real gate, a sabotage of
+  `Fail::arg(1, "value expected")` to `Fail::arg(2, …)` **passed**, and `method`
+  silently grew to three members. The control, `"value"` changed to `"valuf"`,
+  failed on 2 rows. The gate was sound outside the class spans and blind inside
+  them. The 7.94 check's `DRIFT_CLASSES` is unscoped the same way.
+  `lpeg_callback_quirks` did it right, with classes keyed per id. The port's own
+  fix is tracked separately.
+- **Root cause:** #007 and #013 framed normalisation as noise removal or
+  projection. #031 made the tolerance part of the divergence, but about expiry,
+  not reach. Nothing said a tolerance must be scoped or its membership pinned.
+- **Kit change:**
+  - `normalize.py` gains scoped rules, `scoped_rule(name, regex, repl, cases,
+    ledger)`, loaded from `[[tolerance]]` TOML or JSON. A rule with no cases is
+    refused. The self-test checks that a scoped rule does not fire on another
+    case.
+  - `diff_run.py --tolerances` applies them per case. It reports
+    `MATCH(tolerated)`, fails with `STALE-TOLERANCE` when a listed case matches
+    without its tolerance, and refuses a tolerance that names a case missing from
+    the matrix. These have self-tests and were exercised end to end.
+  - PLAYBOOK gate 2 states the rule, ORACLE-CHECKS.md §5 holds the evidence, and
+    REVIEW-GATE.md's sabotage protocol adds "sabotage inside every tolerance".
+- **Section amended:** `harnesses/differential/{normalize.py,diff_run.py}`; PLAYBOOK · Phase 4 (gate 2); `ORACLE-CHECKS.md`; `REVIEW-GATE.md`; `skills/porting-kit-{module,oracle}/SKILL.md`.
+
+## 049. Every golden generated by running C is UB-screened, and the screen's record digests what it screened
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (`m66b_tree_golden.txt`, `screen_m66_lpeg.py`)
+- **What happened:**
+  - **UB in the tree golden.** The golden is hex-encoded, so a text grep for
+    `block too big` found nothing. The retrospective built the tree's own
+    `liblua` and `lpeg.c` with `-fsanitize=undefined -fno-sanitize-recover=all`
+    and ran all 5,710 tree rows, which took 3 s. **14 rows are UB**, from signed
+    `int` overflow at `lpeg.c:2374, 2377, 2643, 2655, 2977`. The other 5,696 are
+    clean and byte-identical. The 14 rows were added on purpose ("the C's int size
+    wraps") and ledgered as "the C's arithmetic modulo 2^32". That made what
+    `gcc -O1` happened to do into the spec, and CI regenerates them from that
+    build on every run.
+  - **UB in four pins.** Separately, a pin generator leaves `(size_t)(-ii)` and
+    `lua_tointeger(...) - 1` undefined, and four pins take their answers from
+    that build.
+  - **The screen's wiring.** The screen for the main corpus,
+    `screen_m66_lpeg.py`, uses ASan, UBSan and `LUA_USE_APICHECK`, but nothing
+    runs it. Its only wiring is a digest check, and the digest covers the
+    corpus, not `lpeg.c`, `liblua/`, the glue, the screen or the flags. The
+    second C-generated corpus had no screen.
+  - **A sweep not run.** One #033 sweep was never done: "whether json.parse
+    reaches doublecap's over-read: not run under ASan".
+- **Root cause:** PLAYBOOK Phase 2's #020 sanitized *pasted oracle functions*
+  under ASan. It said nothing about every C-generated golden, about UBSan, or
+  about what the screen's record must cover. #033's sweep is a text grep, and a
+  hex-encoded golden defeats it. The kit's `run_sanitizers.sh` covers Rust only.
+- **Kit change:**
+  - PLAYBOOK Phase 2 rule and exit criterion: every golden generated by running C
+    is screened under `-fsanitize=address,undefined -fno-sanitize-recover=all`
+    plus the runtime's API checks.
+  - The screen's committed record carries a digest of the corpus, the C sources
+    and the flags. The generator refuses a mismatch, and CI checks it.
+  - UB that looks deterministic is still UB. Drop the row, or generate it from a
+    defined variant and pin the answer as semantic.
+  - Store goldens greppable, or decode them before any sweep.
+  - ORACLE-CHECKS.md §3 holds the recipe, and the cross-cutting table has a row.
+    The oracle, cflaw-scan and retrospective skills and PROMPTS/90 carry the
+    decode step.
+  - A generic `screen_oracle.py`, modelled on nmap's screen, is a candidate
+    harness and is not built.
+- **Section amended:** PLAYBOOK · Phase 2, cross-cutting controls, compounding loop; `ORACLE-CHECKS.md`; `PROMPTS/90-retrospective.md`; `skills/porting-kit-{oracle,cflaw-scan,retrospective}/SKILL.md`.
+
+## 050. The flaw scanner found 1 of 22, and the miss was known at Phase 0
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6 (`lpeg.c`, `nse_db.cc`, `protocols.cc`, `services.cc`)
+- **What happened:** `scan_c_flaws.py lpeg.c nse_db.cc nse_db.h nse_lpeg.cc
+  nse_lpeg.h` reported one hit, `nse_db.cc:52`, which #032's sentinel rule found
+  as that entry predicted. M6.6 ledgered 22 C defects, and the scanner found
+  nothing in `lpeg.c`'s 3,694 lines. `docs/M6.6-ANALYSIS.md` §7 had recorded
+  "0 hits on lpeg.c" at Phase 0. No rule followed and no lesson was written, so
+  the miss was known for the whole milestone (#019's pattern). The audit also
+  found three problems in the scanner itself:
+  - `int-overflow-mul` hard-coded `malloc|calloc|realloc` on one line. It could
+    not see LPeg's five size overflows, which allocate through `newtree` and
+    `lua_newuserdata`, or nbase's `safe_*` wrappers.
+  - The same regex reported dereferences and casts (`sizeof(*p)`,
+    `realloc((char *) ptr, n)`) as products, and missed every product written
+    sizeof-first.
+  - The docstring listed an `unchecked-malloc` category that had never been
+    implemented.
+- **Root cause:** Rules were added only at retrospectives. A flaw that a step
+  found and the scanner missed was written into the analysis document, not
+  measured against the scanner.
+- **Kit change:** `scan_c_flaws.py` gains:
+  - five rules from the retrospective's measured prototypes, each with a
+    self-test case and a near miss it must not flag:
+    - `scanf-narrow-int` (CWE-190);
+    - `index-rewind-in-stride-loop` (CWE-823);
+    - `negation-to-unsigned` (CWE-190);
+    - `narrow-field-store` (CWE-197), which skips constants, masked values and
+      stores with `SHRT_MAX` within 3 lines;
+    - `ctype-signed-char` (CWE-758, weak).
+  - a per-target `ALLOC_FUNCS` table seeded with libc's allocators,
+    `lua_newuserdata[uv]` and nmap's `safe_malloc`/`safe_zalloc`/`safe_realloc`.
+    Calls are parsed across lines, only a binary `*` counts, and all-constant
+    products are skipped. `--config FILE.json` and `--alloc-func NAME[:ARG]`
+    extend it and the other two contract tables per target.
+  - `--inventory recursion`, which lists the functions on a call-graph cycle with
+    no depth guard. It uses an iterative Tarjan SCC per file.
+  - comment stripping that keeps line numbers;
+  - an extended "What this CANNOT find" section, and the phantom category is
+    removed.
+
+  Each new rule was then sabotaged against its self-test. The self-test caught
+  11 of 13 sabotages. The fixture was fixed for one survivor; the other was a
+  check that is redundant by construction. PLAYBOOK Phase 0 and the cflaw-scan
+  skill now say to **measure a rule when a later step finds a flaw the scanner
+  missed**, then, not at the retrospective.
+- **Measured (re-run on the tree for this entry):**
+  - **Recall on M6.6's 22 defects:** 1 before. 8 now with the default tables, 10
+    with LPeg's file-local allocator added (`--alloc-func newtree:1`), and 12
+    counting the recursion inventory. The inventory lists 18 functions in
+    `lpeg.c`, including every walker the ledger names. Of the other 10, three
+    candidate rules were measured and rejected as noise (a pointer difference as
+    a length, a Lua push in a loop, an array sized `UCHAR_MAX`). Seven are
+    outside any line rule, and the docstring names their classes.
+  - **The five M6.6 files:** 1 hit before, 21 now, 27 with `newtree`.
+    - `narrow-field-store`: 13, 9 of them at ledgered sites.
+    - `int-overflow-mul`: 2, or 8 with `newtree` (5 ledgered).
+    - `negation-to-unsigned`: 2.
+    - `ctype-signed-char`: 2.
+    - `index-rewind-in-stride-loop`: 1.
+    - `unterminated-list`: 1.
+  - **The other 772 C/C++ files: 430 hits before, 482 now (+52).**
+    - `ctype-signed-char`: +39 in 14 files. All 5 of 5 sampled are true CERT
+      STR37-C instances.
+    - `scanf-narrow-int`: +2. Both, `protocols.cc:121` and `services.cc:159`, are
+      ledgered M6.6 defects.
+    - The other three new rules: 0. `pcap-dag.c:534`'s masked store is no longer
+      a false positive.
+    - `int-overflow-mul`: 75 to 86. Over libc's allocators alone, the parsed rule
+      gives 41: it drops 55 dereferences, casts and constant products the regex
+      reported, and adds 21 sizeof-first and multi-line products the regex
+      missed. The `safe_*` seeding adds 45 more. `lua_newuserdata` adds none,
+      because both of `nse_nsock.cc`'s calls have constant sizes.
+    - The audit's estimate was +42. The new rules give +41, since the masked
+      false positive is gone, and the `ALLOC_FUNCS` rework adds a net +11.
+  - **Recursion inventory, rest of the tree:** 72 functions in 29 files.
+  - **Speed:** the whole 775-file tree scans in 5.6 s.
+- **Section amended:** `harnesses/c-flaw-scan/scan_c_flaws.py`; PLAYBOOK · Phase 0; `skills/porting-kit-{cflaw-scan,kickoff}/SKILL.md`.
+
+## 051. Small amendments: the runtime's own checking mode, path filters for oracle inputs, citations by revision and ID
+
+- **Date:** 2026-10-13
+- **Codebase:** nmap — M6.6
+- **What happened:**
+  1. **ASan saw nothing on 40 to 299 nested captures**, and `LUA_USE_APICHECK`
+     caught the Lua stack overflow they cause (the port's M6.6 analysis §7). ASan
+     watches the C heap, and the runtime's checks watch the runtime's own
+     invariants.
+  2. **The CI path filter missed the oracle's inputs.** A `build.yml` comment says
+     nmap-rs-ci is scoped "plus the C-tree files its goldens read". Its `on:` block
+     omits `lpeg.c`, `nse_lpeg.cc`, `nse_lpeg.h`, `nse_lua.h` and `liblua/**`,
+     which are exactly the files the LPeg and Lua oracle checks compile. A change
+     to `lpeg.c` would not have run them.
+  3. **Citations drifted.** 35c0e07ab fixed about 80 citations and 14 drifts
+     mid-milestone. The consistency audit still found about 45 wrong `file:line`
+     citations in code comments: 24 in `stdlib/base.rs`, checked against the
+     tree's Lua 5.4.8, and about 20 in `lpeg/`. It also found three ledger IDs
+     named in docs but never ledgered, one ledgered under a different ID, and
+     PLAN.md:22 out of date again.
+- **Root cause:** (1) #020 named ASan only. (2) #005 scoped workflows to the paths
+  they *build*, not to the paths their oracles *read*. (3) Line numbers move
+  unless a revision pins them, and prose names are not checked against the
+  ledger.
+- **Kit change:**
+  1. PLAYBOOK Phase 2: build the oracle in the embedded library's own checking
+     mode too (ORACLE-CHECKS.md §3).
+  2. PLAYBOOK Phase 3 and the CI template: path filters include every file the
+     goldens read.
+  3. CLAUDE.md working notes: cite C as `rev:path:line` against a pinned
+     revision, and cite the ledger by ID.
+- **Section amended:** PLAYBOOK · Phase 2, Phase 3; `ORACLE-CHECKS.md`; `harnesses/ci/porting-ci.template.yml`; `CLAUDE.md` (working notes).
+
+## Meta — M6.6's gates were green and its reviews were not
+
+Every automated gate passed at every step commit, and every review found defects.
+The four largest kit gaps share one shape: **a property the kit assumed rather
+than measured**. It assumed that yielding bounds the work (#040), that CI runs
+(#042), that a dependency does what its docs say (#043), and that a tick stays
+true (#045). The fixes measure instead: wall clock and RSS against C, check runs
+on the SHA, rows per exposed function, a digest per tick. The single failure the
+kit still would not prevent is the one #040 records: a super-linear cost on an
+input shape nobody chose to scale. Its tool, a differential performance search
+that hill-climbs inputs to maximise port ÷ oracle time and memory, is the next
+port's target. It is recorded, not stubbed.
+
 ## Positive validations (habits that paid off, no change needed)
 
 - **Spike-with-a-decision-gate changed the plan before it cost a wall.** M3's whole
@@ -1200,3 +1705,17 @@ These entries are the M2 retrospective.
   held more than 20 sockets or had more than one waiter. Writing those two
   fixtures, checked first against nmap, turned both into catches. A surviving
   mutant is usually a missing *case*, not a missing assertion.
+- **Phase 0's decisions gate held** (nmap M6.6). The analysis ended with "No
+  port code until §9 approved" and three adversarial reviews, which overturned
+  10 claims before any Rust was written. The milestone's defects came later, in
+  code, and not from a design decision taken on an unexamined claim.
+- **A scanner rule written for one milestone paid out in the next** (nmap
+  M6.6). #032's sentinel-list rule named `nmapdb` as an unported module with an
+  unterminated list. M6.6's Phase 0 found `nse_db.cc:52` with it, and the port
+  rejects the unlisted option by design.
+- **Phase 2's discipline held under load** (nmap M6.6). The tree's own `liblua`
+  and `lpeg.c` were the spec (#019). 164 rows were quarantined, each with exactly
+  one pin (#033). Host-dependent drift got named classes (#034). Sabotaging the C
+  measured the corpus: at step 0b, one of 16 variants exposed a behaviour the
+  corpus could not tell apart, and at HEAD all 17 variants are caught. That
+  practice is now a rule (#044).

@@ -18,7 +18,8 @@ with a mechanical integrity check.
 **Provisional** — designed and documented, not yet battle-tested end-to-end:
 the **library** path (the differential is executable-shaped; C-ABI libraries need
 the `cando`-style function-level harness, §5 P0); C→C **preconditioning** is prose,
-not tooling; the **performance** gate is a number in the playbook, not a harness;
+not tooling; the **performance** gate is a growth check against C
+(`scale_check.py`), not yet a median-runtime comparison or an input search;
 **held-back vectors** and **C-baseline vector validation** are described, not wired.
 
 **Bottom line:** ready to *drive an executable port today* and to *structure* a
@@ -136,7 +137,13 @@ audit → retrospective`.
 **P0 — needed before a *library* port or a security-critical claim:**
 1. **`cando`-style function-level differential harness** for C-ABI libraries — the
    current differential is executable-shaped (argv/stdin→stdout+exit). Biggest gap.
-2. **Performance gate harness** — measure module runtime vs the C median, fail >1.3×.
+2. **Performance gate harness** — *partly done* (LESSONS #040):
+   `harnesses/scaling/scale_check.py` gates time and peak-memory growth at n/2n/4n
+   against declared bounds and the C oracle, with a port/C ratio ceiling. Still
+   open: a median-runtime comparison per module, and a **differential performance
+   search** — hill-climb inputs seeded from the fuzz corpus to maximise port ÷
+   oracle time and memory, since a scale check only scales the shapes someone
+   listed (M6.6's per-slice heap walk hid in a shape no review chose).
 3. **Held-back vectors + C-baseline validation** in `golden.py` (`--holdout`, and
    "a vector must pass on C before it may judge Rust").
 
@@ -145,9 +152,11 @@ audit → retrospective`.
 5. **CI template hardening**: SHA-pin actions; split smoke/nightly for fuzz+sanitizers;
    add `cargo vet`, SBOM, `gitleaks` jobs.
 6. **`scan_c_flaws.py` depth**: add double-free / use-after-free / uninitialized-read
-   heuristics and `strncpy` non-termination / `snprintf` truncation; note its
-   line-based checks can miss multi-line calls (the format-string check is already
-   whole-file — extend the rest).
+   heuristics and `strncpy` non-termination / `snprintf` truncation. The legacy
+   line-based checks can miss multi-line calls; the format-string, contract and
+   M6.6 rules (LESSONS #050) already parse whole calls — extend the rest. A generic
+   `screen_oracle.py` (UB screen + digest record for C-generated goldens, LESSONS
+   #049) belongs beside it.
 7. **A `porting-kit-precondition` skill** for Step 0 (C→C: global-state threading,
    aliasing reduction, `#ifdef` story) — currently prose only.
 

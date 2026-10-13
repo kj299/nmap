@@ -20,20 +20,31 @@ PY_HARNESSES := \
 	harnesses/differential/normalize.py \
 	harnesses/golden/golden.py \
 	harnesses/c-flaw-scan/scan_c_flaws.py \
-	harnesses/progress/progress.py
+	harnesses/progress/progress.py \
+	harnesses/scaling/scale_check.py \
+	harnesses/ci/ci_local.py
 
 SH_HARNESSES := \
 	harnesses/fuzz/gen_fuzz_target.sh \
 	harnesses/sanitizers/run_sanitizers.sh \
 	harnesses/supply-chain/run_supply_chain.sh
 
-.PHONY: check-kit check-harnesses check-skills check-shell help
+# `ci-local` runs every job of the port's CI workflows on this machine, unscoped,
+# and prints a summary to paste into the PR. No check run on the head SHA means no
+# gate ran (LESSONS #042): nmap's whole M6.6 merged with zero CI runs while the
+# local stand-ins were scoped (#030's trap). It needs the port's toolchains, so it
+# is deliberately NOT part of check-kit. WORKFLOWS defaults to every workflow in the
+# repository that vendors this kit; set it to name fewer *workflows*, never fewer jobs.
+WORKFLOWS ?= $(wildcard ../.github/workflows/*.yml ../.github/workflows/*.yaml)
+
+.PHONY: check-kit check-harnesses check-skills check-shell ci-local help
 
 help:
 	@echo "make check-kit         smoke-test every harness + the skills-integrity check"
 	@echo "make check-harnesses   python harness self-tests only"
 	@echo "make check-shell       shell harness syntax check only"
 	@echo "make check-skills      skills-integrity check only"
+	@echo "make ci-local          run every CI job locally when CI did not run (WORKFLOWS=...)"
 
 check-kit: check-harnesses check-shell check-skills
 	@echo "check-kit: OK"
@@ -60,3 +71,7 @@ check-shell:
 
 check-skills:
 	@$(PY) skills/check_skills.py
+
+ci-local:
+	@test -n "$(WORKFLOWS)" || { echo "ci-local: no workflow found; pass WORKFLOWS=path/to/ci.yml"; exit 2; }
+	@$(PY) harnesses/ci/ci_local.py $(WORKFLOWS)

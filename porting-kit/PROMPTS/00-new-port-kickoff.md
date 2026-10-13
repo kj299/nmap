@@ -24,10 +24,14 @@ faithfully re-implement a vulnerability. Maximize safety controls.
    global mutable state, macros, build system. Seed the tracker:
    `python3 porting-kit/harnesses/progress/progress.py init --modules <list>`.
 2. Run the C-flaw scan and triage it:
-   `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py <c-src-dirs>`.
+   `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py <c-src-dirs> --inventory recursion`,
+   after extending its contract tables (`--config`) for each embedded library.
    Every confirmed hit is a planned DIVERGENCES.md entry (a bug you will fix).
 3. Draft `THREAT-MODEL.md` from `porting-kit/skeleton/THREAT-MODEL.md`: trust
-   boundaries, privilege transitions, what "secure" means here.
+   boundaries, privilege transitions, what "secure" means here — including the
+   time and memory bound each untrusted input must respect
+   (`porting-kit/RESOURCE-BOUNDS.md`). Classify which calls and path inputs can
+   block, and vet any reused library for fidelity, not only safety.
 4. Decide the port shape: is this **reimplement-behind-a-seam** (OS-integration
    layer being replaced — like lsof) or **translate-with-FFI-coexistence**
    (library internals preserved)? State which and why; it sets the strategy.
@@ -36,8 +40,9 @@ Then propose the **dependency-graph-driven port order** (Phase 1), flagging any
 known-hazardous module for a pre-port spike (the winlsof hang cost 7 commits
 because it wasn't spiked first).
 
-**Stop and present** the Phase 0 report + proposed order before Phase 2. Do not
-begin porting modules until the order is agreed.
+**Stop and present** the Phase 0 report, its open design decisions, and the
+proposed order before Phase 2. Do not begin porting modules until they are
+agreed.
 
 When you do build, copy `porting-kit/skeleton/` for the workspace shape, wire
 `porting-kit/harnesses/ci/porting-ci.template.yml` into CI, and run

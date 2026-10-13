@@ -57,6 +57,10 @@ workspace/
   contradict "dependencies are liabilities": a wrapper crate that clears the
   supply-chain gate and *removes* first-party `unsafe` is a net safety win, not a
   new liability. Classify this at Phase 0 (PLAYBOOK · Phase 0, LESSONS #18).
+  Vet a reused crate or vendored runtime for **fidelity** as well as safety: its
+  own compatibility list is not an oracle. nmap's vendored Lua VM called its base
+  library "implemented" and had seven behaviours wrong, none reached by the corpus
+  (LESSONS #043; the reach census in `ORACLE-CHECKS.md`).
 
 ## If your port *is* cross-platform
 

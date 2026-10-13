@@ -15,6 +15,10 @@
     "core::nse::choose": [
       "nse_results"
     ],
+    "core::nse::lpeg": [
+      "nse_lpeg_build",
+      "nse_lpeg_match"
+    ],
     "core::nse::lpeg::code": [
       "nse_lpeg_match"
     ],
@@ -233,6 +237,7 @@
     "core::nse::choose": "unsafe_audited",
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
+    "core::nse::lpeg": "unsafe_audited",
     "core::nse::lpeg::code": "unsafe_audited",
     "core::nse::lpeg::tree": "unsafe_audited",
     "core::nse::lpeg::vm": "unsafe_audited",

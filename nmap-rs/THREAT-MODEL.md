@@ -147,7 +147,7 @@ model", Decision 2); this section records what the port does about each.
 | `script.db` and `.nse` metadata | semi-trusted (decides what runs) | parsed as bytes, never executed; fuzzed | `core::nse::script` (`nse_scriptdb`, `nse_metadata`) |
 | `--script` selection rules | operator | total, fuzzed; rules over 64 KiB refused | `core::nse::selection` (`nse_selection`) |
 | `--script-args` | operator, but often pasted | parsed by a port of nse_main.lua's grammar; fuzzed | `core::nse::scriptargs` (`nse_scriptargs`) |
-| Network responses handed to scripts | **untrusted** | parsed in Lua, through first-party stdlib functions that are each fuzzed and differentially tested | `core::nse::stdlib` (`nse_pattern`, `nse_format`, `nse_strpack`, `nse_tail`, `nse_utf8_date`) |
+| Network responses handed to scripts | **untrusted** | parsed in Lua, through first-party stdlib functions that are each fuzzed and differentially tested; since M6.6 step e also through LPeg (`json.parse`, coap's link format, lpeg-utility's fingerprint parsers, ntp-info, fingerprint-strings, http-affiliate-id's `re` grammars): a first-party engine, total, fuzzed, with nmap's backtrack ceiling (D2), wide indices where C's are 16 bits (D4), and every stage pre-emptible (D3) | `core::nse::stdlib` (`nse_pattern`, `nse_format`, `nse_strpack`, `nse_tail`, `nse_utf8_date`), `core::nse::lpeg` (`nse_lpeg_build`, `nse_lpeg_match`) |
 | `nmapdb` arguments (M6.6 step a) | script | total parsers; the protocol option list is terminated, and a byte ≥ 0x80 is never a hex digit; fuzzed | `core::nse::nmapdb` (`nse_mac2corp`) |
 | `nmap-mac-prefixes`, `nmap-protocols` (M6.6 step a) | semi-trusted (installer, `--datadir`) | read once, as bytes; no assert: a prefix-only line is skipped, and so is a protocol line C misreads; fuzzed | `core::macvendor` (`macvendor_parse`), `core::protocols` (`nse_protocols`) |
 
@@ -179,8 +179,15 @@ Here:
 - **Depth.** C-call depth (200), Lua stack (1,000,000 slots) and
   `__index`/`__newindex` chains (2,000) are bounded as in PUC-Lua.
 - **Runaway matching.** The pattern matcher's worst case is bounded
-  (`pattern-worst-case-time-is-bounded`). Size-chosen buffers (`string.rep`,
-  `format`, `pack`) are checked against the budget before they are built.
+  (`pattern-worst-case-time-is-bounded`). LPeg's is not bounded, as in C:
+  building, compiling, matching and evaluating captures can each take time
+  exponential in a pattern a script writes. Instead every stage burns fuel
+  and returns to the VM between slices, so the watchdog below ends it
+  (`lpeg-stall-limit-ends-finite-work`; C hangs), and the 11 patterns that
+  read network data are linear in their subject, held to 1.25 times the
+  steps per byte of their adversarial inputs (`lpeg_slowness_regression`).
+  Size-chosen buffers (`string.rep`, `format`, `pack`) are checked against
+  the budget before they are built.
 - **CPU.** The engine steps the VM in slices and checks a watchdog between
   them. On the command line, a phase whose scheduler makes no pass for ten
   minutes, or for `--script-timeout` when set, ends as aborted. The results

@@ -420,6 +420,19 @@ jobs:
       - run: bash tests/differential/m6/regen_m66_scriptload.sh --check
       - run: python3 tests/differential/m6/oracle/gen_m66_scriptload.py "$RUNNER_TEMP"
       - run: M66_SCRIPTLOAD_GOLDEN="$RUNNER_TEMP/m66_scriptload_golden.txt" cargo test -p nmap-core --test scriptload_differential
+      # M6.6 step e: the exit criterion. nmap on this repository's own data
+      # directory: what -sC, --script default, --script version and -A (as
+      # -sC -sV) select, load and drop, with the port's missing C modules
+      # removed for the loaded and quiet lists; the categories that still stop
+      # at start-up, and on which file:line; and address-info, riak-http-info,
+      # bitcoinrpc-info and http-affiliate-id run against loopback listeners
+      # (8098, 8332, 8180). The port's binary must print the same, through the
+      # same parser (oracle/gen_m66_exit.py --check), with the two tolerances
+      # its ledger entries name. --check fails on a stale committed golden.
+      # Regenerated live here; the test job runs the committed golden.
+      - run: bash tests/differential/m6/regen_m66_exit.sh --check
+      - run: python3 tests/differential/m6/oracle/gen_m66_exit.py "$RUNNER_TEMP"
+      - run: M66_EXIT_GOLDEN="$RUNNER_TEMP/m66_exit_golden.txt" cargo test -p nmap-cli --test nse_exit_differential
       # M6.6: nmap's C module `nmapdb` over this tree's data files, through a
       # prerule probe: every MAC prefix, every port of tcp, udp and sctp, and
       # the argument edges, with the calls that abort or are undefined in 7.94
@@ -690,3 +703,8 @@ jobs:
       # goldens (regenerated live in the differential job).
       - run: cargo test -p nmap-core --test scriptload_differential
       - run: cargo test -p nmap-core --test nmapdb_differential
+      # M6.6 step e — the exit criterion against the committed nmap 7.94
+      # golden (regenerated live in the differential job); plus the LPeg
+      # denial-of-service rows at --script-timeout 2, which have no oracle
+      # (nmap hangs in each).
+      - run: cargo test -p nmap-cli --test nse_exit_differential

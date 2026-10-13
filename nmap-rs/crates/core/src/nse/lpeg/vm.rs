@@ -54,7 +54,7 @@ pub mod capture;
 
 use super::code::{Op, Program, Slot};
 use super::tree::{CapKind, Key};
-use super::{did_steps, grow, Grown};
+use super::{did_steps, did_vm_steps, grow, Grown};
 
 /// `INITBACK` (`lpeg.c:3360`): the backtrack stack's first size, and the
 /// floor of its ceiling — the stored maximum is read only when it is full.
@@ -328,7 +328,7 @@ impl Vm {
         std::mem::take(&mut self.caps)
     }
 
-    /// Instructions run so far.
+    /// Instructions run so far, and the bytes span instructions tested.
     #[must_use]
     pub fn steps(&self) -> u64 {
         self.steps
@@ -368,6 +368,7 @@ impl Vm {
         let steps = self.steps;
         let r = self.run_inner(prog, subj, maxstack, budget);
         did_steps(self.steps - steps);
+        did_vm_steps(self.steps - steps);
         r
     }
 
@@ -487,10 +488,17 @@ impl Vm {
                 }
                 // A unit a byte, the unit the instruction took paying for
                 // the first: a long run is scanned across slices, and every
-                // slice scans at least one byte.
+                // slice scans at least one byte. Each byte tested is a step
+                // too (M6.6 step e): counted as one instruction, a span
+                // rescanned from many positions was quadratic in time and
+                // linear in steps (`lpeg_search`'s blind spot).
                 Op::Span => {
                     *budget += 1;
-                    while self.s < e && in_set(slots, p + 1, subj[self.s])? {
+                    while self.s < e {
+                        self.steps += 1;
+                        if !in_set(slots, p + 1, subj[self.s])? {
+                            break;
+                        }
                         if *budget == 0 {
                             return Ok(VmPoll::Pending);
                         }

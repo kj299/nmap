@@ -1,0 +1,30 @@
+# M6.6 step e: the adversarial-slowness regression gate's ceilings, read by
+# crates/core/tests/lpeg_slowness_regression.rs.
+#
+# One row per network-facing pattern of ../matchers.lua. ID.bin beside this
+# file is the subject with the most steps per byte, among subjects of at least
+# SELMIN = 1024 bytes, that a 600 s CPU run of ../run_search.sh per pattern
+# found (its sustained_ID.bin, 2026-10-12), steps counted by the tree's lpeg.c
+# instrumented by ../patch_lpeg.py: one per VM instruction, one per byte a span
+# instruction examines, one per capture-evaluation step. c_vm and c_cap are
+# that build's counts on the subject, c_spb = (c_vm + c_cap) / size the
+# pattern's adversarial maximum, and K = 1.25 x c_spb (docs/M6.6-ANALYSIS.md
+# §9, D3 condition 4): the port's own counts per byte on the same subject
+# (lpeg::take_steps, in the same units) must stay at or under K.
+#
+# Regenerate after a new search: copy OUT/sustained_ID.bin to ID.bin, and take
+# each row from OUT/res_ID.txt's SUSTAINED line and a run of the instrumented
+# interpreter over ID.bin (README.md, "The regression gate").
+#
+# id	size	c_vm	c_cap	c_spb	K
+json	1025	22043	1026	22.5063	28.1329
+coap	48546	298435	36661	6.9026	8.6283
+get_response	65348	1403731	6	21.4809	26.8511
+parse_fp	65129	1397682	10	21.4604	26.8255
+ntp	65531	1310614	65530	20.9999	26.2499
+fpstrings	1025	8232	1	8.0322	10.0402
+aff_ga	1024	7175	1	7.0078	8.7598
+aff_ad	1024	7175	1	7.0078	8.7598
+aff_amz	1024	8201	1	8.0098	10.0122
+aff_short	1024	6151	1	6.0078	7.5098
+escaped_quote	1024	14342	0	14.0059	17.5074

@@ -1,5 +1,6 @@
 # kind	library	outcome	[detail]
-# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir). Regenerate with
+# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir); unittest-all without openssl,lfs,libssh2,zlib.
+# Regenerate with
 # python3 oracle/gen_m64_nselib.py tests/differential/m6
 require	afp	ok
 require	ajp	ok
@@ -134,29 +135,71 @@ require	vuzedht	ok
 require	wsdd	ok
 require	xdmcp	ok
 require	xmpp	ok
-unittest	asn1	pass
-unittest	base32	pass
-unittest	base64	pass
-unittest	bits	pass
-unittest	coap	pass
-unittest	comm	pass
-unittest	dns	pass
-unittest	formulas	pass
-unittest	gps	pass
-unittest	http	pass
-unittest	idna	pass
-unittest	ipOps	pass
-unittest	json	pass
-unittest	mongodb	pass
-unittest	mqtt	pass
-unittest	mssql	pass
-unittest	packet	pass
-unittest	punycode	pass
-unittest	sasl	pass
-unittest	smbauth	pass
-unittest	ssh2	pass
-unittest	tls	pass
-unittest	unicode	pass
-unittest	unittest	pass
-unittest	url	pass
-unittest	vnc	pass
+unittest	asn1	pass	10
+unittest	base32	pass	26
+unittest	base64	pass	276
+unittest	bits	pass	11
+unittest	coap	pass	1060
+unittest	comm	pass	2
+unittest	dns	pass	155
+unittest	formulas	pass	1
+unittest	gps	pass	2
+unittest	http	pass	105
+unittest	idna	pass	43
+unittest	ipOps	pass	81
+unittest	json	pass	69
+unittest	mongodb	pass	160
+unittest	mqtt	pass	67
+unittest	mssql	pass	2
+unittest	packet	pass	7
+unittest	punycode	pass	10
+unittest	sasl	pass	3
+unittest	smbauth	pass	4
+unittest	ssh2	pass	3
+unittest	tls	pass	399
+unittest	unicode	pass	16
+unittest	unittest	pass	0
+unittest	url	pass	84
+unittest	vnc	pass	4
+unittest-emu	asn1	pass	10
+unittest-emu	base32	pass	26
+unittest-emu	base64	pass	276
+unittest-emu	bits	pass	11
+unittest-emu	coap	pass	1060
+unittest-emu	comm	pass	2
+unittest-emu	dns	pass	155
+unittest-emu	formulas	pass	1
+unittest-emu	gps	pass	2
+unittest-emu	http	pass	75
+unittest-emu	idna	pass	43
+unittest-emu	ipOps	pass	81
+unittest-emu	json	pass	69
+unittest-emu	mongodb	fail	Failed to load: table: 0x?
+unittest-emu	mqtt	pass	67
+unittest-emu	mssql	pass	2
+unittest-emu	packet	pass	7
+unittest-emu	punycode	pass	10
+unittest-emu	sasl	pass	0
+unittest-emu	smbauth	pass	0
+unittest-emu	ssh2	fail	Failed to load: table: 0x?
+unittest-emu	tls	pass	399
+unittest-emu	unicode	pass	16
+unittest-emu	unittest	pass	0
+unittest-emu	url	pass	84
+unittest-emu	vnc	pass	0
+unittest-all	bitcoin	silent_require
+unittest-all	bittorrent	openssl
+unittest-all	iax2	silent_require
+unittest-all	iscsi	silent_require
+unittest-all	lfs	lfs
+unittest-all	libssh2	libssh2
+unittest-all	libssh2-utility	silent_require
+unittest-all	mongodb	silent_require
+unittest-all	openssl	openssl
+unittest-all	pgsql	silent_require
+unittest-all	rsync	silent_require
+unittest-all	sip	silent_require
+unittest-all	ssh1	silent_require
+unittest-all	ssh2	silent_require
+unittest-all	tns	silent_require
+unittest-all	zlib	zlib

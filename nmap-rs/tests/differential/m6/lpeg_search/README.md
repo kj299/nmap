@@ -7,8 +7,10 @@ of `lpeg.c` and writes only to a work directory outside the repository.
 ## What it does
 
 `patch_lpeg.py` writes an instrumented copy of `lpeg.c` with two counters:
-one per VM instruction, and one per capture-evaluation step (each
-`pushcapture` call). `lpeg.__steps()` returns both and resets them.
+one per VM instruction and per byte a span instruction examines, and one per
+capture-evaluation step (each `pushcapture` call). `lpeg.__steps()` returns
+both and resets them. (Until M6.6 step e a span counted once however many
+bytes it scanned; see "What the counters cannot see".)
 `build_patched_lua.sh` builds the M6 oracle interpreter around that copy.
 It runs the committed `oracle/build_lua_oracle.sh` itself, in a throw-away
 tree under the work directory, so the build recipe is the oracle's own.
@@ -86,53 +88,72 @@ read high for known reasons, so the warning ignores them:
 
 ## What it last measured
 
-The last full measurement is the step 0b critic's re-run of this search,
-with this fitness, at 300 s CPU per pattern. get_response and parse_fp were
-not re-run; their figures come from the first 120 s run (`*`), whose fitness
-had no floor but whose maxima came from 64 KiB subjects anyway. The values
-below are recomputed from those runs' saved outputs, using this harness's
-definitions:
+M6.6 step e, 2026-10-12: `./run_search.sh` at its defaults (600 s CPU per
+pattern, SELMIN 1024, 4 at once), with span bytes counted:
 
-| pattern | max steps/byte (≥ 1 KiB) | at size | best, ≥ 64 B | grow_exp | env_exp | tail_exp | 1.25 × max |
-|---|---|---|---|---|---|---|---|
-| json | 22.15 | 6,887 | 22.17 | 0.999 | 1.008 | 1.001 | 27.69 |
-| get_response* | 21.46 | 65,536 | 21.46 | 1.010 | 1.035 | 1.001 | 26.82 |
-| parse_fp* | 21.02 | 65,536 | 21.04 | 0.995 | 1.057 | 1.007 | 26.28 |
-| ntp | 19.64 | 6,888 | 19.64 | 0.998 | 1.046 | 1.002 | 24.55 |
-| escaped_quote | 14.00 | 1,217 | 14.09 | 0.999 | 0.999 | 0.997 | 17.51 |
-| aff_amz | 8.01 | 1,217 | 8.16 | 1.009 | 0.998 | 1.000 | 10.01 |
-| fpstrings | 7.69 | 1,217 | 8.14 | 0.976 | 0.982 | 0.933 | 9.61 |
-| aff_ga | 7.01 | 1,217 | 7.12 | 0.997 | 0.998 | 1.000 | 8.76 |
-| aff_ad | 7.01 | 1,217 | 7.12 | 0.997 | 0.998 | 0.997 | 8.76 |
-| coap | 6.67 | 1,216 | 6.76 | 0.998 | 0.990 | 0.969 | 8.34 |
-| aff_short | 6.01 | 1,217 | 6.12 | 0.994 | 0.998 | 1.000 | 7.51 |
+| pattern | evals | max steps/byte (≥ 1 KiB) | at size | best, ≥ 64 B | grow_exp | env_exp | pre_exp | tail_exp | K = 1.25 × max |
+|---|---|---|---|---|---|---|---|---|---|
+| json | 1,393,156 | 22.51 | 1,025 | 22.60 | 0.999 | 0.999 | 1.009 | 0.999 | 28.13 |
+| get_response | 140,392 | 21.48 | 65,348 | 21.48 | 1.010 | 1.049 | 1.190 | 1.000 | 26.85 |
+| parse_fp | 141,634 | 21.46 | 65,129 | 21.46 | 0.996 | 1.111 | 1.188 | 1.001 | 26.83 |
+| ntp | 294,998 | 21.00 | 65,531 | 21.00 | 0.998 | 1.048 | 1.000 | 1.001 | 26.25 |
+| escaped_quote | 13,231,795 | 14.01 | 1,024 | 14.09 | 0.999 | 0.999 | 1.000 | 0.997 | 17.51 |
+| fpstrings | 14,527,764 | 8.03 | 1,025 | 8.51 | 0.981 | 0.984 | 1.000 | 0.924 | 10.04 |
+| aff_amz | 22,245,828 | 8.01 | 1,024 | 8.16 | 1.009 | 0.996 | 1.000 | 0.997 | 10.01 |
+| aff_ga | 24,615,102 | 7.01 | 1,024 | 7.12 | 0.997 | 0.998 | 1.000 | 1.000 | 8.76 |
+| aff_ad | 24,566,020 | 7.01 | 1,024 | 7.12 | 0.997 | 0.998 | 1.000 | 0.997 | 8.76 |
+| coap | 90,160 | 6.90 | 48,546 | 6.90 | 0.998 | 1.033 | 1.002 | 1.001 | 8.63 |
+| aff_short | 29,806,387 | 6.01 | 1,024 | 6.12 | 0.994 | 0.998 | 1.000 | 1.000 | 7.51 |
 
-Every pattern is linear: no exponent reaches 1.06. The step 0b report's
-figures differ from these in two places:
-- coap: the report quoted 6.76, which is the best over subjects of at least
-  64 bytes;
-- fpstrings: the report quoted 7.66, the plateau above 4 KiB.
+Every pattern is linear: no `grow_exp` or `tail_exp` passes 1.01, so the
+run printed no warning (`env_exp` and `pre_exp` read high for the known
+reasons above). Counting span bytes moved four maxima, each by under 7%
+(step 0b's critic, 300 s and spans counted once: json 22.15, ntp 19.64,
+fpstrings 7.69, coap 6.67); none of the 11 has the span-rescanning shape,
+as step 0b judged by inspection. The closed families (`wellformed.txt`)
+fit 0.997 to 1.003.
 
-Step e sets K per pattern at 1.25 × the maximum from a 600 s run of
-`./run_search.sh`, which has not been done yet.
+## The regression gate
 
-The budget matters. A 5 s smoke run of this harness reached lower maxima,
-for example ntp 14.6 steps/byte and parse_fp 15.7.
+`adversarial/` holds, for each pattern, the subject behind its maximum
+(`sustained_ID.bin` as `ID.bin`), and `K.txt` the instrumented C's counts on
+it and K = 1.25 × its steps per byte (D3 condition 4). The port's
+`crates/core/tests/lpeg_slowness_regression.rs` builds the same 11 patterns
+through this directory's own `matchers.lua`, unmodified, runs each on its
+subject, and counts steps with the port's counters in the same units
+(`lpeg::take_steps`: instructions and span bytes, and `pushcapture` calls).
+Each pattern must stay at or under its K, and its counts must be the C's: they
+are equal on all 11 but escaped_quote, where the C's machine takes one more
+step, its `IGiveup` on a failed match. It also checks that the counter sees a
+span's bytes. Deterministic, under a second; it runs in `cargo test`.
+
+To move the gate after a new search: copy `OUT/sustained_ID.bin` to
+`adversarial/ID.bin`, and write each row of `K.txt` from `OUT/res_ID.txt`'s
+`SUSTAINED` line and the instrumented interpreter's `lpeg.__steps()` over the
+new subject (`matchers.lua`'s `M[id].match`, through `pcall`).
 
 ## What the counters cannot see
 
-The VM counter adds one step per instruction, but `ISpan` (`S(...)^0`,
-`(P(1) - x)^0` and the like) consumes a whole run of bytes in one
-instruction. Work inside a span is therefore invisible to steps per byte.
-A pattern that rescans a span from many start positions is quadratic in
-time and linear in steps. For example, `anywhere(P"a"^0 * "b")` on a run of
-`a`s gives a flat 6.00 steps/byte from 1,000 to 8,000 bytes, while its CPU
-time grows about 30-fold. This search cannot find that shape.
+Until M6.6 step e the VM counter added one step per instruction, and `ISpan`
+(`S(...)^0`, `(P(1) - x)^0` and the like) consumes a whole run of bytes in
+one instruction, so a pattern that rescans a span from many start positions
+was quadratic in time and linear in steps: `anywhere(P"a"^0 * "b")` on a run
+of `a`s gave a flat 6.00 steps/byte from 1,000 to 8,000 bytes while its CPU
+time grew about 30-fold. `patch_lpeg.py` now counts every byte a span
+examines, and that pattern takes 506,505 steps at 1,000 bytes and 8,026,005
+at 4,000 (`build_instrumented.sh` checks a 1,000-byte span counts at least
+1,000). The port counts span bytes the same way (`lpeg::take_steps`, and its
+work counter).
 
-By inspection, none of the 11 patterns has it. Their retry loops start with
-a literal or bounded head: `anywhere("%r(")`, `'UA-'`, `'pub-'`,
-`'http://'`, and fingerprint-strings' `^-(n-1)`. A pattern added later
-should be checked for it by hand, or the counter extended.
+What still goes uncounted:
+- **Inside a capture's evaluation.** One step per `pushcapture` call: a
+  substitution's walk of its nested captures, a string capture's copy of its
+  bytes, a back-reference's re-evaluation of its group are each one step,
+  whatever their length. The port's fuel and work counter charge them (a unit
+  per frame and per `BYTES_PER_FUEL` bytes); this gate does not compare them.
+- **The Lua around a pattern**: `scriptside.txt` times two.
+- **The compile**, once per pattern.
+- **Subjects above 64 KiB.**
 
 ## Files
 
@@ -145,3 +166,4 @@ should be checked for it by hand, or the counter extended.
 | `search.lua` | the search and the exponent fits for one pattern |
 | `matchers.lua`, `stubs.lua` | the 11 patterns, and the stubs that let nselib load standalone |
 | `verify_wellformed.lua`, `scriptside.lua` | the closed-family fits and the script-side CPU times |
+| `adversarial/` | each pattern's adversarial subject and `K.txt`, the regression gate's ceilings |

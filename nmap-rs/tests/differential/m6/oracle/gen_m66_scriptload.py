@@ -45,8 +45,8 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", ".."))
 # The C modules nmap registers that the port does not have yet
 # (DIVERGENCES.md, `nse-c-modules-pending`). CI regenerates with this set, and
 # scriptload_differential fails unless it is the port's: a module leaves it in
-# the change that ports it (`nmapdb` left in M6.6 step a).
-PORT_MISSING = "openssl,lpeg,lfs,libssh2,zlib"
+# the change that ports it (`nmapdb` left in M6.6 step a, `lpeg` in step e).
+PORT_MISSING = "openssl,lfs,libssh2,zlib"
 
 ANCHOR = "local REQUIRE_ERROR = {};\n"
 NOT_FOUND = re.compile(r"[a-zA-Z0-9_./-]*:[0-9]*: module '[^']*' not found")

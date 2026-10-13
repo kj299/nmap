@@ -65,7 +65,9 @@ use gc_arena::Collect;
 
 use super::Capture;
 use crate::nse::lpeg::tree::{CapKind, Key};
-use crate::nse::lpeg::{did_bytes, did_steps, grow as grow_by, Grown, BYTES_PER_FUEL};
+use crate::nse::lpeg::{
+    did_bytes, did_cap_steps, did_steps, grow as grow_by, Grown, BYTES_PER_FUEL,
+};
 
 /// `LUAI_MAXSTACK` (`luaconf.h`): the most slots a Lua stack may use.
 pub const LUAI_MAXSTACK: usize = 1_000_000;
@@ -451,6 +453,10 @@ pub struct CapCursor<V = NoLua> {
     done: bool,
     #[collect(require_static)]
     steps: u64,
+    /// `pushcapture` calls ([`Frame::Push`]): capture evaluation in the
+    /// units `lpeg_search`'s instrumented C counts it (`lpeg::take_steps`).
+    #[collect(require_static)]
+    pushes: u64,
     /// A growth took the heap past the memory budget: end the slice.
     #[collect(require_static)]
     stop: bool,
@@ -501,6 +507,7 @@ impl<V: Copy> CapCursor<V> {
             ptop,
             done: false,
             steps: 0,
+            pushes: 0,
             stop: false,
             over: 0,
             pending: None,
@@ -790,9 +797,10 @@ impl<V: Copy> CapCursor<V> {
         env: &dyn CapEnv<V>,
         budget: &mut u32,
     ) -> Result<Step, CapError> {
-        let start = self.steps;
+        let (start, pushes) = (self.steps, self.pushes);
         let r = self.run(caps, subj, env, budget);
         did_steps(self.steps - start);
+        did_cap_steps(self.pushes - pushes);
         r
     }
 
@@ -1404,6 +1412,7 @@ impl<V: Copy> CapCursor<V> {
         env: &dyn CapEnv<V>,
     ) -> Result<(), CapError> {
         let _ = subj;
+        self.pushes += 1;
         // `luaL_checkstack(L, 4, "too many captures")`: the stack's whole
         // height, plus four, within `LUAI_MAXSTACK`.
         if self.u0.saturating_add(self.vs.len()).saturating_add(4) > LUAI_MAXSTACK {

@@ -4,9 +4,10 @@
 //! Every script and library shares one state. It holds the standard library
 //! the scripts are allowed (the VM's own, and the first-party half in
 //! [`super::stdlib`]), `package` and `require` ([`super::package`]), and the
-//! modules the engine provides — `nmap` ([`super::nmaplib`]) and `nmapdb`
-//! ([`super::nmapdb`]) — each both in `package.loaded` and as a global, as
-//! `luaL_requiref(L, name, open, 1)` leaves them.
+//! modules the engine provides — `nmap` ([`super::nmaplib`]), `nmapdb`
+//! ([`super::nmapdb`]) and `lpeg` ([`super::lpeg`]) — each both in
+//! `package.loaded` and as a global, as `luaL_requiref(L, name, open, 1)`
+//! leaves them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +16,7 @@ use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, StashedTable, Value
 
 use super::engine::{load_cnse, EngineOptions, Store};
 
+use super::lpeg::load_lpeg;
 use super::nmapdb::load_nmapdb;
 use super::nmaplib::{load_nmap, Shared};
 use super::package::{load_package, preload_module, LibrarySource};
@@ -168,6 +170,13 @@ fn build(config: &StateConfig) -> Lua {
         // `set_nmap_libraries` registers `nmapdb` next (`nse_main.cc:564`).
         let nmapdb = load_nmapdb(ctx, &config.lib);
         preload_module(ctx, loaded, "nmapdb", Value::Table(nmapdb), true);
+        // Then `lfs`, which is not ported (`nse-c-modules-pending`), and
+        // `lpeg` (`nse_main.cc:566-567`), a global and in `package.loaded`.
+        // nmap's engine also requires `lpeg-utility` before any script loads
+        // (`nse_main.lua:151`); the port's engine needs none of it
+        // (`nse-lpeg-utility-not-preloaded`).
+        let lpeg = load_lpeg(ctx);
+        preload_module(ctx, loaded, "lpeg", Value::Table(lpeg), true);
     });
     lua
 }
@@ -280,9 +289,10 @@ mod tests {
     /// The C modules this port registers, exactly: nmap's are registered by
     /// `set_nmap_libraries` (`nse_main.cc:556-579`) — `nmap`, `nmapdb`,
     /// `lfs`, `lpeg`, `libssh2`, `openssl`, `zlib` — with `nmap.socket` and
-    /// `nmap.dnet` from `luaopen_nmap`. This port has the first two and the
-    /// sub-modules, and the scriptload golden is generated with the rest
-    /// removed (`oracle/gen_m66_scriptload.py`, `PORT_MISSING`). Porting a
+    /// `nmap.dnet` from `luaopen_nmap`. This port has `nmap`, `nmapdb` and
+    /// `lpeg` (M6.6 step e) and the sub-modules, and the scriptload golden is
+    /// generated with the rest removed (`oracle/gen_m66_scriptload.py`,
+    /// `PORT_MISSING`). Porting a
     /// module, or stubbing one, means changing this list as well as that one
     /// (M6.6 review, sabotages S24 and S27).
     /// The state `new_state` builds, before the prelude, with no libraries,
@@ -391,10 +401,10 @@ mod tests {
         assert_eq!(
             out,
             ChunkOutcome::Returned(vec![
-                "nmap.dnet,nmap.socket,nmap=global,nmapdb=global".to_string()
+                "lpeg=global,nmap.dnet,nmap.socket,nmap=global,nmapdb=global".to_string()
             ])
         );
-        for missing in ["lfs", "lpeg", "libssh2", "openssl", "zlib"] {
+        for missing in ["lfs", "libssh2", "openssl", "zlib"] {
             let out = run_chunk(
                 &mut lua,
                 "=t",
@@ -405,43 +415,61 @@ mod tests {
         }
     }
 
-    /// `lpeg` is built only partly (M6.6 step b: patterns, not matching), and
-    /// is registered only at step e (E9): until then no script can reach it.
-    /// Its test-only registration (`lpeg::register_for_tests`) is not called
-    /// by the runtime.
+    /// `lpeg` is registered as `luaL_requiref(L, "lpeg", luaopen_lpeg, 1)`
+    /// leaves it (`nse_main.cc:567,581`; M6.6 step e): one table, in
+    /// `package.loaded` and the global `lpeg`, which `require` returns; the
+    /// pattern metatable reachable through `getmetatable` (no `__metatable`
+    /// field: `re.lua` reads it and calls its fields), its `__index` that
+    /// table; and matching works through it. The runtime opens it through
+    /// `lpeg::load_lpeg`, never the test-only `register_for_tests`.
     #[test]
-    fn lpeg_is_not_registered() {
+    fn lpeg_is_registered_as_nmap_registers_it() {
         use super::*;
         let mut lua = bare_state();
         let out = run_chunk(
             &mut lua,
             "=t",
-            b"local ok, e = pcall(require, 'lpeg') \
-              return ok, (tostring(e):match(\"^module 'lpeg' not found\")), \
-                     rawget(_G, 'lpeg'), package.loaded.lpeg",
-            1_000_000,
+            b"local ok, l = pcall(require, 'lpeg') \
+              local mt = getmetatable(l.P(1)) \
+              return ok, rawequal(l, rawget(_G, 'lpeg')), rawequal(l, package.loaded.lpeg), \
+                     l.version(), type(mt), rawequal(mt.__index, l), \
+                     rawget(mt, '__metatable') == nil, mt.__name, type(mt.__add), \
+                     l.match(l.C(l.P'a'^1) * l.Cp(), 'aab')",
+            10_000_000,
         );
         assert_eq!(
             out,
-            ChunkOutcome::Returned(vec![
-                "false".to_string(),
-                "module 'lpeg' not found".to_string(),
-                "nil".to_string(),
-                "nil".to_string()
-            ])
+            ChunkOutcome::Returned(
+                [
+                    "true",
+                    "true",
+                    "true",
+                    "0.12",
+                    "table",
+                    "true",
+                    "true",
+                    "lpeg-pattern",
+                    "function",
+                    "aa",
+                    "3"
+                ]
+                .map(str::to_string)
+                .to_vec()
+            )
         );
         let src = include_str!("runtime.rs");
         let call = ["register", "_for_tests"].concat();
         assert!(
             !src.contains(&format!("{call}(")),
-            "the runtime registers lpeg"
+            "the runtime registers lpeg through the test-only path"
         );
     }
 
     /// Nothing calls `lpeg::register_for_tests` but the `lpeg` module's own
-    /// tests, the integration tests and the fuzz targets (E9): a search of
-    /// every crate's sources, so a caller anywhere else — the engine, the
-    /// command line — fails here, not only one in this file.
+    /// tests, the integration tests and the fuzz targets: a search of every
+    /// crate's sources, so a caller anywhere else — the engine, the command
+    /// line — fails here, not only one in this file. The runtime registers
+    /// the module through `lpeg::load_lpeg` alone.
     #[test]
     #[cfg_attr(miri, ignore = "reads the source tree")]
     fn only_tests_register_lpeg() {

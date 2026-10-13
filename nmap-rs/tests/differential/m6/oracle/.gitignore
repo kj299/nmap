@@ -1,4 +1,6 @@
 lua
+lua-fwrapv
+lua-ubsan
 __pycache__/
 
 # Generated oracle drivers. These are pasted together from verbatim slices of

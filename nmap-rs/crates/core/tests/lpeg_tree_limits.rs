@@ -182,12 +182,14 @@ fn deep_patterns_are_walked_without_recursion() {
 }
 
 /// Sizes the C computes in an `int` (`lpeg-tree-size-int-overflow`), as
-/// the tree's oracle answers each (measured): where the `int` wraps to -3 or
-/// below, `luaM_toobig`'s "memory allocation error: block too big", with no
-/// position even from Lua code; where it wraps to -2, -1 or a size short of
-/// the tree, the C allocates that and writes past it (it crashes), which is
-/// `not enough memory` here — unless the C's own check comes between the
-/// allocation and the writes, which is reproduced. Any tree the memory
+/// the tree's oracle built with `-fwrapv` answers each (measured; the C's
+/// arithmetic modulo 2^32, defined): where the `int` wraps to -3 or below,
+/// but not to `INT_MIN`, `luaM_toobig`'s "memory allocation error: block too
+/// big", with no position even from Lua code; where it wraps to -2, -1 or a
+/// size short of the tree, the C allocates that and writes past it (it
+/// crashes), and to `INT_MIN` it asks for 16 GiB, both `not enough memory`
+/// here — unless the C's own check comes between the allocation and the
+/// writes, which is reproduced. Any tree the memory
 /// budget refuses is `not enough memory` too. Each is a catchable error,
 /// not an abort.
 #[test]
@@ -197,7 +199,8 @@ fn sizes_past_the_cs_int_are_its_errors() {
     for (src, want) in [
         ("return pcall(lpeg.P, 2^30 + 1)", big),
         ("return pcall(function() return lpeg.P(2^31 - 1) end)", big),
-        ("return pcall(lpeg.P, -(2^30))", big),
+        // `INT_MIN`: the C asks for 16 GiB (its `len - 1` wraps).
+        ("return pcall(lpeg.P, -(2^30))", nem),
         ("return pcall(lpeg.P, 1500000000)", big),
         ("return pcall(lpeg.P, -1500000000)", big),
         (
@@ -208,7 +211,12 @@ fn sizes_past_the_cs_int_are_its_errors() {
         ("return pcall(function() return lpeg.P'' ^ (2^30) end)", big),
         (
             "return pcall(function() return (#lpeg.P'a') ^ (2^31 - 1) end)",
-            big,
+            nem,
+        ),
+        // `INT_MIN` too, before the check for an empty loop.
+        (
+            "return pcall(function() return lpeg.P'' ^ (2^30 - 1) end)",
+            nem,
         ),
         (
             "return pcall(function() return lpeg.P'a' ^ -(2^31 - 1) end)",

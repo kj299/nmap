@@ -15,9 +15,18 @@ lpeg.c crashes, trips a sanitizer, or is undefined; no golden records them
       jump and goes on after it, without the `i--` re-scan (lpeg.c:1846);
     - lpeg-cc-nil-without-ktable: `Cconst` with key 0 pushes nil instead of
       reading entry 0 of a constant table the pattern may not have.
-  Only rows of those two ids and of lpeg-initposition-negation-overflow
-  (undefined `-ii` in C, a correct answer in practice) take this source:
-  the other ids' defects are not fixed in the build.
+  and, so that every `fixed-c` answer comes from defined code (LESSONS #033;
+  the M6.6 retrospective's H3), lpeg-initposition-negation-overflow's two
+  undefined operations:
+    - `initposition`'s `(size_t)(-ii)` (lpeg.c:3191-3192), signed overflow
+      for `math.mininteger`, becomes `0 - (size_t)ii`, its value modulo
+      2^64, defined;
+    - `resdyncaptures`' `lua_tointeger(L, fr) - 1` (:3439), signed overflow
+      for a match-time capture returning `math.mininteger`, is checked: that
+      position is out of range, so "invalid position returned by match-time
+      capture", raised before the subtraction.
+  Only rows of those three ids take this source: the other ids' defects are
+  not fixed in the build.
 * source `semantic`: the answer a correct LPeg gives where the fixed build
   still crashes or is wrong (16-bit constant keys, nested captures past
   the stack space LPeg checked for), written here with its reason.
@@ -80,6 +89,20 @@ def ledger_id(reason):
     return ""
 
 
+# lpeg-initposition-negation-overflow, made defined (see the docstring).
+DEFINED = [
+    ("    if ((size_t)(-ii) <= len)  /* inside the string? */\n"
+     "      return len - ((size_t)(-ii));  /* return position from the end */\n",
+     "    if (0 - (size_t)ii <= len)  /* inside the string? */\n"
+     "      return len - (0 - (size_t)ii);  /* return position from the end */\n"),
+    ("    res = lua_tointeger(L, fr) - 1;  /* new position */\n",
+     "    res = lua_tointeger(L, fr);\n"
+     "    if (res == LUA_MININTEGER)\n"
+     "      luaL_error(L, \"invalid position returned by match-time capture\");\n"
+     "    res = res - 1;  /* new position */\n"),
+]
+
+
 def patch(src):
     old_pp = "            i--;  /* reoptimize its label */\n"
     old_cc = ("    case Cconst: {\n"
@@ -87,9 +110,13 @@ def patch(src):
     new_cc = ("    case Cconst: {\n"
               "      if (cs->cap->idx == 0) lua_pushnil(L);\n"
               "      else pushluaval(cs);\n")
-    if src.count(old_pp) != 1 or src.count(old_cc) != 1:
+    if src.count(old_pp) != 1 or src.count(old_cc) != 1 \
+            or any(src.count(old) != 1 for old, _ in DEFINED):
         raise SystemExit("gen_m66c_quarantine_pins: lpeg.c no longer has the lines it patches")
-    return src.replace(old_pp, "").replace(old_cc, new_cc)
+    src = src.replace(old_pp, "").replace(old_cc, new_cc)
+    for old, new in DEFINED:
+        src = src.replace(old, new)
+    return src
 
 
 def step_of(flags):

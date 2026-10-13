@@ -178,6 +178,63 @@ fn each_network_facing_pattern_stays_under_its_ceiling_on_its_adversarial_input(
     );
 }
 
+/// The steps one call of `id`'s matcher takes on `subject` in slices of
+/// `fuel`, and how many slices the call took.
+fn steps_sliced(lua: &mut Lua, id: &str, subject: &[u8], fuel: i32) -> ((u64, u64), u64) {
+    let ex = lua.enter(|ctx| {
+        let gate: piccolo::Table = ctx.get_global("GATE").expect("GATE");
+        let Value::Table(m) = gate.get_value(ctx, Value::String(ctx.intern(id.as_bytes()))) else {
+            panic!("{id}: no matcher");
+        };
+        let f: Function = m.get(ctx, "match").expect("its match");
+        ctx.stash(Executor::start(ctx, f, Value::String(ctx.intern(subject))))
+    });
+    let _ = take_steps();
+    let (done, slices) = lpeg_eval::step_only(lua, &ex, fuel, 100_000_000);
+    assert!(done, "{id}: runs on");
+    (take_steps(), slices)
+}
+
+/// A span cut by slices counts as one slice does (the M6.6 retrospective's
+/// F1): `P'a'^0` over a run of `a`s is one span instruction, a step for each
+/// byte it tests, and `IEnd` — `n + 2`, as the C's instrumented `ISpan`
+/// counts it — whether the run is scanned in one slice or across hundreds
+/// of slice boundaries, each inside the span. Before, a boundary in a span
+/// counted the byte it stopped at twice and the instruction again, two
+/// steps more a boundary, so the gate's counts held only while no span
+/// crossed one.
+#[test]
+fn a_span_cut_by_slices_counts_as_one_slice_does() {
+    let mut lua = lpeg_eval::new_lua();
+    let ex = lpeg_eval::start(
+        &mut lua,
+        "GATE = { span = { match = function(s) return lpeg.match(lpeg.P'a'^0, s) end } } \
+         return 1",
+    );
+    assert_eq!(
+        lpeg_eval::step_to_end(&mut lua, &ex, 1_000_000, 1_000).0,
+        lpeg_eval::Outcome::Returned(vec!["1".into()])
+    );
+    let n = 200_000u64;
+    let subject = vec![b'a'; 200_000];
+    let (whole, one) = steps_sliced(&mut lua, "span", &subject, 10_000_000);
+    assert_eq!(one, 1, "the whole run in one slice");
+    assert_eq!(whole, (n + 2, 0), "one slice: the span, {n} bytes and IEnd");
+    // (A slice of the binding runs at least `MIN_STEPS`, 1,024, steps.)
+    for fuel in [8192, 4096, 2048, 1024] {
+        let (sliced, slices) = steps_sliced(&mut lua, "span", &subject, fuel);
+        eprintln!("fuel {fuel}: {slices} slices, {sliced:?} steps");
+        assert!(
+            slices > n / u64::try_from(fuel).unwrap_or(1) / 2,
+            "fuel {fuel}: {slices} slices, too few to cut the span"
+        );
+        assert_eq!(
+            sliced, whole,
+            "fuel {fuel}: {slices} slices counted otherwise than one"
+        );
+    }
+}
+
 /// The counter is not blind to spans: `anywhere(P'a'^0 * 'b')` on a run of
 /// `a`s rescans the run from every position, quadratic in time — and, since
 /// each byte a span tests is a step, in steps. Counted once a span, it was

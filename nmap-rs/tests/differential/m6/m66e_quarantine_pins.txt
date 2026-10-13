@@ -1,6 +1,6 @@
 # M6.6 step e: pins for the last 7 quarantined rows of m66_lpeg_cases.txt's
 # generator, which steps c and d left to step b's unit tests (M6.6-ANALYSIS
-# §13). id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log, as in
+# §11, step e row). id<TAB>step<TAB>source<TAB>status<TAB>values<TAB>log, as in
 # m66c_quarantine_pins.txt. Written by hand, each answer measured: source
 # `tree` is what the tree's standalone lpeg.c (oracle/lua, m66_lpeg_driver.lua)
 # answers when run on the row alone, which it does without crashing; `semantic`

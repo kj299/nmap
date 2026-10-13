@@ -10,7 +10,9 @@ nmap 7.94 against them. Driven by ../regen_m66_lpeg.sh.
 `build`:
   1. generates every row (gen_m66_lpeg_cases.py) and requires the committed
      quarantine (m66_lpeg_quarantine.txt) to have screened exactly this corpus
-     (its SHA-256), then drops the quarantined rows: they never reach an oracle;
+     (its SHA-256) with exactly these sources, recipes and harnesses
+     (`screened-sources-sha256`, classify_m66_lpeg.sources_sha256), then drops
+     the quarantined rows: they never reach an oracle;
   2. runs this tree's standalone Lua + LPeg over the rest TWICE; a row that
      differs between the runs must fall in a class allowed run to run
      (`hashorder` only), or the build fails;
@@ -21,9 +23,10 @@ nmap 7.94 against them. Driven by ../regen_m66_lpeg.sh.
   5. with --with-794, runs nmap 7.94 over the same cases and classifies every
      row that differs from run 1 (see `agree`).
 
-`agree` (and step 5): every row where 7.94 differs from the tree must fall in a
-named class (hashorder, cdepth, drift794, path, position, argname); untagged
-drift fails.
+`agree` (and step 5): every row where 7.94 differs from the tree must be one
+DRIFT_794 lists, under the class listed for it (cdepth, drift794), and every
+listed row must still differ; anything else fails (hashorder, the golden's own
+mask, is the only class allowed on any row).
 Counts per class are printed. nmap runs the prerule probe
 oracle/m66_lpeg_probe.nse with --datadir set to this repository.
 """
@@ -45,7 +48,26 @@ DRIVER = os.path.join(HERE, "m66_lpeg_driver.lua")
 CORE = os.path.join(HERE, "m66_lpeg_core.lua")
 PROBE = os.path.join(HERE, "m66_lpeg_probe.nse")
 QUARANTINE = os.path.join(M6, "m66_lpeg_quarantine.txt")
-DRIFT_CLASSES = {"hashorder", "cdepth", "drift794", "path", "position", "argname"}
+# The rows nmap 7.94 may answer differently from the tree, each with the one
+# class it may differ under -- exactly (the M6.6 retrospective's H2: a class
+# tried on every row is an exemption nobody counted). A row not listed here
+# that differs fails, and so does a listed row that agrees: the table is the
+# drift, not a ceiling on it. `cdepth` and `drift794` also need the row's tag
+# in the cases file. `path`, `position` and `argname` are listed for no row.
+DRIFT_794 = {
+    "H.reenter.195": "cdepth",
+    "H.reenter.196": "cdepth",
+    "H.reenter.197": "cdepth",
+    "H.reenter.198": "cdepth",
+    "H.reenter.199": "cdepth",
+    "H.reenter.200": "cdepth",
+    "H.reenter.250": "cdepth",
+    "H.reenter.rel": "drift794",
+}
+# `hashorder` is not a drift but the mask the golden is stored with: the rule
+# name in four grammar errors follows Lua's per-process salt, so a raw run
+# (`build --with-794`, against standalone run 1) may differ there on any row
+# that raises one, and both sides are then masked alike.
 
 GOLDEN_HEAD = """\
 # M6.6 step 0b LPeg golden: what this tree's liblua/ + lpeg.c (oracle/build_lua_oracle.sh)
@@ -87,15 +109,24 @@ def agree_report(tree_rows, nmap_rows, cases, label):
     agree = len(tree_rows) - sum(len(v) for k, v in cls.items() if k != "extra")
     print("m6.6 lpeg vs nmap 7.94 (%s): %d rows, %d agree (%.3f%%); drift by class: %s"
           % (label, len(tree_rows), agree, 100.0 * agree / max(1, len(tree_rows)), cl.summary(cls)))
-    bad = {k: v for k, v in cls.items() if not set(k.split("+")) <= DRIFT_CLASSES}
+    bad = {}
+    for k, ids in cls.items():
+        for cid in ids:
+            if k != "hashorder" and DRIFT_794.get(cid) != k:
+                bad.setdefault(k, []).append(cid)
+    drifted = {cid for k, ids in cls.items() if k != "hashorder" for cid in ids}
+    stale = sorted(cid for cid in DRIFT_794 if cid not in drifted)
     for k, ids in sorted(cls.items()):
         print("  %-24s %s" % (k, " ".join(ids[:12]) + (" ..." if len(ids) > 12 else "")))
+    if stale:
+        fail("rows listed in DRIFT_794 now agree with the tree (exact membership; take them out): %s"
+             % " ".join(stale))
     if bad:
         for k, ids in bad.items():
             for cid in ids[:10]:
                 print("  UNTAGGED %s %s\n    tree: %s\n    7.94: %s" % (k, cid, "\t".join(tree_rows.get(cid, ("-",)))[:300],
                                                                   "\t".join(nmap_rows.get(cid, ("-",)))[:300]))
-        fail("nmap 7.94 drifts from the tree outside the named classes: %s" % cl.summary(bad))
+        fail("nmap 7.94 drifts from the tree outside the rows and classes DRIFT_794 lists: %s" % cl.summary(bad))
 
 
 def build(outdir, with_794):
@@ -110,6 +141,12 @@ def build(outdir, with_794):
         fail("m66_lpeg_quarantine.txt screened another corpus (%s, generated %s): the generator changed, so "
              "re-run oracle/screen_m66_lpeg.py locally (it needs an ASan build and nmap 7.94)"
              % (head.get("screened-corpus-sha256"), digest))
+    sources = cl.sources_sha256(REPO)
+    if head.get("screened-sources-sha256") != sources:
+        fail("m66_lpeg_quarantine.txt was screened with other sources (%s, now %s): the C, a build recipe or "
+             "its flags, or a harness changed (classify_m66_lpeg.SCREENED_SOURCES), so re-run "
+             "oracle/screen_m66_lpeg.py locally (it needs an ASan build and nmap 7.94)"
+             % (head.get("screened-sources-sha256"), sources))
     cases_all = cl.read_cases(allp)
     for cid, (reason, chunk) in quarantined.items():
         if cid not in cases_all or cases_all[cid][1] != chunk:

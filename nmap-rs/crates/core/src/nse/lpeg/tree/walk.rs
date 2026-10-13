@@ -341,7 +341,7 @@ impl FixedLen {
     }
 }
 
-/// `verifyerror` (`lpeg.c:3020`): the latest rule on the left-call path
+/// `verifyerror` (`lpeg.c:3028`): the latest rule on the left-call path
 /// that appears earlier on it, or "too many left calls".
 fn verify_error(passed: &[Key]) -> TreeError {
     for i in (0..passed.len()).rev() {
@@ -506,7 +506,7 @@ impl VerifyRule {
     }
 }
 
-/// `checkloops` (`lpeg.c:3000`): whether a repetition in the subtree has a
+/// `checkloops` (`lpeg.c:3008`): whether a repetition in the subtree has a
 /// body that can match the empty string. Does not enter sub-grammars, which
 /// were checked when they were built, nor follow calls.
 #[derive(Debug, Clone)]
@@ -861,7 +861,7 @@ impl Default for FindOpenCall {
     }
 }
 
-/// `fixonecall` (`lpeg.c:2160`): the open call at `t` becomes a call of the
+/// `fixonecall` (`lpeg.c:2167`): the open call at `t` becomes a call of the
 /// rule its name resolves to, and that rule takes its key (and so counts as
 /// used, and is named by the key in errors).
 fn fix_one_call(

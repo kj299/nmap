@@ -41,7 +41,8 @@
       "nse_scriptargs"
     ],
     "core::nse::stdlib::base": [
-      "nse_tail"
+      "nse_tail",
+      "nse_tonumber"
     ],
     "core::nse::stdlib::osdate": [
       "nse_utf8_date"

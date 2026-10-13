@@ -34,6 +34,8 @@ any difference.
 | `m66_nmapdb_golden.txt`, `m66_nmapdb_quarantine.txt` | the C module `nmapdb` over this tree's data files (M6.6), vs nmap 7.94 | `regen_m66_nmapdb.sh`, `oracle/gen_m66_nmapdb.py` (live in CI) | `nmapdb_differential` | 115,064 lines; 36 calls quarantined, each pinned |
 | `m66_scriptload_golden.txt` | how each shipped script loads, alone, without the C modules the port lacks (M6.6), vs nmap 7.94 | `regen_m66_scriptload.sh`, `oracle/gen_m66_scriptload.py` (live in CI) | `scriptload_differential` | 611 scripts: 560 OK, 2 LOUD, 49 QUIET (531 / 33 / 47 before step e) |
 | `m66_lpeg_*`, `m66{c,d,e}_quarantine_pins.txt` | the C module `lpeg` (LPeg 0.12) with `re` and `lpeg-utility` (M6.6 step 0b), vs this tree's Lua + LPeg, and nmap 7.94 | `regen_m66_lpeg.sh` (`--check`; `--check-794` live in CI) | `lpeg_corpus_differential`: through the test-only registration, and since step e through the registered module, run by the port's engine under `oracle/m66_lpeg_probe.nse` | 62,599 rows; 164 quarantined, every one pinned |
+| `m66b_tree_*` | LPeg pattern construction (M6.6 step b): every constructor and operator, the grammar builder and verifier, the metatable, vs this tree's Lua + LPeg built with `-fwrapv`, and a UBSan screen of every row | `regen_m66b_trees.sh` | `lpeg_tree_differential` | 5,710 rows (14 `[wrapv]`) |
+| `m6_base_golden.txt` | the base and coroutine libraries as an NSE script meets them (`oracle/m6_base_probe.nse`): argument checks and results, coroutines inside a script's own, the collector as nmap starts it, `warn`'s output, vs nmap 7.94 | `regen_m6_base.sh`, `oracle/gen_m6_base.py` (live in CI) | `base_differential` | 67 rows + 5 warning lines; 7 pinned |
 | `m66_exit_golden.txt` | M6.6's exit criterion (step e): what `-sC`, `--script default`, `--script version` and `-A` select, load and drop on `--datadir REPO`; the categories that still stop at start-up; address-info, riak-http-info, bitcoinrpc-info and http-affiliate-id run, vs nmap 7.94 | `regen_m66_exit.sh`, `oracle/gen_m66_exit.py` (live in CI) | `nse_exit_differential` (in `nmap-cli`) | 18 scenarios |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
@@ -200,8 +202,9 @@ because they are regression tests for specific performance bugs.
 
 ## M6 stdlib differentials — the Lua standard library NSE needs
 
-The vendored VM ships seven string functions; the rest are written first-party
-in `core::nse::stdlib`. Each is gated against `liblua/` (the table above). Every
+The vendored VM ships seven string functions, of which six are still its own
+(`string.char` is first-party since the base-library port); the rest are
+written first-party in `core::nse::stdlib`. Each is gated against `liblua/` (the table above). Every
 case is a Lua chunk that the oracle's `lua` evaluates, and that the Rust harness
 (`crates/core/tests/m6_eval/`) evaluates through the VM with the port
 installed. None of these corpora has an exemption list.
@@ -239,8 +242,9 @@ recreates. The Rust harness serves the same paths from memory
 oracle wrote.
 
 `m64_nselib_golden.txt` comes from nmap itself. `oracle/gen_m64_nselib.py` runs
-two probe scripts (`oracle/m64_probe_require.nse`, `m64_probe_unittest.nse`)
-as prerules, with `-sn` against 127.0.0.1, so nothing leaves the host. They
+three probe scripts (`oracle/m64_probe_require.nse`, `m64_probe_unittest.nse`,
+and since M6.6 step e `m64_probe_unittest_all.nse`, also under an emulated
+data directory, `unittest-emu`) as prerules, with `-sn` against 127.0.0.1, so nothing leaves the host. They
 `require` every library in this tree's `nselib/` and run every `test_suite`.
 The port must end each one the same way, except for the libraries pinned in
 `nselib_differential.rs` to C modules not yet ported. To see one library under
@@ -599,7 +603,12 @@ Three classes come from the row, not its text:
 Anything else is `other`, and nothing accepts it. Each regeneration runs the
 standalone oracle twice. A row that differs between the runs outside
 `hashorder` fails the regeneration, and so does a row 7.94 gives differently
-outside the named classes.
+outside the named classes. Since the M6.6 retrospective the 7.94 check lists
+its drift per row (`gen_m66_lpeg.py`'s `DRIFT_794`: the 7 `cdepth` rows and
+the 1 `drift794` row, each with its class): a row not listed that drifts
+fails, and so does a listed row that no longer drifts. `path`, `position`
+and `argname` are listed for no row there; `hashorder`, the golden's own
+mask, is the only class any row may take.
 
 **What the classes cover, measured.** The C-call ceiling on re-entry is 195 in
 the standalone oracle and 194 in 7.94. Rows below 190 give the same answer
@@ -662,8 +671,13 @@ report's first `lpeg.c` frame falls in a §7 defect.
 
 The screen needs an ASan build and about six minutes, so CI does not
 run it. The list's header records the SHA-256 of the corpus it screened, and
-`gen_m66_lpeg.py` refuses any other corpus. Changing the generator therefore
-means re-running the screen locally. Quarantined rows never reach an oracle
+`screened-sources-sha256`, one digest over what the verdict rests on besides
+the corpus (`classify_m66_lpeg.SCREENED_SOURCES`: `lpeg.c`, `nse_lpeg.cc`
+and `.h`, `nse_lua.h`, `liblua/*.[ch]`, the screen with its build flags,
+`oracle/build_lua_oracle.sh`, the driver, the case runner and the 7.94
+probe; since the M6.6 retrospective). `gen_m66_lpeg.py` refuses any other
+corpus or sources. Changing the generator, the C or a recipe therefore means
+re-running the screen locally (5 min 48 s at the retrospective). Quarantined rows never reach an oracle
 in CI or a golden, and each needs a port pin with the semantic answer by step
 e (§11).
 
@@ -682,8 +696,10 @@ e (§11).
 | `lpeg-code-freed-during-match` | 1 |
 
 18 rows are tagged by the generator. Of the 146 found, the standalone oracle
-crashes on 115, the census run on 114, 7.94 on 114, and the sanitizer build
-flags all 146. Every crash in the other three harnesses is also a sanitizer
+crashes on 117, the census run on 112, 7.94 on 114, and the sanitizer build
+flags all 146 (the retrospective's re-screen; the census and 7.94 counts move
+by one or two between screens, as a crash depends on the binary's layout,
+§1.2, while the quarantined set does not). Every crash in the other three harnesses is also a sanitizer
 report. Every report's first `lpeg.c` frame falls in a §7 defect, so every
 quarantined row carries a ledger id.
 
@@ -709,8 +725,9 @@ python3 oracle/classify_m66_lpeg.py compare m66_lpeg_golden.txt PORT_OUTPUT \
 ```
 
 A Rust harness can parse the same four-column format. Each class a step
-accepts must be ledgered (`position` and `argname` already are). Each
-quarantined row needs a unit-test pin by step e.
+accepts must be ledgered, and scoped to the rows it was ledgered for
+(`lpeg_corpus_differential`'s `SCOPED`, since the M6.6 retrospective). Each
+quarantined row has a pin in a pin file (`m66{c,d,e}_quarantine_pins.txt`).
 
 **Agreement with 7.94** (`--check-794`): the committed golden is what 7.94
 gives on 62,591 of 62,599 rows (99.987%) once the rule names are masked. Of the 8 drift rows, 7 are
@@ -774,12 +791,17 @@ Step c ports `lpeg.match` with every capture that calls no Lua. Its gates
 read the step 0b files above and three more of their own.
 
 **The corpus at step c.** `crates/core/tests/lpeg_corpus_differential.rs`
-takes its step from one constant, now `'c'`: it runs the 37,367 rows
-`m66_lpeg_steps.txt` gives steps b and c through `oracle/m66_lpeg_core.lua`
-in the port's VM and compares them with the golden. A row that differs passes
-only under a named class, each ledgered: `argname` (2 rows), `vmbase` (2) and
-`cdepth` (1, `H.stackcaps.999950`: the absolute capture ceiling is the
-embedding's, `lpeg-capture-ceiling-is-the-embeddings`). `cdepth` accepts only
+takes its step from one constant, `'c'` at step c and `'d'` since step d: it
+runs the rows `m66_lpeg_steps.txt` gives that step and the earlier ones
+(37,367 at step c; all 62,599 now) through `oracle/m66_lpeg_core.lua` in the
+port's VM and compares them with the golden. A row that differs passes only
+under a named class, each ledgered: at step c `argname` (2 rows), `vmbase`
+(2, retired by the base-library port, #136) and `cdepth` (1,
+`H.stackcaps.999950`: the absolute capture ceiling is the embedding's,
+`lpeg-capture-ceiling-is-the-embeddings`). Since the M6.6 retrospective each
+class is listed per row (`SCOPED`: `argname` 2, `method` 1, `cdepth` 7), a
+differing row passes only under its own, and a listed row that stops
+needing it fails too. `cdepth` accepts only
 rows the cases file tags `cdepth`, and only when their status and log are the
 golden's. `H.stackcaps.rel`, the ceiling relative to `table.unpack`'s, is
 held to the golden's -5.
@@ -829,7 +851,7 @@ python3 oracle/gen_m66c_behind.py           # rewrite the golden (local only)
 python3 oracle/gen_m66c_behind.py --check   # FAIL if stale
 ```
 
-**Quirks.** `crates/core/tests/lpeg_match_quirks.rs` holds 174 chunks, each
+**Quirks.** `crates/core/tests/lpeg_match_quirks.rs` holds 188 chunks, each
 with the tree's oracle's answer through the same serialiser: the compiler's,
 the machine's and the captures' observable quirks (the step's brief §5), and
 four out-of-order substitutions (`lpeg-subst-negative-length`). `Q01a` and

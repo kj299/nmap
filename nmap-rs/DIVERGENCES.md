@@ -2939,10 +2939,20 @@ now 2,742 cases (1,723 added: sections G-J and two rows of `load`'s
 reader), compared with `liblua/` on every
 value and every message, escaped errors and their positions included, with no
 exemption list; by in-module tests Miri runs; by `lua_semantics_differential`
-for the VM's half; and by a prerule probe run under nmap 7.94 and through the
-port's own NSE runtime, which agree on every row but the two below that are
-open (`#t` of a sparse table, `'char'` for `'string.char'`), and write the
-same `warn` output byte for byte.
+for the VM's half; and by `base_differential` (since the M6.6 retrospective;
+before, a one-off scratch measurement): the prerule probe
+`oracle/m6_base_probe.nse`, run under nmap 7.94 (`regen_m6_base.sh`, live
+in CI) and through the port's own NSE runtime, 67 rows and `warn`'s output
+byte for byte, every line equal but 7, each pinned exactly to the port's
+answer and still required to differ from 7.94's: the three `#t` rows of
+stage 2 (`vm-table-border-is-not-luas`, below) and four errors of
+functions `pcall` calls directly, which the C names from `package.loaded`
+(`'string.char'`, `'coroutine.create'`, `'table.insert'`,
+`'table.remove'`) and the port by their own names
+(`stdlib-bad-argument-naming`). Fuzzed by `nse_tail` (`chunk_id`) and, since
+the M6.6 retrospective, `nse_tonumber`: `tonumber(s, base)`'s `str2int`
+against a transliteration of `lbaselib.c`'s `b_str2int`, and the VM's
+`tonumber(s)` against one of `lobject.c`'s `l_str2int`.
 
 ### Behaviour now matched that the corpora pin
 
@@ -2975,12 +2985,16 @@ same `warn` output byte for byte.
 - [x] `vm-tostring-accepts-any-result` — a `__tostring` returning a table
       was returned; it is "'__tostring' must return a string", and a number
       it returns is converted. Rows `base_tostring_*`.
-- [x] `vm-coroutine-normal-reported-running`,
-      `vm-coroutine-resume-messages`, `vm-coroutine-create-accepts-callables`
-      — a coroutine that resumed another said "running" (C: "normal");
-      resuming a dead or running one gave "bad thread mode: …" (C: "cannot
-      resume dead coroutine", "cannot resume non-suspended coroutine");
-      `coroutine.create` took a callable table. Rows `co_*`.
+- [x] `vm-coroutine-normal-reported-running` — a coroutine that resumed
+      another said "running" (C: "normal"). Rows `co_*`; `base_differential`'s
+      `status_normal`.
+- [x] `vm-coroutine-resume-messages` — resuming a dead or running coroutine
+      gave "bad thread mode: …" (C: "cannot resume dead coroutine", "cannot
+      resume non-suspended coroutine"). Rows `co_*`; `base_differential`'s
+      `resume_dead`.
+- [x] `vm-coroutine-create-accepts-callables` — `coroutine.create` took a
+      callable table (C: "function expected"). Rows `co_*`;
+      `base_differential`'s `create_table`.
 - [x] `coroutine-close-and-isyieldable-missing` — both now exist. `close`
       returns `false` and the error for a coroutine that died of one (kept,
       weakly keyed, from its resume until it is closed, once) and refuses a
@@ -3029,8 +3043,11 @@ same `warn` output byte for byte.
       `redis.lua` and `mssql.lua`'s `list_of`. Pinned by `m60_semantics`:
       the 18 `border_*` rows that match (each needs one piece of stage 1),
       and `border_sparse_assign`, `border_len_twice`, `border_insert_holes`
-      in `KNOWN_DIVERGENCES`.
-- [x] `string-dump-absent` — `string.dump` does not exist: the VM has no
+      in `KNOWN_DIVERGENCES`; and by `base_differential`'s `border_sparse`,
+      `border_len_twice` and `border_insert_holes`, each pinned to the
+      port's answer beside nmap 7.94's (4, `7,3` and `x` at 5; 7.94: 8,
+      `7,6` and `x` at 9).
+- [ ] `string-dump-absent` — `string.dump` does not exist: the VM has no
       bytecode format, and `load` refuses binary chunks
       (`load-never-loads-bytecode`). No shipped script calls it. Pinned by
       `m60_semantics`'s `string_dump_absent`.
@@ -3314,8 +3331,12 @@ wrong types, and errors on later lines. Two VM defects closed:
       errors exactly). A call made by `pcall` directly has no Lua caller and no
       prefix in either, which is how the corpora compare those messages
       exactly; an escaped one is compared without nmap's prefix. The LPeg
-      corpus gate (`lpeg_corpus_differential`) accepts a row differing only
-      in such a prefix under its named class `position` (no row at step b).
+      corpus gate (`lpeg_corpus_differential`) had a named class `position`
+      for a row differing only in such a prefix, which no row ever needed;
+      since the M6.6 retrospective each class is listed per row (`SCOPED`)
+      and `position` for none, so such a row fails it. Pinned in
+      `lpeg_callback_quirks` (`U07c`, `string.find`'s "unfinished capture"
+      raised from `lpeg-utility.lua:153`, unpositioned here).
 
 ### Behaviour now matched that the corpus pins
 
@@ -3564,9 +3585,15 @@ Gated by three things:
       Ten cases are pinned (`METHOD_NAMING`), each required to differ from
       nmap only in that number and name. The LPeg corpus gate
       (`lpeg_corpus_differential`) accepts a row differing only in the name
-      under its named class `argname`: at step b two rows,
-      `pcall(string.rep, P'a', …)`, which Lua names `'string.rep'` and the
-      binding `'rep'`.
+      under its named class `argname` for the two rows its `SCOPED` table
+      lists, `A.name.typeerr` and `X.name.rep` (`pcall(string.rep, P'a',
+      …)`, which Lua names `'string.rep'` and the binding `'rep'`), and for
+      no other: since the M6.6 retrospective a class tried on every row is
+      gone (it reached 5,906 rows, and a port numbering an argument one too
+      high passed), and a listed row that stops needing the class fails
+      too. `base_differential` pins four more, exactly (`char`,
+      `create_table`, `insert_pos`, `remove_pos`: `'string.char'`,
+      `'coroutine.create'`, `'table.insert'`, `'table.remove'` in 7.94).
 - [ ] `debug-traceback-names-approximate` — `traceback` names a function as
       PUC-Lua's `pushglobalfuncname` does, from `package.loaded`. Where PUC-Lua
       falls back on the calling instruction (`local 'f'`, `method 'm'`,
@@ -3632,50 +3659,6 @@ Gated by three things:
       Found in M6.5 Phase 0 (`docs/M6.5-ANALYSIS.md` §1.4). Whether the
       command line should set a default budget is a user-visible change,
       left to M7.
-- [x] `nse-sc-aborts-on-unported-modules` — **closed in M6.6 step e.** With
-      `lpeg` registered, `-sC`, `-A`, `--script default` and `--script
-      version` load the shipped scripts on the real data directory: `default`
-      selects 127, loads 121 and drops six quietly for want of `openssl`
-      (`nse-sc-openssl-quiet-drops`); `version` selects and loads 48. `-A`
-      selects the `default` set only while `nse-sv-version-scripts-pending`
-      is open (7.94 selects 158, `default` and `version`). Each ends rc 0
-      with no `QUITTING!`. Gated by the exit scenarios of
-      `nse_exit_differential` (`oracle/gen_m66_exit.py`), which read the
-      `-d2` selection and load lines of both programs on `--datadir REPO`,
-      require every script path under that directory's `scripts/`, and
-      assert 127, 127, 48 and 158 `selected` lines on 7.94's side, so a
-      fixture data directory cannot pass them (the blind spot below). The
-      categories that still stop are `nse-categories-abort-on-unported-modules`.
-      What this entry said until then:
-
-      On the shipped `scripts/`, these stopped at start-up with `could not
-      load script` and `QUITTING!` (measured):
-      - `-sC` and `-A`;
-      - `--script default`, `version`, `safe`, `vuln`, `intrusive`,
-        `exploit` and `all`.
-
-      **Why.** Before M6.6, nine `default` scripts hard-required `nmapdb` or
-      `lpeg`. Since step a ported `nmapdb`, three remain, all on `lpeg`
-      (`m66_scriptload_golden.txt`): bitcoinrpc-info (`json.lua:30`),
-      ntp-info (`ntp-info.nse:9`) and snmp-info (`lpeg-utility.lua:10`).
-      `nmap-rs --datadir REPO -Pn -n -p 1 -sC 127.0.0.1` now stops on
-      `json.lua:30: module 'lpeg' not found`, loading bitcoinrpc-info, where
-      it stopped on `datafiles.lua:19: module 'nmapdb' not found` (measured).
-      Every nmap build registers both modules (`nse_main.cc:564-567`), so
-      this matches no real nmap.
-
-      **Why the gate missed it.** The `-sC` scenario in
-      `nse_cli_differential` passes because it runs on a fixture datadir
-      (`gen_m64_cli.py:10-14,59`).
-
-      **Retired by M6.6** (`nmapdb` and `lpeg`) for `-sC`, `-A`, `default`
-      and `version` only.
-      - The other categories also contain scripts that hard-require `lfs`
-        (http-fetch, `safe`) or `openssl` (http-vuln-cve2014-3704: `vuln`,
-        `intrusive`, `exploit`). Measured on 7.94 with only those modules
-        removed.
-      - M6.6 replaces this entry with one for those categories, naming its
-        retiring milestones (`docs/M6.6-ANALYSIS.md` §0, D1).
 - [ ] `nse-categories-abort-on-unported-modules` — on the shipped
       `scripts/`, these categories stop at start-up with `could not load
       script` and `QUITTING!` (rc 1), before any scan:
@@ -3729,7 +3712,13 @@ Gated by three things:
       exactly these six as the difference between the port's `Loaded` lines
       and 7.94's, and require them as its only `Failed to load` lines.
       Generation checks the list against 7.94 with the port's missing
-      modules removed, and fails if it differs.
+      modules removed, and fails if it differs. The tolerance matches by
+      name, not reason (the step e review's F2): one of the six dropped
+      quietly for another reason, a port defect reached through
+      `silent_require`, would pass both this gate and `scriptload_differential`
+      (which records no reason for a quiet drop); each of the six requires
+      `openssl` first, so nothing later in its chain is reachable while
+      `openssl` is missing.
 
       **Retired by M6.5** (`openssl`): the list must then be empty, and the
       tolerance goes with this entry.
@@ -3742,10 +3731,57 @@ Gated by three things:
       the same table either way. Only enumerating `package.loaded` before
       that, or a broken `lpeg-utility.lua` (which would stop nmap's engine at
       start-up, and here the first script that needs it), can tell.
+
+### Differences closed since (kept for the record)
+
 - [x] `nmap-socket-and-dnet-stubbed` — **closed in M6.4d.** Sockets,
       `resolve`, `mutex`, `condvar` and `get_interface_info` are ported (see
       Milestone 6.4d). What remains of `dnet` and of packet capture is ledgered
       there as `nse-dnet-send-pending` and `nse-no-pcap-sockets`.
+- [x] `nse-sc-aborts-on-unported-modules` — **closed in M6.6 step e.** With
+      `lpeg` registered, `-sC`, `-A`, `--script default` and `--script
+      version` load the shipped scripts on the real data directory: `default`
+      selects 127, loads 121 and drops six quietly for want of `openssl`
+      (`nse-sc-openssl-quiet-drops`); `version` selects and loads 48. `-A`
+      selects the `default` set only while `nse-sv-version-scripts-pending`
+      is open (7.94 selects 158, `default` and `version`). Each ends rc 0
+      with no `QUITTING!`. Gated by the exit scenarios of
+      `nse_exit_differential` (`oracle/gen_m66_exit.py`), which read the
+      `-d2` selection and load lines of both programs on `--datadir REPO`,
+      require every script path under that directory's `scripts/`, and
+      assert 127, 127, 48 and 158 `selected` lines on 7.94's side, so a
+      fixture data directory cannot pass them (the blind spot below). The
+      categories that still stop are `nse-categories-abort-on-unported-modules`.
+      What this entry said until then:
+
+      On the shipped `scripts/`, these stopped at start-up with `could not
+      load script` and `QUITTING!` (measured):
+      - `-sC` and `-A`;
+      - `--script default`, `version`, `safe`, `vuln`, `intrusive`,
+        `exploit` and `all`.
+
+      **Why.** Before M6.6, nine `default` scripts hard-required `nmapdb` or
+      `lpeg`. Since step a ported `nmapdb`, three remain, all on `lpeg`
+      (`m66_scriptload_golden.txt`): bitcoinrpc-info (`json.lua:30`),
+      ntp-info (`ntp-info.nse:9`) and snmp-info (`lpeg-utility.lua:10`).
+      `nmap-rs --datadir REPO -Pn -n -p 1 -sC 127.0.0.1` now stops on
+      `json.lua:30: module 'lpeg' not found`, loading bitcoinrpc-info, where
+      it stopped on `datafiles.lua:19: module 'nmapdb' not found` (measured).
+      Every nmap build registers both modules (`nse_main.cc:564-567`), so
+      this matches no real nmap.
+
+      **Why the gate missed it.** The `-sC` scenario in
+      `nse_cli_differential` passes because it runs on a fixture datadir
+      (`gen_m64_cli.py:10-14,59`).
+
+      **Retired by M6.6** (`nmapdb` and `lpeg`) for `-sC`, `-A`, `default`
+      and `version` only.
+      - The other categories also contain scripts that hard-require `lfs`
+        (http-fetch, `safe`) or `openssl` (http-vuln-cve2014-3704: `vuln`,
+        `intrusive`, `exploit`). Measured on 7.94 with only those modules
+        removed.
+      - M6.6 replaces this entry with one for those categories, naming its
+        retiring milestones (`docs/M6.6-ANALYSIS.md` §0, D1).
 
 ### Behaviour matched that the corpus pins
 
@@ -4123,7 +4159,7 @@ of ten points is caught:
       Generation checks that list against 7.94. The oracle for `-A` is
       7.94's `-sC -sV`, which selects the same 158 in the same order: 7.94
       cannot run `-A` on `--datadir REPO`, whose `nmap-os-db` is for 7.94.2
-      and later (an assertion abort, `osscan.cc:681`, rc 134). When this
+      and later (an assertion abort, `3be01efb1:osscan.cc:681`, rc 134). When this
       entry closes, `SV_PENDING` goes false and the port's `-A` is compared
       with all 158 (152 loaded, the same six quiet).
 - [ ] `nse-host-os-pending` — `host.os` and `host.os_fp` are not given to
@@ -4341,15 +4377,17 @@ are closed by gates added in the review.
       pairs, each optionally after one `:`, exactly six of them, the whole
       string used, so `0011:2233:4455` and `:00:11:22:33:44:55` are
       addresses and `00:11:22:33:44:55:` is not. Lookup tries MA-S, then
-      MA-M, then MA-L.
+      MA-M, then MA-L. Pinned by `nmapdb_differential`'s `mac_arg` rows
+      (`mac2corp(s:000000)` is nil).
 - [x] `nmapdb-getservbyport-check-order` — the port must be an integer, then
       the protocol one of the list, then the port in range: `(70000, nil)`
       is a bad argument #2, and `(-1, "foo")` is an invalid option, not a
-      port out of range.
+      port out of range. Pinned by `nmapdb_differential`'s `gsp_arg` rows.
 - [x] `nmapdb-names-end-at-nul` — `getservbyport`'s protocol and
       `getprotbyname`'s name are C strings: `"tcp\0junk"` is `tcp`.
       `getprotbyname` compares with `strcmp`, so case matters, and a number
-      is read as its string (`6` is `"6"`, `6.0` is `"6.0"`).
+      is read as its string (`6` is `"6"`, `6.0` is `"6.0"`). Pinned by
+      `nmapdb_differential`'s `gsp_arg` and `gpna_arg` rows.
 - [x] `nmapdb-first-wins-duplicates` — in `nmap-protocols` the first line
       for a name wins, and a later line with that name is dropped whole, its
       number unclaimed; a number goes to the first line *with a new name*,
@@ -4357,7 +4395,8 @@ are closed by gates added in the review.
       `nmap-mac-prefixes` and `nmap-services`, the first entry for a key
       wins. Pinned by unit tests and fuzzed (`nse_protocols`).
 - [x] `nmapdb-one-result` — every function returns exactly one value, nil
-      included, and ignores extra arguments.
+      included, and ignores extra arguments. Pinned by
+      `nmapdb_differential`'s `nret` row.
 
 ### Differences in error *messages* only
 
@@ -4439,6 +4478,20 @@ are closed by gates added in the review.
       | `nbsp\xc2\xa0x 25/tcp`, `ideo\xe3\x80\x80x 44/tcp` | the name kept whole | the line dropped (Rust splits on Unicode whitespace) |
 
       The shipped file has none of these lines.
+- [ ] `nse-datafiles-not-reported` — nmap lists the data files it read
+      lazily (`printdatafilepaths`, `output.cc:2583-2659`), `nmap-mac-prefixes`
+      and `nmap-protocols` among them: at `-v`, one `Read data files from:
+      DIR` line when they all came from one directory, and **at default
+      verbosity** one `Read from DIR: FILES.` line per directory when they came
+      from more than one (`output.cc:2650`; measured on 7.94, M6.6 review:
+      `Read from /etc: protocols.` and `Read from D: nmap-mac-prefixes.`). The
+      port prints neither, for any file. `nmapdb` records where it read each
+      one (`Tables::loaded`, asserted by `mac2corp_looks_up_most_specific_first`
+      and `getprotbynum_and_getprotbyname_answer_from_nmap_protocols`), for when
+      it does.
+
+### A port defect found and fixed in M6.6
+
 - [x] `sv-nomatch-table-name` — **a port defect, predating M6.6, found in the
       M6.6 review (fidelity D4) and fixed there.** Under `-sV`, a port no probe
       matched was recorded `method="probed"` with no name, so scripts saw
@@ -4458,17 +4511,6 @@ are closed by gates added in the review.
       `sv_marks_unconfirmed_open_names_as_7_94_does` (`core::output`). Still
       different there, and not new: the port's `<service>` has no `servicefp`
       attribute, and a soft match is recorded at confidence 8 where C gives 10.
-- [ ] `nse-datafiles-not-reported` — nmap lists the data files it read
-      lazily (`printdatafilepaths`, `output.cc:2583-2659`), `nmap-mac-prefixes`
-      and `nmap-protocols` among them: at `-v`, one `Read data files from:
-      DIR` line when they all came from one directory, and **at default
-      verbosity** one `Read from DIR: FILES.` line per directory when they came
-      from more than one (`output.cc:2650`; measured on 7.94, M6.6 review:
-      `Read from /etc: protocols.` and `Read from D: nmap-mac-prefixes.`). The
-      port prints neither, for any file. `nmapdb` records where it read each
-      one (`Tables::loaded`, asserted by `mac2corp_looks_up_most_specific_first`
-      and `getprotbynum_and_getprotbyname_answer_from_nmap_protocols`), for when
-      it does.
 
 ## Milestone 6.6 step b — LPeg pattern trees (`core::nse::lpeg`, `core::nse::lpeg::tree`, `core::nse::stdlib`, vendored VM patch `0012`)
 
@@ -4515,16 +4557,26 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       `(n+1)*(size1+1)` and `n*(size1+3)-1`, the operators' `1+s1+s2`,
       `collectrules`' total over a grammar's rules (`lpeg.c:2368-2384`,
       `:2638-2660`, `:2960-2982`) — and `MAXPATTSIZE` is used nowhere.
-      `newtree` asks Lua for `8*len+16` bytes in `size_t`. So, by what the
-      `int` wraps to (`tree::c_size`, measured on the tree's oracle, the
-      C's arithmetic modulo 2^32): to -3 or below (`INT_MIN` included), the
-      size is past `MAX_SIZE` and `luaM_toobig` raises "memory allocation
-      error: block too big", unpositioned even from Lua code, before
-      anything is written — `P(2^30+1)`, `P(2^31-1)`, `P(-(2^30))`,
-      `P(±1500000000)`, `P'a'^(2^30)`, `P''^(2^30)`, `(#P'a')^(2^31-1)`,
-      `P'a'^-(2^31-1)`, `(R'\33\126'+V'space')^(2^28)` (fingerprint-strings'
-      `n` = 2^28), 300 grammar rules of one 2^23-node pattern — and the port
-      raises the same; to -2, -1 or a size short of the tree, the C allocates
+      `newtree` asks Lua for `8*len+16` bytes in `size_t`. A signed `int`
+      that overflows is undefined in C; the port follows the C's arithmetic
+      modulo 2^32, as `-fwrapv` defines it (`tree::c_size`, measured on the
+      tree's oracle built with `-fwrapv`). So, by what the `int` wraps to:
+      to -3 or below, but not `INT_MIN`, the size is past `MAX_SIZE` and
+      `luaM_toobig` raises "memory allocation error: block too big",
+      unpositioned even from Lua code, before anything is written —
+      `P(2^30+1)`, `P(2^31-1)`, `P(±1500000000)`, `P'a'^(2^30)`,
+      `P''^(2^30)`, `P'a'^-(2^31-1)`, `(R'\33\126'+V'space')^(2^28)`
+      (fingerprint-strings' `n` = 2^28), 300 grammar rules of one
+      2^23-node pattern — and the port raises the same; to exactly
+      `INT_MIN` — `P(-(2^30))`, `(#P'a')^(2^31-1)`, `P''^(2^30-1)` —
+      `newtree`'s own `len - 1` wraps to `INT_MAX` and the C asks for
+      16 GiB, which is `not enough memory` where it is refused (the tree
+      corpus's oracle runs under a 4 GiB address-space cap, so it is
+      refused on every host) and here, where the budget refuses it (until
+      the M6.6 retrospective the port said "block too big" there, as the
+      oracle built without `-fwrapv` does: gcc computed `INT_MIN - 1` in
+      64 bits, and the golden had recorded what one compiler made of
+      undefined code, LESSONS #033); to -2, -1 or a size short of the tree, the C allocates
       that (0, 8, 16 or `8*w+16` bytes) and writes past it — `P(2^31+1)`
       ends 7.94 in `malloc(): corrupted top size`, `P'a'^(2^31)` and
       `P'ab'^(2^31-1)` in SIGSEGV — which is `not enough memory` here, as is
@@ -4538,13 +4590,19 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       "not enough memory", which the port, allocating nothing, does not
       reproduce. Pinned by `sizes_are_judged_as_the_cs_wrapped_int`,
       `sizes_past_the_cs_int_are_its_errors` (also under a 64 MiB budget),
-      corpus rows `A.size.*`, `F.size.*`, `D.size.*`, and fuzzed
-      (`nse_lpeg_build`, adversarial integers under a budget). Before the
-      step b review every such size was `not enough memory`. Since step e
-      its quarantined rows are pinned too (`m66e_quarantine_pins.txt`):
-      `A.Pbig.0` and `.3` with the tree's own answer, block too big, and
-      `A.Pbig.1`, `.2` and `X.ub.starsize`, which crash it, with `not enough
-      memory`.
+      the 14 corpus rows `A.size.*`, `F.size.*`, `D.size.*` (noted
+      `[wrapv]`: `regen_m66b_trees.sh` records the whole tree golden from
+      the `-fwrapv` oracle, and its UBSan pass, `oracle/ubsan_m66b_trees.py`,
+      requires exactly those 14 rows to overflow, at `lpeg.c:2374`, `:2377`,
+      `:2643`, `:2655` and `:2977`, and every other row to give the same
+      answer with and without `-fwrapv`, so a new undefined row fails the
+      regeneration), and fuzzed (`nse_lpeg_build`, adversarial integers
+      under a budget). Before the step b review every such size was `not
+      enough memory`. Since step e its quarantined rows are pinned too
+      (`m66e_quarantine_pins.txt`): `A.Pbig.0` and `.3` with the tree's own
+      answer, block too big (the same with `-fwrapv`: `2*n-1` wraps to -3),
+      and `A.Pbig.1`, `.2` and `X.ub.starsize`, which crash it, with `not
+      enough memory`.
 - [x] `lpeg-pattern-string-size-overflow` — `getpatt`'s `2*(slen-1)+1` for a
       string pattern is computed in `size_t` and passed to `newtree` as an
       `int`: from 1 GiB + 1 bytes to 2 GiB - 1 it wraps to -3 or below and
@@ -4916,8 +4974,11 @@ fuzz target `nse_lpeg_build`; Miri on the module's unit tests.
       Telling a method call apart needs the calling instruction, which the
       VM does not show a Rust function. **Tolerated by a gate:**
       `lpeg_corpus_differential`'s named class `method`, which takes one off
-      the port's argument numbers and nothing off the C's — that row alone
-      at step d.
+      the port's argument numbers and nothing off the C's — that row alone,
+      by id: since the M6.6 retrospective `SCOPED` lists `J.compile.nil` for
+      `method` and no other row may use it (tried on every row, it let a
+      port numbering `P()`'s argument #2 pass, as `A.Pnone` and `X.msg.0`
+      showed), and the row fails if it stops needing it.
 - [ ] `lpeg-grammar-stack-overflow-message` — `collectrules` checks the Lua
       stack for each rule (`luaL_checkstack`), so a grammar of about half a
       million rules or more fails with "stack overflow (grammar has too many
@@ -4972,7 +5033,8 @@ base-library port), and `cdepth` 1
 runs, each held to its pin in `m66c_quarantine_pins.txt` (149 rows: 142 the
 answer of the tree's `lpeg.c` with its peephole and `Cc(nil)` defects fixed,
 7 a correct LPeg's; the other 30 are step d's). Also gated: `lpeg_match_quirks`
-(184 cases from the step's brief and its review, against the tree's oracle);
+(188 cases: 184 from the step's brief and its review, and step d's four
+`QO1*`, against the tree's oracle);
 `lpeg_match_limits` (the D2 ceilings, depth, the capture ceiling, pre-emption
 of every stage, memory, and the left calls through `B` against
 `m66c_behind_golden.txt`; and, since the review, work per slice counted
@@ -5034,6 +5096,12 @@ review fixes'.
       `res - 1` (`lpeg.c:3439`) is undefined in the C; here the subtraction
       is checked and the position refused, "invalid position returned by
       match-time capture", as the C's wrapped value is (the brief's R13).
+      Since the M6.6 retrospective the four pins come from defined code:
+      `gen_m66c_quarantine_pins.py` builds its patched `lpeg.c` with
+      `0 - (size_t)ii` for the negation and a checked `res - 1` (refused
+      for `math.mininteger` before the subtraction), which runs clean under
+      UBSan on those rows and gives the four answers the committed pins
+      already held.
 - [x] `lpeg-nested-capture-lua-stack-overflow` — `pushcapture` asks for 4
       free stack slots (`luaL_checkstack(L, 4, …)`) as it enters each
       capture, and a simple capture pushes its whole match after its nested
@@ -5177,7 +5245,11 @@ review fixes'.
       depends on its history (`lpeg-capture-ceiling`). Nothing realistic
       reaches 999,9xx values. Tolerated by the corpus gate's `cdepth`
       class, which only rows tagged `cdepth` may use, and only with the
-      golden's status and log: at step c, that one row. **Step d** adds the
+      golden's status and log: at step c, that one row (since the M6.6
+      retrospective the gate lists the rows by id, exactly, `SCOPED`: the
+      7 named below; the other 10 rows tagged `cdepth` must agree exactly,
+      and a listed row that agrees fails; the 7.94 check's `DRIFT_794`
+      lists its own 7, `H.reenter.195` to `.200` and `.250`). **Step d** adds the
       embedding's other two ceilings, each pinned at the port's own number
       beside the C's: the live dynamic values a match keeps, on its own Lua
       stack as the C keeps them (`Cmt(1, →true, 1)^0`, the brief's N17, and
@@ -5247,7 +5319,8 @@ registered it).
 a named class (`argname` 2 rows, `method` 1 (`J.compile.nil`), `cdepth` 7;
 `vmbase` 2 and `vmbase+position` 1 (`K.parse_fp.badesc`) until the
 base-library port made those three the C's byte for byte and retired the
-class); and by
+class; since the M6.6 retrospective each class is listed per row, exactly,
+in the gate's `SCOPED` table); and by
 `every_quarantined_step_row_matches_its_pin`: 157 quarantined rows, each held
 to its pin — `m66c_quarantine_pins.txt`'s 149 and `m66d_quarantine_pins.txt`'s
 8, the answers of the tree's `lpeg.c` with the doublecap over-read, the
@@ -5429,6 +5502,28 @@ match-time capture's body values not removed.
       callable table given to `/` is a query, not a call (F21). Reproduced;
       the brief's M, R, C and N pins in `lpeg_callback_quirks`, corpus
       rows C, F, X.
+- [x] `lpeg-utility-probe-name-is-a-pattern` — an upstream bug in
+      `nselib/lpeg-utility.lua`, run unmodified: `get_response(fp, probe)`
+      finds the probe's entry with `string.find(fp, string.format("%s,%%x+,",
+      probe))` (`lpeg-utility.lua:153`), so the probe name is a Lua pattern.
+      A name with `-` misses its own response (`Get-Request` reads as `Ge`,
+      any `t`s, `Request`) and can return another probe's; a name with `(`
+      raises "unfinished capture". A shipped script reaches it:
+      oracle-tns-version asks for `oracle-tns` (`oracle-tns-version.nse:72`),
+      which never finds its own response, in 7.94 as here. Reproduced,
+      through the port's own `string.find`: `lpeg_callback_quirks`' `U07a`
+      and `U07d` (nil, `oracle-tns` itself) and `U07b` (another probe's
+      response), the C's answers; `U07c`'s error is the C's text,
+      unpositioned (`stdlib-errors-have-no-position`).
+- [x] `lpeg-utility-split-sep-is-not-a-pattern` — an upstream bug in
+      `nselib/lpeg-utility.lua`, run unmodified: `split(str, sep)` builds a
+      grammar whose `sep` rule is the separator as given (`sep = sep`,
+      `lpeg-utility.lua:61`), and LPeg 0.12 does not coerce a grammar rule,
+      so with a string separator, the documented use, every call fails with
+      "rule 'sep' is not a pattern" (`lpeg-utility.lua:58`); with a number
+      it fails the same way. No shipped script calls `split`. Reproduced:
+      tree corpus rows `D.U06` and `D.U06b` (the C's answer, exact) and
+      `lpeg_callback_quirks`' `U06`.
 
 ## Milestone 6.6 step e — `lpeg` registered (`core::nse::runtime`, `core::nse::lpeg`)
 
@@ -5451,7 +5546,8 @@ the entry they replace).
   62,599 rows of step 0b's corpus through step 0b's own 7.94 probe
   (`oracle/m66_lpeg_probe.nse`), run as a prerule by the port's engine,
   compared under the same named classes only (`argname` 2, `method` 1,
-  `cdepth` 7, as through the test-only registration); and the 164
+  `cdepth` 7, as through the test-only registration; the same rows by id,
+  `SCOPED`, since the M6.6 retrospective); and the 164
   quarantined rows, every one now pinned, against their pins the same way.
 - `nselib_differential`: the five libraries pinned to `lpeg` load; every
   suite passes by its count (`json` 69 tests, `coap` 1,060);

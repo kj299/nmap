@@ -13,7 +13,7 @@ module, nmap and nmap-rs compared by one parser.
 data directory, never a fixture one, with SEL `-sC`, `--script default`,
 `--script version` or `-A`. nmap 7.94 cannot run `-A` with this repository's
 nmap-os-db (written for 7.94.2 and later: an assertion abort in
-osscan.cc:681), so its `-A` block is `-sC -sV`, which selects the same 158
+3be01efb1:osscan.cc:681), so its `-A` block is `-sC -sV`, which selects the same 158
 scripts in the same order. From each program's output this keeps:
 
     selected  `NSE: Script X was selected by HOW[ and forced to run].` (stdout)
@@ -256,7 +256,7 @@ def u(*hexes):
 # Each escape kind json.lua decodes differently: ASCII through its unicode16
 # match-time capture; two- and three-byte UTF-8; a surrogate pair (four-byte);
 # control bytes, which the output layer escapes; an embedded NUL; the short
-# escapes; and backslash-q, the P[[\]]*C(1) fallback (json.lua:142).
+# escapes; and backslash-q, the P[[\]]*C(1) fallback (json.lua:134).
 STRINGS = {
     "nodename": "riak" + u("0040") + "127.0.0.1",
     "sys_system_architecture": ("x86_64 caf" + u("00e9") + " " + u("00e8") + " "

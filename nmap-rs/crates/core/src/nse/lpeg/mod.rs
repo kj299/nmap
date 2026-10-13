@@ -314,7 +314,11 @@ pub(crate) fn did_cap_steps(n: u64) {
 /// and capture evaluation's `pushcapture` calls — and nothing else (no
 /// compile, no failure's unwinding, no byte work, and not the frames a
 /// capture's evaluation takes inside it, a substitution's walk of its nested
-/// captures, say, which the work counter and the fuel see).
+/// captures, say, which the work counter and the fuel see). However the
+/// match is sliced: a span pre-empted in the middle of a run counts its
+/// instruction once and each byte it tests once, as in one slice
+/// (`vm::tests::a_span_cut_by_slices_counts_as_one_slice_does`; until the
+/// M6.6 retrospective each slice boundary inside a span counted two more).
 #[doc(hidden)]
 #[must_use]
 pub fn take_steps() -> (u64, u64) {
@@ -439,7 +443,7 @@ pub fn take_most_work_per_fuel() -> u64 {
     MOST_WORK.with(|c| c.replace(0))
 }
 
-/// A pattern (`Pattern`, `lpeg.c:198`): its tree, and its constant table,
+/// A pattern (`Pattern`, `lpeg.c:201`): its tree, and its constant table,
 /// shared with the patterns it was built from as the C shares its user
 /// value (`copyktable`), and never handed to a script.
 #[derive(Collect)]
@@ -611,7 +615,7 @@ enum Func {
     Pcode,
 }
 
-/// `pattreg` (`lpeg.c:3290`), in the C's order.
+/// `pattreg` (`lpeg.c:3293`), in the C's order.
 const LIBRARY: [Func; 22] = [
     Func::Ptree,
     Func::Pcode,
@@ -722,7 +726,7 @@ impl From<super::stdlib::strpack::PackError> for Failure<'_> {
     }
 }
 
-/// `val2str` (`lpeg.c:2148`): a value as `lua_tostring` shows it, else as
+/// `val2str` (`lpeg.c:2153`): a value as `lua_tostring` shows it, else as
 /// `(a TYPE)`; up to its first NUL, as `%s` reads it.
 fn val2str<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Vec<u8> {
     match v.into_string(ctx) {
@@ -942,7 +946,7 @@ fn leaves_metatables(v: Value<'_>) -> bool {
     matches!(v, Value::UserData(u) if u.metatable().is_some())
 }
 
-/// `newgrammar` (`lpeg.c:3140`) of the table at argument `arg`, as a
+/// `newgrammar` (`lpeg.c:3124`) of the table at argument `arg`, as a
 /// resumable job: reading the initial rule may call an `__index`
 /// metamethod, and copying the rules, fixing and verifying take steps.
 #[derive(Collect)]
@@ -1204,9 +1208,10 @@ impl<'gc> GrammarJob<'gc> {
                 .saturating_add(u64::try_from(p.tree().len()).unwrap_or(u64::MAX));
         }
         // `newtree(L, size + 1)`, then the count: a size the C's `int` cannot
-        // hold is "block too big" where it wraps to -3 or below; where it
-        // wraps short, the C's allocation is what the count check finds
-        // past `MAXRULES`, and is written past otherwise.
+        // hold is "block too big" where it wraps to -3 or below (not
+        // `INT_MIN`, 16 GiB asked for: `not enough memory`); where it wraps
+        // short, the C's allocation is what the count check finds past
+        // `MAXRULES`, and is written past otherwise.
         let total = size.saturating_add(1);
         let space = match tree::c_size(total) {
             CSize::TooBig => return Err(Failure::TooBig),
@@ -3332,7 +3337,7 @@ impl<'gc> Sequence<'gc> for Job<'gc> {
     }
 }
 
-/// `luaopen_lpeg` (`lpeg.c:3326`): the library table. Opening it resets
+/// `luaopen_lpeg` (`lpeg.c:3334`): the library table. Opening it resets
 /// `lpeg-maxstack` to `MAXBACK`, as the C does, and makes the table the
 /// pattern metatable's `__index`.
 fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {

@@ -341,6 +341,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "nse_tonumber"
+path = "fuzz_targets/nse_tonumber.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "nse_scriptargs"
 path = "fuzz_targets/nse_scriptargs.rs"
 test = false

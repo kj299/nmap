@@ -16,11 +16,11 @@
 //!   four grammar errors follows the C's salted table order,
 //!   `lpeg-grammar-error-rule-name-is-hash-ordered`); the same mask is applied
 //!   to the port's output before comparing.
-//! - **No per-row exemption list.** A row that differs passes only if it
-//!   agrees under a *named* normalisation class, each ledgered: [`CLASSES`],
-//!   and [`CDEPTH`] for the rows the cases file tags `cdepth`. Every class's
-//!   count is printed, and a class may be used only by rows of the kind it
-//!   names.
+//! - **No exemption without a named class, and no class without its rows.**
+//!   A row that differs passes only if it agrees under the one *named*
+//!   normalisation class, each ledgered ([`CLASSES`]), that [`SCOPED`] lists
+//!   for its id; a listed row that no longer needs its class fails too, so
+//!   each class's membership is exact. Every class's members are printed.
 //!
 //! Since M6.6 step e the module is registered, and
 //! [`every_row_through_the_registered_module_matches_the_trees_own_lpeg`]
@@ -150,7 +150,6 @@ impl ScriptFs for NoFiles {
 struct Masks {
     four: Vec<(Regex, &'static str)>,
     not_a_pattern: Regex,
-    position: Regex,
     argname: Regex,
 }
 
@@ -170,7 +169,6 @@ impl Masks {
                 ),
             ],
             not_a_pattern: re(r"(initial )?rule '[^']*' is not a pattern"),
-            position: re(r#""(?:\.\.\.)?[^"\s:\\]+:\d+: "#),
             argname: re(r"bad argument #(\d+) to '[^']*'"),
         }
     }
@@ -205,7 +203,6 @@ impl Masks {
                 })
                 .into_owned(),
             "method" => s.to_string(),
-            "position" => self.position.replace_all(s, "\"").into_owned(),
             "argname" => self
                 .argname
                 .replace_all(s, "bad argument #${1} to '?'")
@@ -216,29 +213,55 @@ impl Masks {
 }
 
 /// The named classes a differing row may agree under, each with its ledger
-/// entry: `position` and `argname` are `classify_m66_lpeg.py`'s ("Named
-/// classes"); `method` is a method call's argument
+/// entry: `argname` is `classify_m66_lpeg.py`'s ("Named classes"), the
+/// function name in `bad argument #N to 'NAME'`
+/// (`stdlib-bad-argument-naming`); `method` is a method call's argument
 /// numbering, which the port starts at the receiver
-/// (`lpeg-bad-argument-naming`): `re.compile(nil)`'s `pattern:match(nil)`
-/// (`J.compile.nil`). Tried alone, then in pairs, then all together; the
-/// smallest set under which a row agrees is the one it is counted under.
+/// (`lpeg-bad-argument-naming`); `cdepth` is decided by the row, not its
+/// text — see [`SCOPED`]. `classify_m66_lpeg.py`'s `position`
+/// (`stdlib-errors-have-no-position`) is listed for no row, so a row that
+/// differs only in a position prefix fails.
 const CLASSES: [(&str, &str); 3] = [
-    ("position", "stdlib-errors-have-no-position"),
     ("argname", "stdlib-bad-argument-naming"),
     ("method", "lpeg-bad-argument-naming"),
+    ("cdepth", "lpeg-capture-ceiling-is-the-embeddings"),
 ];
 
-/// `cdepth` (`classify_m66_lpeg.py`): a row the cases file tags `cdepth` has
-/// for its answer the depth of the embedding it runs in — how many Lua
-/// stack slots the frames below the call use, which piccolo lays out
-/// otherwise than the C — and nothing about LPeg. At step c these are the
-/// absolute capture ceilings, `H.stackcaps.999000` to `.1000100`: the port
-/// puts the ceiling where the C puts it relative to `table.unpack`'s in the
-/// same frame (`H.stackcaps.rel`, an untagged row held to the golden's -5),
-/// and the absolute ceiling, about 999,934 under the standalone oracle and
-/// 999,945 under 7.94, falls elsewhere. Such a row agrees under this class
-/// when its status and log are the golden's, whatever its values.
-const CDEPTH: (&str, &str) = ("cdepth", "lpeg-capture-ceiling-is-the-embeddings");
+/// **Every row that may agree only under a named class, with that class —
+/// exactly** (the M6.6 retrospective's H2: a class tried on every differing
+/// row reached 5,906 of the golden's rows, and a port numbering an argument
+/// one too high passed). A differing row passes only under the class listed
+/// for its id, and a listed row must still need it: one that agrees exactly,
+/// or under no class, fails the gate, so the table is the membership the
+/// ledger states.
+///
+/// - `argname`: `pcall(string.rep, P'a', …)`, which Lua names
+///   `'string.rep'` and the binding `'rep'`.
+/// - `method`: `re.compile(nil)`'s `pattern:match(nil)` (`re.lua:269`),
+///   `#1` in the C and `#2` here.
+/// - `cdepth` (`classify_m66_lpeg.py`): a row the cases file also tags
+///   `cdepth`, whose answer is the depth of the embedding it runs in — how
+///   many Lua stack slots the frames below the call use, which piccolo lays
+///   out otherwise than the C — and nothing about LPeg: the absolute capture
+///   ceiling (`H.stackcaps.999950`; the port puts the ceiling where the C
+///   puts it relative to `table.unpack`'s in the same frame,
+///   `H.stackcaps.rel`, an untagged row held to the golden's -5) and the C
+///   levels left to re-entry (`H.reenter.196` to `.200` and `.250`;
+///   `H.reenter.rel` is held to the golden's 0). Such a row agrees under
+///   this class when its status and log are the golden's, whatever its
+///   values. The other ten rows tagged `cdepth` must agree exactly.
+const SCOPED: [(&str, &str); 10] = [
+    ("A.name.typeerr", "argname"),
+    ("X.name.rep", "argname"),
+    ("J.compile.nil", "method"),
+    ("H.stackcaps.999950", "cdepth"),
+    ("H.reenter.196", "cdepth"),
+    ("H.reenter.197", "cdepth"),
+    ("H.reenter.198", "cdepth"),
+    ("H.reenter.199", "cdepth"),
+    ("H.reenter.200", "cdepth"),
+    ("H.reenter.250", "cdepth"),
+];
 
 /// The rows this step runs, in corpus order: (id, tags, chunk).
 fn step_rows() -> Vec<(String, String, Vec<u8>)> {
@@ -384,61 +407,73 @@ fn golden() -> HashMap<String, (String, String, String)> {
         .collect()
 }
 
-/// Rows that agree only under a named class, by class (or set of classes).
+/// Rows that agree only under a named class, by class.
 type ByClass = HashMap<String, Vec<String>>;
 
-/// Compare each row's answer (`get`) with the golden's: equal, or equal under
-/// [`CDEPTH`] for a row tagged with it, or under the smallest set of
-/// [`CLASSES`] that makes it so; anything else is a mismatch.
+/// Compare each row's answer (`get`) with the golden's: equal, or equal
+/// under the one class [`SCOPED`] lists for its id; anything else is a
+/// mismatch, and so is a listed row that no longer needs its class.
 fn compare(
     rows: &[(String, String, Vec<u8>)],
     golden: &HashMap<String, (String, String, String)>,
     masks: &Masks,
     mut get: impl FnMut(&str, &str, &[u8]) -> (String, String, String),
 ) -> (ByClass, Vec<String>) {
+    let scoped: HashMap<&str, &str> = SCOPED.into_iter().collect();
+    assert_eq!(scoped.len(), SCOPED.len(), "an id listed twice in SCOPED");
     let mut by_class: ByClass = HashMap::new();
     let mut mismatches = Vec::new();
+    let mut seen = HashSet::new();
     for (id, tags, chunk) in rows {
         let got = get(id, tags, chunk);
         let want = golden
             .get(id)
             .unwrap_or_else(|| panic!("{id}: in the cases but not the golden"));
+        let class = scoped.get(id.as_str()).copied();
+        if class.is_some() {
+            seen.insert(id.as_str());
+        }
         if &got == want {
+            if let Some(c) = class {
+                mismatches.push(format!(
+                    "  {id}: listed for the named class `{c}` but agrees exactly: \
+                     take it out of SCOPED and the ledger's count"
+                ));
+            }
             continue;
         }
-        if tags.split(',').any(|t| t == CDEPTH.0) && got.0 == want.0 && got.2 == want.2 {
-            by_class
-                .entry(CDEPTH.0.to_string())
-                .or_default()
-                .push(id.clone());
-            continue;
-        }
-        // The smallest set of named classes under which the row agrees.
-        let names: Vec<&str> = CLASSES.iter().map(|(c, _)| *c).collect();
-        let mut sets: Vec<Vec<&str>> = (1u32..1 << names.len())
-            .map(|m| {
-                (0..names.len())
-                    .filter(|i| m & (1 << i) != 0)
-                    .map(|i| names[i])
-                    .collect()
-            })
-            .collect();
-        sets.sort_by_key(Vec::len);
-        let agrees = sets.iter().find(|set| {
-            let n = |s: &str, port: bool| {
-                set.iter()
-                    .fold(s.to_string(), |s, c| masks.class(c, &s, port))
-            };
-            got.0 == want.0
-                && n(&got.1, true) == n(&want.1, false)
-                && n(&got.2, true) == n(&want.2, false)
-        });
-        match agrees {
-            Some(set) => by_class.entry(set.join("+")).or_default().push(id.clone()),
-            None => mismatches.push(format!(
-                "  {id}:\n      lua  = {} {} | {}\n      port = {} {} | {}",
-                want.0, want.1, want.2, got.0, got.1, got.2
+        let agrees = match class {
+            None => false,
+            Some("cdepth") => {
+                tags.split(',').any(|t| t == "cdepth") && got.0 == want.0 && got.2 == want.2
+            }
+            Some(c) => {
+                got.0 == want.0
+                    && masks.class(c, &got.1, true) == masks.class(c, &want.1, false)
+                    && masks.class(c, &got.2, true) == masks.class(c, &want.2, false)
+            }
+        };
+        match (agrees, class) {
+            (true, Some(c)) => by_class.entry(c.to_string()).or_default().push(id.clone()),
+            _ => mismatches.push(format!(
+                "  {id}{}:\n      lua  = {} {} | {}\n      port = {} {} | {}",
+                class.map_or(String::new(), |c| format!(" (listed for `{c}`)")),
+                want.0,
+                want.1,
+                want.2,
+                got.0,
+                got.1,
+                got.2
             )),
+        }
+    }
+    // A listed id the run never reached is a stale table: the corpus lost
+    // the row, or the gate stopped running it.
+    for (id, c) in SCOPED {
+        if !seen.contains(id) {
+            mismatches.push(format!(
+                "  {id}: listed for the named class `{c}` but not run"
+            ));
         }
     }
     (by_class, mismatches)
@@ -447,10 +482,9 @@ fn compare(
 /// Print the classes used, and fail on any mismatch.
 fn report(what: &str, rows: usize, by_class: &ByClass, mismatches: &[String]) {
     eprintln!(
-        "{what}: {rows} rows; agreeing only under a named class: {by_class:?} ({})",
+        "{what}: {rows} rows; agreeing only under the named class listed for them: {by_class:?} ({})",
         CLASSES
             .iter()
-            .chain([&CDEPTH])
             .map(|(c, l)| format!("{c} = {l}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -653,7 +687,7 @@ fn pins() -> Vec<Vec<String>> {
 /// and 7 semantic pins; at step d, the 30 more of those ids that run
 /// captures calling Lua, and the 8 of `m66d_quarantine_pins.txt`; at step e,
 /// the 7 construction rows of `m66e_quarantine_pins.txt` — every
-/// quarantined row (M6.6-ANALYSIS §3).
+/// quarantined row (M6.6-ANALYSIS §11, row 0b).
 const MIN_PINS: usize = 164;
 
 /// The pin files: step c's, step d's for the rows of the three ids whose
@@ -690,8 +724,8 @@ fn every_quarantined_step_row_matches_its_pin() {
     let masks = Masks::new();
     let mut lua = corpus_lua();
     let (mut ran, mut mismatches) = (0usize, Vec::new());
-    // Every quarantined row has a pin, and only those (M6.6-ANALYSIS §3:
-    // "every quarantined id has a port pin by step e").
+    // Every quarantined row has a pin, and only those (M6.6-ANALYSIS §11,
+    // row 0b: "every quarantined id has a port pin by step e").
     let mut pinned: Vec<String> = pins().into_iter().map(|p| p[0].clone()).collect();
     let mut quarantined: Vec<String> = chunks.keys().cloned().collect();
     pinned.sort();

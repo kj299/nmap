@@ -26,10 +26,15 @@ is quarantined when it misbehaves in at least one harness, and no per-harness
 outcome is recorded as a pin. Quarantined rows never enter the golden; each
 needs a port pin with the semantic answer by step e.
 
-The output's header records the SHA-256 of the corpus it screened. The
-regeneration (gen_m66_lpeg.py) refuses a corpus with another digest, so any
-change to the generator means re-running this screen. CI never runs it: it
-needs a sanitizer build and minutes, and its answer is committed.
+The output's header records the SHA-256 of the corpus it screened, and
+`screened-sources-sha256`, one digest over what the verdict rests on besides
+the corpus (classify_m66_lpeg.SCREENED_SOURCES: lpeg.c, nse_lpeg.cc and .h,
+nse_lua.h, liblua/*.[ch], this script with its build flags,
+oracle/build_lua_oracle.sh, the driver, the case runner and the 7.94 probe).
+The regeneration (gen_m66_lpeg.py) refuses a corpus or sources with another
+digest, so any change to the generator, the C or the recipe means re-running
+this screen. CI never runs it: it needs a sanitizer build and minutes, and its
+answer is committed.
 """
 
 import argparse
@@ -193,6 +198,7 @@ def main():
     with open(allp, "w") as fh:
         subprocess.run([sys.executable, os.path.join(HERE, "gen_m66_lpeg_cases.py")], stdout=fh, check=True)
     digest = cl.sha256_file(allp)
+    sources = cl.sources_sha256(REPO)
     cases = cl.read_cases(allp)
     tagged = {cid: [t[2:] for t in tags if t.startswith("q=")][0] for cid, (tags, _) in cases.items()
               if any(t.startswith("q=") for t in tags)}
@@ -261,9 +267,12 @@ def main():
     else:
         sys.exit("the verification passes did not converge")
 
+    if cl.sources_sha256(REPO) != sources:
+        sys.exit("the screened sources changed while the screen ran: run it again")
     with open(a.out, "w", encoding="latin-1") as fh:
         fh.write("# M6.6 step 0b: LPeg corpus rows no oracle may record (LESSONS #033), from oracle/screen_m66_lpeg.py\n")
         fh.write("# screened-corpus-sha256: %s\n" % digest)
+        fh.write("# screened-sources-sha256: %s\n" % sources)
         fh.write("# harnesses: tree, census, asan%s\n" % ("" if a.no_794 else ", nmap794"))
         fh.write("# rows: %d (%d tagged by the generator, %d found by a harness)\n" % (len(tagged) + len(found), len(tagged), len(found)))
         fh.write("# id<TAB>reason<TAB>chunk (as in the cases file). reason: q=LEDGERID for a generator tag, else\n")

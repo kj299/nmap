@@ -23,12 +23,21 @@ The Rust must be **safer** than the C, not merely equivalent. The C is a spec th
    `python3 porting-kit/harnesses/progress/progress.py init --modules <list>`
 2. **Hunt C vulnerabilities** (invoke the `porting-kit-cflaw-scan` skill, or run
    `python3 porting-kit/harnesses/c-flaw-scan/scan_c_flaws.py <c-dirs>`). Tune for
-   signal-to-noise first (LESSONS #2). Each confirmed hit is a planned
-   `DIVERGENCES.md` entry — a bug the port will fix, not re-port.
+   signal-to-noise first (LESSONS #2); confirm it read the target's languages
+   (LESSONS #006); extend its contract tables (`SENTINEL_LIST_ARGS`,
+   `NON_FORMATTING_ARGS`, `ALLOC_FUNCS` via `--config`) for each embedded library
+   (LESSONS #032, #050). Each confirmed hit is a planned `DIVERGENCES.md` entry —
+   a bug the port will fix, not re-port.
 3. **Classify the FFI/syscall surface by failure mode** (LESSONS #1): for each
    external call, record can-it-block-indefinitely / needs-privilege /
-   varies-by-OS-or-version. This arms the "spike the scary module first" rule.
-4. **Draft the threat model** from `porting-kit/skeleton/THREAT-MODEL.md`.
+   varies-by-OS-or-version — **path inputs included** (a FIFO, `/dev/zero`;
+   LESSONS #040). This arms the "spike the scary module first" rule. Record a
+   fourth property: does a vetted safe crate wrap it (Option-C, LESSONS #018)?
+   Vet any reused code for **fidelity** too — its own compatibility list is not
+   an oracle; the oracle phase censuses what the corpus reaches (LESSONS #043).
+4. **Draft the threat model** from `porting-kit/skeleton/THREAT-MODEL.md`,
+   including the time and memory bound each untrusted input must respect
+   (`porting-kit/RESOURCE-BOUNDS.md`, LESSONS #040).
 5. **Decide the port shape:** reimplement-behind-a-seam (OS-integration replaced,
    like lsof) vs translate-with-FFI-coexistence (library internals preserved). If
    translation, also read `porting-kit/C-to-Rust-Playbook-Best-of-Both.md` (Step 0
@@ -40,6 +49,7 @@ The Rust must be **safer** than the C, not merely equivalent. The C is a spec th
 the order is agreed. Then copy `porting-kit/skeleton/` and invoke `porting-kit-oracle`.
 
 ## Integrity
+`check_skills.py` fails if a lesson that amended Phase 0 is not cited here (LESSONS #046).
 Commands and file paths above must match the kit exactly. If a harness path/flag has
 changed, fix the kit reference (and re-run `make -C porting-kit check-kit`) rather than
 diverging here — the playbook is the single source of truth.

@@ -28,15 +28,26 @@ error, byte for byte. Rows:
   Q  random construction programs
 and, from the step b review (sec_review, in the families above): left calls
 through B, which the C builds (lpeg-getfirst-unbounded-recursion); sizes past
-the C's `int` where it raises a deterministic error ("block too big", or the
-check that comes before its writes; lpeg-tree-size-int-overflow); a grammar's
-__index and locale's __newindex in their variants; __name as `%s` prints it
-(E7); and lpeg-utility's split of a string separator (U06).
+the C's `int` where it raises an error ("block too big", or the check that
+comes before its writes; lpeg-tree-size-int-overflow); a grammar's __index
+and locale's __newindex in their variants; __name as `%s` prints it (E7); and
+lpeg-utility's split of a string separator (U06).
 
-Rows the C answers by crashing or with undefined behaviour are never
-generated (LESSONS #033): P(n) and p^n whose sizes wrap the C's `int` to
--2, -1 or a short size, and match-time uses of the left recursions the C's
-verifier misses. Nor are the rows where the port differs on purpose: a left
+The size rows overflow a signed `int` in lpeg.c, which C leaves undefined;
+they are noted `[wrapv]`, and regen_m66b_trees.sh records the whole golden
+from the oracle built with -fwrapv, where that overflow wraps as defined
+behaviour, under a 4 GiB address-space cap (a size that wraps to exactly
+INT_MIN asks for 16 GiB, refused on every host): the answer is the C's
+arithmetic modulo 2^32, which the port implements
+(`sizes_are_judged_as_the_cs_wrapped_int`). Its UBSan screen
+(oracle/ubsan_m66b_trees.py) requires the `[wrapv]` rows, exactly, to be the
+rows the standard build finds undefined, and every other row to give the same
+answer with and without -fwrapv.
+
+Rows the C answers by crashing, or with undefined behaviour that -fwrapv
+does not define, are never generated (LESSONS #033): P(n) and p^n whose
+sizes wrap the C's `int` to -2, -1 or a short size, which the C then writes
+past, and match-time uses of the left recursions the C's verifier misses. Nor are the rows where the port differs on purpose: a left
 recursion past a sub-grammar in a nullable context, which the port refuses
 (unit tests and lpeg_tree_limits pin it), and a yield from a constructor's
 callback (lpeg-callback-may-yield, pinned there too). Error messages are
@@ -668,7 +679,8 @@ REVIEW_F1 = [
     ("D.lr.behind.4", 'return ltype(P{ "A", A = V"C", C = B(#(V"A" * "b") * "c") })'),
 ]
 REVIEW_F3 = [
-    # The C's `int` size wraps to -3 or below: "block too big", unpositioned.
+    # The C's `int` size wraps (-fwrapv; undefined without it) to -3 or
+    # below: "block too big", unpositioned.
     ("A.size.p30p1", "return pcall(P, 2^30 + 1)"),
     ("A.size.p31m1", "return pcall(function() return P(2^31 - 1) end)"),
     ("A.size.m30", "return pcall(P, -(2^30))"),
@@ -823,8 +835,9 @@ REVIEW_UTILITY = [
 
 
 def sec_review():
+    wrapv = {cid for cid, _ in REVIEW_F3}
     for cid, chunk in REVIEW_F1 + REVIEW_F3 + review_rows():
-        add(cid, chunk, "[exact] review")
+        add(cid, chunk, "[exact] review [wrapv]" if cid in wrapv else "[exact] review")
     # lpeg-utility.lua as nselib has it, loaded with lpeg and a stub stdnse
     # under a fixed chunk name: `split` with a string separator builds a
     # grammar whose `sep` rule is a string (U06).

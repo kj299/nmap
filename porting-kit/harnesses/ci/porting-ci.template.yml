@@ -5,7 +5,14 @@
 #
 # Gates (each PLAYBOOK Phase 4 / cross-cutting control):
 #   build+test | clippy -D warnings | unsafe-audit (HARD FAIL) | miri |
-#   sanitizers | fuzz smoke | supply-chain (audit + deny) | differential
+#   sanitizers | fuzz smoke | supply-chain (audit + deny) | differential +
+#   resource bounds
+#
+# LESSONS #042 — a gate wired here is a gate only on the commits it ran on. No
+# check run on the head SHA means no gate ran: nmap's whole M6.6 merged with zero
+# check runs while the local stand-ins were scoped. When this workflow cannot
+# run, `make -C porting-kit ci-local` runs every job below, every matrix leg,
+# unscoped (harnesses/ci/ci_local.py), and its summary goes into the PR.
 name: porting-ci
 
 # LESSONS #5 — path-scope CI to what it actually builds. During a gradual port the
@@ -14,6 +21,10 @@ name: porting-ci
 # CI and leaving PRs misleadingly "unstable" while unrelated jobs drain. Scope this
 # Rust workflow to the Rust paths, and scope the C workflow to the C paths, so each
 # change triggers only the pipeline that can be affected by it. Tune the globs.
+# LESSONS #051 — the Rust paths include EVERY FILE THE ORACLE AND GOLDENS READ:
+# the C sources a golden generator compiles, the data files it loads. nmap's
+# filter omitted `lpeg.c` and `liblua/**`, so a change to the C under test would
+# not have re-run the checks that compile it.
 #
 # LESSONS #025 — scope `push` to the DEFAULT BRANCH only. An unfiltered `push`
 # alongside `pull_request` runs this entire pipeline TWICE for every pull request:
@@ -109,7 +120,10 @@ jobs:
       # made — and module-to-target coverage inferred from import paths is wrong in
       # both directions (LESSONS #027). Drop --fuzz-manifest if you have no fuzz
       # crate yet; the exemption checks still run.
-      - run: python3 porting-kit/harnesses/progress/progress.py --file progress.json audit --fuzz-manifest fuzz/Cargo.toml
+      # --src also fails on a STAMPED tick whose module changed after its gate ran
+      # (stamps are opt-in: `progress.py set MODULE GATE --src crates`). A fuzz tick
+      # outlived its code in nmap's M6.6 while base.rs tripled (LESSONS #045).
+      - run: python3 porting-kit/harnesses/progress/progress.py --file progress.json audit --fuzz-manifest fuzz/Cargo.toml --src crates
 
   miri:
     name: miri (UB in unsafe)
@@ -214,3 +228,14 @@ jobs:
             --oracle ./c-oracle --rust ./target/release/<binary> \
             --matrix porting-kit/harnesses/differential/input-matrix.example.toml \
             --ledger DIVERGENCES.md
+          # --tolerances tolerances.toml   # scoped + pinned (LESSONS #048)
+      # Resource bounds, one per untrusted input edge in THREAT-MODEL.md (LESSONS
+      # #040): time and peak memory at n, 2n, 4n against the C oracle, release
+      # build. Pre-emptible is not bounded; nmap's json.parse took 1,600x C's time
+      # with every gate above green. See porting-kit/RESOURCE-BOUNDS.md.
+      - run: |
+          python3 porting-kit/harnesses/scaling/scale_check.py \
+            --gen 'python3 tests/gen_input.py {n} > {input}' \
+            --cmd './target/release/<binary> {input}' \
+            --oracle-cmd './c-oracle {input}' \
+            --n 100000 --time-exp 1 --mem-exp 1 --max-time-ratio 10

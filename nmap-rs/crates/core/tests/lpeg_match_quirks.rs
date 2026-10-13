@@ -16,7 +16,7 @@
 //!
 //! Calls are direct, not through `pcall`, so errors carry the caller's
 //! position (`c:1:`) as `luaL_where` gives it.
-#![cfg(not(miri))] // the VM over 170 cases; the module's own tests run under Miri
+#![cfg(not(miri))] // the VM over 188 cases; the module's own tests run under Miri
 
 mod lpeg_eval;
 

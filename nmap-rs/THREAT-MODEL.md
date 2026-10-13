@@ -227,6 +227,23 @@ Here:
   end from a data line for 255 (`nmapdb-getprotbynum-255-oracle-abort`).
 - `nmapdb.mac2corp` passes a `char` to `isxdigit`, which is undefined for
   bytes ≥ 0x80 (`nmapdb-mac2corp-isxdigit-signed-char`).
+- LPeg (`lpeg.c`, M6.6), seven, each reachable from patterns and calls a
+  script makes:
+  - a `Cmt` can call `__gc` on the pattern it runs in, which frees the code
+    the machine is reading (use-after-free, `lpeg-code-freed-during-match`);
+  - `doublecap` copies one entry more than the 32-entry capture array on
+    the C stack holds (stack over-read, `lpeg-doublecap-stack-overread`);
+  - `Cc(nil)` with no other constant reads a constant table that does not
+    exist (null dereference, `lpeg-cc-nil-without-ktable`);
+  - the peephole resumes one slot early after rewriting a jump, so it reads
+    operands as instructions and follows jumps out of the code
+    (`lpeg-codegen-jump-out-of-code`);
+  - nested captures push past the Lua stack space LPeg checked for
+    (`lpeg-nested-capture-lua-stack-overflow`);
+  - tree sizes computed in `int` (`lpeg-tree-size-int-overflow`) and a
+    string pattern's size truncated to `int`
+    (`lpeg-pattern-string-size-overflow`) wrap short, and the C writes past
+    the allocation (heap overflow).
 
 **Not defended.** The operator can name any script, and a script can scan,
 brute-force or exploit whatever its arguments point at. That is the tool's

@@ -37,7 +37,7 @@ In brief:
 - **Workstream S** (signature-database maintenance): every unblocked slice is merged.
 - **M6, NSE, is in progress.** Done so far:
   - `.nse` metadata and `--script` selection;
-  - the vendored Lua VM (`crates/vendor/piccolo`, eleven local patches), with
+  - the vendored Lua VM (`crates/vendor/piccolo`, thirteen local patches), with
     PUC-Lua's errors, limits and memory budget;
   - the first-party standard library;
   - `--script-args` and the `nmap` module's non-I/O half;
@@ -52,12 +52,21 @@ In brief:
     command line, with results in normal and XML output as nmap prints them.
     Data files and scripts come from nmap's data directories, never the
     working directory.
-    **But** `-sC` and `--script default` with the shipped `scripts/` still
-    stop at start-up, because three `default` scripts need the unported
-    `lpeg` module (`nse-sc-aborts-on-unported-modules`);
+    Since M6.6, `-sC`, `-A`, `--script default` and `--script version` load
+    the shipped scripts as nmap 7.94 does, but for six `default` scripts
+    dropped quietly for want of `openssl` (`nse-sc-openssl-quiet-drops`);
+    `safe` and `all` still stop at start-up on `lfs`, and `vuln`,
+    `intrusive` and `exploit` on `openssl`
+    (`nse-categories-abort-on-unported-modules`);
   - the `nmapdb` module (M6.6 step a): MAC vendors, service names and IP
     protocols from nmap's data files, read as bytes on first use, every
-    answer as nmap 7.94 gives it over this tree's files.
+    answer as nmap 7.94 gives it over this tree's files;
+  - the `lpeg` module, LPeg 0.12 as nmap ships it, with `re` and
+    `lpeg-utility` (M6.6 steps b to e): pattern trees, the compiler, the
+    matching machine and every capture, each stage pre-emptible and its
+    memory accounted, gated against this tree's own `lpeg.c` over a
+    62,599-row corpus and against nmap 7.94; the C's crashes and undefined
+    sizes are fixed, not reproduced.
 
   What remains of NSE is ledgered in `DIVERGENCES.md`: TLS, packet capture,
   raw `dnet` sends, `-sV`'s version scripts, and the unported C modules.

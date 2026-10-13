@@ -52,7 +52,7 @@ fn list_bytes(n: usize) -> usize {
     n.saturating_mul(std::mem::size_of::<usize>())
 }
 
-/// `MAXBEHIND` (`lpeg.c:121`): the most an and-predicate may look behind
+/// `MAXBEHIND` (`lpeg.c:122`): the most an and-predicate may look behind
 /// to undo its match.
 const MAXBEHIND: i64 = 255;
 

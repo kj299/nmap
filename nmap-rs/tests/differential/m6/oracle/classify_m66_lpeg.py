@@ -51,6 +51,7 @@ A row at c whose census saw match call a Lua function is a contradiction
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 
@@ -190,6 +191,34 @@ def sha256_file(path):
     with open(path, "rb") as fh:
         for blk in iter(lambda: fh.read(1 << 20), b""):
             h.update(blk)
+    return h.hexdigest()
+
+
+# What the sanitizer screen's verdict rests on besides the corpus (the M6.6
+# retrospective's H4): the C it builds (liblua/ and LPeg as nse_lpeg.cc
+# includes it), the recipes and flags it builds them with (the screen itself
+# for the ASan+UBSan build, oracle/build_lua_oracle.sh for the tree harness),
+# and what each harness runs (the driver, the case runner, the 7.94 probe).
+# Paths are relative to the repository root.
+SCREENED_SOURCES = (
+    ["lpeg.c", "nse_lpeg.cc", "nse_lpeg.h", "nse_lua.h"]
+    + ["nmap-rs/tests/differential/m6/oracle/" + f for f in (
+        "screen_m66_lpeg.py", "build_lua_oracle.sh", "m66_lpeg_driver.lua",
+        "m66_lpeg_core.lua", "m66_lpeg_probe.nse")]
+)
+
+
+def screened_sources(repo):
+    """The repository-relative paths SCREENED_SOURCES and liblua/*.[ch] name, sorted."""
+    lib = sorted("liblua/" + f for f in os.listdir(os.path.join(repo, "liblua")) if f.endswith((".c", ".h")))
+    return sorted(SCREENED_SOURCES + lib)
+
+
+def sources_sha256(repo):
+    """One digest over every screened source: each path and its own SHA-256, in order."""
+    h = hashlib.sha256()
+    for rel in screened_sources(repo):
+        h.update(("%s\t%s\n" % (rel, sha256_file(os.path.join(repo, rel)))).encode())
     return h.hexdigest()
 
 

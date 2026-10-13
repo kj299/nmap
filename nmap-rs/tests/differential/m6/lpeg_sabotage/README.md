@@ -63,8 +63,9 @@ The full lists go to `WORK/out/sab.json`, and the builds' logs to
 
 ## What it last measured
 
-The last full run was the step 0b critic's, over the committed corpus of
-62,599 rows, leaving out the 22 `cdepth` rows. The result is the table under
+The last full run was the M6.6 retrospective's (17 variants, 455 s), over
+the committed corpus of 62,599 rows, leaving out the 18 rows tagged `cdepth`
+(17) or `drift794` (1); the step 0b critic's before it gave the same result. The result is the table under
 "What the corpus catches" in `../README.md`:
 - every sabotage differs on at least one row;
 - the baseline differs on none;

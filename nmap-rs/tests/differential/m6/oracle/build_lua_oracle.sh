@@ -14,16 +14,39 @@
 # repetition, when capture functions run, the backtrack-stack ceiling) is a
 # property of THIS engine, not of PEGs in general. Re-implementing it to
 # generate the golden would prove nothing.
+#
+#   build_lua_oracle.sh                    oracle/lua, the oracle every corpus uses
+#   build_lua_oracle.sh --variant fwrapv   oracle/lua-fwrapv: the same with -fwrapv,
+#        so a signed `int` that overflows wraps, as defined behaviour. Only the
+#        step b tree corpus uses it (regen_m66b_trees.sh), for the 14 rows whose
+#        sizes overflow lpeg.c's `int` (lpeg-tree-size-int-overflow): the answer
+#        recorded is the C's arithmetic modulo 2^32, defined, not what one
+#        compiler made of undefined code (LESSONS #033).
+#   build_lua_oracle.sh --variant ubsan    oracle/lua-ubsan: the same with
+#        -fsanitize=undefined -fno-sanitize-recover=all, so the first undefined
+#        operation ends the process (regen_m66b_trees.sh's screen,
+#        oracle/ubsan_m66b_trees.py).
+# Variants are built from the same sources by the same recipe below, and, like
+# oracle/lua, are not committed.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TREE="$(cd "$HERE/../../../../.." && pwd)"
 LIBLUA="$TREE/liblua"
-OUT="$HERE/lua"
+case "${1:-} ${2:-}" in
+  " ")            EXTRA=(); LDEXTRA=(); OUT="$HERE/lua" ;;
+  "--variant fwrapv") EXTRA=(-fwrapv); LDEXTRA=(); OUT="$HERE/lua-fwrapv" ;;
+  "--variant ubsan")  EXTRA=(-g -fsanitize=undefined -fno-sanitize-recover=all)
+                      LDEXTRA=(-fsanitize=undefined); OUT="$HERE/lua-ubsan" ;;
+  *) echo "usage: $0 [--variant fwrapv|ubsan]" >&2; exit 2 ;;
+esac
 
-# Rebuild only when the interpreter is missing or older than any input source.
+# Rebuild only when the interpreter is missing or older than any input source,
+# or than this recipe.
 if [[ -x "$OUT" ]] \
   && [[ -z "$(find "$LIBLUA" -name '*.[ch]' -newer "$OUT" -print -quit)" ]] \
-  && [[ "$TREE/lpeg.c" -ot "$OUT" ]] && [[ "$TREE/nse_lpeg.cc" -ot "$OUT" ]]; then
+  && [[ "$TREE/lpeg.c" -ot "$OUT" ]] && [[ "$TREE/nse_lpeg.cc" -ot "$OUT" ]] \
+  && [[ "$TREE/nse_lpeg.h" -ot "$OUT" ]] && [[ "$TREE/nse_lua.h" -ot "$OUT" ]] \
+  && [[ "${BASH_SOURCE[0]}" -ot "$OUT" ]]; then
   exit 0
 fi
 
@@ -62,10 +85,10 @@ PY
 
 cd "$WORK"
 for f in $(ls ./*.c | grep -v '/lpeg\.c$'); do   # lpeg.c is #included, not compiled
-  cc -O1 -std=gnu99 -DLUA_USE_LINUX -I. -c "$f" -o "${f%.c}.o"
+  cc -O1 ${EXTRA[@]+"${EXTRA[@]}"} -std=gnu99 -DLUA_USE_LINUX -I. -c "$f" -o "${f%.c}.o"
 done
-c++ -O1 -DLUA_INCLUDED -I. -c nse_lpeg.cc -o nse_lpeg.o
-c++ -O1 -o lua ./*.o -lm -ldl
+c++ -O1 ${EXTRA[@]+"${EXTRA[@]}"} -DLUA_INCLUDED -I. -c nse_lpeg.cc -o nse_lpeg.o
+c++ -O1 ${LDEXTRA[@]+"${LDEXTRA[@]}"} -o lua ./*.o -lm -ldl
 mv "$WORK/lua" "$OUT"
 "$OUT" -v
 "$OUT" -e 'assert(type(require"lpeg".P) == "function", "oracle built without lpeg")' \

@@ -340,7 +340,7 @@ fn rawset<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, mut stack: Stack<'gc
     Ok(CallbackReturn::Return)
 }
 
-/// `pcall(f, ...)` (`lbaselib.c:463`). A value that cannot be called fails
+/// `pcall(f, ...)` (`lbaselib.c:472`). A value that cannot be called fails
 /// inside the protected call, so `pcall` returns `false` and the message.
 fn pcall<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, mut stack: Stack<'gc, '_>) -> Ret<'gc> {
     let f = check_any(&stack, 1).map_err(|e| arg_error(ctx, &exec, "pcall", e))?;
@@ -529,7 +529,7 @@ impl<'gc> Sequence<'gc> for XPcall<'gc> {
     }
 }
 
-/// `next(t [, k])` (`lbaselib.c:262`): the next key and its value, or one
+/// `next(t [, k])` (`lbaselib.c:267`): the next key and its value, or one
 /// `nil` past the last.
 fn next<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, mut stack: Stack<'gc, '_>) -> Ret<'gc> {
     let t = check_table(ctx, &stack, 1).map_err(|e| arg_error(ctx, &exec, "next", e))?;
@@ -577,7 +577,7 @@ fn pairs<'gc>(
     }
 }
 
-/// `ipairs(v)` (`lbaselib.c:313`): `ipairsaux, v, 0`, for any value.
+/// `ipairs(v)` (`lbaselib.c:314`): `ipairsaux, v, 0`, for any value.
 fn ipairs<'gc>(
     aux: &Callback<'gc>,
     ctx: Context<'gc>,
@@ -645,7 +645,7 @@ impl<'gc> Sequence<'gc> for IpairsValue {
     }
 }
 
-/// `select(n, ...)` (`lbaselib.c:446`).
+/// `select(n, ...)` (`lbaselib.c:438`).
 fn select<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, mut stack: Stack<'gc, '_>) -> Ret<'gc> {
     let n = stack.len();
     // `*lua_tostring(L, 1) == '#'`: only the first byte counts.
@@ -672,7 +672,7 @@ fn select<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, mut stack: Stack<'gc
     Ok(CallbackReturn::Return)
 }
 
-/// `type(v)` (`lbaselib.c:254`).
+/// `type(v)` (`lbaselib.c:259`).
 fn type_of<'gc>(
     ctx: Context<'gc>,
     exec: Execution<'gc, '_>,
@@ -683,7 +683,7 @@ fn type_of<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `tostring(v)` (`lbaselib.c:507`), which is `luaL_tolstring`: a
+/// `tostring(v)` (`lbaselib.c:499`), which is `luaL_tolstring`: a
 /// `__tostring` metafield is called, and must give a string or a number;
 /// otherwise the VM's own text.
 fn tostring<'gc>(
@@ -740,7 +740,7 @@ impl<'gc> Sequence<'gc> for ToStringResult {
     }
 }
 
-/// `tonumber(v [, base])` (`lbaselib.c:76`).
+/// `tonumber(v [, base])` (`lbaselib.c:81`).
 fn tonumber<'gc>(
     ctx: Context<'gc>,
     exec: Execution<'gc, '_>,
@@ -772,10 +772,13 @@ fn tonumber<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `b_str2int` (`lbaselib.c:49`): `s`, all of it, as an integer numeral in
+/// `b_str2int` (`lbaselib.c:60`): `s`, all of it, as an integer numeral in
 /// `base` with optional spaces and sign around it, wrapping as `lua_Unsigned`
-/// arithmetic wraps. `None` where the C answers `fail`.
-fn str2int(s: &[u8], base: i64) -> Option<i64> {
+/// arithmetic wraps. `None` where the C answers `fail`. `tonumber(s, base)`
+/// calls it with `base` in 2 to 36; public for the `nse_tonumber` fuzz
+/// target, which holds it to a transliteration of the C.
+#[must_use]
+pub fn str2int(s: &[u8], base: i64) -> Option<i64> {
     fn spaces(mut s: &[u8]) -> &[u8] {
         // `SPACECHARS`.
         while let [b' ' | b'\x0c' | b'\n' | b'\r' | b'\t' | b'\x0b', rest @ ..] = s {
@@ -822,7 +825,7 @@ fn str2int(s: &[u8], base: i64) -> Option<i64> {
     Some(i64::from_le_bytes(n.to_le_bytes()))
 }
 
-/// `getmetatable(v)` (`lbaselib.c:125`): a `__metatable` field stands in for
+/// `getmetatable(v)` (`lbaselib.c:126`): a `__metatable` field stands in for
 /// the metatable.
 fn getmetatable<'gc>(
     ctx: Context<'gc>,
@@ -841,7 +844,7 @@ fn getmetatable<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `setmetatable(t, mt)` (`lbaselib.c:136`): refused for a table whose
+/// `setmetatable(t, mt)` (`lbaselib.c:137`): refused for a table whose
 /// metatable has a `__metatable` field.
 fn setmetatable<'gc>(
     ctx: Context<'gc>,
@@ -908,7 +911,7 @@ impl Default for GcSettings {
     }
 }
 
-/// `collectgarbage([opt [, ...]])` (`lbaselib.c:203`). Each option answers
+/// `collectgarbage([opt [, ...]])` (`lbaselib.c:199`). Each option answers
 /// what `lua_gc` would; `"count"` is the VM's heap. The collector itself is
 /// the VM's, which runs on its own schedule: `"collect"` and `"step"` do no
 /// collecting, and `"stop"` stops none (`vm-collectgarbage-drives-no-collector`).
@@ -1012,7 +1015,7 @@ fn collectgarbage<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `assert(v [, message, ...])` (`lbaselib.c:431`): all its arguments when
+/// `assert(v [, message, ...])` (`lbaselib.c:425`): all its arguments when
 /// `v` is true; otherwise `error(message)`, `message` defaulting to
 /// "assertion failed!" only when there is no second argument at all.
 fn assert<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, stack: Stack<'gc, '_>) -> Ret<'gc> {
@@ -1028,7 +1031,7 @@ fn assert<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, stack: Stack<'gc, '_
     Err(raise_value(ctx, &exec, msg, 1))
 }
 
-/// `error(message [, level])` (`lbaselib.c:113`).
+/// `error(message [, level])` (`lbaselib.c:114`).
 fn error<'gc>(ctx: Context<'gc>, exec: Execution<'gc, '_>, stack: Stack<'gc, '_>) -> Ret<'gc> {
     let level = (LuaArgs { ctx, stack: &stack })
         .opt_integer(2, 1)
@@ -1448,7 +1451,7 @@ impl CoStatus {
     }
 }
 
-/// `auxstatus(L, co)` (`lcorolib.c:118`): running if it is the caller;
+/// `auxstatus(L, co)` (`lcorolib.c:127`): running if it is the caller;
 /// otherwise suspended, dead, or normal — active but waiting on a coroutine
 /// it resumed.
 fn co_status_of<'gc>(exec: &Execution<'gc, '_>, co: Thread<'gc>) -> CoStatus {
@@ -1463,7 +1466,7 @@ fn co_status_of<'gc>(exec: &Execution<'gc, '_>, co: Thread<'gc>) -> CoStatus {
     }
 }
 
-/// `coroutine.create(f)` (`lcorolib.c:90`): `f` must be a function.
+/// `coroutine.create(f)` (`lcorolib.c:95`): `f` must be a function.
 fn co_create<'gc>(
     ctx: Context<'gc>,
     exec: Execution<'gc, '_>,
@@ -1510,7 +1513,7 @@ fn co_resume<'gc>(
     }
 }
 
-/// `coroutine.status(co)` (`lcorolib.c:139`).
+/// `coroutine.status(co)` (`lcorolib.c:149`).
 fn co_status<'gc>(
     ctx: Context<'gc>,
     exec: Execution<'gc, '_>,
@@ -1521,7 +1524,7 @@ fn co_status<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `coroutine.running()` (`lcorolib.c:153`). A main thread it reports is
+/// `coroutine.running()` (`lcorolib.c:163`). A main thread it reports is
 /// remembered, for `isyieldable`: no Lua code can hold one any other way.
 fn co_running<'gc>(
     ctx: Context<'gc>,
@@ -1540,7 +1543,7 @@ fn co_running<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `coroutine.isyieldable([co])` (`lcorolib.c:146`): whether `co`, the
+/// `coroutine.isyieldable([co])` (`lcorolib.c:156`): whether `co`, the
 /// running coroutine by default, may yield. Every call into Lua may yield in
 /// this VM, so that is whether it is not a main thread.
 fn co_isyieldable<'gc>(
@@ -1567,7 +1570,7 @@ fn co_isyieldable<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `coroutine.close(co)` (`lcorolib.c:160`): a suspended or dead coroutine is
+/// `coroutine.close(co)` (`lcorolib.c:170`): a suspended or dead coroutine is
 /// closed, returning `true`, or `false` and the error it died of; a running
 /// or normal one cannot be.
 fn co_close<'gc>(
@@ -1704,7 +1707,7 @@ fn string_rep<'gc>(
     Ok(CallbackReturn::Return)
 }
 
-/// `string.char(...)` (`lstrlib.c:214`): each argument an integer from 0 to
+/// `string.char(...)` (`lstrlib.c:195`): each argument an integer from 0 to
 /// 255.
 fn string_char<'gc>(
     ctx: Context<'gc>,
@@ -1751,7 +1754,7 @@ const STRING_ARITH: [(&str, Arith); 8] = [
     ("__unm", Arith::Unm),
 ];
 
-/// `tonum(L, arg)` (`lstrlib.c:262`) on `stack`, the C function's stack:
+/// `tonum(L, arg)` (`lstrlib.c:264`) on `stack`, the C function's stack:
 /// whether its value at `arg` (0-based) is a number or a string that is one
 /// whole. Like the C it pushes what it converts — a number, or the number a
 /// string's text up to its first NUL makes (`lua_stringtonumber` pushes on
@@ -1851,7 +1854,7 @@ fn string_arith<'gc>(
     Err(positioned(ctx, &exec, msg.as_bytes()))
 }
 
-/// What `checktab` (`ltablib.c:44`) asks of a table-like argument.
+/// What `checktab` (`ltablib.c:46`) asks of a table-like argument.
 const TAB_R: u8 = 1;
 const TAB_W: u8 = 2;
 const TAB_L: u8 = 4;
@@ -1925,7 +1928,7 @@ fn table_insert<'gc>(
     })
 }
 
-/// `table.remove(t [, pos])` (`ltablib.c:90`): the C's checks, then the VM's
+/// `table.remove(t [, pos])` (`ltablib.c:91`): the C's checks, then the VM's
 /// removal (`remove`), tail-called.
 fn table_remove<'gc>(
     remove: &Function<'gc>,
@@ -1955,7 +1958,7 @@ fn table_remove<'gc>(
     })
 }
 
-/// `table.concat(t [, sep [, i [, j]]])` (`ltablib.c:160`): the C's checks of
+/// `table.concat(t [, sep [, i [, j]]])` (`ltablib.c:156`): the C's checks of
 /// its arguments, and of each value (`addfield`) where the table answers for
 /// itself, then the VM's concatenation (`concat`), tail-called.
 fn table_concat<'gc>(

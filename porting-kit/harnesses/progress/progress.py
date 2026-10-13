@@ -14,9 +14,22 @@ A module's status is the highest gate it has cleared. "Done" = unsafe_audited.
   drift  --src DIR ...              fail if a shipped module is absent from the table
   exempt MODULE GATE --reason ...   record that GATE does not apply to MODULE
   cover  MODULE --targets a,b       record which fuzz target(s) cover MODULE
-  audit  [--fuzz-manifest F] [--require-done]
+  audit  [--fuzz-manifest F] [--require-done] [--src DIR ...]
                                     fail on an unreasoned exemption or a coverage
-                                    claim naming a fuzz target that does not exist
+                                    claim naming a fuzz target that does not exist;
+                                    with --src, also on a stale stamped tick
+  stamp  MODULE GATE --src DIR ...  record a digest of MODULE's source files at
+                                    the moment GATE was (re-)run; `set ... --src`
+                                    does the same as it ticks
+
+A gate tick vouches for the code as it was when the gate ran. nmap's
+`core::nse::stdlib::base` stayed "fuzzed" while base.rs grew from 756 to 2,499
+lines and gained a byte parser (`tonumber(s, base)`), because its fuzz target
+reaches two functions and nothing re-checked the tick (LESSONS #045). Stamps are
+opt-in: a table without them audits exactly as before. Once a gate is stamped,
+`audit --src` fails when the module's files have changed since, until the gate
+is re-run and re-stamped, which is the moment to ask whether its fuzz target
+still reaches the new entry points.
 
 A gate a module is exempt from renders as [-], never [x] — an exemption is an
 argument that the gate does not apply, not evidence that it passed. There is
@@ -30,12 +43,13 @@ leans on this file as a primary artifact, so a stale table does not merely fail 
 help — it actively misleads the review that is supposed to catch drift. Wire
 `drift` into CI and the table cannot silently rot. (LESSONS #021 — nmap M5.)
 
-Usage: progress.py [--file progress.json] {init,set,show,ingest,drift} ...
+Usage: progress.py [--file progress.json] {init,set,show,ingest,drift,exempt,cover,audit,stamp} ...
        (--file is a top-level flag: it precedes the subcommand)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -99,7 +113,7 @@ def cmd_init(path, modules):
     return 0
 
 
-def cmd_set(path, module, gate):
+def cmd_set(path, module, gate, srcs=None):
     if gate not in GATES:
         print(f"error: gate must be one of {', '.join(GATES)}", file=sys.stderr)
         return 2
@@ -107,6 +121,64 @@ def cmd_set(path, module, gate):
     state["modules"][module] = gate
     save(path, state)
     print(f"{module} -> {gate}")
+    if srcs and gate != "not_started":
+        return cmd_stamp(path, module, gate, srcs)
+    return 0
+
+
+def module_files(srcs, module):
+    """The source files that make up MODULE (`crate::a::b`): `a/b.rs` and
+    everything under `a/b/`, inside `<src>/<crate>/src`. A crate name alone
+    means the whole crate."""
+    crate, _, rest = module.partition("::")
+    parts = rest.split("::") if rest else []
+    found = []
+    for root in srcs:
+        for base in (os.path.join(root, crate, "src"),
+                     os.path.join(root, "src") if os.path.basename(os.path.normpath(root)) == crate
+                     else None):
+            if not base or not os.path.isdir(base):
+                continue
+            target = os.path.join(base, *parts) if parts else base
+            if parts and os.path.isfile(target + ".rs"):
+                found.append((base, target + ".rs"))
+            if os.path.isdir(target):
+                for dirpath, _dirs, files in os.walk(target):
+                    found.extend((base, os.path.join(dirpath, f)) for f in files if f.endswith(".rs"))
+    return sorted(set(found), key=lambda bf: bf[1])
+
+
+def module_digest(srcs, module):
+    """(sha256 over each file's path relative to its crate's src/ and bytes,
+    file count), or (None, 0) when the module has no files of its own."""
+    files = module_files(srcs, module)
+    if not files:
+        return None, 0
+    h = hashlib.sha256()
+    for base, f in files:
+        h.update(os.path.relpath(f, base).replace(os.sep, "/").encode() + b"\0")
+        with open(f, "rb") as fh:
+            h.update(hashlib.sha256(fh.read()).digest())
+    return h.hexdigest(), len(files)
+
+
+def cmd_stamp(path, module, gate, srcs):
+    """Record the digest of MODULE's files as of GATE's (re-)run."""
+    if gate not in GATES[1:]:
+        print(f"error: gate must be one of {', '.join(GATES[1:])}", file=sys.stderr)
+        return 2
+    state = load(path)
+    if module not in state.get("modules", {}):
+        print(f"error: unknown module {module!r}", file=sys.stderr)
+        return 2
+    digest, n = module_digest(srcs, module)
+    if digest is None:
+        print(f"error: no source files found for {module!r} under {', '.join(srcs)} "
+              "(expected <src>/<crate>/src/<path>.rs or a directory)", file=sys.stderr)
+        return 2
+    state.setdefault("stamps", {}).setdefault(module, {})[gate] = {"sha256": digest, "files": n}
+    save(path, state)
+    print(f"{module}: {gate} stamped at {digest[:12]} ({n} file(s))")
     return 0
 
 
@@ -227,7 +299,7 @@ def _manifest_targets(manifest):
     return set(re.findall(r'^name = "(.+)"$', text, re.M))
 
 
-def cmd_audit(path, manifest, require_done=False):
+def cmd_audit(path, manifest, require_done=False, srcs=None):
     """Hard-fail on an unbacked exemption or a coverage claim naming no real target.
 
     This exists because module-to-target coverage had only ever been *inferred*, and
@@ -285,6 +357,25 @@ def cmd_audit(path, manifest, require_done=False):
             if t not in known:
                 print(f"COVER-NO-SUCH-TARGET: {module} -> {t}")
                 rc = 1
+
+    stamps = state.get("stamps", {})
+    if stamps and srcs:
+        for module, gates in sorted(stamps.items()):
+            if module not in mods:
+                print(f"STAMP-UNKNOWN-MODULE: {module}")
+                rc = 1
+                continue
+            now, n = module_digest(srcs, module)
+            for gate, rec in sorted(gates.items()):
+                if now != rec.get("sha256"):
+                    was = rec.get("sha256", "?")[:12]
+                    print(f"STALE-TICK: {module}: {gate} was stamped at {was} "
+                          f"({rec.get('files', '?')} file(s)); its files are now "
+                          f"{(now or 'missing')[:12]} ({n} file(s)). Re-run the gate, check its "
+                          f"target still reaches the new code, then `stamp {module} {gate}`.")
+                    rc = 1
+    elif stamps:
+        print("note: stamped ticks not checked (pass --src <crates dir>)")
 
     stalled = sorted(m for m in mods if not effective_done(state, m))
     for module in stalled:
@@ -413,6 +504,38 @@ def _self_test():
               cmd_cover(p, "parser", ["parse_thing"]) == 0 and cmd_audit(p, man) == 0)
         check("a coverage claim naming no such target fails",
               cmd_cover(p, "parser", ["parse_ghost"]) == 0 and cmd_audit(p, man) == 1)
+
+        # --- stamped ticks (LESSONS #045) ----------------------------------------
+        src = os.path.join(d, "stamp", "crates")
+        core = os.path.join(src, "core", "src")
+        os.makedirs(os.path.join(core, "nse"))
+        files = {"lib.rs": "pub mod parser;\npub mod nse;\n", "parser.rs": "fn p() {}\n",
+                 "nse/mod.rs": "pub mod base;\n", "nse/base.rs": "fn b() {}\n"}
+        for rel, body in files.items():
+            open(os.path.join(core, rel), "w").write(body)
+        cmd_init(p, ["core::parser", "core::nse", "core::nse::base"])
+        check("a table with no stamps audits as before, --src or not",
+              cmd_audit(p, None, srcs=[src]) == 0)
+        check("stamping a module with no files of its own is refused",
+              cmd_stamp(p, "core::parser", "fuzzed", [os.path.join(d, "nowhere")]) == 2)
+        check("set --src ticks and stamps in one step",
+              cmd_set(p, "core::parser", "fuzzed", [src]) == 0
+              and "fuzzed" in load(p)["stamps"]["core::parser"])
+        cmd_stamp(p, "core::nse", "fuzzed", [src])
+        check("audit passes while the stamped files are unchanged",
+              cmd_audit(p, None, srcs=[src]) == 0)
+        open(os.path.join(core, "parser.rs"), "a").write("fn tonumber_base() {}\n")
+        check("audit fails once a stamped module's file changes",
+              cmd_audit(p, None, srcs=[src]) == 1)
+        check("re-stamping after re-running the gate clears it",
+              cmd_stamp(p, "core::parser", "fuzzed", [src]) == 0
+              and cmd_audit(p, None, srcs=[src]) == 0)
+        open(os.path.join(core, "nse", "str2int.rs"), "w").write("fn s() {}\n")
+        check("a new file inside a directory module makes its tick stale",
+              cmd_audit(p, None, srcs=[src]) == 1)
+        cmd_stamp(p, "core::nse", "fuzzed", [src])
+        check("audit without --src does not check stamps (opt-in)",
+              cmd_audit(p, None) == 0)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -512,6 +635,9 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     pi = sub.add_parser("init"); pi.add_argument("--modules", required=True, help="comma-separated")
     ps = sub.add_parser("set"); ps.add_argument("module"); ps.add_argument("gate")
+    ps.add_argument("--src", nargs="+", help="also stamp the module's source digest for this gate")
+    pst = sub.add_parser("stamp"); pst.add_argument("module"); pst.add_argument("gate")
+    pst.add_argument("--src", nargs="+", required=True, help="crates directory (as for drift)")
     psh = sub.add_parser("show"); psh.add_argument("--json", action="store_true")
     pg = sub.add_parser("ingest"); pg.add_argument("--unsafe-json", nargs="+", default=[])
     pd = sub.add_parser("drift"); pd.add_argument("--src", nargs="+", required=True)
@@ -525,6 +651,8 @@ def main(argv=None):
                     help="cargo-fuzz Cargo.toml, to check coverage names against [[bin]] entries")
     pa.add_argument("--require-done", action="store_true",
                     help="fail on any module that is not done (retrospectives, milestone close)")
+    pa.add_argument("--src", nargs="+",
+                    help="crates directory: also fail on a stamped tick whose files changed")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -532,7 +660,9 @@ def main(argv=None):
     if args.cmd == "init":
         return cmd_init(args.file, [m.strip() for m in args.modules.split(",") if m.strip()])
     if args.cmd == "set":
-        return cmd_set(args.file, args.module, args.gate)
+        return cmd_set(args.file, args.module, args.gate, args.src)
+    if args.cmd == "stamp":
+        return cmd_stamp(args.file, args.module, args.gate, args.src)
     if args.cmd == "show":
         return cmd_show(args.file, args.json)
     if args.cmd == "ingest":
@@ -545,7 +675,7 @@ def main(argv=None):
         return cmd_cover(args.file, args.module,
                          [t.strip() for t in args.targets.split(",") if t.strip()])
     if args.cmd == "audit":
-        return cmd_audit(args.file, args.fuzz_manifest, args.require_done)
+        return cmd_audit(args.file, args.fuzz_manifest, args.require_done, args.src)
     ap.print_help()
     return 2
 

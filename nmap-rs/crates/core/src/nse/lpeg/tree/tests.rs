@@ -81,7 +81,7 @@ fn fixedlen_ref(t: &Tree, i: usize, mut count: usize, len: i64) -> i64 {
     }
 }
 
-/// `verifyerror` and `verifyrule` (`lpeg.c:3020-3088`). `fixed`: with the
+/// `verifyerror` and `verifyrule` (`lpeg.c:3028-3087`). `fixed`: with the
 /// port's correction (`lpeg-getfirst-unbounded-recursion`): a sub-grammar
 /// in a nullable context is nullable. Without it, the C exactly.
 fn verifyrule_ref(
@@ -129,7 +129,7 @@ fn verifyrule_ref(
     }
 }
 
-/// `checkloops` (`lpeg.c:3000`).
+/// `checkloops` (`lpeg.c:3008`).
 fn checkloops_ref(t: &Tree, i: usize) -> bool {
     let n = t.node(i).expect("in tree");
     if n.tag == Tag::Rep && checkaux_ref(t, i + 1, PRED_NULLABLE) {
@@ -398,14 +398,18 @@ fn repetitions_have_the_cs_layout() {
 /// wrapped `int`, against what the tree's oracle does with it (measured;
 /// `crate::nse::lpeg`'s tests and `lpeg_tree_limits` raise them through the
 /// VM): wrapped to -3 or below, "block too big"; to -2 or -1, or short of
-/// the tree, an allocation the C writes past, `not enough memory` here.
+/// the tree, an allocation the C writes past, and to `INT_MIN`, 16 GiB
+/// asked for, `not enough memory` here (the C's arithmetic modulo 2^32, as
+/// `-fwrapv` defines it; `lpeg-tree-size-int-overflow`).
 #[test]
 fn sizes_are_judged_as_the_cs_wrapped_int() {
     use CSize::{Fits, Short, TooBig};
     let nem = Err(TreeError::NotEnoughMemory);
     let big = Err(TreeError::BlockTooBig);
     assert_eq!(c_size(0x7fff_ffff), Fits(MAX_TREE));
-    assert_eq!(c_size(0x8000_0000), TooBig, "INT_MIN");
+    // `INT_MIN`: `newtree`'s `len - 1` wraps to `INT_MAX`, 16 GiB asked for.
+    assert_eq!(c_size(0x8000_0000), Short(i32::MIN), "INT_MIN");
+    assert_eq!(c_size(0x8000_0001), TooBig, "INT_MIN + 1");
     assert_eq!(c_size(0xffff_fffd), TooBig, "-3");
     assert_eq!(c_size(0xffff_fffe), Short(-2));
     assert_eq!(c_size(0xffff_ffff), Short(-1));
@@ -419,9 +423,10 @@ fn sizes_are_judged_as_the_cs_wrapped_int() {
     assert_eq!(Tree::number_size(-1_500_000_000), TooBig);
     assert_eq!(
         Tree::number_size(-0x4000_0000),
-        TooBig,
+        Short(i32::MIN),
         "P(-(2^30)): INT_MIN"
     );
+    assert_eq!(Tree::number(-0x4000_0000).map(|_| ()), nem);
     assert_eq!(Tree::number_size(-0x3fff_ffff), Fits(0x7fff_fffe));
     assert_eq!(
         Tree::number_size(-0x7fff_fffe),
@@ -446,13 +451,17 @@ fn sizes_are_judged_as_the_cs_wrapped_int() {
     assert_eq!(Tree::star_size(1, 0x4000_0000), TooBig, "P'a'^(2^30)");
     assert_eq!(
         Tree::star_size(1, 0x3fff_ffff),
-        TooBig,
+        Short(i32::MIN),
         "P''^(2^30 - 1): INT_MIN"
     );
-    assert_eq!(Tree::star_size(5, 0x3fff_ffff), TooBig, "P'abc'^(2^30 - 1)");
+    assert_eq!(
+        Tree::star_size(5, 0x3fff_ffff),
+        Short(i32::MIN),
+        "P'abc'^(2^30 - 1): INT_MIN"
+    );
     assert_eq!(
         Tree::star_size(2, i32::MAX),
-        TooBig,
+        Short(i32::MIN),
         "(#P'a')^(2^31 - 1): INT_MIN"
     );
     assert_eq!(Tree::star_size(1, i32::MAX), Short(0), "P''^(2^31 - 1)");

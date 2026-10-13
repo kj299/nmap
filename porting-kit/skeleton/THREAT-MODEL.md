@@ -10,12 +10,15 @@ and which cross a privilege boundary (audit those hardest).
 
 ## 2. Trust boundaries — where does untrusted data / lower trust cross in?
 List each entry point and mark it. These are the fuzz + validation priorities.
-| Entry point | Source | Trust | Ported module |
-|---|---|---|---|
-| CLI args / stdin | user / pipe | untrusted | `cli`, `core::parser` |
-| files parsed | filesystem | semi-trusted | |
-| network / IPC | remote | untrusted | |
-| environment / config | operator | trusted-ish | |
+The **bound** column is availability: how time and peak memory may grow with the
+input (n = its size), checked at n/2n/4n against C by
+`harnesses/scaling/scale_check.py` (PLAYBOOK Phase 4 step 4b; LESSONS #040).
+| Entry point | Source | Trust | Ported module | Bound (time / memory) |
+|---|---|---|---|---|
+| CLI args / stdin | user / pipe | untrusted | `cli`, `core::parser` | e.g. O(n) / O(n) |
+| files parsed | filesystem (may be a FIFO or `/dev/zero`) | semi-trusted | | |
+| network / IPC | remote | untrusted | | |
+| environment / config | operator | trusted-ish | | |
 
 ## 3. Privilege transitions
 Where does the tool gain/drop privilege, elevate, or act on another security
@@ -25,6 +28,9 @@ scoped (the retrospective's `PrivilegeGuard` RAII pattern).
 ## 4. Attacker capabilities we defend against
 - Supplies arbitrary bytes on any untrusted boundary (→ no panic/UB: fuzz gate).
 - Supplies pathological sizes (→ no integer overflow / OOM: overflow-checks on).
+- Supplies inputs shaped to maximise work: deep nesting, long runs, repeated
+  formats, a path that never reaches EOF (→ the bound column; "it can yield" is
+  not "it is bounded").
 - Races the filesystem/IPC (→ no TOCTOU: prefer open-then-check over check-then-open).
 
 ## 5. Explicit non-goals

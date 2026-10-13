@@ -33,9 +33,9 @@ repo-root `porting-kit/`; if you vendor it elsewhere, adjust the paths inside ea
 - **`porting-kit-oracle`** — establish the differential oracle + test-vector harness
   *before* writing Rust. Golden corpus, normalization, hidden vectors,
   C-baseline-validated vectors, ledger seed.
-- **`porting-kit-module`** — the six-gate loop for one module: spike-if-hazardous →
-  port → differential → fuzz → sanitize → unsafe-audit → pin+merge. Advances
-  `progress.json`.
+- **`porting-kit-module`** — the gate loop for one module: spike-if-hazardous →
+  port → differential → fuzz → sanitize → resource bounds → unsafe-audit →
+  independent review + merge. Advances and stamps `progress.json`.
 - **`porting-kit-audit`** — run the full safety-gate suite; report a gate-status
   table; refuse a "safe" verdict unless every applicable gate is green or a
   divergence is ledgered. Gate every merge/release with it.
@@ -54,5 +54,8 @@ kickoff
 ## Integrity rule
 These skills are part of "all elements of the kit." If a harness is renamed or a
 flag changes, update every skill that references it — `check_skills.py` hard-fails
-on a dangling `porting-kit/<path>` reference, and the retrospective must patch the
-skills alongside the docs.
+on a dangling `porting-kit/<path>` reference or `make` target, and on a LESSONS
+entry that amended a PLAYBOOK phase but is not cited by number in the skills that
+run it (Phase 4: `porting-kit-module` + `PROMPTS/10-module-port.md`; Phase 2: `porting-kit-oracle`;
+Phase 0: `porting-kit-kickoff` + `porting-kit-cflaw-scan`). The retrospective must
+patch the skills alongside the docs.

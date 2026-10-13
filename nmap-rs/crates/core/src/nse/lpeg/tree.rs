@@ -25,11 +25,12 @@
 //! `newtree`, which allocates `8 * len + 16` bytes. Here every size is
 //! computed exactly, then judged as the C's wrapped `int` would be
 //! ([`c_size`]): a size the `int` holds is allocated through the memory
-//! budget (`not enough memory` if refused); one that wraps to -3 or below is
-//! the C's `luaM_toobig`, "memory allocation error: block too big"; and one
-//! that wraps to anything else, where the C allocates too little and writes
-//! past it, is `not enough memory` — unless the C raises another error
-//! between the two, which the caller reproduces (`lpeg-tree-size-int-overflow`,
+//! budget (`not enough memory` if refused); one that wraps to -3 or below,
+//! but not to `INT_MIN`, is the C's `luaM_toobig`, "memory allocation error:
+//! block too big"; and one that wraps to anything else, where the C
+//! allocates too little and writes past it, or asks for 16 GiB, is `not
+//! enough memory` — unless the C raises another error between the two,
+//! which the caller reproduces (`lpeg-tree-size-int-overflow`,
 //! `lpeg-pattern-string-size-overflow`).
 //!
 //! **No recursion.** No walker recurses on the Rust stack (E2): each is a
@@ -54,7 +55,7 @@ pub use walk::{CheckAux, CheckLoops, FinalFix, FindOpenCall, FixedLen, Pred, Ver
 /// longest chain of left calls the verifier and `fixedlenx` follow.
 pub const MAXRULES: usize = 200;
 
-/// `MAXBEHIND` (`lpeg.c:121`, `MAXAUX`): the longest pattern `B` accepts.
+/// `MAXBEHIND` (`lpeg.c:122`, `MAXAUX`): the longest pattern `B` accepts.
 pub const MAXBEHIND: i64 = 255;
 
 /// `SHRT_MAX`: the bound on a numbered capture (`p / n`) and on `Carg`.
@@ -73,7 +74,7 @@ pub const MAX_TREE: usize = 0x7fff_ffff;
 /// An index into a pattern's constant table (`ktable`); 0 is none.
 pub type Key = u32;
 
-/// A node's kind (`TTag`, `lpeg.c:160`), in the C's order.
+/// A node's kind (`TTag`, `lpeg.c:159`), in the C's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Tag {
@@ -110,7 +111,7 @@ impl Tag {
         }
     }
 
-    /// `tagnames` (`lpeg.c:2028`), for the debug printer.
+    /// `tagnames` (`lpeg.c:2025`), for the debug printer.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -135,7 +136,7 @@ impl Tag {
     }
 }
 
-/// A capture's kind (`CapKind`, `lpeg.c:236`), in the C's order.
+/// A capture's kind (`CapKind`, `lpeg.c:233`), in the C's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum CapKind {
@@ -270,25 +271,37 @@ pub struct Tree {
 ///
 /// `newtree` allocates `(len - 1) * sizeof(TTree) + sizeof(Pattern)` bytes,
 /// `8 * len + 16` on a 64-bit host, in `size_t`. Every size the C computes
-/// is a sum or product of `int`s, so its `int` is `len` modulo 2^32: if that
-/// is the true size, the C allocates it; if it is -3 or below, the size in
-/// `size_t` is past `MAX_SIZE` and `luaS_newudata` raises `luaM_toobig`
-/// before anything is written ("memory allocation error: block too big",
-/// unpositioned; `INT_MIN` included, measured); and -2, -1, 0 or a positive
-/// size short of the tree's are an allocation of 0, 8, 16 or `8 * w + 16`
-/// bytes, which the C then writes past. Measured on the tree's oracle:
-/// `P(2^31 - 1)` (-3) and `P(-(2^30))` (`INT_MIN`) are too big,
-/// `P(-(2^31 - 1))` (-2) and `P'a'^-(2^30)` (-1) crash, `P''^(2^31 - 1)` (0)
-/// raises the check that comes before the writes.
+/// is a sum or product of `int`s, which C leaves undefined past `INT_MAX`;
+/// this follows the C's arithmetic modulo 2^32, as `-fwrapv` defines it
+/// (`lpeg-tree-size-int-overflow`), so its `int` is `len` modulo 2^32: if
+/// that is the true size, the C allocates it; if it is -3 to `INT_MIN + 1`,
+/// `len - 1` is negative, the size in `size_t` is past `MAX_SIZE`, and
+/// `luaS_newudata` raises `luaM_toobig` before anything is written
+/// ("memory allocation error: block too big", unpositioned); if it is
+/// `INT_MIN`, `len - 1` itself wraps, to `INT_MAX`, and the C asks for
+/// 16 GiB, which its allocator refuses ("not enough memory") or grants, and
+/// the C then fills or writes past it; and -2, -1, 0 or a positive size
+/// short of the tree's are an allocation of 0, 8, 16 or `8 * w + 16` bytes,
+/// which the C then writes past. Measured on the tree's oracle built with
+/// `-fwrapv` under a 4 GiB address-space cap (`regen_m66b_trees.sh`):
+/// `P(2^31 - 1)` (-3) is too big, `P(-(2^30))` (`INT_MIN`) not enough
+/// memory, `P(-(2^31 - 1))` (-2) and `P'a'^-(2^30)` (-1) crash,
+/// `P''^(2^31 - 1)` (0) raises the check that comes before the writes.
+/// (Built without `-fwrapv`, gcc computes `INT_MIN - 1` in 64 bits and the
+/// oracle says "block too big" for `INT_MIN` too: what one compiler made of
+/// undefined code, which this followed until the M6.6 retrospective.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CSize {
     /// The `int` holds the size: the C allocates it.
     Fits(usize),
-    /// The `int` wrapped to -3 or below: "block too big".
+    /// The `int` wrapped to -3 or below, but not to `INT_MIN`: "block too
+    /// big".
     TooBig,
     /// The `int` wrapped to this, in -2 to `INT_MAX`, short of the tree: the
     /// C allocates that much and writes past it, unless a check between the
-    /// two raises first.
+    /// two raises first. Or to `INT_MIN`, where the C asks for 16 GiB: past
+    /// [`MAX_TREE`] here, so `not enough memory`, before any check, as the
+    /// C answers where that allocation is refused.
     Short(i32),
 }
 
@@ -303,7 +316,7 @@ pub fn c_size(len: u64) -> CSize {
     // The low 32 bits, read as the C's `int`.
     let low = u32::try_from(len & 0xffff_ffff).unwrap_or(0);
     let w = i32::from_ne_bytes(low.to_ne_bytes());
-    if w <= -3 {
+    if w <= -3 && w != i32::MIN {
         CSize::TooBig
     } else {
         CSize::Short(w)
@@ -364,7 +377,7 @@ fn set_slot(cs: &Charset, i: usize) -> Node {
     }
 }
 
-/// `fillseq` (`lpeg.c:2364`): `n` nodes of `tag`, the i-th with `u = s[i]`
+/// `fillseq` (`lpeg.c:2350`): `n` nodes of `tag`, the i-th with `u = s[i]`
 /// (or 0), chained by `Seq` nodes. `n >= 1`.
 fn fillseq(v: &mut Vec<Node>, tag: Tag, n: usize, s: Option<&[u8]>) {
     let byte = |i: usize| s.and_then(|s| s.get(i)).map_or(0, |&b| i32::from(b));
@@ -481,7 +494,7 @@ impl Tree {
         }
     }
 
-    /// A number as a pattern (`numtree`, `lpeg.c:2381`): 0 matches always,
+    /// A number as a pattern (`numtree`, `lpeg.c:2368`): 0 matches always,
     /// `n > 0` is `n` of any byte, `n < 0` is not `-n` of any byte. `n` is
     /// already the C's `int` ([`super::narrow`]).
     pub fn number(n: i32) -> Result<Tree, TreeError> {
@@ -715,7 +728,7 @@ impl Tree {
         correct_keys(&mut self.nodes, from, to, n, usize::MAX).map(|_| ())
     }
 
-    /// `hascaptures` (`lpeg.c:1045`) of the whole tree: whether any node is a
+    /// `hascaptures` (`lpeg.c:1046`) of the whole tree: whether any node is a
     /// capture or a run-time capture. A scan of the slots, as in
     /// [`Tree::correct_keys`].
     #[must_use]
@@ -849,7 +862,7 @@ impl GrammarLayout {
         alloc(self.size)
     }
 
-    /// `buildgrammar` (`lpeg.c:2988`) at once: the grammar of `rules`, each
+    /// `buildgrammar` (`lpeg.c:2986`) at once: the grammar of `rules`, each
     /// with the shift its keys take when its constant table is appended to
     /// the grammar's. See [`GrammarBuild`], which does it a slice at a time.
     pub fn build(&self, rules: &[(&Tree, Key)], space: Vec<Node>) -> Result<Tree, TreeError> {
@@ -863,7 +876,7 @@ impl GrammarLayout {
     }
 }
 
-/// `buildgrammar` (`lpeg.c:2988`), in pieces a slice of fuel can do: each
+/// `buildgrammar` (`lpeg.c:2986`), in pieces a slice of fuel can do: each
 /// rule's `Rule` node, then its nodes copied, then its keys shifted by what
 /// its constant table's entries moved by when they were appended to the
 /// grammar's (`mergektable`). Rule `i` is numbered `i` (`cap`), its key is 0

@@ -23,7 +23,17 @@ A port that ships without this wastes its most valuable output.
    that validated paths but not commands (LESSONS #022).
    **Point the flaw scanner at the files where this port actually found bugs** and
    check whether it reports them. If it does not, that gap is the headline finding, not
-   a footnote — in M5 it missed both defects in the file it was run on (LESSONS #020).
+   a footnote — in M5 it missed both defects in the file it was run on (LESSONS #020);
+   in M6.6 it found 1 of 22 and the miss had been known since Phase 0 (LESSONS #050).
+   Measure a candidate rule on those files and on the rest of the tree before adding it.
+   **List the merged SHAs with zero check runs** — each is a commit no gate ran on
+   (LESSONS #042):
+   `for c in $(git log --first-parent --format=%H <base>..HEAD); do echo "$c $(gh api repos/OWNER/REPO/commits/$c/check-runs --jq .total_count)"; done`
+   **Check every gate claim against the code it vouches for:** stale ticks with
+   `progress.py --file <f> audit --src crates` (LESSONS #045); a reach census of the
+   port's exposed functions against the corpus (LESSONS #043); and the C-generated
+   goldens **decoded**, then re-screened under UBSan/ASan with the runtime's API checks
+   before any UB sweep (LESSONS #049; `porting-kit/ORACLE-CHECKS.md` §6).
 1. **Reconstruct from artifacts** the way `RETROSPECTIVE-lsof.md` was built: lean on git
    history — especially commit *sequences* where a message says "the real fix"
    (higher signal than reverts), churn per file (time-sink proxy), the final
@@ -47,11 +57,13 @@ A port that ships without this wastes its most valuable output.
    harness misfire, over-report, or get skipped (a skipped control is a broken
    control)? **Did a failure occur the playbook would NOT have prevented?** — the most
    important finding.
-3. **Patch the kit — make the edits, don't just describe them:** amend `PLAYBOOK.md`;
-   fix/extend a harness and re-run `make -C porting-kit check-kit`; update
-   `ARCHITECTURE-TEMPLATE.md`, the `PROMPTS/`, or these skills if the shape/loop changed.
+3. **Patch the kit — make the edits, don't just describe them:** amend `PLAYBOOK.md`
+   (keep it under ~400 lines; detail goes to linked docs); fix/extend a harness and re-run
+   `make -C porting-kit check-kit`; update `ARCHITECTURE-TEMPLATE.md`, the `PROMPTS/`, or
+   these skills if the shape/loop changed.
    **Keep the skills in integrity with the kit** — if you renamed a harness or changed a
-   flag, update every skill that references it (the skills-integrity check enforces this).
+   flag, update every skill that references it, and cite each new lesson in the skills
+   that run the phase it amended (`check_skills.py` check 5 fails otherwise; LESSONS #046).
 4. **Append to `porting-kit/LESSONS.md`** — one entry per lesson in the required format
    (date, codebase, lesson, section amended). If the kit had the lesson but it didn't
    fire, say why (friction? unclear? not wired to CI?).

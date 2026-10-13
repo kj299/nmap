@@ -107,7 +107,7 @@ pub enum Op {
 }
 
 impl Op {
-    /// `names` in `printinst` (`lpeg.c:1940`).
+    /// `names` in `printinst` (`lpeg.c:1932`).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -177,7 +177,7 @@ impl Op {
     }
 }
 
-/// `CHARSETINSTSIZE` (`lpeg.c:130`, `instsize(CHARSETSIZE)`): an instruction
+/// `CHARSETINSTSIZE` (`lpeg.c:134`, `instsize(CHARSETSIZE)`): an instruction
 /// and the eight 4-byte slots of its charset.
 pub const SET_INST_SLOTS: usize = 1 + CHARSET_SIZE / 4;
 

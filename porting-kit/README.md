@@ -23,6 +23,9 @@ vulnerability. Maximize safety controls.
 | Close a port & improve the kit | paste [`PROMPTS/90-retrospective.md`](PROMPTS/90-retrospective.md) |
 | Lay out the workspace | copy [`skeleton/`](skeleton/); see [`ARCHITECTURE-TEMPLATE.md`](ARCHITECTURE-TEMPLATE.md) |
 | The control ledger | [`SECURITY-CHECKLIST.md`](SECURITY-CHECKLIST.md) |
+| Check the oracle is sound and the corpus discriminates | [`ORACLE-CHECKS.md`](ORACLE-CHECKS.md) |
+| Gate time and memory on untrusted input | [`RESOURCE-BOUNDS.md`](RESOURCE-BOUNDS.md) |
+| Review a step before the next (and sabotage properly) | [`REVIEW-GATE.md`](REVIEW-GATE.md) |
 | Standing rules for any kit repo | [`CLAUDE.md`](CLAUDE.md) |
 
 ## Skills (invokable wrappers over the kit)
@@ -50,14 +53,16 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | Harness | Purpose | Gate |
 |---|---|---|
 | `harnesses/unsafe-audit/audit_unsafe.py` | every `unsafe {}` needs a `// SAFETY:` | **hard-fail CI** |
-| `harnesses/differential/diff_run.py` (+`normalize.py`) | diff Rust vs C oracle; triage divergences via a ledger; timeout = liveness backstop | CI |
+| `harnesses/differential/diff_run.py` (+`normalize.py`) | diff Rust vs C oracle; triage divergences via a ledger; timeout = liveness backstop; `--tolerances` = scoped, pinned exemptions | CI |
 | `harnesses/golden/golden.py` | capture/version/replay the oracle; flag oracle nondeterminism | CI |
 | `harnesses/fuzz/gen_fuzz_target.sh` | scaffold a cargo-fuzz target per module | CI smoke + nightly |
 | `harnesses/sanitizers/run_sanitizers.sh` | Miri / ASan / LSan / TSan over the unsafe layer (no UBSan — rustc has none) | CI |
 | `harnesses/supply-chain/run_supply_chain.sh` | `cargo audit` + `cargo deny` | CI |
-| `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting | Phase 0 |
-| `harnesses/progress/progress.py` | per-module status table incl. safety gates (`init`, `set`, `show`, `ingest`); `drift` fails on an untracked shipped module; `exempt` records a reasoned gate exemption, `cover` maps modules to fuzz targets, and `audit` fails on an unreasoned exemption or a coverage claim naming a missing target | tracking + **CI** |
+| `harnesses/c-flaw-scan/scan_c_flaws.py` | find C vuln classes *before* porting; per-target contract tables (`--config`); `--inventory recursion` | Phase 0 |
+| `harnesses/scaling/scale_check.py` | time + peak-memory growth at n/2n/4n vs declared bounds and the C oracle | CI |
+| `harnesses/progress/progress.py` | per-module status table incl. safety gates (`init`, `set`, `show`, `ingest`); `drift` fails on an untracked shipped module; `exempt` records a reasoned gate exemption, `cover` maps modules to fuzz targets, `stamp` records a source digest at a tick, and `audit` fails on an unreasoned exemption, a coverage claim naming a missing target, or (`--src`) a stamped tick whose code changed | tracking + **CI** |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
+| `harnesses/ci/ci_local.py` (`make ci-local`) | runs every workflow job locally, unscoped, when CI did not run on the head SHA | merge |
 
 ```
 make check-kit      # smoke-test every harness (python3 + bash only, no toolchain)

@@ -19,19 +19,28 @@ name: nmap-rs-ci
 # goldens and gates here read them (the nmapdb and scriptload goldens, the
 # probe and OS databases' corpora, every NSE differential). A PR that only
 # syncs them must run this workflow too, or the goldens go stale silently and
-# the failure lands on the next unrelated nmap-rs PR (M6.6 review).
+# the failure lands on the next unrelated nmap-rs PR (M6.6 review). So must a
+# PR that changes the C the oracles compile: liblua/, lpeg.c and nse_lpeg.cc
+# with their headers (oracle/build_lua_oracle.sh: every Lua and LPeg golden),
+# libnetutil/, nbase/ and libdnet-stripped/include/ (the M4/M5 packet,
+# build6, fp6match, fp6_vectorize and ndp oracles) and FPModel.cc (the fp6
+# oracle) (M6.6 retrospective).
 on:
   push:
     branches: [master]
     paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml',
             'nmap-mac-prefixes', 'nmap-services', 'nmap-protocols',
             'nmap-service-probes', 'nmap-os-db', 'nselib/**', 'scripts/**',
-            'nse_main.lua']
+            'nse_main.lua', 'liblua/**', 'lpeg.c', 'nse_lpeg.cc', 'nse_lpeg.h',
+            'nse_lua.h', 'libnetutil/**', 'nbase/**',
+            'libdnet-stripped/include/**', 'FPModel.cc']
   pull_request:
     paths: ['nmap-rs/**', 'porting-kit/**', '.github/workflows/nmap-rs-ci.yml',
             'nmap-mac-prefixes', 'nmap-services', 'nmap-protocols',
             'nmap-service-probes', 'nmap-os-db', 'nselib/**', 'scripts/**',
-            'nse_main.lua']
+            'nse_main.lua', 'liblua/**', 'lpeg.c', 'nse_lpeg.cc', 'nse_lpeg.h',
+            'nse_lua.h', 'libnetutil/**', 'nbase/**',
+            'libdnet-stripped/include/**', 'FPModel.cc']
 
 # Supersede a PR's in-flight run when it is force-pushed: with a ~40-minute fuzz
 # matrix, a stale run is pure waste and its result is about code that no longer
@@ -429,7 +438,9 @@ jobs:
       # (8098, 8332, 8180). The port's binary must print the same, through the
       # same parser (oracle/gen_m66_exit.py --check), with the two tolerances
       # its ledger entries name. --check fails on a stale committed golden.
-      # Regenerated live here; the test job runs the committed golden.
+      # Regenerated live here; the test job runs the committed golden. A port
+      # already taken on the runner fails it closed (EADDRINUSE: a red run,
+      # never a false pass).
       - run: bash tests/differential/m6/regen_m66_exit.sh --check
       - run: python3 tests/differential/m6/oracle/gen_m66_exit.py "$RUNNER_TEMP"
       - run: M66_EXIT_GOLDEN="$RUNNER_TEMP/m66_exit_golden.txt" cargo test -p nmap-cli --test nse_exit_differential
@@ -444,11 +455,22 @@ jobs:
       # golden; each quarantined call must give the answer its ledger id pins.
       - run: python3 tests/differential/m6/oracle/gen_m66_nmapdb.py "$RUNNER_TEMP"
       - run: M66_NMAPDB_GOLDEN="$RUNNER_TEMP/m66_nmapdb_golden.txt" cargo test -p nmap-core --test nmapdb_differential
+      # M6 stdlib: the base and coroutine libraries as an NSE script meets them,
+      # through a prerule probe under nmap itself (oracle/m6_base_probe.nse):
+      # argument checks and results, the coroutine functions inside a script's
+      # coroutine, the collector as nmap's state starts it, `warn`'s output.
+      # --check regenerates twice and requires the committed golden; the port
+      # runs the same probe through its engine and must write every line but
+      # the 7 it pins, each with its ledger id (base_differential).
+      - run: bash tests/differential/m6/regen_m6_base.sh --check
+      - run: python3 tests/differential/m6/oracle/gen_m6_base.py "$RUNNER_TEMP"
+      - run: M6_BASE_GOLDEN="$RUNNER_TEMP/m6_base_golden.txt" cargo test -p nmap-core --test base_differential
       # M6.6 step 0b: the LPeg corpus (~62k rows) under nmap 7.94's own LPeg,
       # through a prerule probe with --datadir set to this tree, against the
       # committed golden (which this tree's liblua + lpeg.c give: the spec).
-      # Every row where 7.94 differs must fall in a named class (hashorder,
-      # cdepth, drift794, path, position, argname); untagged drift fails.
+      # Every row where 7.94 differs must be one gen_m66_lpeg.py's DRIFT_794
+      # lists, under the class listed for it (7 cdepth, 1 drift794), and every
+      # listed row must still differ; anything else fails.
       - run: bash tests/differential/m6/regen_m66_lpeg.sh --check-794
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
@@ -560,12 +582,18 @@ jobs:
       # sabotage the plan names) twice: the runs must agree outside the
       # hash-ordered rule names, and the cases, golden and per-step map must be
       # what is committed. The sanitizer quarantine is screened locally and
-      # checked here by digest.
+      # checked here by digest: of the corpus it screened, and of the C, the
+      # build recipes and flags and the harnesses it screened them with
+      # (screened-sources-sha256).
       - run: bash tests/differential/m6/regen_m66_lpeg.sh --check
-      # M6.6 step b — LPeg pattern construction. The same oracle builds every
-      # case's pattern and prints its tree (ptree) or the construction error;
-      # the cases and golden must be what is committed. The port is compared
-      # with the golden by lpeg_tree_differential (in `cargo test --all`).
+      # M6.6 step b — LPeg pattern construction. The same oracle, built with
+      # -fwrapv (14 rows overflow lpeg.c's `int`, which -fwrapv defines) and
+      # capped at 4 GiB of address space, builds every case's pattern and
+      # prints its tree (ptree) or the construction error; the cases and
+      # golden must be what is committed. Then a UBSan build runs every row:
+      # exactly those 14 may overflow, and nothing else may be undefined. The
+      # port is compared with the golden by lpeg_tree_differential (in
+      # `cargo test --all`).
       - run: bash tests/differential/m6/regen_m66b_trees.sh --check
 
       # M6.0 — the Lua VM itself. Same oracle as M6.1 and M6.2, used
@@ -582,10 +610,10 @@ jobs:
       # rule out.
       #
       # Four corpora, deliberately not one:
-      #   * semantics    — 99 chunks, evaluated end to end. Carries an exemption
-      #                    list; `DIVERGENCES.md` holds the same list, and the
-      #                    test fails if a listed defect is silently FIXED as
-      #                    well as if a new one appears.
+      #   * semantics    — 133 chunks, evaluated end to end. Carries an
+      #                    exemption list of 17, each a `DIVERGENCES.md` entry,
+      #                    and the test fails if a listed defect is silently
+      #                    FIXED as well as if a new one appears.
       #   * arithmetic   — 2,955 cases, floats compared as raw IEEE bits so that
       #                    a lossy `%.14g` cannot hide a wrong low-order digit.
       #   * float format — 7,917 doubles, compared as TEXT through both
@@ -631,11 +659,15 @@ jobs:
       - run: cargo test -p nmap-core --test format_differential
 
       # M6 stdlib — the tail: `string.rep`, `_G`, `rawequal`, `xpcall`, `load`
-      # and `coroutine.wrap`. 1,019 cases, compared on every value and every
-      # error message, no exemption list: the size bound of `string.rep`, raw
-      # equality across the integer/float edges, handlers that fail, coroutines
-      # resumed dead or from tail position, every mode string, chunk names
-      # around `luaO_chunkid`'s limits, and reader functions.
+      # and `coroutine.wrap`, and since the base-library port (#136) the whole
+      # base and coroutine libraries, `string.char`, the string metatable's
+      # arithmetic and the table functions' argument checks. 2,742 cases,
+      # compared on every value and every error message, escaped errors and
+      # their positions included, no exemption list: the size bound of
+      # `string.rep`, raw equality across the integer/float edges, handlers
+      # that fail, coroutines resumed dead or from tail position, every mode
+      # string, chunk names around `luaO_chunkid`'s limits, and reader
+      # functions.
       - run: bash tests/differential/m6/regen_m6_tail.sh --check
       - run: cargo test -p nmap-core --test tail_differential
 

@@ -125,7 +125,11 @@ subject, and counts steps with the port's counters in the same units
 Each pattern must stay at or under its K, and its counts must be the C's: they
 are equal on all 11 but escaped_quote, where the C's machine takes one more
 step, its `IGiveup` on a failed match. It also checks that the counter sees a
-span's bytes. Deterministic, under a second; it runs in `cargo test`.
+span's bytes, and (since the M6.6 retrospective) that a span cut by slice
+boundaries counts as one slice does: until then each boundary inside a span
+counted two steps more, so the counts were the C's only while no span crossed
+a slice (`a_span_cut_by_slices_counts_as_one_slice_does`). Deterministic,
+under a second; it runs in `cargo test`.
 
 To move the gate after a new search: copy `OUT/sustained_ID.bin` to
 `adversarial/ID.bin`, and write each row of `K.txt` from `OUT/res_ID.txt`'s
@@ -162,7 +166,7 @@ What still goes uncounted:
 | `run_search.sh` | the entry point: builds if needed, runs the patterns in parallel, prints the table |
 | `build_instrumented.sh` | patches a copy of `lpeg.c`, builds `lua-instr`, checks that `lpeg.__steps` counts and resets |
 | `build_patched_lua.sh` | builds the oracle interpreter around any patched copy of `lpeg.c` through `oracle/build_lua_oracle.sh`; `../lpeg_sabotage` uses it too |
-| `patch_lpeg.py` | the instrumentation: four anchored edits, each of which must match once |
+| `patch_lpeg.py` | the instrumentation: five edits (1, 2, 2b, 3, 4) over six anchors, each of which must match once |
 | `search.lua` | the search and the exponent fits for one pattern |
 | `matchers.lua`, `stubs.lua` | the 11 patterns, and the stubs that let nselib load standalone |
 | `verify_wellformed.lua`, `scriptside.lua` | the closed-family fits and the script-side CPU times |

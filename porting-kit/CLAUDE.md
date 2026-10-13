@@ -27,9 +27,10 @@ port *safe* and *verifiable*.
 
 ## The gates (non-negotiable, wired into CI)
 
-Every module clears all six before merge:
-`ported → differential → fuzzed → sanitized → unsafe-audited`. A module that
-compiles and matches the oracle is at step 2 of 6, not done.
+Every module clears all of them before merge:
+`ported → differential → fuzzed → sanitized (+ resource-bounded) → unsafe-audited`,
+then an independent review (`REVIEW-GATE.md`). A module that compiles and matches
+the oracle is at step 2 of 6, not done.
 
 | Control | Command |
 |---|---|
@@ -40,6 +41,8 @@ compiles and matches the oracle is at step 2 of 6, not done.
 | clean deps | `harnesses/supply-chain/run_supply_chain.sh` |
 | no silent drift | `harnesses/differential/diff_run.py` + `DIVERGENCES.md` |
 | don't re-port a vuln | `harnesses/c-flaw-scan/scan_c_flaws.py` at Phase 0 |
+| no super-linear cost | `harnesses/scaling/scale_check.py` vs the C oracle (`RESOURCE-BOUNDS.md`) |
+| the gates actually ran | check runs on the head SHA, else `make -C porting-kit ci-local` |
 
 Smoke-test the harnesses anytime with `make -C porting-kit check-kit` (python3 +
 bash only; no toolchain needed).
@@ -54,6 +57,10 @@ bash only; no toolchain needed).
   reactively in winlsof and both would have paid immediately.
 - **The test harness is software with a hostile host** — budget for its
   encoding/quoting/portability hardening explicitly.
+- **Review every step for fidelity and security before the next one starts**,
+  and make each finding's class a standing gate for every later step. In nmap's
+  M6.6 every gate was green at every step and every reviewed step still had
+  defects, the only High among them (LESSONS #041).
 
 ## Skills
 
@@ -62,7 +69,9 @@ bash only; no toolchain needed).
 **thin wrappers**: they point at the authoritative docs here and run the real
 harness commands, never a divergent copy. **Keep them in integrity with the kit** —
 if you rename a harness or change a flag, update every skill that references it;
-`skills/check_skills.py` (in `make check-kit`) hard-fails on a dangling reference.
+`skills/check_skills.py` (in `make check-kit`) hard-fails on a dangling reference,
+and on a lesson that amended a PLAYBOOK phase but is not cited in the skills that
+run that phase (LESSONS #046).
 The retrospective (which patches the kit after every port) must patch the skills too.
 
 ## Working notes
@@ -74,3 +83,8 @@ The retrospective (which patches the kit after every port) must patch the skills
   untracked modules across one milestone (LESSONS #021).
 - Keep `PLAYBOOK.md` under ~400 lines; push detail into linked docs.
 - When you infer project history from artifacts, mark it `[INFERRED]`.
+- **Cite C as `rev:path:line`** against a pinned revision (`3be01efb1:osscan.cc:681`),
+  and cite the divergence ledger **by ID**, never by prose. Line numbers move and
+  prose names drift: nmap's M6.6 fixed ~80 citations mid-milestone and still
+  ended with ~45 wrong `file:line` comments and three IDs that were never
+  ledgered (LESSONS #051).

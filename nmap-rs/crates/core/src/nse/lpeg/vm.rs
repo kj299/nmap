@@ -6,7 +6,7 @@
 //! entry included, and grows only when full, by doubling up to the value
 //! `setmaxstack` stored, read at that moment and narrowed to an `int`; at
 //! that size a push raises "too many pending calls/choices" (`doublestack`,
-//! `lpeg.c:3403-3418`). So the ceilings it puts on a subject's nesting are
+//! `lpeg.c:3403-3420`). So the ceilings it puts on a subject's nesting are
 //! the C's exactly (D2): `INITBACK` is the floor, `setmaxstack(150)` passes
 //! depth 74 of `S <- 'a' S 'b' / ''` and fails at 75. Its memory grows
 //! through the budget (E4); a refusal is "not enough memory".
@@ -63,7 +63,7 @@ pub const INITBACK: usize = 100;
 /// `INITCAPSIZE` (`lpeg.c:62`): the capture list's first logical size.
 pub const INITCAPSIZE: usize = 32;
 
-/// `doublecap`'s limit (`lpeg.c:3392`): `INT_MAX / (2 * sizeof(Capture))`
+/// `doublecap`'s limit (`lpeg.c:3391`): `INT_MAX / (2 * sizeof(Capture))`
 /// entries.
 pub const CAPLIST_LIMIT: usize = 67_108_863;
 
@@ -491,16 +491,21 @@ impl Vm {
                 // slice scans at least one byte. Each byte tested is a step
                 // too (M6.6 step e): counted as one instruction, a span
                 // rescanned from many positions was quadratic in time and
-                // linear in steps (`lpeg_search`'s blind spot).
+                // linear in steps (`lpeg_search`'s blind spot). The slice
+                // ends before a byte is tested, not after, and the dispatch
+                // it ends is taken back, so a run cut by slices counts its
+                // instruction once and each byte once, as one slice does
+                // and as the C's `ISpan` does (the M6.6 retrospective's F1).
                 Op::Span => {
                     *budget += 1;
                     while self.s < e {
+                        if *budget == 0 {
+                            self.steps -= 1;
+                            return Ok(VmPoll::Pending);
+                        }
                         self.steps += 1;
                         if !in_set(slots, p + 1, subj[self.s])? {
                             break;
-                        }
-                        if *budget == 0 {
-                            return Ok(VmPoll::Pending);
                         }
                         *budget -= 1;
                         self.s += 1;

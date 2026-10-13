@@ -1,0 +1,76 @@
+# The base and coroutine libraries as an NSE script meets them, by nmap itself:
+# oracle/m6_base_probe.nse as a prerule, through oracle/gen_m6_base.py.
+# row|name|values, then warn|what warn wrote to standard error.
+# Nmap version 7.94SVN ( https://nmap.org )
+row|warn_noarg|false,bad argument #1 to 'warn' (string expected, got no value)
+row|warn_table|false,bad argument #2 to 'warn' (string expected, got table)
+row|isyieldable|true
+row|isyieldable_self|true
+row|status_self|running
+row|running_main|false
+row|close_self|false,cannot close a running coroutine
+row|status_normal|true,normal
+row|resume_dead|false,cannot resume dead coroutine
+row|close_dead|false,boom
+row|close_again|true
+row|create_table|false,bad argument #1 to 'coroutine.create' (function expected, got table)
+row|wrap_error|false,table
+row|cg_collect|0,0
+row|cg_isrunning|true
+row|cg_mode|incremental
+row|cg_pause|200,100
+row|cg_stop|0,false,0,true
+row|cg_count|float
+row|cg_step|boolean
+row|cg_bad|false,bad argument #1 to 'collectgarbage' (invalid option 'bogus')
+row|pcall_nil|true,false,attempt to call a nil value
+row|pcall_none|false,bad argument #1 to 'pcall' (value expected)
+row|rawlen|true,3
+row|rawlen_bad|false,probe:1: bad argument #1 to 'rawlen' (table or string expected, got number)
+row|rawset_2|false,bad argument #3 to 'rawset' (value expected)
+row|rawget_1|false,bad argument #2 to 'rawget' (value expected)
+row|rawequal|true,false
+row|rawequal_one|false,bad argument #2 to 'rawequal' (value expected)
+row|pairs_n|3,3
+row|pairs_meta|3
+row|ipairs_index|60
+row|next_float|false,invalid key to 'next'
+row|next_none|false,bad argument #1 to 'next' (table expected, got no value)
+row|select0|false,bad argument #1 to 'select' (index out of range)
+row|select_neg|b,2
+row|select_far|false,bad argument #1 to 'select' (index out of range)
+row|type_none|false,bad argument #1 to 'type' (value expected)
+row|tostring_bad|false,'__tostring' must return a string
+row|tostring_num|42
+row|tostring_name|Thing: ADDR
+row|tonumber|16,10.0,16,35
+row|tonumber_base|-255,9223372036854775807,-1
+row|tonumber_bad|nil,nil,nil,nil
+row|tonumber_base37|false,bad argument #2 to 'tonumber' (base out of range)
+row|tonumber_number|false,bad argument #1 to 'tonumber' (string expected, got number)
+row|getmt_locked|locked
+row|setmt_locked|false,cannot change a protected metatable
+row|setmt_bad|false,bad argument #2 to 'setmetatable' (nil or table expected, got number)
+row|assert_false|false,assertion failed!
+row|assert_msg|false,msg
+row|assert_none|false,bad argument #1 to 'assert' (value expected)
+row|error_table|false,table
+row|error_level|false,probe:1: lvl
+row|version|Lua 5.4
+row|char|false,bad argument #1 to 'string.char' (value out of range)
+row|char_ok|Hi
+row|str_add|7,6
+row|str_arith_bad|false,attempt to add a 'string' with a 'number'
+row|insert4|false,wrong number of arguments to 'insert'
+row|insert_pos|false,bad argument #2 to 'table.insert' (position out of bounds)
+row|remove_pos|false,bad argument #2 to 'table.remove' (position out of bounds)
+row|concat_bad|false,invalid value (table) at index 2 in table for 'concat'
+row|border_sparse|8
+row|border_len_twice|7,6
+row|border_insert_holes|1,2,nil,4,nil,6,nil,8,x,nil
+row|border_vararg|3,3,3
+warn|Lua warning: shown1
+warn|Lua warning: ab3
+warn|Lua warning: shown2
+warn|Lua warning: @ony
+warn|Lua warning: z

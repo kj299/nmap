@@ -22,7 +22,7 @@
 //!   by induction on the walk). So each node keeps the largest count it
 //!   answered with its length and the smallest it answered -1, and a node
 //!   whose walk met no call answers alike at every count.
-//! - `hascaptures` follows no call (`numsiblings[TCall]` is 0, `:2139`), so
+//! - `hascaptures` follows no call (`numsiblings[TCall]` is 0, `:2141`), so
 //!   it is one pass over the tree's slots, bottom-up.
 //!
 //! **Cycles.** In a verified grammar only `getfirst` can meet a rule already

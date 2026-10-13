@@ -9,7 +9,9 @@
 //! and the corpus's `json.lua`, `lpeg-utility.lua` and `re.lua` over them;
 //! then the step d review's six ([`REVIEW`]: `#p`'s orphans under a
 //! match-time capture, a method call's argument number reached through
-//! `lpeg-utility`, and what the C's 16-bit index loses on a failure).
+//! `lpeg-utility`, and what the C's 16-bit index loses on a failure) and
+//! the M6.6 retrospective's four (`lpeg-utility`'s probe name read as a
+//! Lua pattern).
 //!
 //! Each case is a chunk, named `=case`, run in an environment over the
 //! globals, with `lpeg`, `re`, `json` and `U` (lpeg-utility) loaded as the
@@ -24,7 +26,7 @@
 //! process's history): the port's deliberate departures (wide indices, the
 //! callbacks' yields), the ceilings that are the embedding's (the Lua
 //! stack's slots, C levels), and the tree's own file paths.
-#![cfg(not(miri))] // the VM over 213 cases, a million-step few among them
+#![cfg(not(miri))] // the VM over 217 cases, a million-step few among them
 
 mod lpeg_eval;
 
@@ -1115,9 +1117,10 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// The step d review's fidelity pins (the review's F3, F5 and F6), run
-/// after the brief's in the same state: (id, chunk, the C's answer). Each is
-/// the tree's standalone oracle's, except `RF3b`, which crashes it (SIGSEGV:
+/// The step d review's fidelity pins (the review's F3, F5 and F6), and the
+/// M6.6 retrospective's four for `lpeg-utility-probe-name-is-a-pattern`
+/// (`U07a`-`U07d`), run after the brief's in the same state: (id, chunk,
+/// the C's answer). Each is the tree's standalone oracle's, except `RF3b`, which crashes it (SIGSEGV:
 /// its orphans take the 16-bit runtime-capture index past 32,767, and the
 /// wrapped index then drives `runtimecap`'s removal,
 /// `lpeg-runtime-capture-index-16bit`), and whose answer is the tree's
@@ -1165,6 +1168,32 @@ const REVIEW: &[(&str, &str, &str)] = &[
         "RF6s",
         r###"local t = lpeg.match(lpeg.Ct(lpeg.Cmt(lpeg.P'a', function() return true, 1 end)^0 * (lpeg.Cmt(lpeg.P'b', function() return true, 2 end) * 'z' + 'b')), ('a'):rep(32000) .. 'b') local ones = 0 for i = 1, #t do if t[i] == 1 then ones = ones + 1 end end return #t, ones"###,
         r###"n=2:32000,32000"###,
+    ),
+    // `lpeg-utility-probe-name-is-a-pattern` (the M6.6 retrospective):
+    // `get_response` looks the probe up with `string.find(fp,
+    // string.format("%s,%%x+,", probe))`, so the name is a Lua pattern. A
+    // name with `-` misses its own response and can find another's, and a
+    // name with `(` raises from `string.find`.
+    (
+        "U07a",
+        r###"return U.get_response('SF:Get-Request,5,"x"', "Get-Request")"###,
+        r###"n=1:nil"###,
+    ),
+    (
+        "U07b",
+        r###"return U.get_response('SF:GeRequest,5,"x"', "Get-Request")"###,
+        r###"n=1:"x""###,
+    ),
+    // oracle-tns-version.nse asks for its own probe this way: never found.
+    (
+        "U07d",
+        r###"return U.get_response('SF:oracle-tns,5,"x"', "oracle-tns")"###,
+        r###"n=1:nil"###,
+    ),
+    (
+        "U07c",
+        r###"return pcall(U.get_response, 'SF:a,5,"y"', "(")"###,
+        r###"n=2:false,"/home/user/nmap/nselib/lpeg-utility.lua:153: unfinished capture""###,
     ),
 ];
 
@@ -1218,6 +1247,13 @@ fn count_then(got: &str) -> Option<(u64, &str)> {
 /// The cases the port answers otherwise, deliberately, and why: (id, the
 /// named class — a ledger entry — and the port's own answer, pinned).
 const CLASSED: &[(&str, &str, &str)] = &[
+    // The M6.6 retrospective's U07c: `string.find`'s own error, which the
+    // first-party pattern functions raise without the caller's position.
+    (
+        "U07c",
+        "stdlib-errors-have-no-position",
+        r#"n=2:false,"unfinished capture""#,
+    ),
     // The step d review's F6: every value is kept where the C's wrapped
     // index drops all but 473.
     (

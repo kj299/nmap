@@ -44,14 +44,14 @@ pub struct FsPolicy {
 }
 
 impl FsPolicy {
-    /// Whether a script may open the file at `canonical` — for writing too
-    /// when `write` is set.
     /// Whether a script may create the directory at `canonical`: only
     /// beneath a designated output directory (a named *file* is a file).
     pub fn allows_mkdir(&self, canonical: &Path) -> bool {
         canonical.is_absolute() && self.write_roots.iter().any(|r| canonical.starts_with(r))
     }
 
+    /// Whether a script may open the file at `canonical` — for writing too
+    /// when `write` is set.
     pub fn allows(&self, canonical: &Path, write: bool) -> bool {
         if !canonical.is_absolute() {
             return false;
@@ -71,14 +71,21 @@ impl FsPolicy {
 /// key. `dir` is not one: `http-phpmyadmin-dir-traversal.dir` and
 /// `http-vlcstreamer-ls.dir` are paths on the target, so `dir=/` would
 /// otherwise make this host's root writable. Nor is `save`, which
-/// `stuxnet-detect` reads as a file-name template.
-pub const OUTPUT_DIR_ARGS: [&str; 6] = [
+/// `stuxnet-detect` reads as a file-name template, nor `path`, which 34
+/// script keys end in, most of them URL paths on the target.
+pub const OUTPUT_DIR_ARGS: [&str; 12] = [
     "http-fetch.destination", // http-fetch.nse:200
     "destination",
     "http-config-backup.save",  // http-config-backup.nse:183
     "ms-sql-dump-hashes.dir",   // ms-sql-dump-hashes.nse:98
     "snmp-ios-config.tftproot", // snmp-ios-config.nse:55
     "tftproot",
+    "cics-enum.path",                    // cics-enum.nse:378
+    "lu-enum.path",                      // lu-enum.nse:178
+    "vtam-enum.path",                    // vtam-enum.nse:249
+    "domino-enum-users.path",            // domino-enum-users.nse:74
+    "http-domino-enum-passwords.idpath", // http-domino-enum-passwords.nse:217
+    "idpath",
 ];
 
 /// The values of the top-level arguments in [`OUTPUT_DIR_ARGS`] that are
@@ -197,12 +204,15 @@ mod tests {
             None,
             b"http-fetch.destination=/a,destination=/b,tftproot=/c,ms-sql-dump-hashes.dir=/d,\
               http-config-backup.save=/e,snmp-ios-config.tftproot=/f,dir=/,save=/g,url=/,\
-              x.destination=/h,{/i},nested={destination=/j},http-fetch.destination2=/k",
+              x.destination=/h,{/i},nested={destination=/j},http-fetch.destination2=/k,\
+              cics-enum.path=/l,lu-enum.path=/m,vtam-enum.path=/n,domino-enum-users.path=/o,\
+              http-domino-enum-passwords.idpath=/p,idpath=/q,path=/,\
+              http-domino-enum-passwords.path=/r",
         )
         .expect("parses");
         assert_eq!(
             output_dir_values(&args),
-            ["/a", "/b", "/c", "/d", "/e", "/f"]
+            ["/a", "/b", "/c", "/d", "/e", "/f", "/l", "/m", "/n", "/o", "/p", "/q"]
                 .iter()
                 .map(|s| s.as_bytes().to_vec())
                 .collect::<Vec<_>>()

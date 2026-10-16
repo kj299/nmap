@@ -9,7 +9,7 @@ whole program with --script, compared on what they print.
 
 Both runs use one scratch data directory, given with --datadir: this
 repository's data files and nselib/, and in scripts/ the fixture scripts of
-nse_scripts/, nse_net/ and nse_cli/ and the shipped http-title and http-headers, with a
+nse_scripts/, nse_net/ and nse_cli/ and the shipped scripts SHIPPED names, with a
 script.db listing them all. Each scenario is a connect scan of loopback
 services (gen_m64_scripts.py's listeners, gen_m64_net.py's services), so
 nothing leaves 127.0.0.1.
@@ -26,10 +26,18 @@ output, by this file:
     init_error HEX      the message after "NSE: failed to initialize the
                         script engine:", without nmap's `nse_main.lua:N: `.
 
-    tree - TEXT         for a scenario that names @DEST (a fresh, empty
-                        directory each run), what the scripts left there:
-                        one line per entry, `PATH TYPE MODE SIZE SHA256`
-                        (lfs.mkdir and io writes, M6 lfs step).
+    tree - TEXT         for a scenario that names @DEST (a fresh directory
+                        each run, empty but for DEST_LINKS), what the scripts
+                        left there: one line per entry, `PATH d MODE`,
+                        `PATH f MODE SIZE SHA256` or `PATH l -> TARGET`
+                        (lfs.mkdir and io writes, the lfs step).
+    stray - TEXT        anything that appeared in the run's scratch directory
+                        outside @DEST and the run's own files: a write that
+                        escaped (none, for both programs).
+
+Every run is under umask 0, so the modes in a tree are the ones the
+programs ask for (lfs.mkdir's 0775, fopen's 0666), and the golden does not
+depend on the umask of whoever generates or checks it.
 
 Within a container, results are sorted by script id: nmap orders them by
 address (`nse-results-sorted-by-id`). The data directory's path reads DATADIR. Each port's state (`xml PORT
@@ -104,15 +112,22 @@ UNORDERED = {
     "fetch-short": {("http-fetch", "Successfully Downloaded")},
 }
 
+# Symbolic links made in @DEST before a scenario runs, (name, target).
+DEST_LINKS = {
+    "lfs": [("loop", "loop")],
+}
+
 SITE_PORT = 7080
 # The fixture site http-fetch mirrors: nested directories (create_directory's
 # recursion), a directory URL (saved as index.html), a link through `..` and
-# one with encoded separators, which the URL library resolves or escapes so
-# that nothing is written outside @DEST.
+# two with encoded separators, which the URL library resolves or escapes so
+# that nothing is written outside @DEST. Keys are what the crawler asks for:
+# url.lua writes escapes in upper case (`..%2f` is requested as `..%2F`).
 SITE = {
     "/": b'<html><body><a href="/a/b/deep.html">d</a> <a href="/a/top.html">t</a> '
          b'<a href="/c/notes.txt">n</a> <a href="/a/b/../../c/up.html">u</a> '
-         b'<a href="/a/..%2f..%2fesc.html">e</a></body></html>',
+         b'<a href="/a/..%2f..%2fesc.html">e</a> <a href="/..%5c..%5cbs.html">b</a>'
+         b'</body></html>',
     "/a/b/deep.html": b'<html><body><a href="/a/b/">dir</a> <a href="/">home</a></body></html>',
     "/a/b/": b"<html><body>a/b index</body></html>",
     "/a/top.html": b"<html><body>top</body></html>",
@@ -120,7 +135,8 @@ SITE = {
     "//a/top.html": b"<html><body>top</body></html>",
     "/c/notes.txt": b"plain notes\n",
     "/c/up.html": b"<html><body>up</body></html>",
-    "/a/..%2f..%2fesc.html": b"<html><body>escaped</body></html>",
+    "/a/..%2F..%2Fesc.html": b"<html><body>escaped</body></html>",
+    "/..%5C..%5Cbs.html": b"<html><body>backslashes</body></html>",
 }
 
 
@@ -167,14 +183,17 @@ def serve_site(stop):
 
 
 def tree(root):
-    """What is beneath root, one line per entry: path, type, mode, size, digest."""
+    """What is beneath root, one line per entry: a directory's mode, a file's
+    mode, size and digest, a link's target. Links are not followed."""
     lines = []
     for dirpath, dirnames, filenames in os.walk(root):
         for name in sorted(dirnames) + sorted(filenames):
             p = os.path.join(dirpath, name)
             st = os.lstat(p)
             rel = os.path.relpath(p, root)
-            if stat.S_ISDIR(st.st_mode):
+            if stat.S_ISLNK(st.st_mode):
+                lines.append("%s l -> %s" % (rel, os.readlink(p)))
+            elif stat.S_ISDIR(st.st_mode):
                 lines.append("%s d %o" % (rel, stat.S_IMODE(st.st_mode)))
             else:
                 with open(p, "rb") as fh:
@@ -305,7 +324,7 @@ def init_error(stderr):
     return None
 
 
-def run(binary, extra, tmp, data, unordered=()):
+def run(binary, extra, tmp, data, unordered=(), links=()):
     args_file = os.path.join(tmp, "m64-args")
     with open(args_file, "w") as fh:
         fh.write(ARGS_FILE_TEXT)
@@ -315,7 +334,10 @@ def run(binary, extra, tmp, data, unordered=()):
     if uses_dest:
         shutil.rmtree(dest, ignore_errors=True)
         os.mkdir(dest)
+        for name, target in links:
+            os.symlink(target, os.path.join(dest, name))
         extra = [a.replace("@DEST", dest) for a in extra]
+    before = set(os.listdir(tmp))
     out_n = os.path.join(tmp, "out.nmap")
     out_x = os.path.join(tmp, "out.xml")
     for f in (out_n, out_x):
@@ -323,7 +345,8 @@ def run(binary, extra, tmp, data, unordered=()):
             os.remove(f)
     cmd = [binary, "--datadir", data, "-sT", "-Pn", "-n"] + extra + [
         "127.0.0.1", "-oN", out_n, "-oX", out_x]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                       preexec_fn=lambda: os.umask(0))
     norm = lambda s: s.replace(data, "DATADIR").replace(tmp, "TMP")
     err = init_error(r.stderr)
     if err is not None:
@@ -334,6 +357,9 @@ def run(binary, extra, tmp, data, unordered=()):
     rows += [("xml",) + r_ for r_ in xml_rows(norm(xml), unordered)]
     if uses_dest:
         rows.append(("tree", "-", tree(dest)))
+    stray = sorted(set(os.listdir(tmp)) - before - {"out.nmap", "out.xml", "dest"})
+    if stray:
+        rows.append(("stray", "-", "\n".join(stray)))
     rows.sort(key=lambda r_: (r_[0], r_[1], script_id(r_[2]), r_[2]))
     return rows
 
@@ -350,7 +376,8 @@ def all_rows(binary):
     try:
         data = datadir(tmp)
         for name, extra in SCENARIOS:
-            out.append((name, extra, run(binary, extra, tmp, data, UNORDERED.get(name, ()))))
+            out.append((name, extra, run(binary, extra, tmp, data, UNORDERED.get(name, ()),
+                                         DEST_LINKS.get(name, ()))))
     finally:
         stop.set()
         for s in socks:

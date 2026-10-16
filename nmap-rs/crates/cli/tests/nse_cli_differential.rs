@@ -274,3 +274,68 @@ fn the_working_directory_is_not_a_data_directory() {
     );
     assert!(!String::from_utf8_lossy(&evil.stdout).contains("evil"));
 }
+
+/// The port alone (`nse-output-dirs-documented-args`, the lfs review's S4):
+/// only the arguments the shipped scripts document as an output directory
+/// designate one. A directory named by any other argument — `url=`, which
+/// http scripts read as a path on the target, `dir=` and `save=`, short keys
+/// other scripts read otherwise, a nested or array value — stays closed to
+/// writes and to `lfs.mkdir`; the documented key opens it.
+#[test]
+fn only_documented_arguments_open_a_directory_to_scripts() {
+    let script = "categories = {'safe'}\n\
+        local lfs = require 'lfs'\n\
+        local stdnse = require 'stdnse'\n\
+        prerule = function() return true end\n\
+        action = function()\n\
+          local d = stdnse.get_script_args('target')\n\
+          local f, err = io.open(d .. '/x', 'w')\n\
+          if f then f:close() end\n\
+          local ok, merr = lfs.mkdir(d .. '/sub')\n\
+          return (f and 'open' or err:gsub('^.*: ', '')) .. ' / ' .. tostring(ok or merr)\n\
+        end\n";
+    let d = datadir("designate", &[("w-probe.nse", script)]);
+    let out = std::env::temp_dir().join(format!("m64e-designate-out-{}", std::process::id()));
+    let run = |args: &str| {
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).expect("out dir");
+        let o = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
+            .arg("--datadir")
+            .arg(&d)
+            .args(["-sT", "-Pn", "-n", "-p", "1", "--script", "w-probe"])
+            .arg("--script-args")
+            .arg(args.replace("OUT", &out.to_string_lossy()))
+            .arg("127.0.0.1")
+            .output()
+            .expect("nmap-rs runs");
+        let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+        let made: Vec<String> = std::fs::read_dir(&out)
+            .expect("out dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        (stdout, made)
+    };
+    for args in [
+        "target=OUT,url=OUT",
+        "target=OUT,dir=OUT",
+        "target=OUT,save=OUT",
+        "target=OUT,x.destination=OUT",
+        "target=OUT,nested={destination=OUT}",
+        "target=OUT,{OUT}",
+        "target=OUT,path=OUT",
+    ] {
+        let (stdout, made) = run(args);
+        assert!(
+            stdout.contains("|_w-probe: Permission denied / Permission denied"),
+            "{args}: {stdout}"
+        );
+        assert!(made.is_empty(), "{args}: made {made:?}");
+    }
+    let (stdout, made) = run("target=OUT,destination=OUT");
+    assert!(stdout.contains("|_w-probe: open / true"), "{stdout}");
+    let mut made = made;
+    made.sort();
+    assert_eq!(made, ["sub", "x"]);
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&d);
+}

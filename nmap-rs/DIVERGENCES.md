@@ -141,6 +141,10 @@ narrower *rendering* of the same result.
         `options::tests::verbosity_two_and_any_debug_turn_on_reason` (12
         command lines); `-vv -p 1` against 7.94 then prints the same table and
         host line, latency apart (`host-line-latency`).
+- [ ] `cli-debug-equals-refused` (`cli`, owner `core::options`) — nmap
+      takes `--debug=N` (`{"debug", optional_argument, 0, 'd'}`,
+      `nmap.cc:531`); the port refuses it, fail-closed, and takes `--debug`
+      and `-dN`. Found by the lfs step's review.
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets
@@ -3559,7 +3563,11 @@ Gated by three things:
       does a `..` or symlink escape. One sabotage no test can catch is opening
       the path as given rather than the canonical one. That differs only when
       a link is swapped between check and open, and a script cannot make a
-      link, so only an outside actor could race it.
+      link, so only an outside actor could race it. Since the lfs step a name
+      that is a link leading nowhere is not written through, and the final
+      name is opened with `O_NOFOLLOW` (`nse-write-through-dangling-link`),
+      and paths resolve as the system calls resolve them
+      (`nse-open-path-shapes-as-the-kernel`).
 - [x] `os-is-the-clock` — `os` has `clock`, `date`, `time` and `difftime`
       only. `execute`, `exit`, `getenv`, `remove`, `rename`, `tmpname` and
       `setlocale` do not exist (Decision 2). None but `getenv` is called on a
@@ -5610,39 +5618,64 @@ the entry they replace).
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which
-`http-fetch` needs, so that `--script safe` loads. Phase 0 and decisions:
-[`docs/LFS-ANALYSIS.md`](docs/LFS-ANALYSIS.md). `lfs` is registered as
-`nse_main.cc:566` registers it: a global and in `package.loaded`, between
-`nmapdb` and `lpeg`. This retires `nse-categories-abort-on-unported-modules`
-for `safe`, and `all` now stops on `openssl`.
+`http-fetch` needs, so that `--script safe` loads. Phase 0, decisions and the
+review: [`docs/LFS-ANALYSIS.md`](docs/LFS-ANALYSIS.md). `lfs` is registered as
+`nse_main.cc:566,579-582` registers it: a global and in `package.loaded`,
+between `nmapdb` and `lpeg`. This retires
+`nse-categories-abort-on-unported-modules` for `safe`, and `all` now stops on
+`openssl`. C citations in this section are against `bc4346dd8`, the last
+commit to change the C this step reads.
 
 **Gated** by:
-- `nse_cli_differential` (`oracle/gen_m64_cli.py`, against 7.94):
-  - `lfs`: the fixture `l-lfs.nse`, 20 rows, every result and argument error
-    byte for byte, and the tree it leaves;
+- `nse_cli_differential` (`oracle/gen_m64_cli.py`, against 7.94, every run
+  under umask 0, so modes are the ones asked for):
+  - `lfs`: the fixture `l-lfs.nse`, 30 rows: every `mkdir` result and
+    argument error, `io.open` on the same path shapes (`q/.`, `g/.`, `h/`,
+    `g/`), a link loop, a path over `PATH_MAX`, `mkdir` of the destination
+    itself, byte for byte, and the tree it leaves;
   - `fetch`, `fetch-short`, `fetch-path`: the shipped http-fetch mirroring a
     fixture site through `http-fetch.destination=`, `destination=` and
-    `http-fetch.paths=`. Script output and the tree must match: each path,
-    type, mode, size and SHA-256. The one tolerance: the XML's download list
-    is compared sorted in `fetch` and `fetch-short`, since 7.94's own order
-    varies with its parallel crawl (5 runs, 4 orders).
+    `http-fetch.paths=`, including links whose `..` the URL library escapes
+    (`..%252F..%252Fesc.html`, `..%255C..%255Cbs.html`). Script output and
+    the tree must match: each path, type, mode, size and SHA-256, and each
+    link's target; and nothing may appear outside the destination (`stray`).
+    The one tolerance: the XML's download list is compared sorted in `fetch`
+    and `fetch-short`, since 7.94's own order varies with its parallel crawl
+    (5 runs, 4 orders; the review saw 6 in 8).
+  - port alone: `only_documented_arguments_open_a_directory_to_scripts`
+    (`url=`, `dir=`, `save=`, `path=`, nested and array values designate
+    nothing; `destination=` does).
 - `scriptload_differential`: 561 / 1 / 49, as 7.94 without `openssl`,
   `libssh2` and `zlib`;
 - `nselib_differential`: `unittest.run_tests()` fails on 15 libraries;
-- `nse_exit_differential`: `safe` as a `load` block, 352 / 334 / 18 quiet,
-  in a loopback-only network namespace (`unshare -rn`); `vuln`, `intrusive`,
-  `exploit` and `all` stop on `openssl`;
-- unit tests in `lfs`, `fspolicy` and `nsefs`, and the `nse_scriptargs` fuzz
-  target's output-directory properties.
+- `nse_exit_differential`: `safe` as a `load` block, 352 / 334 / 18 quiet;
+  `vuln`, `intrusive`, `exploit` and `all` stop on `openssl`. Every load and
+  abort block runs in a network namespace whose only interface is checked
+  to be `lo` (`unshare -rn`).
+- unit tests in `lfs`, `fspolicy` and `nsefs` (among them
+  `a_dangling_link_is_not_written_through` and
+  `paths_resolve_as_the_system_calls_resolve_them`), and the
+  `nse_scriptargs` fuzz target's output-directory properties.
 - **Sabotage, each caught:**
   - `mkdir` without the policy check (nsefs);
   - `allows_mkdir` as `allows(.., true)`, so a named file could become a
     directory (fspolicy, nsefs);
   - the command line designating nothing (the `lfs`, `fetch` and
-    `fetch-short` scenarios);
+    `fetch-short` scenarios), or every argument that names a directory
+    (`only_documented_arguments_open_a_directory_to_scripts`);
   - `dir` among the designating keys (fspolicy);
   - `mkdir` returning `errno` as a third value, as `io.open` does (the `lfs`
-    scenario).
+    scenario);
+  - `mkdir`'s mode 0777 or 0755 (the `lfs`, `fetch` and `fetch-short`
+    trees, under umask 0);
+  - `allows_mkdir` refusing a designated directory itself (the `lfs`
+    scenario's `base` row);
+  - writes through a dangling link, with neither the check nor
+    `O_NOFOLLOW` (nsefs).
+- **The independent review** (LESSONS #041) ran 18 sabotages of its own: 14
+  were caught, and the 4 that survived (both modes, the root, every value
+  designating) are caught now. It found B1 below, which blocked the merge,
+  and the rest of this section's fixes.
 
 ### Divergences from the C
 
@@ -5659,27 +5692,67 @@ for `safe`, and `all` now stops on `openssl`.
       the name, so `..` and a planted symbolic link do not lead out, and a
       dangling link is `EEXIST`, not followed. Elsewhere it returns
       `nil, "Permission denied"`, the system's refusal, and a path that
-      exists outside is refused rather than reported as existing. A missing
-      parent is `ENOENT` either way, as for `io.open`. The mode is the C's,
-      0775 before the umask. Pinned by
-      `nsefs::tests::directories_are_made_beneath_output_dirs_only` and
-      `fspolicy::tests::directories_are_made_beneath_output_dirs_only`.
+      exists outside is refused rather than reported as existing. What does
+      not resolve fails as `mkdir(2)` fails, whether or not the script may
+      look: a missing parent `ENOENT`, a file on the way `ENOTDIR`, a loop
+      `ELOOP`, `PATH_MAX` bytes or more `ENAMETOOLONG`
+      (`nse-open-path-shapes-as-the-kernel`). The mode is the C's, 0775
+      before the umask. Pinned by
+      `nsefs::tests::directories_are_made_beneath_output_dirs_only`,
+      `fspolicy::tests::directories_are_made_beneath_output_dirs_only` and the
+      `lfs` scenario.
+- [x] `nse-write-through-dangling-link` (security) — **found by the review
+      (B1), blocking, and fixed in this step.** A name beneath a writable
+      root that is a symbolic link leading nowhere: `fopen` creates the
+      link's target, wherever it is. Until this step nothing was a writable
+      directory, so only a named file could be one; designation made it
+      reachable with no race. The review wrote a mirrored page into another
+      directory's `authorized_keys` through one planted link. Here a write to
+      such a name is refused (`EACCES`), a read finds nothing (`ENOENT`), and
+      every file is opened with `O_NOFOLLOW`, so a link swapped in at the
+      final name after the check is refused too. Anyone who could write the
+      directory before the run could plant the link; scripts cannot. Pinned
+      by `nsefs::tests::a_dangling_link_is_not_written_through` (`w`, `a`,
+      `w+`, `a+`, `r+`, beneath an output directory and as a named file).
+      A link swapped in at an *intermediate* component between the check and
+      the open remains the residual risk `THREAT-MODEL.md` names
+      (`openat2`'s `RESOLVE_BENEATH` would close it on Linux).
+- [x] `nse-open-path-shapes-as-the-kernel` — **a port defect since M6.4c1,
+      found by the review (S7), fixed here.** Rust's `Path` drops a trailing
+      `.` and separators, and the policy's resolution replaced every lookup
+      error with "the parent and the name". So `io.open("f/.", "w")`
+      truncated the file `f`, `io.open("q/.", "w")` created `q`,
+      `mkdir("nx/.")` created `nx`, a path over `PATH_MAX` that
+      canonicalised short was made, and a loop or a file on the way read as
+      `ENOENT`. Now a path resolves as `open(2)` and `mkdir(2)` resolve it:
+      the lookup's own error (`ENOTDIR`, `ELOOP`, `ENAMETOOLONG`, `ENOENT`
+      for `x/.`), `EISDIR` for a creating `fopen` of a name ending in a
+      separator, and `ENAMETOOLONG` at `PATH_MAX` bytes, before any lookup.
+      Each row was measured against the kernel and 7.94. Pinned by
+      `nsefs::tests::paths_resolve_as_the_system_calls_resolve_them` and the
+      `lfs` scenario's `dot_*`, `through_a_loop`, `too_long` and `open_*`
+      rows.
 - [x] `nse-output-dirs-documented-args` (security) — a directory is
       designated for script output only by the arguments the shipped scripts
-      document as the directory they save into (`fspolicy::OUTPUT_DIR_ARGS`):
-      `http-fetch.destination`, `http-config-backup.save`,
-      `ms-sql-dump-hashes.dir` and `snmp-ios-config.tftproot` by their full
-      keys, and `destination` and `tftproot` by the short keys
-      `stdnse.get_script_args` also accepts. `dir` and `save` are not: other
-      scripts read them as a path on the target
-      (`http-phpmyadmin-dir-traversal.dir`, `http-vlcstreamer-ls.dir`) or a
-      file-name template (`stuxnet-detect.save`). So
-      `ms-sql-dump-hashes.dir=/x` designates `/x`, and `dir=/x` does not:
+      document as the folder they save into (`fspolicy::OUTPUT_DIR_ARGS`), by
+      full key: `http-fetch.destination`, `http-config-backup.save`,
+      `ms-sql-dump-hashes.dir`, `snmp-ios-config.tftproot`, `cics-enum.path`,
+      `lu-enum.path`, `vtam-enum.path`, `domino-enum-users.path` and
+      `http-domino-enum-passwords.idpath`; and by the short keys
+      `stdnse.get_script_args` also accepts where no other shipped script
+      reads them: `destination`, `tftproot` and `idpath`. `dir`, `save` and
+      `path` are not: other scripts read them as a path on the target
+      (`http-phpmyadmin-dir-traversal.dir`, `http-vlcstreamer-ls.dir`, 34
+      keys ending in `.path`) or a file-name template (`stuxnet-detect.save`).
+      So `ms-sql-dump-hashes.dir=/x` designates `/x`, and `dir=/x` does not:
       that script then cannot save, where nmap saves. Only top-level string
       values count; designation holds for every script in the run, as named
-      files do. Decided in the lfs step's Phase 0, D1 (a). Pinned by
-      `fspolicy::tests::only_documented_output_arguments_designate_directories`
-      and the `nse_scriptargs` fuzz target.
+      files do, so `http-fetch.destination=/a,destination=/b` designates both.
+      Decided in the lfs step's Phase 0, D1 (a); the five folder arguments
+      were added after the review (S5) found the census short. Pinned by
+      `fspolicy::tests::only_documented_output_arguments_designate_directories`,
+      `only_documented_arguments_open_a_directory_to_scripts` and the
+      `nse_scriptargs` fuzz target.
 - [ ] `nse-output-dir-must-exist` — a designated directory must exist when
       the run starts. nmap's http-fetch creates a missing destination,
       parents and all (`create_directory`, `http-fetch.nse:76-89`). Here
@@ -5701,4 +5774,35 @@ for `safe`, and `all` now stops on `openssl`.
       this host's `/etc/passwd` to every script, writable. Found in the lfs
       step's Phase 0. **Decided (D2 (a)): fix next**, in its own step: a
       value grants a file only from an argument the scripts document as a
-      local file, a table like `OUTPUT_DIR_ARGS`.
+      local file, a table like `OUTPUT_DIR_ARGS`. The review's hardening
+      notes belong there too: refuse a designated directory that holds a
+      data directory (scripts could then write `nselib/`, which this and
+      later runs load), and consider binding a key to the scripts that read
+      it.
+- [ ] `lfs-bad-argument-naming` — as `nmapdb-bad-argument-naming`: a bad
+      argument names the function `'mkdir'` when Lua code called it and
+      `'lfs.mkdir'` from a C function such as `pcall`. 7.94 names it as
+      `getfuncname` describes the call, so they agree on a direct
+      `lfs.mkdir(...)`, `pcall` and tail calls, and differ through an alias
+      (`local m = lfs.mkdir; m()`: `'m'`), a field of another table (`'f'`),
+      a global (`'MKD'`) and a method call (`lfs:mkdir()`: `calling 'mkdir'
+      on bad self`). Measured by the review (S6).
+- [ ] `nse-templated-output-paths` — `stuxnet-detect.save` is a file-name
+      template (`%h`, `%v`) and `hostmap.prefix` a prefix. Neither names the
+      file the script writes, so neither is a named file, and neither script
+      can save; nmap saves. Older than this step; found by the review (S5).
+- [ ] `nse-whois-ip-cache-in-datadir` — whois-ip keeps its cache beside
+      `nmap-services` (`whois-ip.nse:1766-1767`), in a data directory, which
+      is read-only to scripts, so it runs uncached. Older than this step;
+      found by the review (S5).
+- [ ] `nse-fs-windows-errno-text` — on Windows a failure's text and code are
+      `FormatMessage`'s and Win32's (`Cannot create a file when that file
+      already exists.`, 183), where nmap's CRT gives `strerror`'s and
+      `errno`'s (`File exists`, 17), for `lfs.mkdir` and `io.open` alike.
+      Unvalidated on Windows, as the port is (the review, S10).
+- [ ] `nse-fs-windows-unc-canonicalize` (security) — on Windows a path is
+      canonicalised before the policy decides, so a script-supplied
+      `\\host\share\x` makes the system open an SMB session, which can leak
+      the user's NTLM credentials, before the refusal. Older than this step
+      (`io.open`); `mkdir` adds a way in. Fix: refuse UNC and device prefixes
+      by their bytes, before touching the file system (the review, S10).

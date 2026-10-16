@@ -189,7 +189,7 @@
       "fuzzed": "Neighbour-discovery I/O driver. Frame parsing is core::ndp::resolve_from_frame, covered by fuzz target ndp_advert; this module only drives the capture and the timeout."
     },
     "sys::nsefs": {
-      "fuzzed": "The ScriptFs over the real file system: it canonicalises a path with the OS and asks fspolicy. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, and that cover named files, output directories and missing files."
+      "fuzzed": "The ScriptFs over the real file system: it resolves a path as open(2) and mkdir(2) do (canonicalising, with the lookup's own errors, PATH_MAX, trailing '.' and separators), asks fspolicy, and opens the canonical path with O_NOFOLLOW, refusing to write through a name that is a link leading nowhere. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, dangling links (w, a, w+, a+, r+), the path shapes against the kernel's errnos, named files, output directories, mkdir, and missing files; and end to end by nse_cli_differential's lfs and http-fetch scenarios against nmap 7.94."
     },
     "sys::nsehost": {
       "fuzzed": "The host side of NSE: nselib/ and script lookup over the data directories, the interface list from sys::netif, random bytes from the OS, and a ScriptNet wrapper that timestamps polls. It parses no network or file data. Pinned by unit tests and exercised end to end by nse_cli_differential against nmap 7.94."
@@ -322,5 +322,37 @@
     "targets": "unsafe_audited",
     "timespec": "unsafe_audited",
     "timing": "unsafe_audited"
+  },
+  "stamps": {
+    "cli": {
+      "unsafe_audited": {
+        "files": 2,
+        "sha256": "2187d261d72ffc1be4694b32ef946147e1424926ab5f8374d497089b6f7c1fb5"
+      }
+    },
+    "core::nse::fspolicy": {
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "e6e44253f512024e9d32e72cc68063293b65f88449ad447746cbece41634b55f"
+      }
+    },
+    "core::nse::lfs": {
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "eaec3b05cec348456ed2cb5425e10420624110d50ef97cf0b5a6cb13588387d7"
+      }
+    },
+    "core::nse::stdlib::osdate": {
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "8a63a7499dd531042fc05010151968dda0eb723f6d8fbbcd9d1dc6f88fddd518"
+      }
+    },
+    "sys::nsefs": {
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "8a2ebbbdccb036abbcb63bd220c8cbcc39177cb727abcfde847d8bb98f5b5e02"
+      }
+    }
   }
 }

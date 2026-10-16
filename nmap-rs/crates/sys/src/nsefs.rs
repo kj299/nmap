@@ -3,14 +3,18 @@
 //!
 //! A path is resolved as `fopen` would resolve it — relative to the working
 //! directory — then canonicalised: a file that exists to itself, one that
-//! does not yet to its canonical directory and its name. The policy decides on
-//! that, and the canonical path is what is opened, so a symbolic link cannot
-//! lead a check one way and an open another. (A script cannot make a link:
-//! nothing a script is given creates one.)
+//! does not yet to its canonical directory and its name ([`resolve`]). The
+//! policy decides on that, and the canonical path is what is opened, so a
+//! symbolic link cannot lead a check one way and an open another. A name that
+//! is a symbolic link leading nowhere is not written through: `fopen` would
+//! create the link's target, wherever it is (`nse-write-through-dangling-link`).
+//! And the final name is opened without following a link (`O_NOFOLLOW`), so
+//! one swapped in after the check is refused too. (A script cannot make a
+//! link: nothing a script is given creates one.)
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nmap_core::nse::fspolicy::FsPolicy;
 use nmap_core::nse::stdlib::iolib::{FsError, OpenMode, ScriptFile, ScriptFs, Whence};
@@ -35,8 +39,15 @@ impl PolicyFs {
         };
         let named = named
             .iter()
-            .filter_map(|n| path_of(n))
-            .filter_map(|p| canonical_target(&p))
+            .filter_map(|n| match resolve(n) {
+                Ok(Target::Exists(p)) => Some(p),
+                Ok(Target::New {
+                    path,
+                    dangling: false,
+                    trailing: false,
+                }) => Some(path),
+                _ => None,
+            })
             .filter(|p| !p.is_dir())
             .collect();
         PolicyFs {
@@ -90,19 +101,103 @@ fn path_of(bytes: &[u8]) -> Option<PathBuf> {
     }
 }
 
-/// The canonical path a file at `path` is, or would be once created: the
-/// file itself when it exists, else its canonical directory joined with its
-/// name. `None` when the directory does not exist either.
-fn canonical_target(path: &Path) -> Option<PathBuf> {
-    if let Ok(c) = path.canonicalize() {
-        return Some(c);
+/// What a path names, for the policy.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    /// It exists: its canonical path.
+    Exists(PathBuf),
+    /// It does not, and its directory does: that directory, canonical, and
+    /// the name. `dangling` when something is there all the same, a symbolic
+    /// link that leads nowhere; `trailing` when the path ended in a
+    /// separator.
+    New {
+        path: PathBuf,
+        dangling: bool,
+        trailing: bool,
+    },
+}
+
+impl Target {
+    /// The path the policy decides on.
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Target::Exists(p) | Target::New { path: p, .. } => p,
+        }
     }
-    let name = path.file_name()?;
+}
+
+/// The path's last component, trailing separators aside.
+fn last_component(bytes: &[u8]) -> &[u8] {
+    let sep = |b: &u8| *b == b'/' || (cfg!(windows) && *b == b'\\');
+    let mut trimmed = bytes;
+    while let Some((last, rest)) = trimmed.split_last() {
+        if !sep(last) {
+            break;
+        }
+        trimmed = rest;
+    }
+    trimmed.rsplit(sep).next().unwrap_or(trimmed)
+}
+
+/// Whether `bytes`, as a C string, ends in a separator.
+fn ends_in_separator(bytes: &[u8]) -> bool {
+    let raw = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
+    !raw.is_empty() && !raw.ends_with(last_component(raw))
+}
+
+fn os_error(errno: i32) -> FsError {
+    fs_error(&std::io::Error::from_raw_os_error(errno))
+}
+
+fn no_such_file() -> FsError {
+    FsError {
+        message: "No such file or directory".into(),
+        errno: 2,
+    }
+}
+
+/// `bytes` resolved as `open(2)` and `mkdir(2)` resolve a path, or the error
+/// they give before touching the last name:
+/// - empty, as a C string: `ENOENT`;
+/// - `PATH_MAX` bytes or more: `ENAMETOOLONG`, before any lookup;
+/// - a path that exists: its canonical form;
+/// - one that does not, whose last component is a name (not `.` or `..`):
+///   its directory's canonical form and the name, or the directory's own
+///   error;
+/// - otherwise the lookup's error: `ENOTDIR`, `ELOOP`, `ENAMETOOLONG`,
+///   `ENOENT` (`x/.` with `x` missing).
+fn resolve(bytes: &[u8]) -> Result<Target, FsError> {
+    let raw = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
+    let path = path_of(raw).ok_or_else(no_such_file)?;
+    #[cfg(unix)]
+    if raw.len() >= usize::try_from(libc::PATH_MAX).unwrap_or(usize::MAX) {
+        return Err(os_error(libc::ENAMETOOLONG));
+    }
+    let err = match path.canonicalize() {
+        Ok(c) => return Ok(Target::Exists(c)),
+        Err(e) => e,
+    };
+    let last = last_component(raw);
+    if err.kind() != std::io::ErrorKind::NotFound
+        || last.is_empty()
+        || last == b"."
+        || last == b".."
+    {
+        return Err(fs_error(&err));
+    }
+    let name = path.file_name().ok_or_else(no_such_file)?;
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    Some(parent.canonicalize().ok()?.join(name))
+    let path = parent.canonicalize().map_err(|e| fs_error(&e))?.join(name);
+    let dangling = std::fs::symlink_metadata(&path).is_ok();
+    let trailing = ends_in_separator(raw);
+    Ok(Target::New {
+        path,
+        dangling,
+        trailing,
+    })
 }
 
 fn fs_error(e: &std::io::Error) -> FsError {
@@ -117,29 +212,54 @@ fn fs_error(e: &std::io::Error) -> FsError {
 }
 
 impl ScriptFs for PolicyFs {
+    /// `fopen(path, mode)` on the canonical path, if the policy allows it.
+    /// What does not resolve fails as `fopen` fails, whether or not the
+    /// script may look ([`resolve`]). Beyond `fopen`: a name that is a
+    /// symbolic link leading nowhere is refused for writing (`EACCES`), and
+    /// is missing for reading, where `fopen` would create or miss the link's
+    /// target; and the final name is opened with `O_NOFOLLOW`.
     fn open(&self, path: &[u8], mode: OpenMode) -> Result<Box<dyn ScriptFile>, FsError> {
-        let path = path_of(path).ok_or(FsError {
-            message: "No such file or directory".into(),
-            errno: 2,
-        })?;
-        let Some(target) = canonical_target(&path) else {
-            // Nothing there to open, and no directory to create it in: what
-            // `fopen` reports, whether or not the script may look.
-            return Err(FsError {
-                message: "No such file or directory".into(),
-                errno: 2,
-            });
-        };
-        if !self.policy.allows(&target, mode.writes()) {
+        let writes = mode.writes();
+        // `open(path, O_CREAT)` with a trailing separator is `EISDIR`,
+        // before any lookup, whatever is there.
+        if mode.base != b'r' && ends_in_separator(path) {
+            return Err(os_error(21)); // EISDIR
+        }
+        let resolved = resolve(path)?;
+        if !self.policy.allows(resolved.path(), writes) {
             return Err(FsError::denied());
         }
+        let target = match resolved {
+            Target::Exists(p) => p,
+            // Without `O_CREAT` (above), there is nothing there.
+            Target::New { trailing: true, .. } => return Err(no_such_file()),
+            Target::New { dangling: true, .. } if writes => return Err(FsError::denied()),
+            Target::New { dangling: true, .. } => return Err(no_such_file()),
+            Target::New { path, .. } => path,
+        };
         let mut o = OpenOptions::new();
         match mode.base {
             b'r' => o.read(true).write(mode.update),
             b'w' => o.write(true).create(true).truncate(true).read(mode.update),
             _ => o.append(true).create(true).read(mode.update),
         };
-        let file = o.open(&target).map_err(|e| fs_error(&e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = o.open(&target).map_err(|e| {
+            // A link swapped in at the final name since the check.
+            #[cfg(unix)]
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                return if writes {
+                    FsError::denied()
+                } else {
+                    no_such_file()
+                };
+            }
+            fs_error(&e)
+        })?;
         Ok(Box::new(DiskFile(file)))
     }
 
@@ -147,28 +267,29 @@ impl ScriptFs for PolicyFs {
         Box::new(Stdout)
     }
 
-    /// `mkdir(path, 0775)` (`nse_fs.cc:117`), on the canonical path, if it
-    /// is beneath a designated output directory. A missing parent is
-    /// `ENOENT` whether or not the script may look, as for `open`; a path
-    /// that exists, a directory or not, is `EEXIST` where the script may
-    /// write, and `EACCES` elsewhere.
+    /// `mkdir(path, 0775)` (`nse_fs.cc:121`), on the canonical path, if it
+    /// is beneath a designated output directory. What does not resolve
+    /// fails as `mkdir` fails, whether or not the script may look
+    /// ([`resolve`]: a missing parent is `ENOENT`, `f/x` on a file
+    /// `ENOTDIR`, a loop `ELOOP`); a path that exists, a directory, a file
+    /// or a link leading nowhere (`mkdir` does not follow it), is `EEXIST`
+    /// where the script may write, and `EACCES` elsewhere.
     fn mkdir(&self, path: &[u8]) -> Result<(), FsError> {
-        let missing = || FsError {
-            message: "No such file or directory".into(),
-            errno: 2,
-        };
-        let path = path_of(path).ok_or_else(missing)?;
-        let target = canonical_target(&path).ok_or_else(missing)?;
-        if !self.policy.allows_mkdir(&target) {
+        let resolved = resolve(path)?;
+        let target = resolved.path();
+        if !self.policy.allows_mkdir(target) {
             return Err(FsError::denied());
         }
-        let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let b = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut b = std::fs::DirBuilder::new();
             b.mode(0o775);
-        }
-        b.create(&target).map_err(|e| fs_error(&e))
+            b
+        };
+        #[cfg(not(unix))]
+        let b = std::fs::DirBuilder::new();
+        b.create(target).map_err(|e| fs_error(&e))
     }
 }
 
@@ -229,6 +350,7 @@ impl ScriptFile for Stdout {
 #[cfg(all(test, not(miri)))] // real files and directories; Miri has no filesystem
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// A fresh directory under the system's temporary directory.
     fn scratch(tag: &str) -> PathBuf {
@@ -390,6 +512,101 @@ mod tests {
             assert_eq!(e.errno, 17);
             assert!(!root.join("nowhere").exists());
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's B1: a name beneath a writable root that is a link
+    /// leading nowhere. `fopen` would create the link's target, wherever it
+    /// is; here a write is refused, a read finds nothing, and `mkdir` does
+    /// not follow it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_not_written_through() {
+        let root = scratch("dangling");
+        let out = root.join("loot");
+        let victim = root.join("victim");
+        std::fs::create_dir_all(&out).expect("mkdir");
+        std::fs::create_dir_all(&victim).expect("mkdir");
+        let link = out.join("index.html");
+        std::os::unix::fs::symlink(victim.join("authorized_keys"), &link).expect("symlink");
+        // A named file that is a dangling link, too.
+        let named = root.join("named.txt");
+        std::os::unix::fs::symlink(victim.join("named-target"), &named).expect("symlink");
+        let fs = PolicyFs::new(&[], std::slice::from_ref(&out), &[bytes(&named)]);
+        for mode in [&b"w"[..], b"a", b"w+", b"a+", b"r+"] {
+            let mode = OpenMode::parse(mode).expect("valid");
+            for p in [&link, &named] {
+                assert_eq!(
+                    fs.open(&bytes(p), mode).err(),
+                    Some(FsError::denied()),
+                    "{} {:?}",
+                    p.display(),
+                    mode
+                );
+            }
+        }
+        let e = fs
+            .open(&bytes(&link), read_mode())
+            .err()
+            .expect("nothing to read");
+        assert_eq!(e.errno, 2);
+        let e = fs.mkdir(&bytes(&link)).expect_err("exists");
+        assert_eq!(e.errno, 17);
+        assert_eq!(
+            std::fs::read_dir(&victim).expect("dir").count(),
+            0,
+            "written through"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's S7: what `open(2)` and `mkdir(2)` do with a trailing
+    /// `.` or separator, a file in the middle of a path, a loop and a path
+    /// too long, which canonicalising alone would have changed.
+    #[cfg(unix)]
+    #[test]
+    fn paths_resolve_as_the_system_calls_resolve_them() {
+        let root = scratch("resolve");
+        let out = root.join("loot");
+        std::fs::create_dir_all(out.join("a")).expect("mkdir");
+        std::fs::write(out.join("f"), b"keep").expect("write");
+        std::os::unix::fs::symlink(out.join("loop"), out.join("loop")).expect("symlink");
+        let fs = PolicyFs::new(&[], std::slice::from_ref(&out), &[]);
+        let errno = |r: Result<(), FsError>| r.err().map(|e| e.errno);
+        let open_errno = |p: &str, m: &[u8]| {
+            fs.open(&bytes(&out.join(p)), OpenMode::parse(m).expect("valid"))
+                .err()
+                .map(|e| e.errno)
+        };
+        let mk = |p: &str| errno(fs.mkdir(&bytes(&out.join(p))));
+        assert_eq!(mk("nx/."), Some(2), "mkdir nx/. with nx missing");
+        assert!(!out.join("nx").exists());
+        assert_eq!(mk("f/."), Some(20), "mkdir f/. on a file");
+        assert_eq!(mk("a/."), Some(17), "mkdir a/. on a directory");
+        assert_eq!(mk("f/x"), Some(20), "mkdir beneath a file");
+        assert_eq!(mk("loop/x"), Some(40), "mkdir through a loop");
+        assert_eq!(open_errno("q/.", b"w"), Some(2));
+        assert!(!out.join("q").exists(), "q/. created q");
+        assert_eq!(open_errno("f/.", b"w"), Some(20));
+        assert_eq!(open_errno("f/", b"w"), Some(21), "fopen file/ w");
+        assert_eq!(open_errno("f/", b"r"), Some(20), "fopen file/ r");
+        assert_eq!(open_errno("f/", b"r+"), Some(20), "fopen file/ r+");
+        assert_eq!(
+            std::fs::read(out.join("f")).expect("read"),
+            b"keep",
+            "f truncated"
+        );
+        assert_eq!(open_errno("new/", b"w"), Some(21), "fopen new/ w");
+        assert_eq!(open_errno("new/", b"r"), Some(2), "fopen new/ r");
+        assert_eq!(open_errno("new/", b"a"), Some(21), "fopen new/ a");
+        assert!(!out.join("new").exists());
+        assert_eq!(open_errno("a/", b"w"), Some(21), "fopen dir/ w");
+        assert_eq!(open_errno("loop/x", b"w"), Some(40));
+        // PATH_MAX bytes or more, though they canonicalise short.
+        let long = format!("{}/{}z", out.display(), "../loot/".repeat(600));
+        assert!(long.len() >= 4096);
+        assert_eq!(errno(fs.mkdir(long.as_bytes())), Some(36));
+        assert!(!out.join("z").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

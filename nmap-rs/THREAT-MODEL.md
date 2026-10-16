@@ -146,7 +146,7 @@ model", Decision 2); this section records what the port does about each.
 | A script's code (`--script FILE`, `scripts/`) | **untrusted-ish** (shipped scripts are trusted; a path the operator names may not be) | runs in a VM with no process, environment or unrestricted file access (below) | `core::nse::runtime`, `stdlib::{iolib,oslib}` |
 | `script.db` and `.nse` metadata | semi-trusted (decides what runs) | parsed as bytes, never executed; fuzzed | `core::nse::script` (`nse_scriptdb`, `nse_metadata`) |
 | `--script` selection rules | operator | total, fuzzed; rules over 64 KiB refused | `core::nse::selection` (`nse_selection`) |
-| `--script-args` | operator, but often pasted | parsed by a port of nse_main.lua's grammar; fuzzed. Since the lfs step its values also designate output directories, by documented key only; that selection is fuzzed with it | `core::nse::scriptargs`, `core::nse::fspolicy` (`nse_scriptargs`) |
+| `--script-args` | operator, but often pasted | parsed by a port of nse_main.lua's grammar; fuzzed. Since the lfs step its values also designate output directories, by documented key only: pinned by unit and CLI tests; the fuzz target checks it is total and that making a directory is never allowed where writing is not | `core::nse::scriptargs`, `core::nse::fspolicy` (`nse_scriptargs`) |
 | Network responses handed to scripts | **untrusted** | parsed in Lua, through first-party stdlib functions that are each fuzzed and differentially tested; since M6.6 step e also through LPeg (`json.parse`, coap's link format, lpeg-utility's fingerprint parsers, ntp-info, fingerprint-strings, http-affiliate-id's `re` grammars): a first-party engine, total, fuzzed, with nmap's backtrack ceiling (D2), wide indices where C's are 16 bits (D4), and every stage pre-emptible (D3) | `core::nse::stdlib` (`nse_pattern`, `nse_format`, `nse_strpack`, `nse_tail`, `nse_utf8_date`), `core::nse::lpeg` (`nse_lpeg_build`, `nse_lpeg_match`) |
 | `nmapdb` arguments (M6.6 step a) | script | total parsers; the protocol option list is terminated, and a byte ≥ 0x80 is never a hex digit; fuzzed | `core::nse::nmapdb` (`nse_mac2corp`) |
 | `nmap-mac-prefixes`, `nmap-protocols` (M6.6 step a) | semi-trusted (installer, `--datadir`) | read once, as bytes; no assert: a prefix-only line is skipped, and so is a protocol line C misreads; fuzzed | `core::macvendor` (`macvendor_parse`), `core::protocols` (`nse_protocols`) |
@@ -169,10 +169,18 @@ Here:
   (`fspolicy::OUTPUT_DIR_ARGS`, `docs/LFS-ANALYSIS.md` D1); a value
   elsewhere that names a directory (`url=/`) designates nothing. Paths are
   compared and opened canonical, so `..` and symbolic links do not escape
-  (`core::nse::fspolicy`, `sys::nsefs`). A refusal looks like `EACCES`.
-  - Residual risk: a link swapped between the check and the open by an
-    actor *outside* nmap. Scripts cannot create links: `lfs.link` is not
-    ported (`lfs-minimal`).
+  (`core::nse::fspolicy`, `sys::nsefs`). A name that is a link leading
+  nowhere is not written through, which `fopen` would do, creating the
+  link's target wherever it is (`nse-write-through-dangling-link`, found by
+  the lfs step's review); and the final name is opened with `O_NOFOLLOW`. A
+  refusal looks like `EACCES`.
+  - Residual risk: a link swapped in at an *intermediate* component between
+    the check and the open, by an actor *outside* nmap who can write the
+    directory (`openat2`'s `RESOLVE_BENEATH` would close it on Linux).
+    Scripts cannot create links: `lfs.link` is not ported (`lfs-minimal`).
+  - On Windows, unvalidated: a UNC path is canonicalised, which opens an SMB
+    session, before the policy refuses it
+    (`nse-fs-windows-unc-canonicalize`).
   - **Open** (`nse-named-values-grant-files`, next): any argument value
     that names a local file is readable and writable by every script, even
     one that names a path on the target.

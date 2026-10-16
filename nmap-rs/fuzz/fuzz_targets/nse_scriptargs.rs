@@ -14,10 +14,11 @@
 //     out never needs a form the grammar lacks;
 //   * `sanitize` (`cstringSanityCheck`) keeps at most the length asked for, of
 //     the bytes before the first NUL, every one printable;
-//   * `fspolicy::output_dir_values` designates exactly the string values of
-//     the top-level arguments `OUTPUT_DIR_ARGS` names, in order, and nothing
-//     nested or array-indexed; and a policy over those directories lets a
-//     script make a directory exactly where it may write, beneath one of them.
+//   * `fspolicy::output_dir_values` is total over any table, takes only
+//     top-level string values (re-derived here from the same table, so this
+//     does not pin which keys designate: unit tests do), and a policy over
+//     what it designates never lets a script make a directory where it may
+//     not write, nor by a relative path.
 //
 // Input layout: byte 0 splits the rest into the file and the command line
 // (0 means no file); byte 1 is the sanitiser's length.

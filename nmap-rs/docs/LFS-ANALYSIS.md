@@ -3,7 +3,8 @@
 M6.6 D1 (c) (`docs/M6.6-ANALYSIS.md` §9): a minimal `lfs` follows M6.6, as a
 small step with its own short Phase 0, because `mkdir` changes the sandbox.
 This is that Phase 0. Measured on master `34ed0fb08`, against the installed
-nmap 7.94 with `--datadir` set to this tree.
+nmap 7.94 with `--datadir` set to this tree. C and script citations are
+against `bc4346dd8`, the last commit to change the files cited.
 
 ## 1. What the C is
 
@@ -51,7 +52,8 @@ value that is a directory is dropped. So no script could write beneath a
 directory, and the ledger entry `io-files-through-policy` described a
 designation that did not exist.
 
-Four shipped scripts save beneath a directory the operator names:
+Nine shipped scripts save beneath a directory the operator names (four
+found here, five more by the review, §7):
 
 | script | argument | reads it at |
 |---|---|---|
@@ -59,12 +61,18 @@ Four shipped scripts save beneath a directory the operator names:
 | http-config-backup | `http-config-backup.save` | `http-config-backup.nse:183` |
 | ms-sql-dump-hashes | `ms-sql-dump-hashes.dir` | `ms-sql-dump-hashes.nse:98` |
 | snmp-ios-config | `snmp-ios-config.tftproot` (also `tftproot`) | `snmp-ios-config.nse:55` |
+| cics-enum | `cics-enum.path` | `cics-enum.nse:378` |
+| lu-enum | `lu-enum.path` | `lu-enum.nse:178` |
+| vtam-enum | `vtam-enum.path` | `vtam-enum.nse:249` |
+| domino-enum-users | `domino-enum-users.path` | `domino-enum-users.nse:74` |
+| http-domino-enum-passwords | `http-domino-enum-passwords.idpath` (also `idpath`) | `http-domino-enum-passwords.nse:217` |
 
 `stdnse.get_script_args` also accepts the key without the script's name
-(`stdnse.lua:616-628`). Two short keys collide with arguments that are not
+(`stdnse.lua:616-628`). Three short keys collide with arguments that are not
 local directories: `dir` is also `http-phpmyadmin-dir-traversal.dir` and
-`http-vlcstreamer-ls.dir`, both paths **on the target**, and `save` is also
-`stuxnet-detect.save`, a file-name template. Treating any value that names a
+`http-vlcstreamer-ls.dir`, both paths **on the target**; `save` is also
+`stuxnet-detect.save`, a file-name template; and 34 keys end in `.path`, most
+of them URL paths on the target. Treating any value that names a
 directory as designated would be worse still: `url=/` is a common argument,
 and would make this host's root writable.
 
@@ -79,6 +87,10 @@ that name a path on the target, such as
   could not already write. `mkdir` goes through the canonical-path policy as
   `open` does: the directory's canonical parent joined with its name, beneath
   a designated directory, or `EACCES`.
+- Nor write through a link someone left in a designated directory. A name
+  that is a link leading nowhere is not written through (`fopen` would create
+  its target, wherever it is), and every file is opened with `O_NOFOLLOW`
+  (`nse-write-through-dangling-link`, the review's B1).
 - `link` is not ported. The sandbox's TOCTOU argument rests on scripts being
   unable to create links (`THREAT-MODEL.md`). `rmdir` and `dir` are not
   ported: nothing calls them.
@@ -101,8 +113,10 @@ that name a path on the target, such as
 - (b) A port-only `--script-output-dir DIR`, which nmap does not have.
 - (c) No writable directories: `lfs` loads, but the four save nothing.
 
-**Decided: (a).** The table is `fspolicy::OUTPUT_DIR_ARGS`. Designation is per
-run, not per script, as named files are. A directory that does not exist is
+**Decided: (a).** The table is `fspolicy::OUTPUT_DIR_ARGS`, with the five
+folder arguments the review found added under the same rule (`idpath` by its
+short key too; `path` never). Designation is per run, not per script, as
+named files are. A directory that does not exist is
 not designated: http-fetch in 7.94 creates a missing destination, and the port
 refuses (`nse-output-dir-must-exist`).
 
@@ -127,7 +141,7 @@ refuses (`nse-output-dir-must-exist`).
   - `sys::nsefs::PolicyFs::mkdir`;
   - the command line designating output directories.
 - **Oracle:** nmap 7.94, through `gen_m64_cli.py`:
-  - the fixture `l-lfs.nse`: 20 rows of results and argument errors;
+  - the fixture `l-lfs.nse`: 30 rows of results and argument errors (20 at first; the review added 10);
   - http-fetch mirroring a fixture site three ways;
   - each compared on script output and on the tree it leaves: path, type,
     mode, size, SHA-256.
@@ -142,3 +156,44 @@ refuses (`nse-output-dir-must-exist`).
 - **Exit:** `--script safe` loads as under 7.94 without `openssl` (352 / 334 /
   18 quiet, rc 0); `all` stops on `openssl`; http-fetch's mirror matches 7.94
   byte for byte.
+
+## 7. The review (LESSONS #041)
+
+An independent fidelity and security review of the step, before merge, ran
+its own 18 sabotages (14 caught) and found:
+
+- **B1, blocking: writes followed a dangling link out of a designated
+  directory.** `canonical_target` fell back to "the canonical parent and the
+  name" for a link that leads nowhere, and `OpenOptions::create` followed
+  it. Designation made that reachable with no race. Through the shipped
+  http-fetch, one planted link wrote the server's page into another
+  directory's `authorized_keys`. **Fixed:** such a name is refused for
+  writing, and files are opened with `O_NOFOLLOW`
+  (`nse-write-through-dangling-link`).
+- **S7: path shapes.** `Path` drops a trailing `.` and separators, and every
+  lookup error became "the parent and the name". `io.open("f/.", "w")`
+  truncated `f`, `mkdir("nx/.")` made `nx`, and a loop or an over-long path
+  read as `ENOENT`. **Fixed:** paths resolve as `open(2)` and `mkdir(2)`
+  resolve them (`nse-open-path-shapes-as-the-kernel`), each row measured
+  against the kernel and 7.94 and pinned in `l-lfs.nse`.
+- **Gates that could not fail.**
+  - S1, S2: the mode compared after a 022 umask. Every run is now under
+    umask 0, so 0775 vs 0777 vs 0755 shows.
+  - S3: an encoded-`..` link the fixture site keyed in lower case. The
+    crawler asks in upper case, so it now runs.
+  - S4: the CLI designating every directory argument passed everything. A
+    port-only test now fails it.
+  - S11: `mkdir` of the destination itself: a row now.
+  - S8: only `safe` ran in the namespace. Every load and abort block does
+    now, and the namespace is checked to hold only `lo`.
+- **S5:** the census was short by five scripts, now designated (§3).
+- **Ledgered rather than fixed here:**
+  - `lfs-bad-argument-naming` (S6);
+  - `nse-fs-windows-errno-text` and `nse-fs-windows-unc-canonicalize` (S10);
+  - `nse-templated-output-paths` and `nse-whois-ip-cache-in-datadir`;
+  - `cli-debug-equals-refused`;
+  - the hardening notes (refuse designating a directory that holds a data
+    directory), under D2's step.
+
+After the fixes, the review's four surviving sabotages, and both
+dangling-link defences removed together, each fail a named gate.

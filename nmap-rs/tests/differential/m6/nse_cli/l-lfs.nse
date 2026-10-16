@@ -1,10 +1,11 @@
 description = [[
 The lfs module as a script meets it (nse_fs.cc): get_path_separator, mkdir's
-results and errors, its argument checks and the info fields, beneath the
-directory named by http-fetch.destination, which must exist and be empty. The
-same command line runs under nmap 7.94 and nmap-rs (oracle/gen_m64_cli.py), so
-this also passes through the port's designation of that argument as an output
-directory (fspolicy::OUTPUT_DIR_ARGS). What only the port does (refusing a
+results and errors, its argument checks and the info fields, and io.open's
+answers for the same path shapes, beneath the directory named by
+http-fetch.destination, which must exist and hold only the link `loop -> loop`
+(gen_m64_cli.py's DEST_LINKS). The same command line runs under nmap 7.94 and
+nmap-rs (oracle/gen_m64_cli.py), so this also passes through the port's
+designation of that argument as an output directory (fspolicy::OUTPUT_DIR_ARGS). What only the port does (refusing a
 directory elsewhere, having no dir, link or rmdir) is pinned in its own tests.
 ]]
 categories = {"cli"}
@@ -32,6 +33,7 @@ action = function()
   out.separator = show(lfs.get_path_separator(), lfs.get_path_separator(1, 2))
   out.version = show(lfs._VERSION, lfs._COPYRIGHT)
   out.description = show(lfs._DESCRIPTION)
+  out.base = show(lfs.mkdir(base))
   out.new = show(lfs.mkdir(base .. "/a"))
   out.again = show(lfs.mkdir(base .. "/a"))
   out.trailing_existing = show(lfs.mkdir(base .. "/a/"))
@@ -45,6 +47,20 @@ action = function()
   out.empty = show(lfs.mkdir(""))
   out.dotdot_inside = show(lfs.mkdir(base .. "/a/../c"))
   out.dot = show(lfs.mkdir(base .. "/a/."))
+  out.dot_missing = show(lfs.mkdir(base .. "/nx/."))
+  out.dot_on_a_file = show(lfs.mkdir(base .. "/f/."))
+  out.through_a_loop = show(lfs.mkdir(base .. "/loop/x"))
+  out.too_long = show(lfs.mkdir(base .. "/" .. string.rep("./", 2100) .. "z"))
+  local g = assert(io.open(base .. "/g", "w"))
+  g:write("keep")
+  g:close()
+  out.open_dot_missing = show(io.open(base .. "/q/.", "w"))
+  out.open_dot_on_a_file = show(io.open(base .. "/g/.", "w"))
+  out.open_slash_new = show(io.open(base .. "/h/", "w"))
+  out.open_slash_file_read = show(io.open(base .. "/g/", "r"))
+  g = assert(io.open(base .. "/g", "r"))
+  out.file_kept = show(g:read("a"))
+  g:close()
   out.none = show(pcall(lfs.mkdir))
   out.table = show(pcall(lfs.mkdir, {}))
   out.boolean = show(pcall(lfs.mkdir, true))

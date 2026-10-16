@@ -12,10 +12,13 @@ module, nmap and nmap-rs compared by one parser.
 `BIN --datadir REPO -d2 -Pn -n -p 1 SEL 127.0.0.1` on this repository's own
 data directory, never a fixture one, with SEL `-sC`, `--script default`,
 `--script version`, `-A` or `--script safe`. `safe` runs its 334 scripts,
-broadcast ones among them, so that block runs, for both programs, in a
-network namespace of its own holding only loopback (`unshare -rn`, NETNS):
-nothing it sends leaves the host. Without user namespaces the block fails;
-it is never skipped. nmap 7.94 cannot run `-A` with this repository's
+broadcast ones among them, so every load and abort block runs, for both
+programs, in a network namespace of its own holding only loopback
+(`unshare -rn`, `isolated`), which is checked before the program starts:
+nothing it sends leaves the host, even if a category that should stop at
+start-up ran. Without user namespaces the blocks fail; they are never
+skipped. (The `run` blocks talk to this process's listeners, so they run
+on the host's loopback.) nmap 7.94 cannot run `-A` with this repository's
 nmap-os-db (written for 7.94.2 and later: an assertion abort in
 3be01efb1:osscan.cc:681), so its `-A` block is `-sC -sV`, which selects the same 158
 scripts in the same order. From each program's output this keeps:
@@ -148,9 +151,6 @@ LOADS = [
     ("safe", ["--script", "safe"], ["--script", "safe"]),
 ]
 
-# The selections run in a loopback-only network namespace (see above).
-NETNS = {"safe"}
-
 # `nse-categories-abort-on-unported-modules`: the categories that stop at
 # start-up for want of `openssl`.
 ABORTS = ["vuln", "intrusive", "exploit", "all"]
@@ -160,10 +160,14 @@ ABORTS = ["vuln", "intrusive", "exploit", "all"]
 # cannot pass): 127 `default`, 48 `version`, 158 for both, 352 `safe`.
 SELECTED = {"sC": 127, "default": 127, "version": 48, "A": 158, "safe": 352}
 
-# Run a command in a new user and network namespace with loopback up: the
-# namespace has no other interface, so nothing can leave the host.
+# Run a command in a new user and network namespace with loopback up, after
+# checking that loopback is the namespace's only interface: nothing can leave
+# the host.
 LO_UP = (
     "import fcntl, os, socket, struct, sys\n"
+    "names = [n for _, n in socket.if_nameindex()]\n"
+    "if names != ['lo']:\n"
+    "    sys.exit('not a loopback-only network namespace: %r' % names)\n"
     "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
     "req = struct.pack('16sH14s', b'lo', 0, b'')\n"
     "flags = struct.unpack('16sH14s', fcntl.ioctl(s, 0x8913, req))[1]\n"  # SIOCGIFFLAGS
@@ -256,7 +260,7 @@ def parse(stdout, stderr, datadir):
     return p
 
 
-def load_run(binary, datadir, sel, netns=False):
+def load_run(binary, datadir, sel, netns=True):
     cmd = [binary, "--datadir", datadir, "-d2", "-Pn", "-n", "-p", "1"] + sel + ["127.0.0.1"]
     if netns:
         probe = subprocess.run(isolated(["true"]), capture_output=True)
@@ -490,8 +494,8 @@ def write_golden(outdir):
     with tempfile.TemporaryDirectory() as dd:
         scriptload.datadir(dd, missing)
         for mode, _port_sel, sel in LOADS:
-            real = load_run("nmap", REPO, sel, mode in NETNS)
-            emu = load_run("nmap", dd, sel, mode in NETNS)
+            real = load_run("nmap", REPO, sel)
+            emu = load_run("nmap", dd, sel)
             bad += clean(real, mode + " (7.94)") + clean(emu, mode + " (7.94 without modules)")
             names = [s[0] for s in real["selected"]]
             if len(names) != SELECTED[mode]:
@@ -589,7 +593,7 @@ def check(golden, binary):
                 "the golden's -A adds %s, not SV_VERSION_ONLY" % only]
         else:
             problems = []
-        got = load_run(binary, REPO, port_sel, mode in NETNS)
+        got = load_run(binary, REPO, port_sel)
         problems += clean(got, mode)
         if len(got["selected"]) != SELECTED["sC" if mode == "A" and SV_PENDING else mode]:
             problems.append("%d selected" % len(got["selected"]))

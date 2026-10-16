@@ -129,6 +129,18 @@ narrower *rendering* of the same result.
         sink drops stdout lines when it holds. Pinned against 7.94 by
         `crates/cli/tests/output_all.rs` (each `-o` option, `-` destinations,
         `-v0`, `-v0 -v`, `-d0`, and a script's `nmap.log_write("stdout")`).
+- [x] `cli-verbosity-and-debug-imply-reason` (`cli`, owner `core::options`) —
+      **a port defect, from M1; found in the lfs step and fixed there.**
+      - **In C.** Every `-d` turns on `--reason`, `-d0` and `--debug`
+        included (`o.reason = true`, `nmap.cc:1060`), and so does verbosity
+        2 or more once all options are read (`nmap.cc:1550-1551`).
+      - **Was here.** Only `--reason` set it, so `-vv` and `-d` printed no
+        REASON column and no `received ...` on the host line.
+      - **Fix.** `apply_d` sets it, `--debug` goes through `apply_d`, and
+        `parse_args` ends with nmap's verbosity rule. Pinned by
+        `options::tests::verbosity_two_and_any_debug_turn_on_reason` (12
+        command lines); `-vv -p 1` against 7.94 then prints the same table and
+        host line, latency apart (`host-line-latency`).
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets

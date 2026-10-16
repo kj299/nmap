@@ -5,7 +5,8 @@
 //! the scripts are allowed (the VM's own, and the first-party half in
 //! [`super::stdlib`]), `package` and `require` ([`super::package`]), and the
 //! modules the engine provides — `nmap` ([`super::nmaplib`]), `nmapdb`
-//! ([`super::nmapdb`]) and `lpeg` ([`super::lpeg`]) — each both in
+//! ([`super::nmapdb`]), `lfs` ([`super::lfs`]) and `lpeg`
+//! ([`super::lpeg`]) — each both in
 //! `package.loaded` and as a global, as `luaL_requiref(L, name, open, 1)`
 //! leaves them.
 
@@ -16,6 +17,7 @@ use piccolo::{Closure, Executor, Fuel, Lua, StashedExecutor, StashedTable, Value
 
 use super::engine::{load_cnse, EngineOptions, Store};
 
+use super::lfs::load_lfs;
 use super::lpeg::load_lpeg;
 use super::nmapdb::load_nmapdb;
 use super::nmaplib::{load_nmap, Shared};
@@ -170,8 +172,11 @@ fn build(config: &StateConfig) -> Lua {
         // `set_nmap_libraries` registers `nmapdb` next (`nse_main.cc:564`).
         let nmapdb = load_nmapdb(ctx, &config.lib);
         preload_module(ctx, loaded, "nmapdb", Value::Table(nmapdb), true);
-        // Then `lfs`, which is not ported (`nse-c-modules-pending`), and
-        // `lpeg` (`nse_main.cc:566-567`), a global and in `package.loaded`.
+        // Then `lfs` and `lpeg` (`nse_main.cc:566-567`), each a global and
+        // in `package.loaded`; `lfs` in its minimal form (`lfs-minimal`),
+        // creating directories through the same policy as `io`.
+        let lfs = load_lfs(ctx, config.fs.clone());
+        preload_module(ctx, loaded, "lfs", Value::Table(lfs), true);
         // nmap's engine also requires `lpeg-utility` before any script loads
         // (`nse_main.lua:151`); the port's engine needs none of it
         // (`nse-lpeg-utility-not-preloaded`).
@@ -289,10 +294,10 @@ mod tests {
     /// The C modules this port registers, exactly: nmap's are registered by
     /// `set_nmap_libraries` (`nse_main.cc:556-579`) — `nmap`, `nmapdb`,
     /// `lfs`, `lpeg`, `libssh2`, `openssl`, `zlib` — with `nmap.socket` and
-    /// `nmap.dnet` from `luaopen_nmap`. This port has `nmap`, `nmapdb` and
-    /// `lpeg` (M6.6 step e) and the sub-modules, and the scriptload golden is
-    /// generated with the rest removed (`oracle/gen_m66_scriptload.py`,
-    /// `PORT_MISSING`). Porting a
+    /// `nmap.dnet` from `luaopen_nmap`. This port has `nmap`, `nmapdb`,
+    /// `lpeg` (M6.6 step e), `lfs` (the lfs step) and the sub-modules, and
+    /// the scriptload golden is generated with the rest removed
+    /// (`oracle/gen_m66_scriptload.py`, `PORT_MISSING`). Porting a
     /// module, or stubbing one, means changing this list as well as that one
     /// (M6.6 review, sabotages S24 and S27).
     /// The state `new_state` builds, before the prelude, with no libraries,
@@ -401,10 +406,11 @@ mod tests {
         assert_eq!(
             out,
             ChunkOutcome::Returned(vec![
-                "lpeg=global,nmap.dnet,nmap.socket,nmap=global,nmapdb=global".to_string()
+                "lfs=global,lpeg=global,nmap.dnet,nmap.socket,nmap=global,nmapdb=global"
+                    .to_string()
             ])
         );
-        for missing in ["lfs", "libssh2", "openssl", "zlib"] {
+        for missing in ["libssh2", "openssl", "zlib"] {
             let out = run_chunk(
                 &mut lua,
                 "=t",

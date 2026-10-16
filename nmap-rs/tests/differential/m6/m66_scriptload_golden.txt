@@ -1,7 +1,7 @@
 # script	outcome	detail: how each shipped script loads, alone, under
 # Nmap version 7.94SVN ( https://nmap.org ) with these C modules removed (--datadir this repository).
-# missing: lfs,libssh2,openssl,zlib
-# totals: 560 OK, 2 LOUD, 49 QUIET
+# missing: libssh2,openssl,zlib
+# totals: 561 OK, 1 LOUD, 49 QUIET
 # Regenerate from nmap-rs/ with
 # python3 tests/differential/m6/oracle/gen_m66_scriptload.py tests/differential/m6
 acarsd-info	OK	
@@ -195,7 +195,7 @@ http-errors	OK
 http-exif-spider	OK	
 http-favicon	QUIET	
 http-feed	OK	
-http-fetch	LOUD	http-fetch.nse:4: module 'lfs' not found
+http-fetch	OK	
 http-fileupload-exploiter	OK	
 http-form-brute	OK	
 http-form-fuzzer	OK	

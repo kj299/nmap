@@ -1,1 +1,2 @@
 Entry { filename = "c-setstate.nse", categories = { "cli", } }
+Entry { filename = "l-lfs.nse", categories = { "cli", } }

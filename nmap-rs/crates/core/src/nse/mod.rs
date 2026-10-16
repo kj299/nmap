@@ -18,6 +18,7 @@
 pub mod choose;
 pub mod engine;
 pub mod fspolicy;
+pub mod lfs;
 pub mod lpeg;
 pub mod net;
 pub mod nmapdb;

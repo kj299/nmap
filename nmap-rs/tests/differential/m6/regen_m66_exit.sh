@@ -6,8 +6,9 @@
 #   ./regen_m66_exit.sh --check   FAIL if it differs
 #
 # The oracle is the installed nmap 7.94 on this repository's data directory:
-# the scripts -sC, --script default, --script version and -sC -sV select and
-# load, the same with the C modules the port does not have removed
+# the scripts -sC, --script default, --script version, -sC -sV and --script
+# safe select and load (in a loopback-only network namespace, unshare -rn),
+# the same with the C modules the port does not have removed
 # (gen_m66_scriptload.py's emulation), the categories that stop at start-up
 # without them, and the executed scripts against loopback listeners on 8098,
 # 8332 and 8180 (oracle/gen_m66_exit.py). Generation fails if 7.94 disagrees

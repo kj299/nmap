@@ -102,6 +102,17 @@ jobs:
           -D warnings
           -D clippy::missing_safety_doc
           -D clippy::undocumented_unsafe_blocks
+      # The exit scenarios' load and abort blocks (`--script safe` runs its
+      # broadcast scripts) run in a network namespace holding only loopback
+      # (`unshare -rn`, gen_m66_exit.py `isolated`), so nothing leaves the
+      # runner. Ubuntu 24.04 forbids unprivileged user namespaces through
+      # AppArmor; allow them for this job. Without them the blocks fail,
+      # never skip (the lfs step).
+      - run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -rn true
       # Same reason, and the effect is countable: `cargo test -p nmap-sys --lib` runs
       # 96 tests, `--features raw-ffi` runs 97 (as of M6.4c1). That extra one —
       # netif::tests::ffi_backend_agrees_with_netdev_on_names_and_v4 — is the ONLY test
@@ -372,6 +383,17 @@ jobs:
       # result (host status + open-port state/reason + closed counts), so the
       # exact nmap version's decorative output does not affect the verdict.
       - run: sudo apt-get update && sudo apt-get install -y nmap
+      # The exit scenarios' load and abort blocks (`--script safe` runs its
+      # broadcast scripts) run in a network namespace holding only loopback
+      # (`unshare -rn`, gen_m66_exit.py `isolated`), so nothing leaves the
+      # runner. Ubuntu 24.04 forbids unprivileged user namespaces through
+      # AppArmor; allow them for this job. Without them the blocks fail,
+      # never skip (the lfs step).
+      - run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -rn true
       - run: cargo build --release
       # Fixture listeners + both binaries + diff_run.py over the M1 matrix.
       # Fails on any UNLEDGERED divergence in port-state fidelity.
@@ -410,7 +432,7 @@ jobs:
       - run: python3 tests/differential/m6/oracle/gen_m64_net.py "$RUNNER_TEMP"
       - run: M64_NET_GOLDEN="$RUNNER_TEMP/m64_net_golden.txt" cargo test -p nmap-sys --test nse_net_differential
       # M6.4e: nmap and nmap-rs, each run as a whole program with --script over
-      # fixture and shipped scripts against loopback services, 15 scenarios.
+      # fixture and shipped scripts against loopback services, 19 scenarios.
       # Every script result in normal output and XML, every port state and
       # every start-up error must match; one parser reads both programs.
       # Regenerated live here; the test job runs the committed golden.
@@ -430,8 +452,9 @@ jobs:
       - run: python3 tests/differential/m6/oracle/gen_m66_scriptload.py "$RUNNER_TEMP"
       - run: M66_SCRIPTLOAD_GOLDEN="$RUNNER_TEMP/m66_scriptload_golden.txt" cargo test -p nmap-core --test scriptload_differential
       # M6.6 step e: the exit criterion. nmap on this repository's own data
-      # directory: what -sC, --script default, --script version and -A (as
-      # -sC -sV) select, load and drop, with the port's missing C modules
+      # directory: what -sC, --script default, --script version, -A (as
+      # -sC -sV) and, since the lfs step, --script safe (in a loopback-only
+      # network namespace, see above) select, load and drop, with the port's missing C modules
       # removed for the loaded and quiet lists; the categories that still stop
       # at start-up, and on which file:line; and address-info, riak-http-info,
       # bitcoinrpc-info and http-affiliate-id run against loopback listeners

@@ -105,6 +105,12 @@ pub trait ScriptFs {
     fn open(&self, path: &[u8], mode: OpenMode) -> Result<Box<dyn ScriptFile>, FsError>;
     /// The default output, which `io.write` writes to.
     fn stdout(&self) -> Box<dyn ScriptFile>;
+    /// `mkdir(path, 0775)`, for `lfs.mkdir`, if the host allows the script
+    /// this directory. A host that gives scripts no directories refuses
+    /// every one, as the system would: `EACCES`.
+    fn mkdir(&self, _path: &[u8]) -> Result<(), FsError> {
+        Err(FsError::denied())
+    }
 }
 
 /// `LUAL_BUFFERSIZE`.

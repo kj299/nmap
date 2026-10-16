@@ -544,11 +544,13 @@ fn apply_v(cfg: &mut RunConfig, rest: &str) {
 }
 
 /// Apply a `-d…` argument. Like `-v`, but nmap bumps/sets **both** debugging
-/// and verbose (`o.debugging = o.verbose = box(0,10,i)`).
+/// and verbose (`o.debugging = o.verbose = box(0,10,i)`), and turns on
+/// `--reason`, even at `-d0` (`o.reason = true`, `nmap.cc:1060`).
 fn apply_d(cfg: &mut RunConfig, rest: &str) {
     if let Some(level) = leading_level(rest) {
         cfg.debugging = level;
         cfg.verbose = level;
+        cfg.reason = true;
     } else if rest.bytes().all(|b| b == b'd') {
         cfg.debugging = bump(cfg.debugging);
         cfg.verbose = bump(cfg.verbose);
@@ -556,6 +558,7 @@ fn apply_d(cfg: &mut RunConfig, rest: &str) {
             cfg.debugging = bump(cfg.debugging);
             cfg.verbose = bump(cfg.verbose);
         }
+        cfg.reason = true;
     } else {
         cfg.unrecognized.push(format!("-d{rest}"));
     }
@@ -814,10 +817,8 @@ pub fn parse_args(args: &[String]) -> RunConfig {
             "--version" => cfg.show_version = true,
             "-h" | "--help" => cfg.show_help = true,
             "--verbose" => cfg.verbose = bump(cfg.verbose),
-            "--debug" => {
-                cfg.debugging = bump(cfg.debugging);
-                cfg.verbose = bump(cfg.verbose);
-            }
+            // `{"debug", optional_argument, 0, 'd'}` (`nmap.cc:531`): `-d`.
+            "--debug" => apply_d(&mut cfg, ""),
             "-6" => cfg.ipv6 = true,
             "-Pn" => cfg.assume_up = true,
             // Accepted as a no-op: see ALREADY_SATISFIED.
@@ -1343,6 +1344,11 @@ pub fn parse_args(args: &[String]) -> RunConfig {
         }
         i += 1 + consumed_extra;
     }
+    // After every option, as `nmap.cc:1550` does: verbosity 2 or more turns
+    // on `--reason`, however it was reached (`-vv`, `-v -v`, `-v2`, `-d2`).
+    if cfg.verbose > 1 {
+        cfg.reason = true;
+    }
     cfg
 }
 
@@ -1604,6 +1610,29 @@ mod tests {
         assert!(!cfg(&["-d0"]).stdout_is_null());
         assert!(!cfg(&["-v1"]).stdout_is_null());
         assert!(!cfg(&["-v", "0"]).stdout_is_null()); // `0` is a target here
+    }
+
+    #[test]
+    fn verbosity_two_and_any_debug_turn_on_reason() {
+        // nmap.cc:1060 (every -d, -d0 included) and nmap.cc:1550 (verbose > 1).
+        for (args, want) in [
+            (&["-v"][..], false),
+            (&["-vv"][..], true),
+            (&["-v", "-v"][..], true),
+            (&["-v2"][..], true),
+            (&["-v1"][..], false),
+            (&["-d"][..], true),
+            (&["-d0"][..], true),
+            (&["-d1"][..], true),
+            (&["--debug"][..], true),
+            (&["--verbose"][..], false),
+            (&["--verbose", "--verbose"][..], true),
+            (&[][..], false),
+        ] {
+            let mut a: Vec<&str> = args.to_vec();
+            a.push("127.0.0.1");
+            assert_eq!(cfg(&a).reason, want, "{args:?}");
+        }
     }
 
     #[test]

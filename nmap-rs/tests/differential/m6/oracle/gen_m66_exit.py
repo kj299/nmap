@@ -11,7 +11,11 @@ module, nmap and nmap-rs compared by one parser.
 **Selection and load** (`load` blocks). Each runs
 `BIN --datadir REPO -d2 -Pn -n -p 1 SEL 127.0.0.1` on this repository's own
 data directory, never a fixture one, with SEL `-sC`, `--script default`,
-`--script version` or `-A`. nmap 7.94 cannot run `-A` with this repository's
+`--script version`, `-A` or `--script safe`. `safe` runs its 334 scripts,
+broadcast ones among them, so that block runs, for both programs, in a
+network namespace of its own holding only loopback (`unshare -rn`, NETNS):
+nothing it sends leaves the host. Without user namespaces the block fails;
+it is never skipped. nmap 7.94 cannot run `-A` with this repository's
 nmap-os-db (written for 7.94.2 and later: an assertion abort in
 3be01efb1:osscan.cc:681), so its `-A` block is `-sC -sV`, which selects the same 158
 scripts in the same order. From each program's output this keeps:
@@ -34,15 +38,15 @@ The golden holds, per selection, 7.94's `selected` list and the `loaded` and
 `quiet` lists nmap 7.94 gives with the C modules the port does not have yet
 removed (gen_m66_scriptload.py's emulation, PORT_MISSING), which is what the
 port must print. Generation checks that emulation against the real 7.94 run:
-the same selection, its `loaded` list the real one less OPENSSL_QUIET, and its
-`quiet` list exactly OPENSSL_QUIET (none for `version`); and the selection
-counts SELECTED. Two harness tolerances, each part of a ledger entry
+the same selection, its `loaded` list the real one less OPENSSL_QUIET[mode],
+and its `quiet` list exactly OPENSSL_QUIET[mode]; and the selection counts
+SELECTED. Two harness tolerances, each part of a ledger entry
 (LESSONS #031), and nothing else:
 
-    OPENSSL_QUIET   `nse-sc-openssl-quiet-drops` (expires with M6.5): the six
-                    `default` scripts that reach `openssl` through
+    OPENSSL_QUIET   `nse-sc-openssl-quiet-drops` (expires with M6.5): per
+                    selection, the scripts that reach `openssl` through
                     silent_require, dropped quietly by the port and loaded by
-                    7.94.
+                    7.94: six of `default`, none of `version`, 18 of `safe`.
     SV_VERSION_ONLY `nse-sv-version-scripts-pending`: the port's -sV runs no
                     scripts yet, so its -A selects `default` alone. While
                     SV_PENDING, the port's -A is held to the `-sC` block and
@@ -51,8 +55,9 @@ counts SELECTED. Two harness tolerances, each part of a ledger entry
 The port's run must also end with rc 0 and print no loud, init or quit line.
 
 **Categories that still stop at start-up** (`abort` blocks,
-`nse-categories-abort-on-unported-modules`): `--script safe`, `vuln`,
-`intrusive`, `exploit` and `all`, with the same command line. The oracle is
+`nse-categories-abort-on-unported-modules`): `--script vuln`, `intrusive`,
+`exploit` and `all`, with the same command line (`safe` stopped on `lfs`
+until the lfs step, and is a `load` block since). The oracle is
 nmap 7.94 without the port's missing modules alone (real 7.94 would run them
 all): it quits at load, so nothing runs. The port must print the same
 `selected`, `loaded` and `quiet` lists up to the script that stops it, that
@@ -100,10 +105,23 @@ import gen_m66_scriptload as scriptload  # noqa: E402
 
 REPO = scriptload.REPO
 
-# `nse-sc-openssl-quiet-drops` (DIVERGENCES.md), expiring with M6.5: the
-# `default` scripts that reach `openssl` through stdnse.silent_require.
-OPENSSL_QUIET = ["http-favicon.nse", "iscsi-info.nse", "mongodb-databases.nse",
+# `nse-sc-openssl-quiet-drops` (DIVERGENCES.md), expiring with M6.5: per
+# selection, the scripts that reach `openssl` through stdnse.silent_require
+# (measured, each module removed alone: all 18 of `safe`'s are `openssl`'s).
+DEFAULT_QUIET = ["http-favicon.nse", "iscsi-info.nse", "mongodb-databases.nse",
                  "mongodb-info.nse", "sip-methods.nse", "ssh-hostkey.nse"]
+OPENSSL_QUIET = {
+    "sC": DEFAULT_QUIET,
+    "default": DEFAULT_QUIET,
+    "version": [],
+    "A": DEFAULT_QUIET,
+    "safe": ["bitcoin-getaddr.nse", "bitcoin-info.nse", "bittorrent-discovery.nse",
+             "duplicates.nse", "http-cakephp-version.nse", "http-favicon.nse",
+             "http-php-version.nse", "http-virustotal.nse", "iscsi-info.nse",
+             "mongodb-databases.nse", "mongodb-info.nse", "rsa-vuln-roca.nse",
+             "rsync-list-modules.nse", "shodan-api.nse", "sip-methods.nse", "smb-ls.nse",
+             "ssh-hostkey.nse", "ssh2-enum-algos.nse"],
+}
 
 # `nse-sv-version-scripts-pending` (DIVERGENCES.md): while it is open, the
 # port's -A selects `default` alone, and these, which 7.94's -A adds through
@@ -127,16 +145,35 @@ LOADS = [
     ("default", ["--script", "default"], ["--script", "default"]),
     ("version", ["--script", "version"], ["--script", "version"]),
     ("A", ["-A"], ["-sC", "-sV"]),
+    ("safe", ["--script", "safe"], ["--script", "safe"]),
 ]
 
+# The selections run in a loopback-only network namespace (see above).
+NETNS = {"safe"}
+
 # `nse-categories-abort-on-unported-modules`: the categories that stop at
-# start-up for want of `lfs` or `openssl`.
-ABORTS = ["safe", "vuln", "intrusive", "exploit", "all"]
+# start-up for want of `openssl`.
+ABORTS = ["vuln", "intrusive", "exploit", "all"]
 
 # How many scripts each selects on this tree's scripts/ (the `selected` lines
 # alone, as well as the lists, so a golden from a fixture data directory
-# cannot pass): 127 `default`, 48 `version`, 158 for both.
-SELECTED = {"sC": 127, "default": 127, "version": 48, "A": 158}
+# cannot pass): 127 `default`, 48 `version`, 158 for both, 352 `safe`.
+SELECTED = {"sC": 127, "default": 127, "version": 48, "A": 158, "safe": 352}
+
+# Run a command in a new user and network namespace with loopback up: the
+# namespace has no other interface, so nothing can leave the host.
+LO_UP = (
+    "import fcntl, os, socket, struct, sys\n"
+    "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+    "req = struct.pack('16sH14s', b'lo', 0, b'')\n"
+    "flags = struct.unpack('16sH14s', fcntl.ioctl(s, 0x8913, req))[1]\n"  # SIOCGIFFLAGS
+    "fcntl.ioctl(s, 0x8914, struct.pack('16sH14s', b'lo', flags | 1, b''))\n"  # SIOCSIFFLAGS, IFF_UP
+    "os.execvp(sys.argv[1], sys.argv[1:])\n"
+)
+
+
+def isolated(cmd):
+    return ["unshare", "-rn", sys.executable, "-c", LO_UP] + cmd
 
 RIAK_PORT, BITCOIN_PORT, HTTP_PORT = 8098, 8332, 8180
 D = ["-sT", "-Pn", "-n"]
@@ -219,9 +256,16 @@ def parse(stdout, stderr, datadir):
     return p
 
 
-def load_run(binary, datadir, sel):
-    r = subprocess.run([binary, "--datadir", datadir, "-d2", "-Pn", "-n", "-p", "1"] + sel +
-                       ["127.0.0.1"], capture_output=True, timeout=600)
+def load_run(binary, datadir, sel, netns=False):
+    cmd = [binary, "--datadir", datadir, "-d2", "-Pn", "-n", "-p", "1"] + sel + ["127.0.0.1"]
+    if netns:
+        probe = subprocess.run(isolated(["true"]), capture_output=True)
+        if probe.returncode != 0:
+            sys.exit("FAIL: %s needs a loopback-only network namespace, and `unshare -rn` "
+                     "failed: %s (on Ubuntu, sysctl kernel.apparmor_restrict_unprivileged_userns=0)"
+                     % (" ".join(sel), probe.stderr.decode("latin-1").strip()))
+        cmd = isolated(cmd)
+    r = subprocess.run(cmd, capture_output=True, timeout=600)
     p = parse(r.stdout, r.stderr, datadir)
     p["rc"] = r.returncode
     return p
@@ -446,8 +490,8 @@ def write_golden(outdir):
     with tempfile.TemporaryDirectory() as dd:
         scriptload.datadir(dd, missing)
         for mode, _port_sel, sel in LOADS:
-            real = load_run("nmap", REPO, sel)
-            emu = load_run("nmap", dd, sel)
+            real = load_run("nmap", REPO, sel, mode in NETNS)
+            emu = load_run("nmap", dd, sel, mode in NETNS)
             bad += clean(real, mode + " (7.94)") + clean(emu, mode + " (7.94 without modules)")
             names = [s[0] for s in real["selected"]]
             if len(names) != SELECTED[mode]:
@@ -456,7 +500,7 @@ def write_golden(outdir):
                 bad.append("%s: the emulation selected otherwise" % mode)
             if real["loaded"] != names or real["quiet"]:
                 bad.append("%s: 7.94 did not load what it selected" % mode)
-            quiet = [] if mode == "version" else OPENSSL_QUIET
+            quiet = OPENSSL_QUIET[mode]
             if emu["quiet"] != quiet:
                 bad.append("%s: without the modules 7.94 drops %s, OPENSSL_QUIET says %s"
                            % (mode, emu["quiet"], quiet))
@@ -545,7 +589,7 @@ def check(golden, binary):
                 "the golden's -A adds %s, not SV_VERSION_ONLY" % only]
         else:
             problems = []
-        got = load_run(binary, REPO, port_sel)
+        got = load_run(binary, REPO, port_sel, mode in NETNS)
         problems += clean(got, mode)
         if len(got["selected"]) != SELECTED["sC" if mode == "A" and SV_PENDING else mode]:
             problems.append("%d selected" % len(got["selected"]))

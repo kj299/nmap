@@ -1,5 +1,5 @@
 # kind	library	outcome	[detail]
-# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir); unittest-all without openssl,lfs,libssh2,zlib.
+# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir); unittest-all without openssl,libssh2,zlib.
 # Regenerate with
 # python3 oracle/gen_m64_nselib.py tests/differential/m6
 require	afp	ok
@@ -191,7 +191,6 @@ unittest-all	bitcoin	silent_require
 unittest-all	bittorrent	openssl
 unittest-all	iax2	silent_require
 unittest-all	iscsi	silent_require
-unittest-all	lfs	lfs
 unittest-all	libssh2	libssh2
 unittest-all	libssh2-utility	silent_require
 unittest-all	mongodb	silent_require

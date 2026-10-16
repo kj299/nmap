@@ -15,6 +15,9 @@
     "core::nse::choose": [
       "nse_results"
     ],
+    "core::nse::fspolicy": [
+      "nse_scriptargs"
+    ],
     "core::nse::lpeg": [
       "nse_lpeg_build",
       "nse_lpeg_match"
@@ -140,8 +143,8 @@
     "core::nse::engine": {
       "fuzzed": "Drives the VM through nse_main.lua's own scheduler and stores results; the bytes a script returns reach output only through core::nse::results, which nse_results fuzzes against transliterations of the C. Exercised end to end by scripts_differential (37 scenarios against nmap 7.94), including the cnse functions' argument checks."
     },
-    "core::nse::fspolicy": {
-      "fuzzed": "A pure predicate over canonical paths the host has already resolved (component-wise prefix and equality). It parses nothing. Pinned by unit tests, including the prefix-is-a-component case, and by sabotage."
+    "core::nse::lfs": {
+      "fuzzed": "Binding only: lfs.mkdir hands the path bytes, as luaL_checkstring gives them, to the host's ScriptFs, and get_path_separator returns a constant. It parses nothing; the policy it asks (core::nse::fspolicy) is covered by nse_scriptargs and sys::nsefs's tests. Exercised end to end against nmap 7.94 by nse_cli_differential's lfs and http-fetch scenarios, results and trees byte for byte."
     },
     "core::nse::net": {
       "fuzzed": "The script-facing half of NSE sockets: it checks a script's arguments (ports, protocols, timeouts, families) as nse_nsock.cc checks them and hands data to the host as opaque bytes. It parses no network data; receive_buf's delimiter search is in the prelude's Lua, on the VM's own pattern matcher, which is fuzzed. Exercised end to end by nse_net_differential (three scenarios against nmap 7.94, every argument error included), and pinned by sabotage."
@@ -238,6 +241,7 @@
     "core::nse::choose": "unsafe_audited",
     "core::nse::engine": "unsafe_audited",
     "core::nse::fspolicy": "unsafe_audited",
+    "core::nse::lfs": "unsafe_audited",
     "core::nse::lpeg": "unsafe_audited",
     "core::nse::lpeg::code": "unsafe_audited",
     "core::nse::lpeg::tree": "unsafe_audited",

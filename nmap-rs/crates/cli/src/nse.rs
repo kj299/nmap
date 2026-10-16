@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nmap_core::model::Host;
 use nmap_core::nse::choose::{choose, RuleOptions};
 use nmap_core::nse::engine::{EngineOptions, PhaseResults, Watchdog};
-use nmap_core::nse::fspolicy::named_values;
+use nmap_core::nse::fspolicy::{named_values, output_dir_values};
 use nmap_core::nse::nmapdb::DataFile;
 use nmap_core::nse::nmaplib::{LogTarget, NmapEnv, NmapLib, Phase, ScriptHost, ScriptPort};
 use nmap_core::nse::runtime::{new_state, NseState, StateConfig};
@@ -31,7 +31,7 @@ use nmap_core::nse::stdlib::oslib::OsEnv;
 use nmap_core::ports::PortList;
 use nmap_core::ServiceTable;
 use nmap_sys::datadir::{self, DataDirs};
-use nmap_sys::nsefs::PolicyFs;
+use nmap_sys::nsefs::{output_dirs, PolicyFs};
 use nmap_sys::nsehost::{self, DataLocator, DataSource, ProgressNet};
 use nmap_sys::nsenet::TokioNet;
 
@@ -183,10 +183,12 @@ fn open(setup: Setup) -> Result<Running, String> {
     );
 
     // Scripts read beneath the data directories and the files named in
-    // their arguments, and write only the latter (Decision 2). Also
-    // readable, never writable: the scripts the operator chose, wherever
-    // they are (`--script ./mine.nse`), and their SSH client files, for
-    // `ssh1.lua`.
+    // their arguments, and write only the latter (Decision 2), and beneath
+    // a directory the operator named in a documented output-directory
+    // argument (`http-fetch.destination=`, `fspolicy::OUTPUT_DIR_ARGS`),
+    // where they may also make directories (`lfs.mkdir`). Also readable,
+    // never writable: the scripts the operator chose, wherever they are
+    // (`--script ./mine.nse`), and their SSH client files, for `ssh1.lua`.
     let home = datadir::home();
     let read_only: Vec<PathBuf> = chosen
         .scripts
@@ -197,7 +199,12 @@ fn open(setup: Setup) -> Result<Running, String> {
                 .flat_map(|h| [h.join(".ssh/config"), h.join(".ssh/known_hosts")]),
         )
         .collect();
-    let fs = PolicyFs::new(&data.existing(), &[], &named_values(&args)).with_read_files(&read_only);
+    let fs = PolicyFs::new(
+        &data.existing(),
+        &output_dirs(&output_dir_values(&args)),
+        &named_values(&args),
+    )
+    .with_read_files(&read_only);
 
     let fetch_dirs = data.clone();
     let stdout_null = setup.stdout_null;

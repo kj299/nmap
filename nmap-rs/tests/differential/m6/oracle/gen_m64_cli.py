@@ -26,15 +26,35 @@ output, by this file:
     init_error HEX      the message after "NSE: failed to initialize the
                         script engine:", without nmap's `nse_main.lua:N: `.
 
+    tree - TEXT         for a scenario that names @DEST (a fresh, empty
+                        directory each run), what the scripts left there:
+                        one line per entry, `PATH TYPE MODE SIZE SHA256`
+                        (lfs.mkdir and io writes, M6 lfs step).
+
 Within a container, results are sorted by script id: nmap orders them by
 address (`nse-results-sorted-by-id`). The data directory's path reads DATADIR. Each port's state (`xml PORT
 "state STATE"`) is compared too, so a state a script set
 (nmap.set_port_state) must reach the report.
+
+The `lfs` scenarios (docs/LFS-ANALYSIS.md): the fixture l-lfs.nse through
+lfs beneath @DEST, and the shipped http-fetch mirroring SITE, served on
+127.0.0.1:7080 (one of shortport.http's ports; the M6.6 exit harness has
+8180), into @DEST. Both name @DEST in an argument the port designates as an
+output directory (fspolicy::OUTPUT_DIR_ARGS), so the port's sandbox lets them
+write there; nmap has no sandbox. The one harness tolerance here: http-fetch lists its
+downloads in its XML in the order its parallel crawl finished them, which
+varies from run to run under 7.94 itself (measured: 5 runs, 4 orders), so in
+the scenarios UNORDERED names, and only in that script's table of that key,
+the <elem>s are compared sorted. Normal output, at default verbosity, prints
+only the summary line, and the tree must match exactly.
 """
 
+import hashlib
 import os
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -48,7 +68,7 @@ import gen_m64_scripts as scripts_gen  # noqa: E402
 import gen_m64_net as net_gen  # noqa: E402
 
 REPO = scripts_gen.REPO
-SHIPPED = ["http-title.nse", "http-headers.nse"]
+SHIPPED = ["http-title.nse", "http-headers.nse", "http-fetch.nse"]
 FIX = "46020,46021,46022"
 
 SCENARIOS = [
@@ -69,7 +89,98 @@ SCENARIOS = [
     ("bad-args", ["-p", FIX, "--script", "s-args", "--script-args", "{"]),
     ("missing-args-file", ["-p", FIX, "--script", "s-args", "--script-args-file",
                            "/nonexistent/m64-args"]),
+    ("lfs", ["-p", "1", "--script", "l-lfs", "--script-args", "http-fetch.destination=@DEST"]),
+    ("fetch", ["-p", "7080", "--script", "http-fetch", "--script-args",
+               "http-fetch.destination=@DEST"]),
+    ("fetch-short", ["-p", "7080", "--script", "http-fetch", "--script-args",
+                     "destination=@DEST/"]),
+    ("fetch-path", ["-p", "7080", "--script", "http-fetch", "--script-args",
+                    "http-fetch.destination=@DEST,http-fetch.paths=/a/top.html"]),
 ]
+
+# Per scenario, the (script id, table key) whose <elem>s are compared sorted.
+UNORDERED = {
+    "fetch": {("http-fetch", "Successfully Downloaded")},
+    "fetch-short": {("http-fetch", "Successfully Downloaded")},
+}
+
+SITE_PORT = 7080
+# The fixture site http-fetch mirrors: nested directories (create_directory's
+# recursion), a directory URL (saved as index.html), a link through `..` and
+# one with encoded separators, which the URL library resolves or escapes so
+# that nothing is written outside @DEST.
+SITE = {
+    "/": b'<html><body><a href="/a/b/deep.html">d</a> <a href="/a/top.html">t</a> '
+         b'<a href="/c/notes.txt">n</a> <a href="/a/b/../../c/up.html">u</a> '
+         b'<a href="/a/..%2f..%2fesc.html">e</a></body></html>',
+    "/a/b/deep.html": b'<html><body><a href="/a/b/">dir</a> <a href="/">home</a></body></html>',
+    "/a/b/": b"<html><body>a/b index</body></html>",
+    "/a/top.html": b"<html><body>top</body></html>",
+    # http-fetch.paths=/a/top.html asks for this (build_path, http-fetch.nse:71).
+    "//a/top.html": b"<html><body>top</body></html>",
+    "/c/notes.txt": b"plain notes\n",
+    "/c/up.html": b"<html><body>up</body></html>",
+    "/a/..%2f..%2fesc.html": b"<html><body>escaped</body></html>",
+}
+
+
+def serve_site(stop):
+    """SITE on 127.0.0.1:SITE_PORT, one thread per connection, as gen_m64_net serves."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", SITE_PORT))
+    s.listen(64)
+    s.settimeout(0.2)
+
+    def handle(c):
+        c.settimeout(5)
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                d = c.recv(4096)
+                if not d:
+                    return
+                data += d
+            path = data.split(b" ", 2)[1].decode("latin-1") if data.count(b" ") >= 2 else "/"
+            body = SITE.get(path)
+            ctype = b"text/plain" if path.endswith(".txt") else b"text/html"
+            if body is None:
+                head, body = b"HTTP/1.1 404 Not Found", b"not found"
+            else:
+                head = b"HTTP/1.1 200 OK"
+            c.sendall(head + b"\r\nServer: fixture/1.0\r\nContent-Type: " + ctype +
+                      b"\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                c, _ = s.accept()
+            except OSError:
+                continue
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    return s
+
+
+def tree(root):
+    """What is beneath root, one line per entry: path, type, mode, size, digest."""
+    lines = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in sorted(dirnames) + sorted(filenames):
+            p = os.path.join(dirpath, name)
+            st = os.lstat(p)
+            rel = os.path.relpath(p, root)
+            if stat.S_ISDIR(st.st_mode):
+                lines.append("%s d %o" % (rel, stat.S_IMODE(st.st_mode)))
+            else:
+                with open(p, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+                lines.append("%s f %o %d %s" % (rel, stat.S_IMODE(st.st_mode), st.st_size, digest))
+    return "\n".join(sorted(lines))
 
 ARGS_FILE_TEXT = "s-args.a=2,b={p,q},,\n"
 
@@ -143,7 +254,7 @@ def normal_rows(text):
     return rows
 
 
-def xml_rows(text):
+def xml_rows(text, unordered=()):
     rows = []
     try:
         root = ET.fromstring(text)
@@ -152,6 +263,13 @@ def xml_rows(text):
 
     def add(container, parent):
         for s in parent.findall("script"):
+            for t in s.findall("table"):
+                if (s.get("id"), t.get("key")) in unordered:
+                    elems = sorted(t.findall("elem"), key=lambda e: e.text or "")
+                    for e in t.findall("elem"):
+                        t.remove(e)
+                    for e in elems:
+                        t.append(e)
             rows.append((container, ET.tostring(s, encoding="unicode").strip()))
 
     for tag, name in (("prescript", "pre"), ("postscript", "post")):
@@ -187,11 +305,17 @@ def init_error(stderr):
     return None
 
 
-def run(binary, extra, tmp, data):
+def run(binary, extra, tmp, data, unordered=()):
     args_file = os.path.join(tmp, "m64-args")
     with open(args_file, "w") as fh:
         fh.write(ARGS_FILE_TEXT)
     extra = [args_file if a == "@ARGSFILE" else a for a in extra]
+    dest = os.path.join(tmp, "dest")
+    uses_dest = any("@DEST" in a for a in extra)
+    if uses_dest:
+        shutil.rmtree(dest, ignore_errors=True)
+        os.mkdir(dest)
+        extra = [a.replace("@DEST", dest) for a in extra]
     out_n = os.path.join(tmp, "out.nmap")
     out_x = os.path.join(tmp, "out.xml")
     for f in (out_n, out_x):
@@ -207,7 +331,9 @@ def run(binary, extra, tmp, data):
     normal = open(out_n).read() if os.path.exists(out_n) else ""
     xml = open(out_x).read() if os.path.exists(out_x) else ""
     rows = [("row",) + r_ for r_ in normal_rows(norm(normal))]
-    rows += [("xml",) + r_ for r_ in xml_rows(norm(xml))]
+    rows += [("xml",) + r_ for r_ in xml_rows(norm(xml), unordered)]
+    if uses_dest:
+        rows.append(("tree", "-", tree(dest)))
     rows.sort(key=lambda r_: (r_[0], r_[1], script_id(r_[2]), r_[2]))
     return rows
 
@@ -220,11 +346,11 @@ def all_rows(binary):
     out = []
     tmp = tempfile.mkdtemp(prefix="m64-cli-")
     stop = threading.Event()
-    socks = scripts_gen.listeners(stop) + net_gen.serve(stop)
+    socks = scripts_gen.listeners(stop) + net_gen.serve(stop) + [serve_site(stop)]
     try:
         data = datadir(tmp)
         for name, extra in SCENARIOS:
-            out.append((name, extra, run(binary, extra, tmp, data)))
+            out.append((name, extra, run(binary, extra, tmp, data, UNORDERED.get(name, ()))))
     finally:
         stop.set()
         for s in socks:

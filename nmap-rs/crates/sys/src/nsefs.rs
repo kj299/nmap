@@ -21,12 +21,17 @@ pub struct PolicyFs {
 }
 
 impl PolicyFs {
-    /// `data_dirs` readable, `output_dirs` readable and writable, and each of
-    /// `named` that is a file — or could be one, in an existing directory —
-    /// readable and writable. Directories that do not exist are dropped.
+    /// `data_dirs` readable, `output_dirs` readable and writable, with
+    /// directories creatable beneath them, and each of `named` that is a
+    /// file — or could be one, in an existing directory — readable and
+    /// writable. A data or output directory that does not exist, or is not a
+    /// directory, is dropped.
     pub fn new(data_dirs: &[PathBuf], output_dirs: &[PathBuf], named: &[Vec<u8>]) -> PolicyFs {
         let dirs = |ds: &[PathBuf]| -> Vec<PathBuf> {
-            ds.iter().filter_map(|d| d.canonicalize().ok()).collect()
+            ds.iter()
+                .filter_map(|d| d.canonicalize().ok())
+                .filter(|d| d.is_dir())
+                .collect()
         };
         let named = named
             .iter()
@@ -59,6 +64,12 @@ impl PolicyFs {
     pub fn policy(&self) -> &FsPolicy {
         &self.policy
     }
+}
+
+/// The directories the operator designated for script output: the values
+/// of the arguments `fspolicy::OUTPUT_DIR_ARGS` names, as paths.
+pub fn output_dirs(values: &[Vec<u8>]) -> Vec<PathBuf> {
+    values.iter().filter_map(|v| path_of(v)).collect()
 }
 
 /// `path` as the OS reads it: bytes up to the first NUL (`fopen` reads a C
@@ -134,6 +145,30 @@ impl ScriptFs for PolicyFs {
 
     fn stdout(&self) -> Box<dyn ScriptFile> {
         Box::new(Stdout)
+    }
+
+    /// `mkdir(path, 0775)` (`nse_fs.cc:117`), on the canonical path, if it
+    /// is beneath a designated output directory. A missing parent is
+    /// `ENOENT` whether or not the script may look, as for `open`; a path
+    /// that exists, a directory or not, is `EEXIST` where the script may
+    /// write, and `EACCES` elsewhere.
+    fn mkdir(&self, path: &[u8]) -> Result<(), FsError> {
+        let missing = || FsError {
+            message: "No such file or directory".into(),
+            errno: 2,
+        };
+        let path = path_of(path).ok_or_else(missing)?;
+        let target = canonical_target(&path).ok_or_else(missing)?;
+        if !self.policy.allows_mkdir(&target) {
+            return Err(FsError::denied());
+        }
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o775);
+        }
+        b.create(&target).map_err(|e| fs_error(&e))
     }
 }
 
@@ -270,6 +305,104 @@ mod tests {
         assert_eq!(
             fs.open(&bytes(&root.join("other.txt")), write_mode()).err(),
             Some(FsError::denied())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn directories_are_made_beneath_output_dirs_only() {
+        let root = scratch("mkdir");
+        let out = root.join("loot");
+        let data = root.join("data");
+        std::fs::create_dir_all(&out).expect("mkdir");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        let named = root.join("named.txt");
+        let fs = PolicyFs::new(
+            std::slice::from_ref(&data),
+            std::slice::from_ref(&out),
+            &[bytes(&named)],
+        );
+        // Beneath the output directory, with a trailing separator as
+        // http-fetch writes it, and C's mode before the umask.
+        assert_eq!(fs.mkdir(&bytes(&out.join("10.0.0.1/"))), Ok(()));
+        assert!(out.join("10.0.0.1").is_dir());
+        #[cfg(unix)]
+        {
+            // 0775 under the process's umask, which a directory made 0777
+            // shows. (Under a umask with 002 set, 0775 and 0777 agree.)
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            let mode = |p: &Path| std::fs::metadata(p).expect("made").permissions().mode() & 0o777;
+            std::fs::DirBuilder::new()
+                .mode(0o777)
+                .create(root.join("umask"))
+                .expect("mkdir");
+            let allowed = mode(&root.join("umask"));
+            assert_eq!(mode(&out.join("10.0.0.1")), 0o775 & allowed);
+        }
+        let e = fs.mkdir(&bytes(&out.join("10.0.0.1"))).expect_err("exists");
+        assert_eq!((e.message.as_str(), e.errno), ("File exists", 17));
+        let e = fs.mkdir(&bytes(&out.join("a/b"))).expect_err("no parent");
+        assert_eq!(
+            (e.message.as_str(), e.errno),
+            ("No such file or directory", 2)
+        );
+        std::fs::write(out.join("f"), b"x").expect("write");
+        let e = fs.mkdir(&bytes(&out.join("f/g"))).expect_err("not a dir");
+        assert_eq!((e.message.as_str(), e.errno), ("Not a directory", 20));
+        // Nowhere else: beside it, in a data directory, where a file is named,
+        // or out by `..`.
+        for p in [
+            root.join("beside"),
+            data.join("x"),
+            named.clone(),
+            out.join("10.0.0.1/../../escaped"),
+        ] {
+            assert_eq!(
+                fs.mkdir(&bytes(&p)),
+                Err(FsError::denied()),
+                "{}",
+                p.display()
+            );
+            assert!(!p.exists(), "{} was made", p.display());
+        }
+        // An existing path outside: refused, not reported as existing.
+        assert_eq!(fs.mkdir(&bytes(&data)), Err(FsError::denied()));
+        assert_eq!(
+            fs.mkdir(b"").map_err(|e| e.errno),
+            Err(2),
+            "mkdir(\"\") is ENOENT"
+        );
+        // Out by a symbolic link planted beneath the output directory.
+        #[cfg(unix)]
+        {
+            let elsewhere = root.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).expect("mkdir");
+            std::os::unix::fs::symlink(&elsewhere, out.join("link")).expect("symlink");
+            assert_eq!(
+                fs.mkdir(&bytes(&out.join("link/x"))),
+                Err(FsError::denied())
+            );
+            assert!(!elsewhere.join("x").exists());
+            // A dangling link is not followed: it exists.
+            std::os::unix::fs::symlink(root.join("nowhere"), out.join("dangling"))
+                .expect("symlink");
+            let e = fs.mkdir(&bytes(&out.join("dangling"))).expect_err("exists");
+            assert_eq!(e.errno, 17);
+            assert!(!root.join("nowhere").exists());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn output_dirs_must_exist_and_be_directories() {
+        let root = scratch("outdirs");
+        let file = root.join("file");
+        std::fs::write(&file, b"x").expect("write");
+        let fs = PolicyFs::new(&[], &[root.join("absent"), file.clone()], &[]);
+        assert!(fs.policy().write_roots.is_empty());
+        assert_eq!(
+            output_dirs(&[b"/a\0b".to_vec(), Vec::new()]),
+            vec![PathBuf::from("/a")]
         );
         let _ = std::fs::remove_dir_all(&root);
     }

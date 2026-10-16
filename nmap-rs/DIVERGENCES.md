@@ -3535,7 +3535,10 @@ Gated by three things:
       - **reading** is allowed beneath nmap's data directories, and of a file
         the operator named in `--script-args`;
       - **writing** is allowed to a named file, or beneath an output directory
-        the operator designated.
+        the operator designated: since the lfs step, a directory named in an
+        argument a shipped script documents as its output directory
+        (`nse-output-dirs-documented-args`). Until then nothing designated
+        one, and no script could write beneath a directory.
 
       Paths are compared canonical, with `..` and symbolic links resolved, and
       the canonical path is what is opened. A refusal reads as the system's:
@@ -3622,22 +3625,23 @@ Gated by three things:
       and 100 userdata with a `__gc`, collected in full collections, are never
       finalized, and the review's repro, with a full collection after every
       slice, sees no finalizer call and no match past the ceiling.
-- [ ] `nse-c-modules-pending` — `openssl`, `lfs`, `libssh2` and `zlib` are
+- [ ] `nse-c-modules-pending` — `openssl`, `libssh2` and `zlib` are
       not preloaded yet. The 12 libraries and 2 suites above fail to load
       where they need them, and are pinned so that each failure must be
       exactly the absence of its module. `nmapdb` was ported in M6.6 step a,
-      and `lpeg` (with `re`, `lpeg-utility`, `json`, `coap` and `mobileme` on
-      it) registered in step e. Four suites that load run only their tests
+      `lpeg` (with `re`, `lpeg-utility`, `json`, `coap` and `mobileme` on
+      it) registered in step e, and a minimal `lfs` in the lfs step
+      (`lfs-minimal`). Four suites that load run only their tests
       that need no `openssl`, which they add only when `pcall(require,
       'openssl')` succeeds: http 75 of nmap's 105, sasl 0 of 3, smbauth 0 of
       4 and vnc 0 of 4. The suite gate holds each to the count nmap gives
       without the port's missing modules (`unittest-emu`), so it passes by
       that count now and must reach nmap's own when `openssl` lands.
       `unittest.run_tests()` over all of `unittest.lua`'s libraries fails on
-      16 (`bitcoin`, `bittorrent`, `iax2`, `iscsi`, `lfs`, `libssh2`,
+      15 (`bitcoin`, `bittorrent`, `iax2`, `iscsi`, `libssh2`,
       `libssh2-utility`, `mongodb`, `openssl`, `pgsql`, `rsync`, `sip`,
       `ssh1`, `ssh2`, `tns`, `zlib`), each on the same module as under nmap
-      without them.
+      without them (16, with `lfs`, before the lfs step).
 
       Two C modules carry the unterminated option list behind
       `nse-condvar-option-overread` and
@@ -3661,29 +3665,30 @@ Gated by three things:
       left to M7.
 - [ ] `nse-categories-abort-on-unported-modules` — on the shipped
       `scripts/`, these categories stop at start-up with `could not load
-      script` and `QUITTING!` (rc 1), before any scan:
-      - `safe` and `all`: `http-fetch.nse:4: module 'lfs' not found`.
-        http-fetch comes before http-vuln-cve2014-3704 in `script.db`, and
-        nmap loads each script as it selects it, so `all` stops on `lfs`
-        first;
-      - `vuln`, `intrusive` and `exploit`:
-        `http-vuln-cve2014-3704.nse:8: module 'openssl' not found`.
+      script` and `QUITTING!` (rc 1), before any scan: `vuln`, `intrusive`,
+      `exploit` and `all`, each on
+      `http-vuln-cve2014-3704.nse:8: module 'openssl' not found`.
 
-      Measured on 7.94 with `openssl`, `lfs`, `libssh2` and `zlib` removed
-      (`gen_m66_scriptload.py`'s emulation): it selects 125 (`safe`), 56
-      (`vuln`), 82 (`intrusive`), 29 (`exploit`) and 192 (`all`) scripts
-      and stops on the same `file:line`, and so does the port, line for line
-      (the exit scenarios' `abort` blocks, `nse_exit_differential`). Every
-      nmap build registers these modules (`nse_main.cc:564-581`), so this
-      matches no real nmap.
+      Measured on 7.94 with `openssl`, `libssh2` and `zlib` removed
+      (`gen_m66_scriptload.py`'s emulation): it selects 56 (`vuln`), 82
+      (`intrusive`), 29 (`exploit`) and 272 (`all`) scripts and stops on the
+      same `file:line`, and so does the port, line for line (the exit
+      scenarios' `abort` blocks, `nse_exit_differential`). Every nmap build
+      registers these modules (`nse_main.cc:564-581`), so this matches no
+      real nmap.
+
+      **Retired:**
+      - for `safe` by the lfs step (M6.6 D1 (c)). Until then `safe` and
+        `all` stopped on `http-fetch.nse:4: module 'lfs' not found`, at 125
+        and 192 selected. `safe` now selects 352 and loads 334, with 18
+        dropped quietly (`nse-sc-openssl-quiet-drops`), as 7.94 without
+        `openssl` does: an exit `load` block, run in a loopback-only
+        network namespace because `safe` runs broadcast scripts.
 
       **Retired by:**
-      - the minimal-`lfs` step after M6.6 (D1(c)) for `safe`, which then
-        selects 352 and loads 334, 18 dropped quietly (measured on 7.94 with
-        `lfs` present); `all` then stops on `openssl`;
       - M6.5 (`openssl`) for `vuln` (105 load), `intrusive` (213 load, 4
         quiet) and `exploit` (45 load);
-      - both, for `all` (611 selected, 607 load, 4 quiet on `libssh2` and
+      - M6.5, for `all` (611 selected, 607 load, 4 quiet on `libssh2` and
         `zlib`).
 
       The scenario asserts each category's failing script and its
@@ -3720,7 +3725,17 @@ Gated by three things:
       `openssl` first, so nothing later in its chain is reachable while
       `openssl` is missing.
 
-      **Retired by M6.5** (`openssl`): the list must then be empty, and the
+      **`safe`, since the lfs step:** 18 scripts dropped quietly, the six
+      and bitcoin-getaddr, bitcoin-info, bittorrent-discovery, duplicates,
+      http-cakephp-version, http-php-version, http-virustotal,
+      rsa-vuln-roca, rsync-list-modules, shodan-api, smb-ls and
+      ssh2-enum-algos. `OPENSSL_QUIET` is per selection (`safe` 18, `-sC`,
+      `default` and `-A` 6, `version` none). The 12 are attributed by
+      measurement, not by reading each chain: with each missing module
+      removed alone, `openssl` drops all 18 and `libssh2` and `zlib` none,
+      and 7.94 with all three present loads all 352.
+
+      **Retired by M6.5** (`openssl`): the lists must then be empty, and the
       tolerance goes with this entry.
 - [ ] `nse-lpeg-utility-not-preloaded` — nmap's engine requires `lpeg` and
       `lpeg-utility` before any script loads (`nse_main.lua:150-151`), for
@@ -5568,3 +5583,99 @@ the entry they replace).
   `lpeg-stall-limit-ends-finite-work`.
 - `lpeg_slowness_regression`: the adversarial-slowness gate (D3 condition 4)
   of `lpeg-stall-limit-ends-finite-work`.
+
+## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
+
+M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which
+`http-fetch` needs, so that `--script safe` loads. Phase 0 and decisions:
+[`docs/LFS-ANALYSIS.md`](docs/LFS-ANALYSIS.md). `lfs` is registered as
+`nse_main.cc:566` registers it: a global and in `package.loaded`, between
+`nmapdb` and `lpeg`. This retires `nse-categories-abort-on-unported-modules`
+for `safe`, and `all` now stops on `openssl`.
+
+**Gated** by:
+- `nse_cli_differential` (`oracle/gen_m64_cli.py`, against 7.94):
+  - `lfs`: the fixture `l-lfs.nse`, 20 rows, every result and argument error
+    byte for byte, and the tree it leaves;
+  - `fetch`, `fetch-short`, `fetch-path`: the shipped http-fetch mirroring a
+    fixture site through `http-fetch.destination=`, `destination=` and
+    `http-fetch.paths=`. Script output and the tree must match: each path,
+    type, mode, size and SHA-256. The one tolerance: the XML's download list
+    is compared sorted in `fetch` and `fetch-short`, since 7.94's own order
+    varies with its parallel crawl (5 runs, 4 orders).
+- `scriptload_differential`: 561 / 1 / 49, as 7.94 without `openssl`,
+  `libssh2` and `zlib`;
+- `nselib_differential`: `unittest.run_tests()` fails on 15 libraries;
+- `nse_exit_differential`: `safe` as a `load` block, 352 / 334 / 18 quiet,
+  in a loopback-only network namespace (`unshare -rn`); `vuln`, `intrusive`,
+  `exploit` and `all` stop on `openssl`;
+- unit tests in `lfs`, `fspolicy` and `nsefs`, and the `nse_scriptargs` fuzz
+  target's output-directory properties.
+- **Sabotage, each caught:**
+  - `mkdir` without the policy check (nsefs);
+  - `allows_mkdir` as `allows(.., true)`, so a named file could become a
+    directory (fspolicy, nsefs);
+  - the command line designating nothing (the `lfs`, `fetch` and
+    `fetch-short` scenarios);
+  - `dir` among the designating keys (fspolicy);
+  - `mkdir` returning `errno` as a third value, as `io.open` does (the `lfs`
+    scenario).
+
+### Divergences from the C
+
+- [x] `lfs-minimal` — `lfs` has `get_path_separator`, `mkdir`, `_COPYRIGHT`,
+      `_DESCRIPTION` and `_VERSION`. `dir`, `link` and `rmdir` are absent:
+      nil, where nmap has functions (`nse_fs.cc:286-293`). No shipped script
+      or library calls them; `link` would void the sandbox's premise that
+      scripts cannot create links (`THREAT-MODEL.md`). Pinned by
+      `lfs::tests::the_separator_and_info_fields`.
+- [x] `lfs-mkdir-through-policy` (security) — nmap's `mkdir` makes any
+      directory nmap's privileges allow, usually as root. Here it makes one
+      only beneath a designated output directory
+      (`nse-output-dirs-documented-args`): the canonical parent joined with
+      the name, so `..` and a planted symbolic link do not lead out, and a
+      dangling link is `EEXIST`, not followed. Elsewhere it returns
+      `nil, "Permission denied"`, the system's refusal, and a path that
+      exists outside is refused rather than reported as existing. A missing
+      parent is `ENOENT` either way, as for `io.open`. The mode is the C's,
+      0775 before the umask. Pinned by
+      `nsefs::tests::directories_are_made_beneath_output_dirs_only` and
+      `fspolicy::tests::directories_are_made_beneath_output_dirs_only`.
+- [x] `nse-output-dirs-documented-args` (security) — a directory is
+      designated for script output only by the arguments the shipped scripts
+      document as the directory they save into (`fspolicy::OUTPUT_DIR_ARGS`):
+      `http-fetch.destination`, `http-config-backup.save`,
+      `ms-sql-dump-hashes.dir` and `snmp-ios-config.tftproot` by their full
+      keys, and `destination` and `tftproot` by the short keys
+      `stdnse.get_script_args` also accepts. `dir` and `save` are not: other
+      scripts read them as a path on the target
+      (`http-phpmyadmin-dir-traversal.dir`, `http-vlcstreamer-ls.dir`) or a
+      file-name template (`stuxnet-detect.save`). So
+      `ms-sql-dump-hashes.dir=/x` designates `/x`, and `dir=/x` does not:
+      that script then cannot save, where nmap saves. Only top-level string
+      values count; designation holds for every script in the run, as named
+      files do. Decided in the lfs step's Phase 0, D1 (a). Pinned by
+      `fspolicy::tests::only_documented_output_arguments_designate_directories`
+      and the `nse_scriptargs` fuzz target.
+- [ ] `nse-output-dir-must-exist` — a designated directory must exist when
+      the run starts. nmap's http-fetch creates a missing destination,
+      parents and all (`create_directory`, `http-fetch.nse:76-89`). Here
+      the destination is not designated, so `mkdir` is refused at its top
+      and every save fails. **http-fetch still prints `Successfully
+      Downloaded Everything At: DEST/...`**, as it does in nmap whenever
+      its output table is not empty, errors included: the failures show
+      only in its XML and at `-vv`. Measured end to end against 7.94 (a
+      fresh `new/dest`). The operator's workaround is to create the
+      directory first. Designating a path that does not exist yet would mean
+      canonicalising its nearest existing ancestor and refusing `..` in the
+      rest. That is a change to the decision, left to the next sandbox step
+      (`nse-named-values-grant-files`).
+- [ ] `nse-named-values-grant-files` (security, open) — every
+      `--script-args` value that names a local file is readable and
+      writable by every script in the run (`fspolicy::named_values`), at
+      any depth. Some arguments are paths on the target: given
+      `http-phpmyadmin-dir-traversal.file=/etc/passwd`, the port also hands
+      this host's `/etc/passwd` to every script, writable. Found in the lfs
+      step's Phase 0. **Decided (D2 (a)): fix next**, in its own step: a
+      value grants a file only from an argument the scripts document as a
+      local file, a table like `OUTPUT_DIR_ARGS`.

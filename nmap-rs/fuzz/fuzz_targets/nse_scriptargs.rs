@@ -13,13 +13,20 @@
 //     A parsed table is never empty -- `{}` is `{""}` -- so writing one back
 //     out never needs a form the grammar lacks;
 //   * `sanitize` (`cstringSanityCheck`) keeps at most the length asked for, of
-//     the bytes before the first NUL, every one printable.
+//     the bytes before the first NUL, every one printable;
+//   * `fspolicy::output_dir_values` designates exactly the string values of
+//     the top-level arguments `OUTPUT_DIR_ARGS` names, in order, and nothing
+//     nested or array-indexed; and a policy over those directories lets a
+//     script make a directory exactly where it may write, beneath one of them.
 //
 // Input layout: byte 0 splits the rest into the file and the command line
 // (0 means no file); byte 1 is the sanitiser's length.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::path::{Path, PathBuf};
+
+use nmap_core::nse::fspolicy::{output_dir_values, FsPolicy, OUTPUT_DIR_ARGS};
 use nmap_core::nse::nmaplib::sanitize;
 use nmap_core::nse::scriptargs::{parse, registry_args, ArgTable, ArgValue, ArgsError};
 
@@ -73,6 +80,46 @@ fn never_empty(t: &ArgTable) -> bool {
         })
 }
 
+fn check_output_dirs(t: &ArgTable) {
+    let want: Vec<Vec<u8>> = t
+        .fields
+        .iter()
+        .filter(|(k, _)| OUTPUT_DIR_ARGS.iter().any(|a| a.as_bytes() == k.as_slice()))
+        .filter_map(|(_, v)| match v {
+            ArgValue::Str(s) => Some(s.clone()),
+            ArgValue::Table(_) => None,
+        })
+        .collect();
+    let got = output_dir_values(t);
+    assert_eq!(got, want, "output_dir_values");
+    // Each designated value that reads as an absolute path, as a root.
+    let roots: Vec<PathBuf> = got
+        .iter()
+        .filter_map(|v| std::str::from_utf8(v).ok())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .collect();
+    let policy = FsPolicy {
+        write_roots: roots.clone(),
+        ..FsPolicy::default()
+    };
+    for r in &roots {
+        let beneath = r.join("x");
+        assert!(policy.allows_mkdir(&beneath) && policy.allows(&beneath, true));
+    }
+    // Any path at all: a directory may be made only where a file may be
+    // written, and never by a relative path.
+    for v in t.fields.iter().filter_map(|(_, v)| match v {
+        ArgValue::Str(s) => std::str::from_utf8(s).ok(),
+        ArgValue::Table(_) => None,
+    }) {
+        let p = Path::new(v);
+        if policy.allows_mkdir(p) {
+            assert!(p.is_absolute() && policy.allows(p, true), "{v:?}");
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
         return;
@@ -94,6 +141,7 @@ fuzz_target!(|data: &[u8]| {
             let mut text = Vec::new();
             write_table(&t, &mut text);
             assert_eq!(parse(&text), Ok(t.clone()), "re-parsing {text:?}");
+            check_output_dirs(&t);
         }
         Err(ArgsError::NoMatch | ArgsError::TooDeep) => {}
     }

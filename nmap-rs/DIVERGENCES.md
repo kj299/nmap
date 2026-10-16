@@ -3815,6 +3815,17 @@ Gated by three things:
 - [x] `os-time-sets-fields-before-failing` — `os.time` normalises the table's
       fields before reporting that the time cannot be represented, as C's
       `setallfields` runs before the error.
+- [x] `os-time-seconds-carried-last` — **a port defect, found by the
+      `nse_utf8_date` fuzz target in CI (the lfs step) and fixed there.**
+      glibc's `mktime` clamps the seconds to 0..=59, finds the time the other
+      fields name, and adds the seconds it set aside last
+      (`LEAP_SECONDS_POSSIBLE`), so that intermediate time must break down
+      too. The port summed every field at once, so fields whose seconds
+      carried the result back from beyond `tm_year`'s range gave a time where
+      timegm gives -1. `os.time` now fails there with "time result cannot be
+      represented", as in C. Pinned by
+      `osdate::tests::mktime_fails_where_the_time_before_the_seconds_cannot_break_down`
+      and the seed `fuzz/seeds/nse_utf8_date/mktime_seconds_carry_past_int_min`.
 - [x] `strftime-century-unpadded` — `%C` and `%F` print a small or negative
       year's century and year unpadded, as glibc does.
 - [x] `io-read-negative-count` — `f:read(-1)` raises "not enough memory", as

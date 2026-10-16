@@ -131,21 +131,30 @@ pub struct TmInput {
 /// A daylight-saving flag that is set asks for a time an hour earlier than
 /// the fields say, as glibc's `mktime` treats a request for DST in a zone
 /// that has none; the normalised fields then report no DST.
+///
+/// glibc clamps the seconds to 0..=59 first (`LEAP_SECONDS_POSSIBLE`,
+/// `sec_requested`), finds the time those fields name, and only then adds
+/// the seconds it set aside. That intermediate time must break down too, so
+/// a time whose fields fit but whose seconds carry it back from beyond the
+/// range of `tm_year` fails, as in glibc: `None`.
 pub fn mktime(input: TmInput) -> Option<(i64, Tm)> {
-    // glibc carries seconds into minutes and so on with wide arithmetic, so
-    // any `int` fields have a sum; only its breakdown can fail.
+    // glibc carries the fields into one another with wide arithmetic, so
+    // any `int` fields have a sum; only the breakdowns can fail.
     let mon = i64::from(input.mon);
     let year = i64::from(input.year) + 1900 + mon.div_euclid(12);
     let month = mon.rem_euclid(12) + 1;
     let days = days_from_civil(year, month, 1) + i64::from(input.mday) - 1;
+    let sec = input.sec.clamp(0, 59);
     let mut t = days
         .checked_mul(SECS_PER_DAY)?
         .checked_add(i64::from(input.hour) * 3600)?
         .checked_add(i64::from(input.min) * 60)?
-        .checked_add(i64::from(input.sec))?;
+        .checked_add(i64::from(sec))?;
     if input.isdst > 0 {
         t = t.checked_sub(3600)?;
     }
+    localtime(t)?;
+    let t = t.checked_add(i64::from(input.sec) - i64::from(sec))?;
     let tm = localtime(t)?;
     Some((t, tm))
 }
@@ -381,6 +390,33 @@ mod tests {
         let tm = gmtime(-1).unwrap();
         assert_eq!((tm.year, tm.hour, tm.min, tm.sec), (69, 23, 59, 59));
         assert!(gmtime(i64::MAX).is_none());
+    }
+
+    #[test]
+    fn mktime_fails_where_the_time_before_the_seconds_cannot_break_down() {
+        // The fuzz target's find (CI, the lfs step): the fields' time fits in
+        // `tm_year`, 31 years above INT_MIN, but glibc's time for them with
+        // the seconds clamped to 0..=59, 44 years earlier, does not, and
+        // timegm returns -1.
+        let input = TmInput {
+            year: -2147481747,
+            mon: -1,
+            mday: 0,
+            hour: 16777216,
+            min: -2013265920,
+            sec: 1394943352,
+            isdst: 0,
+        };
+        assert_eq!(mktime(input), None);
+        // The same time reached through the minutes instead breaks down.
+        let (t, tm) = mktime(TmInput {
+            min: -2013265920 + 1394943352 / 60,
+            sec: 1394943352 % 60,
+            ..input
+        })
+        .expect("representable");
+        assert_eq!(localtime(t), Some(tm));
+        assert!(tm.year < 0);
     }
 
     #[test]

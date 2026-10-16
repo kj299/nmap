@@ -28,7 +28,7 @@ fn script_scans_print_as_under_nmap() {
         .expect("python3 runs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout.contains("0 of 19 scenarios differ"),
+        out.status.success() && stdout.contains("0 of 20 scenarios differ"),
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -337,5 +337,80 @@ fn only_documented_arguments_open_a_directory_to_scripts() {
     made.sort();
     assert_eq!(made, ["sub", "x"]);
     let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The port alone (D2, `nse-file-args-documented`): a value opens a file
+/// only from an argument a shipped script uses as a local file, as that
+/// script uses it. A path on the target (`http-phpmyadmin-dir-traversal.file`,
+/// `file`) opens nothing here; `userdb` reads and does not write; `outfile`
+/// writes. And nothing writable overlaps a data directory: such a
+/// designation is refused, with a warning.
+#[test]
+fn only_local_file_arguments_open_their_files() {
+    let script = "categories = {'safe'}\n\
+        local stdnse = require 'stdnse'\n\
+        prerule = function() return true end\n\
+        action = function()\n\
+          local p = stdnse.get_script_args('target')\n\
+          local r = io.open(p, 'r')\n\
+          local got = r and r:read('a') or 'no read'\n\
+          if r then r:close() end\n\
+          local w, err = io.open(p, 'a')\n\
+          if w then w:write('!') w:close() end\n\
+          return got .. ' / ' .. (w and 'wrote' or err:gsub('^.*: ', ''))\n\
+        end\n";
+    let d = datadir("files", &[("f-probe.nse", script)]);
+    let secret = std::env::temp_dir().join(format!("m64e-files-secret-{}", std::process::id()));
+    let run = |args: &str| {
+        std::fs::write(&secret, "secret").expect("secret");
+        let o = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
+            .arg("--datadir")
+            .arg(&d)
+            .args(["-sT", "-Pn", "-n", "-p", "1", "--script", "f-probe"])
+            .arg("--script-args")
+            .arg(args.replace("SECRET", &secret.to_string_lossy()))
+            .arg("127.0.0.1")
+            .output()
+            .expect("nmap-rs runs");
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            std::fs::read_to_string(&secret).expect("secret"),
+        )
+    };
+    for args in [
+        "target=SECRET,http-phpmyadmin-dir-traversal.file=SECRET",
+        "target=SECRET,file=SECRET",
+        "target=SECRET,url=SECRET",
+        "target=SECRET,nested={userdb=SECRET}",
+    ] {
+        let (out, _, after) = run(args);
+        assert!(
+            out.contains("|_f-probe: no read / Permission denied"),
+            "{args}: {out}"
+        );
+        assert_eq!(after, "secret", "{args}: written");
+    }
+    let (out, _, after) = run("target=SECRET,userdb=SECRET");
+    assert!(
+        out.contains("|_f-probe: secret / Permission denied"),
+        "{out}"
+    );
+    assert_eq!(after, "secret");
+    let (out, _, after) = run("target=SECRET,outfile=SECRET");
+    assert!(out.contains("|_f-probe: secret / wrote"), "{out}");
+    assert_eq!(after, "secret!");
+    // An output directory inside the data directory: refused, said once.
+    let (_, err, _) = run(&format!(
+        "target=SECRET,destination={}",
+        d.join("nselib").display()
+    ));
+    assert!(
+        err.contains("NSE: Warning: scripts may not write to")
+            && err.contains("overlaps the data directory"),
+        "{err}"
+    );
+    let _ = std::fs::remove_file(&secret);
     let _ = std::fs::remove_dir_all(&d);
 }

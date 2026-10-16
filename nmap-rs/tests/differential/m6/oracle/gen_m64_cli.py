@@ -104,12 +104,17 @@ SCENARIOS = [
                      "destination=@DEST/"]),
     ("fetch-path", ["-p", "7080", "--script", "http-fetch", "--script-args",
                     "http-fetch.destination=@DEST,http-fetch.paths=/a/top.html"]),
+    # A destination that does not exist yet: http-fetch makes it, parents
+    # and all, under 7.94, and the port lets it (D2).
+    ("fetch-new", ["-p", "7080", "--script", "http-fetch", "--script-args",
+                   "http-fetch.destination=@DEST/new/deeper/dest"]),
 ]
 
 # Per scenario, the (script id, table key) whose <elem>s are compared sorted.
 UNORDERED = {
     "fetch": {("http-fetch", "Successfully Downloaded")},
     "fetch-short": {("http-fetch", "Successfully Downloaded")},
+    "fetch-new": {("http-fetch", "Successfully Downloaded")},
 }
 
 # Symbolic links made in @DEST before a scenario runs, (name, target).

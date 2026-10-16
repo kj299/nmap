@@ -116,9 +116,9 @@ that name a path on the target, such as
 **Decided: (a).** The table is `fspolicy::OUTPUT_DIR_ARGS`, with the five
 folder arguments the review found added under the same rule (`idpath` by its
 short key too; `path` never). Designation is per run, not per script, as
-named files are. A directory that does not exist is
-not designated: http-fetch in 7.94 creates a missing destination, and the port
-refuses (`nse-output-dir-must-exist`).
+named files are. A directory that does not exist was
+not designated at first: http-fetch in 7.94 creates a missing destination, and
+the port refused (`nse-output-dir-must-exist`, closed by D2's step, §8).
 
 ### D2 — Argument values that grant files
 
@@ -127,7 +127,8 @@ refuses (`nse-output-dir-must-exist`).
 - (b) Fix it in this step.
 - (c) Accept it as a residual risk.
 
-**Decided: (a)** (`nse-named-values-grant-files`, open).
+**Decided: (a)** (`nse-named-values-grant-files`), and done in its own step
+(§8).
 
 ## 6. The step
 
@@ -193,7 +194,116 @@ its own 18 sabotages (14 caught) and found:
   - `nse-templated-output-paths` and `nse-whois-ip-cache-in-datadir`;
   - `cli-debug-equals-refused`;
   - the hardening notes (refuse designating a directory that holds a data
-    directory), under D2's step.
+    directory), under D2's step, which did it (§8).
 
 After the fixes, the review's four surviving sabotages, and both
 dangling-link defences removed together, each fail a named gate.
+
+## 8. The named-files step (D2)
+
+D2 (a): a value grants a file only from an argument the shipped scripts open
+as a local file, by the same mechanism as D1. Done on the lfs step's branch,
+with the two changes the step's ledger left to it: a destination that does not
+exist yet, and the review's hardening.
+
+### The census
+
+Every argument read in the 744 shipped Lua files (945 reads of 792 keys:
+797 through `stdnse.get_script_args`, 148 through `nmap.registry.args`), and
+every `io.open` and `io.lines` (86 sites in 68 files), each
+traced from the open back to where its path comes from. A path comes from:
+
+| source | examples | grant |
+|---|---|---|
+| a data file, by `nmap.fetchfile` alone | `datafiles`, `jdwp-inject.filename`, `nselib/data/...` | none needed: `fetchfile` searches the data directories only, and an absolute path is not found there |
+| an argument, opened as a local file to read (often after `fetchfile` fails) | `userdb`, `brute.credfile`, `dns-brute.hostlist`, `targets-xml.iX` | **`READ_FILE_ARGS`**, 52 keys |
+| an argument, opened to write or append | `*.outfile`, `ajp-request.filename`, `*.map_path`, `oracle-brute-stealth.johnfile` | **`WRITE_FILE_ARGS`**, 20 keys |
+| a directory argument, the file beneath it | http-fetch, the 3270 scripts | `OUTPUT_DIR_ARGS` (D1) |
+| an argument, with more appended | `ldap.savesearch`, `ldap.saveprefix`, `hostmap.prefix`, `stuxnet-detect.save` | none (`nse-templated-output-paths`) |
+| the environment | `ssh1.lua`'s `~/.ssh/config` and `~/.ssh/known_hosts` | read-only, by the host (`os-getenv-home-only`) |
+| the script's own state | whois-ip's cache beside `nmap-services` | none (`nse-whois-ip-cache-in-datadir`) |
+
+Each table entry cites the line that reads it (`fspolicy.rs`).
+
+### The short-key rule
+
+`stdnse.get_script_args` accepts a key without the script's name
+(`stdnse.lua:616-628`); `nmap.registry.args[k]` takes the key as written. A
+short key is listed only where **every** shipped reader of it, by its full key
+or its short one, opens a local file the same way:
+
+- `file` is never: `http-axis2-dir-traversal.file`,
+  `http-phpmyadmin-dir-traversal.file` and `http-vuln-cve2006-3392.file` name
+  a file on the target. `http-put.file` counts by its full key only.
+- `filename` is read-only: `http-virustotal.filename` and
+  `smb-print-text.filename` read it, `ajp-request.filename` writes, so only
+  that full key writes.
+- `hostlist` (dns-brute, nje-node-brute), `idlist` (cics-enum, vtam-enum) and
+  `outfile` (seven scripts) are read or written by every reader alike.
+- `path`, `dir` and `save` stay out, as in D1.
+
+So `filename=/x` lets scripts read `/x`, and `ajp-request.filename=/x` lets
+them write it; under nmap, `filename=/x` also makes ajp-request write `/x`.
+That and the closed list itself are the divergence
+(`nse-file-args-documented`): a script given a local path under an argument
+the census missed cannot open it.
+
+The values are those of top-level string fields, as in D1:
+`nested={userdb=/x}` and `{/x}` grant nothing, where before any value at any
+depth did. `smb-psexec`'s `config` is not listed: it is a Lua file run with
+`loadfile`, which scripts do not have here (`require-searches-only-nselib`).
+
+### A destination that does not exist yet
+
+The C's http-fetch makes a missing destination, parents and all
+(`create_directory`, `http-fetch.nse:76-89`). An output directory named before
+it exists is now designated as its nearest existing ancestor, canonical,
+joined with the rest of the path, which must be plain names: a `.` or `..`
+there means what it means only once the directories exist, so it refuses the
+designation. The missing directories above it may be made, each itself and
+nothing beside it (`FsPolicy::creatable`). Compared canonical, as everything
+is, so a link planted in their place later leads nowhere writable.
+
+Measured through the shipped http-fetch against 7.94, with
+`http-fetch.destination=DEST/new/deeper/dest` (the `fetch-new` scenario): the
+same 16-entry tree, path, type, mode, size and SHA-256, and the same output
+(`nse-output-dir-must-exist`, closed).
+
+### Hardening: nothing writable overlaps a data directory
+
+From the lfs review: an output directory or a named file that is in a data
+directory, or holds one, is refused, and so is one that overlaps what a data
+directory's entries lead to (`nselib`, `scripts`, the data files), which a
+link can put anywhere. Scripts could otherwise write what this run and later
+runs load. nmap has no such rule (`nse-write-overlapping-data-dirs`). Each
+refusal, and each output directory that cannot be designated, is reported on
+standard error, before the scan:
+
+```
+NSE: Warning: scripts may not write to /usr/share/nmap/nselib: it overlaps the data directory /usr/share/nmap.
+```
+
+Binding a key to the scripts that read it, the review's last note, is not
+done: a grant holds for every script in the run, as nmap's arguments are
+every script's (left in `nse-file-args-documented`).
+
+### Gates
+
+- `fspolicy::tests::only_local_file_arguments_name_files`,
+  `the_tables_are_disjoint`,
+  `the_missing_way_to_an_output_dir_is_creatable_and_no_more`;
+- `nsefs::tests::an_output_dir_that_does_not_exist_yet_can_be_made`,
+  `nothing_writable_overlaps_a_data_directory`,
+  `output_dirs_must_be_directories_or_plain_names_beneath_one`;
+- `only_local_file_arguments_open_their_files` (the CLI, port only): a path on
+  the target opens nothing, a read argument reads and does not write, a write
+  argument writes, a destination in a data directory is refused with the
+  warning;
+- the `fetch-new` scenario against 7.94 (20 scenarios, 0 differ);
+- the `nse_scriptargs` fuzz target: each table's values are exactly the
+  top-level string fields it lists.
+
+Four sabotages, each caught: `file` added to `READ_FILE_ARGS` (two fspolicy
+tests and the CLI test), the overlap check removed (nsefs and the CLI),
+read files made writable (the CLI), and `..` accepted in a destination that
+does not exist (nsefs).

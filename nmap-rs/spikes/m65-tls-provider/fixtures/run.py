@@ -78,7 +78,7 @@ FIXTURES = [
     ("starttls-modern", "starttls", "ECDHE-RSA-AES128-GCM-SHA256 tls12", "starttls", "", "--starttls smtp"),
     # Weak and odd certificates 7.94 accepts.
     ("rsa512", "s_server", "rsa512 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0", "host", "", ""),
-    ("rsa1024-md5cert", "s_server", "rsamd5 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0", "host", "", ""),
+    ("rsa2048-md5cert", "s_server", "rsamd5 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0", "host", "", ""),
     ("rsa-sha1-signed-cert", "s_server", "rsasha1 -tls1_3", "host", "", ""),
     ("secp256k1-cert", "s_server", "ecsecp256k1 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0", "host", "", ""),
     ("dsa-dhe", "s_server", "dsa2048 -tls1_2 -cipher DHE-DSS-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/dh2048.pem", "host", "", ""),

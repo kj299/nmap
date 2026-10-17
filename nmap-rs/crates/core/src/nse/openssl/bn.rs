@@ -809,6 +809,7 @@ mod tests {
 
     /// `nse-bignum-operand-cap`: every cap, at and one past it.
     #[test]
+    #[cfg_attr(miri, ignore)] // megabit values and a 16,384-bit mod_exp
     fn the_caps_hold_at_their_edges() {
         let at = |bits: u64| {
             let mut v = Bn::zero();

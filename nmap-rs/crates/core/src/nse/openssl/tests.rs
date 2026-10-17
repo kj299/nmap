@@ -273,8 +273,22 @@ fn the_memory_budget_refuses_a_number() {
         "local ok1, e1 = pcall(openssl.bignum_rand, 1 << 20) \
          local z = openssl.bignum_dec2bn('1') \
          local ok2, e2 = pcall(z.set_bit, z, (1 << 20) - 1) \
-         return r(ok1, e1, ok2, e2)",
+         return r(ok1, e1, ok2, e2, z:num_bits())",
         i32::MAX,
     );
-    assert_eq!(out, "false|s:not enough memory|false|s:not enough memory");
+    // Refused before the number changes: it is still 1.
+    assert_eq!(out, "false|s:not enough memory|false|s:not enough memory|1");
+}
+
+/// `bignum_rand`'s count is the C's `int` (`size_t bits = luaL_checkinteger`,
+/// passed to `BN_rand`'s `int`): 2^32 + 8 is 8 bits, and 2^32 - 1 is -1, 0.
+#[test]
+fn rand_bits_are_narrowed_to_int() {
+    let out = run("local big, max, nonzero = 0, 0, false \
+         for _ = 1, 64 do \
+           local x = openssl.bignum_rand((1 << 32) + 8) \
+           max = math.max(max, x:num_bits()) nonzero = nonzero or x:num_bits() > 0 \
+         end \
+         return r(max <= 8, nonzero, openssl.bignum_rand((1 << 32) - 1):num_bits())");
+    assert_eq!(out, "true|true|0");
 }

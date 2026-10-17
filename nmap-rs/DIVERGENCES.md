@@ -5777,7 +5777,7 @@ The only exemptions are named:
 
 The golden itself agrees with Python ints on every row they can compute (step
 a, `oracle/xref_m65.py`). Also gated:
-- 23 unit tests in the module, which Miri runs;
+- 24 unit tests in the module, which Miri runs (two heavy ones natively only);
 - the fuzz target `nse_openssl_bignum`, against a machine-integer model and a
   deterministic 64-bit Miller-Rabin;
 - 13 sabotages (`docs/M6.5-ANALYSIS.md`, §11 row b).

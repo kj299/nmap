@@ -37,6 +37,8 @@ any difference.
 | `m66b_tree_*` | LPeg pattern construction (M6.6 step b): every constructor and operator, the grammar builder and verifier, the metatable, vs this tree's Lua + LPeg built with `-fwrapv`, and a UBSan screen of every row | `regen_m66b_trees.sh` | `lpeg_tree_differential` | 5,710 rows (14 `[wrapv]`) |
 | `m6_base_golden.txt` | the base and coroutine libraries as an NSE script meets them (`oracle/m6_base_probe.nse`): argument checks and results, coroutines inside a script's own, the collector as nmap starts it, `warn`'s output, vs nmap 7.94 | `regen_m6_base.sh`, `oracle/gen_m6_base.py` (live in CI) | `base_differential` | 67 rows + 5 warning lines; 7 pinned |
 | `m66_exit_golden.txt` | M6.6's exit criterion (step e): what `-sC`, `--script default`, `--script version` and `-A` select, load and drop on `--datadir REPO`; the categories that still stop at start-up; address-info, riak-http-info, bitcoinrpc-info and http-affiliate-id run, vs nmap 7.94 | `regen_m66_exit.sh`, `oracle/gen_m66_exit.py` (live in CI) | `nse_exit_differential` (in `nmap-cli`) | 18 scenarios |
+| `m65_cases.txt`, `m65_golden.txt`, `m65_drift.txt`, `m65_screen.txt`, `m65_census.txt`, `m65_sabotage.txt` (with `m65_algs.txt`, `m65_certs.txt`) | the C module `openssl` and `parse_ssl_certificate` (M6.5 step a): digests, HMAC, ciphers, bignums, randomness, argument checks and 3,020 certificates, vs nmap 7.94; this tree's C, built standalone, differs only in pinned drift rows | `regen_m65.sh` (`--check`; `--check-794` live in CI) | none yet: steps b–e | 29,476 rows; 1,690 `ub:` (no C run), 447 `nondet:`, 3,208 drift |
+| `m65_tls_golden.txt` | nmap 7.94's TLS client on 61 fixture servers (M6.5 step a; the oracle side of step f1) | `regen_m65_tls.sh` (`--check` live in CI) | none yet: step f1 | 61 fixtures |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -907,3 +909,259 @@ timeout 60 nmap --datadir REPO -d -Pn -n -sT -p 1 --script-timeout 2 \
 **Adversarial slowness.** `lpeg_search/adversarial/` and
 `crates/core/tests/lpeg_slowness_regression.rs`: see `lpeg_search/README.md`,
 "The regression gate".
+
+## M6.5 step a — the `openssl` corpus
+
+The oracle for steps b–e (`docs/M6.5-ANALYSIS.md` §11 row a, D1): nmap 7.94's
+`openssl` module and `parse_ssl_certificate`, over a seeded case matrix, with
+this tree's C as the spec.
+
+```sh
+./regen_m65.sh               # regenerate everything in place (needs nmap; about a minute)
+./regen_m65.sh --check       # CI build job: no nmap
+./regen_m65.sh --check-794   # CI differential job: nmap 7.94 against the golden
+python3 oracle/sabotage_m65.py   # local: the 34 C sabotage variants (about five minutes)
+```
+
+| file | what it is |
+|---|---|
+| `oracle/gen_m65_cases.py` | the case generator (seed `0x6D65`), a pure function of itself, `m65_algs.txt` and `m65_certs.txt`; its docstring lists the families and the tags |
+| `m65_algs.txt` | the algorithm table, captured once (`--capture-algs`) from the oracle and libcrypto: 56 digests and 170 ciphers as `supported_*` list them, OpenSSL's aliases, and the key, IV and block length of every cipher name a case uses |
+| `m65_certs.txt` | the certificate corpus, committed as data (its keys are random): Phase 0's 2,876 `x` rows (`oracle/gen_m65_certs.py`) and 144 BER rows (`b`) (`oracle/mkber_m65.py`, which reproduces them byte for byte) |
+| `m65_cases.txt` | 29,476 rows, `ID TAGS OP SUB ARG...` |
+| `oracle/m65_core.lua` | the one case runner: 7.94 loads it through `oracle/m65_probe.nse`, the tree's C through `oracle/m65_driver.lua`, and the port will load it too. Renders every value greppably (LESSONS #049) and drains the OpenSSL error queue after each case |
+| `oracle/build_openssl_oracle.sh` | builds `oracle/lua-openssl`: this tree's `liblua/` with `nse_openssl.cc` and `nse_ssl_cert.cc` linked in, nmap's headers swapped for `oracle/openssl_oracle_shim.h` by anchored edits, nsock's SSL initialisation replayed (without it `supported_ciphers` is empty), and one named repair (below); `--variant asan` and `--sabotage NAME` build the variants |
+| `m65_golden.txt` | 7.94's answer for every row, run twice, under a header pinning nmap, OpenSSL, `OPENSSL_CONF`, the legacy provider and the digests of the cases and certificates |
+| `m65_drift.txt` | the 3,208 rows where this tree's C differs from 7.94, each with its §2 family: `year` 2,546 (validity years are `year - 1900` in the tree), `ivnul` 648 (an IV whose first byte is NUL is no IV to 7.94), `asn1time` 13, `state` 1 |
+| `m65_screen.txt` | the sanitizer screen's record: every row under the tree's C built with `-fsanitize=address,undefined -fno-sanitize-recover=all -DLUA_USE_APICHECK`, no report, with the digests of what decided it |
+| `m65_census.txt` | rows per exposed function and method; none is zero |
+| `m65_sabotage.txt` | what each of the 34 C sabotage variants changed, and how many rows caught it |
+| `oracle/xref_m65.py` | the independent references (below) |
+
+**Tags.** A row's tags name the step that gates it (`b` bignums, `c` digests,
+HMAC and randomness, `d` ciphers, `e` certificates, `g` the module's shape),
+then:
+- `nondet:random` (70): the random functions, compared on shape (type,
+  length, a bignum's sign). The bignum rows draw 64 times and report whether
+  every draw fits in N bits and whether one is shorter, which pins
+  `BN_rand`'s free top bit.
+- `nondet:random-iv` (357): GCM and 3DES key wrap with no IV, or, to 7.94,
+  an IV whose first byte is NUL. libcrypto draws the IV itself.
+- `nondet:alias-name` (20): an argument error of `bignum_rand` or
+  `bignum_pseudo_rand`. They are one C function under two names, and
+  `luaL_argerror` names whichever its walk of `package.loaded` meets first.
+  That order follows Lua's per-state hash seed (`lstate.c:71`), so it
+  changes from run to run. The two names compare equal on these rows only.
+- `ub:iv-length-uaf` (1,688): a non-empty IV of the wrong length. The C frees
+  the cipher context and then reads it for the error message
+  (`nse-openssl-iv-length-uaf`). It crashed 7.94 more than 1,000 times before
+  the first run was stopped. No C runs these rows as written. The golden records status `ub` and
+  the message the C means, `Length of iv is N; should be M`, from the
+  oracle's one named repair: build_openssl_oracle.sh reads the length before
+  the free. `gen_m65.py golden` refuses a golden unless the repaired C
+  raises "Length of iv" on exactly the tagged rows.
+- `ub:rc4-empty-key` (2): RC4 with a zero-length key. libcrypto's
+  `RC4_set_key` reads 256 bytes past the key (`nse-openssl-rc4-empty-key`),
+  so the output changes from run to run. The golden records `ub` with no
+  value (ORACLE-CHECKS 5c); the Rust side covers the row.
+
+**What each mode checks.** `golden` runs the tree's C first and checks the
+`ub:` tags. It then runs 7.94 twice over every other row and refuses the
+golden if an untagged row differs between the runs. `drift` refuses any
+difference between the tree and 7.94 that no §2 family explains. `--check`
+needs no nmap. It regenerates the cases and requires them byte for byte. It
+checks the golden's digests and statuses, the drift and census files, and
+the screen record against its inputs. It rebuilds the tree's C and requires
+it to differ from the golden in exactly the pinned rows (`--check-tree`). It
+runs the cross-check, and requires the sabotage record to name these cases.
+`--check-794` refuses to compare on an environment other than the header's,
+then requires 7.94 to agree with the golden on all 27,786 rows it runs.
+
+**Independent references** (`oracle/xref_m65.py`, part of `--check`). These
+share no code with OpenSSL:
+- Python ints, for add, div, mod_exp, the bit functions, primality and every
+  bignum's five renderings;
+- CPython's own hash modules (`_md5`, `_sha1`, `_sha256`, `_sha512`,
+  `_sha3`, `_blake2`, not `hashlib`), with HMAC computed from them;
+- nettle, through ctypes, for md4, ripemd160, sha512-224/256 and sm3.
+
+They agree on every check they can compute: 16,376 bignum renderings, and
+1,678 digest, 466 HMAC, 2,841 add, 2,502 div, 1,999 mod_exp, 1,767 bit and
+1,092 primality rows. Only whirlpool has no reference. The C's deliberate behaviours are written in as the
+expectation: `div` by 0 is (0, 0); `mod_exp` ignores the signs of p and m
+and gives 0 for m = 0; positions are int32.
+
+**What the screen cannot see.** ASan instruments the C that is built here,
+not the system libcrypto it calls. The RC4 over-read happens inside
+libcrypto, so the screen passed it. It surfaced as an untagged row whose
+output changed between two 7.94 runs, which is what the two-run rule exists
+to catch. The screen runs with `allocator_may_return_null=1`, so that
+`rand_bytes(-1)`'s `malloc(SIZE_MAX)` returns NULL as glibc's does. The C
+checks for NULL ("Couldn't allocate memory."); without the option, ASan
+aborts on a request whose behaviour is defined.
+
+**Sabotage** (ORACLE-CHECKS §4). The corpus catches all 34 variants:
+`bn-div-swap` to `cert-bad-der-false`, with what each changes in
+`oracle/sabotage_m65.py`. The first pass missed four:
+- `bn-rand-top`: random rows were compared only by shape. This added the
+  64-draw bound.
+- `digest-short-msg`: no message was over 1,000 bytes. This added 4,099.
+- `cert-utctime-pivot` and `cert-month`: these changed `time_to_tm`'s own
+  parser, which is dead with OpenSSL 3 (`HAVE_OPAQUE_STRUCTS` uses
+  `ASN1_TIME_to_tm`). They were replaced by mutations of the live path.
+
+A variant that changed nothing observable on 3.0.13 (HMAC's unchecked length)
+was replaced by one that does (`hmac-result-checked`). The plan's trimming
+rule applies to every later change of the cases. The cipher grid was trimmed
+(57,885 rows in all before, 29,476 now), and the trimmed corpus is what these
+34 variants measured. The port
+sabotage lists of steps b–e and f1–f2 run against this corpus as each step
+lands.
+
+## M6.5 step a — the TLS fixtures
+
+The oracle side of step f1's gate (`docs/M6.5-ANALYSIS.md` §11 rows a and f1,
+§14.1, §14.5). Step 0's spike ran 61 TLS fixtures against nmap 7.94 and
+against its rustls client; step a commits the fixtures in `m65_tls/` and
+records 7.94's result on each in `m65_tls_golden.txt`. Step f1 supplies the
+other side: the port's client over the same servers, compared row by row,
+with each divergence pinned and ledgered (the five step-0 entries of §14.1).
+
+```sh
+./regen_m65_tls.sh                  # regenerate in place (needs nmap, openssl; about a minute)
+./regen_m65_tls.sh --check          # regenerate and FAIL if the committed golden differs
+./regen_m65_tls.sh --check-header   # FAIL if this machine is not the pinned environment
+python3 oracle/gen_m65_tls.py --check m65_tls_golden.txt --client CMD   # step f1: exits 2 today
+```
+
+| file | what it is |
+|---|---|
+| `oracle/gen_m65_tls.py` | the generator: the fixture table (`FIXTURES`, the rows and names of the spike's `run.py`), the servers, the parsing of what each saw, the header |
+| `m65_tls/s0probe.nse` | the probe 7.94 runs: `connect(...,"ssl")` with a host table, an IP string or a name, or SMTP then `reconnect_ssl`; prints the leaf's SHA-256, length and CN, or the error |
+| `m65_tls/fakesrv.py` | a TLS 1.2 server flight (ServerHello, Certificate, ServerKeyExchange, ServerHelloDone, suite `0xc02f`) with one thing mutated per mode, recording the client's next record |
+| `m65_tls/starttls_smtp.py` | SMTP with STARTTLS, then TLS over Python's `ssl` (OpenSSL 3's `s_server` has no `-starttls`) |
+| `m65_tls/silent.py` | accepts and never speaks |
+| `m65_tls/certs/` | the certificates and keys, all throwaway and self-signed (`CN=m65-*`, `O=nmap-rs`, or `*.example.test`); two chains of 86 and 127 copies of `rsa2048.crt` (70,606 and 104,267 bytes of DER) |
+| `m65_tls/clienthello_suites_794.txt` | the suites 7.94 offers, in its order (§5's `s_server -trace`), for f1's ClientHello |
+| `m65_tls_golden.txt` | the golden: a header, then `FIXTURE<TAB>TAGS<TAB>RESULT<TAB>SERVER`, 61 rows |
+
+The servers were copied from `spikes/m65-tls-provider/fixtures/`. The only
+changes are in what they print:
+- a connection that never reaches TLS prints a line starting `noise:`;
+- `silent.py` holds each connection on its own thread.
+
+**The fixtures.** Each server listens on 127.0.0.1, on port 47300 plus its row
+number (47301–47361; no other M6 generator uses a 47xxx port). nmap 7.94 runs
+`-Pn -sT -n -p PORT --datadir REPO --script m65_tls/s0probe.nse` once against
+each:
+
+| rows | what they test |
+|---|---|
+| `tls12-ecdhe-{rsa,ecdsa}-{aes128gcm,aes256gcm,chacha}`, `tls12-ecdsa-p{384,521}-cert`, `tls12-group-p{256,384,521}` | TLS 1.2 ECDHE with each AEAD suite rustls carries, RSA and ECDSA certificates, each curve forced |
+| `tls12-sig-{pss-sha256,pss-sha512,pkcs1-sha256,pkcs1-sha384,pkcs1-sha1}` | each ServerKeyExchange signature scheme forced; SHA-1 is refused at 7.94's level |
+| `tls13-{aes128-x25519,aes256-p256,chacha-p384,aes128-p521,x448,ffdhe2048}` | TLS 1.3 with each suite and group forced (a HelloRetryRequest where 7.94's first key share is not the group) |
+| `tls13-ecdsa-p{256,384,521}`, `tls13-ed25519`, `tls13-sig-pss-sha384` | TLS 1.3 certificate types and a forced CertificateVerify scheme |
+| `dual-tls12-clientpref`, `dual-tls12-serverpref`, `dual-tls13` | RSA and ECDSA certificates on one server: which leaf 7.94 gets |
+| `starttls-legacy`, `starttls-modern` | SMTP STARTTLS then `reconnect_ssl`, with `AES128-SHA` and with ECDHE-RSA-AES128-GCM |
+| `rsa512`, `rsa2048-md5cert`, `rsa-sha1-signed-cert`, `secp256k1-cert`, `dsa-dhe` | weak and odd certificates. `rsa2048-md5cert` was `rsa1024-md5cert` in Phase 0: the key is 2048-bit |
+| `chain-over64k`, `chain-over100k`, `chain13-over64k` | chains past rustls's 65,535-byte handshake limit and past OpenSSL's 102,400-byte certificate list |
+| `sni-ip-string`, `sni-name` | the server_name 7.94 sends for an IP string and for a name |
+| `tls10-only`, `tls11-only`, `tls12-rsa-kx-gcm`, `tls12-ecdhe-cbc`, `tls12-dhe2048` | legacy reach, the `nse-tls-modern-only` pins |
+| `fake-ok`, `fake-badsig`, `fake-trail`, `fake-garbage`, `fake-noreneg`, `fake-{ecdsa,ed25519}-cert-rsa-suite`, `fake-{x25519,dh,unknownoid}-cert` | the negative fixtures, TLS 1.2: in order, nothing mutated, one ServerKeyExchange signature bit flipped, a byte after the certificate inside its entry, an undecodable certificate, no `renegotiation_info`, and a certificate whose key does not match the suite or is a type TLS refuses |
+| `bad13-control`, `bad13-corrupt-certverify` | TLS 1.3 with a valid and with a corrupt P-256 CertificateVerify |
+| `silent-server`, `connection-refused` | a server that never speaks (7.94 at a 3 s timeout), and a closed port |
+
+**The golden.** `RESULT` is the probe's line. It has three forms:
+- `ok leaf=<sha256> len=<n> cn=<cn>`;
+- `fail <socket error>`;
+- `fail closed`, when the scan found nothing listening. The spike's
+  `results.tsv` spells this `fail (no script result; port closed)`.
+
+`SERVER` is what the fixture server saw of 7.94's connection, and only what is
+the same on every run:
+- **`s_server` rows:** parsed from `-trace` and stderr, keeping only the
+  connections that sent a ClientHello (the connect scan sends none). The
+  fields are:
+  - `hello=` the number of ClientHellos;
+  - `sni=` each one's server_name (`-` for none);
+  - from the last ServerHello and the server's ServerKeyExchange or
+    CertificateVerify: `version=`, `suite=`, `group=` and `sigalg=`;
+  - `alerts=` the fatal alerts, sent or received;
+  - `error=` the server's OpenSSL reason, without the thread id or the
+    source line.
+- **fake rows:** `client alert N` or `client ClientKeyExchange`.
+- **STARTTLS rows:** `tls VERSION CIPHER`.
+- **bad13 rows:** `handshake completed` or the alert the server received.
+
+That gives f1 the version and suite to compare, not only reach, and the SNI
+rows' `sni=127.0.0.1` and `sni=localhost`.
+
+The generator does not connect to check that a server is up. It reads
+`/proc/net/tcp`, because a probe connection is one more connection the
+server would log.
+
+What 7.94 does, against the spike's record:
+- **43 `ok`, 16 `fail ERROR`, 1 `fail TIMEOUT`, 1 `fail closed`.** Every row
+  equals `spikes/m65-tls-provider/fixtures/results/results.tsv`'s 7.94 column,
+  except for the spelling of the closed port.
+- **The fake server saw** ClientKeyExchange for `fake-ok`, then alerts 51, 50,
+  42 and 40 (`noreneg`), 47 for each of the four key-type rows, and 80 for
+  the unknown OID.
+- **`bad13-corrupt-certverify`:** the server received `DecryptError`.
+
+**The header** pins the environment, as §2 "Pinning the CI environment" asks.
+Each `# env` line is one field:
+- `nmap --version`'s first line, and the OpenSSL nmap was compiled with;
+- `openssl version` and `openssl version -d`;
+- `OPENSSL_CONF`, or `unset`;
+- `seclevel`, the effective default security level, **measured**. The
+  generator creates `SSL_CTX_new(TLS_client_method())` through `ctypes`, in
+  the libssl that `ldd` says nmap links, and applies nsock's
+  `CIPHERS_SECURE` (7.94's `nsock_ssl.c`). The configuration file is loaded
+  as libssl loads it for nmap. Measured: 2. A config with
+  `CipherString = DEFAULT:@SECLEVEL=1` makes it 1. A Python `ssl` context or
+  `s_client` would not do: each sets its own cipher string;
+- `seclevel-compiled`, the `-DOPENSSL_TLS_SECURITY_LEVEL` in
+  `openssl version -a` (Ubuntu builds with 2; upstream's default is 1);
+- `legacy-provider`: whether `openssl list -providers -provider legacy`
+  succeeds;
+- `python-ssl`: the OpenSSL behind the STARTTLS fixture server.
+
+`--check-header` compares these fields and exits 1 on any difference.
+`--check` runs the same comparison before anything else.
+
+**Nondeterminism.** None was found, measured as follows:
+- the generator runs the matrix twice by default, about 30 s each, and
+  refuses to write a golden if an untagged row differs;
+- seven full runs with the badserver, in four generator invocations, gave
+  identical rows, and two invocations into separate directories gave
+  byte-identical goldens.
+
+A row that later proves nondeterministic goes into `NONDET` with a reason. It
+is then written with the tag `nondet:<reason>` and never compared. Fields
+that vary by nature are never recorded: timings, random values, the server's
+thread ids and source lines, and the connect scan's own connection.
+
+**The corrupt CertificateVerify: `needs-badserver`.** The spike's TLS 1.3
+server is a Rust binary (`spikes/m65-tls-provider/src/bin/badserver.rs`), and
+nothing in Python or the `openssl` CLI can stand in for it:
+- Python's `ssl` cannot corrupt a CertificateVerify;
+- `s_server` refuses a key that does not match its certificate;
+- corrupting the encrypted record in a proxy draws `bad_record_mac`, not
+  `decrypt_error`.
+
+So the two `bad13-*` rows are tagged `needs-badserver` and recorded from the
+binary when it is there. The generator looks in `$BADSERVER`, then
+`$CARGO_TARGET_DIR/release/badserver`, then
+`spikes/m65-tls-provider/target/release/badserver`. The committed rows were
+recorded from a build of the spike (`cargo build --release --bin badserver`).
+
+Without the binary, the generator prints which rows it could not run and
+why. Then:
+- with `--carry GOLDEN`, it copies those rows from the golden;
+  `regen_m65_tls.sh` passes the committed golden this way, so a
+  regeneration or a `--check` on a machine without Rust keeps them;
+- without `--carry`, it writes them as `skipped`. A `skipped` row is never
+  compared.
+
+The oracle never builds the spike.

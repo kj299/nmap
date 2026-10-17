@@ -10,3 +10,6 @@ __pycache__/
 # grammar is the quickest way to check what the oracle actually ran.
 m62_driver.lua
 m62_sweep.lua
+lua-openssl
+lua-openssl-asan
+lua-openssl-sabotage

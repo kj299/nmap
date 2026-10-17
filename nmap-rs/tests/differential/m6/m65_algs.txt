@@ -1,0 +1,573 @@
+# M6.5 algorithm table (gen_m65_cases.py --capture-algs), from the oracle
+# and libcrypto: OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024).
+# Captured once and committed: the cases are generated from it, not
+# from the host's OpenSSL. Lengths: key, IV (the context's,
+# after EVP_EncryptInit_ex), block; `-` where no cipher resolves.
+# `lookup` names are hex (one holds a NUL).
+digest	RSA-MD4
+digest	RSA-MD5
+digest	RSA-RIPEMD160
+digest	RSA-SHA1
+digest	RSA-SHA1-2
+digest	RSA-SHA224
+digest	RSA-SHA256
+digest	RSA-SHA3-224
+digest	RSA-SHA3-256
+digest	RSA-SHA3-384
+digest	RSA-SHA3-512
+digest	RSA-SHA384
+digest	RSA-SHA512
+digest	RSA-SHA512/224
+digest	RSA-SHA512/256
+digest	RSA-SM3
+digest	blake2b512
+digest	blake2s256
+digest	id-rsassa-pkcs1-v1_5-with-sha3-224
+digest	id-rsassa-pkcs1-v1_5-with-sha3-256
+digest	id-rsassa-pkcs1-v1_5-with-sha3-384
+digest	id-rsassa-pkcs1-v1_5-with-sha3-512
+digest	md4
+digest	md4WithRSAEncryption
+digest	md5
+digest	md5-sha1
+digest	md5WithRSAEncryption
+digest	ripemd
+digest	ripemd160
+digest	ripemd160WithRSA
+digest	rmd160
+digest	sha1
+digest	sha1WithRSAEncryption
+digest	sha224
+digest	sha224WithRSAEncryption
+digest	sha256
+digest	sha256WithRSAEncryption
+digest	sha3-224
+digest	sha3-256
+digest	sha3-384
+digest	sha3-512
+digest	sha384
+digest	sha384WithRSAEncryption
+digest	sha512
+digest	sha512-224
+digest	sha512-224WithRSAEncryption
+digest	sha512-256
+digest	sha512-256WithRSAEncryption
+digest	sha512WithRSAEncryption
+digest	shake128
+digest	shake256
+digest	sm3
+digest	sm3WithRSAEncryption
+digest	ssl3-md5
+digest	ssl3-sha1
+digest	whirlpool
+cipher	aes-128-cbc	16	16	16
+cipher	aes-128-cbc-hmac-sha1	16	16	16
+cipher	aes-128-cbc-hmac-sha256	16	16	16
+cipher	aes-128-ccm	16	7	1
+cipher	aes-128-cfb	16	16	1
+cipher	aes-128-cfb1	16	16	1
+cipher	aes-128-cfb8	16	16	1
+cipher	aes-128-ctr	16	16	1
+cipher	aes-128-ecb	16	0	16
+cipher	aes-128-gcm	16	12	1
+cipher	aes-128-ocb	16	12	16
+cipher	aes-128-ofb	16	16	1
+cipher	aes-128-xts	32	16	1
+cipher	aes-192-cbc	24	16	16
+cipher	aes-192-ccm	24	7	1
+cipher	aes-192-cfb	24	16	1
+cipher	aes-192-cfb1	24	16	1
+cipher	aes-192-cfb8	24	16	1
+cipher	aes-192-ctr	24	16	1
+cipher	aes-192-ecb	24	0	16
+cipher	aes-192-gcm	24	12	1
+cipher	aes-192-ocb	24	12	16
+cipher	aes-192-ofb	24	16	1
+cipher	aes-256-cbc	32	16	16
+cipher	aes-256-cbc-hmac-sha1	32	16	16
+cipher	aes-256-cbc-hmac-sha256	32	16	16
+cipher	aes-256-ccm	32	7	1
+cipher	aes-256-cfb	32	16	1
+cipher	aes-256-cfb1	32	16	1
+cipher	aes-256-cfb8	32	16	1
+cipher	aes-256-ctr	32	16	1
+cipher	aes-256-ecb	32	0	16
+cipher	aes-256-gcm	32	12	1
+cipher	aes-256-ocb	32	12	16
+cipher	aes-256-ofb	32	16	1
+cipher	aes-256-xts	64	16	1
+cipher	aes128	16	16	16
+cipher	aes128-wrap	16	8	8
+cipher	aes192	24	16	16
+cipher	aes192-wrap	24	8	8
+cipher	aes256	32	16	16
+cipher	aes256-wrap	32	8	8
+cipher	aria-128-cbc	16	16	16
+cipher	aria-128-ccm	16	7	1
+cipher	aria-128-cfb	16	16	1
+cipher	aria-128-cfb1	16	16	1
+cipher	aria-128-cfb8	16	16	1
+cipher	aria-128-ctr	16	16	1
+cipher	aria-128-ecb	16	0	16
+cipher	aria-128-gcm	16	12	1
+cipher	aria-128-ofb	16	16	1
+cipher	aria-192-cbc	24	16	16
+cipher	aria-192-ccm	24	7	1
+cipher	aria-192-cfb	24	16	1
+cipher	aria-192-cfb1	24	16	1
+cipher	aria-192-cfb8	24	16	1
+cipher	aria-192-ctr	24	16	1
+cipher	aria-192-ecb	24	0	16
+cipher	aria-192-gcm	24	12	1
+cipher	aria-192-ofb	24	16	1
+cipher	aria-256-cbc	32	16	16
+cipher	aria-256-ccm	32	7	1
+cipher	aria-256-cfb	32	16	1
+cipher	aria-256-cfb1	32	16	1
+cipher	aria-256-cfb8	32	16	1
+cipher	aria-256-ctr	32	16	1
+cipher	aria-256-ecb	32	0	16
+cipher	aria-256-gcm	32	12	1
+cipher	aria-256-ofb	32	16	1
+cipher	aria128	16	16	16
+cipher	aria192	24	16	16
+cipher	aria256	32	16	16
+cipher	bf	16	8	8
+cipher	bf-cbc	16	8	8
+cipher	bf-cfb	16	8	1
+cipher	bf-ecb	16	0	8
+cipher	bf-ofb	16	8	1
+cipher	blowfish	16	8	8
+cipher	camellia-128-cbc	16	16	16
+cipher	camellia-128-cfb	16	16	1
+cipher	camellia-128-cfb1	16	16	1
+cipher	camellia-128-cfb8	16	16	1
+cipher	camellia-128-ctr	16	16	1
+cipher	camellia-128-ecb	16	0	16
+cipher	camellia-128-ofb	16	16	1
+cipher	camellia-192-cbc	24	16	16
+cipher	camellia-192-cfb	24	16	1
+cipher	camellia-192-cfb1	24	16	1
+cipher	camellia-192-cfb8	24	16	1
+cipher	camellia-192-ctr	24	16	1
+cipher	camellia-192-ecb	24	0	16
+cipher	camellia-192-ofb	24	16	1
+cipher	camellia-256-cbc	32	16	16
+cipher	camellia-256-cfb	32	16	1
+cipher	camellia-256-cfb1	32	16	1
+cipher	camellia-256-cfb8	32	16	1
+cipher	camellia-256-ctr	32	16	1
+cipher	camellia-256-ecb	32	0	16
+cipher	camellia-256-ofb	32	16	1
+cipher	camellia128	16	16	16
+cipher	camellia192	24	16	16
+cipher	camellia256	32	16	16
+cipher	cast	16	8	8
+cipher	cast-cbc	16	8	8
+cipher	cast5-cbc	16	8	8
+cipher	cast5-cfb	16	8	1
+cipher	cast5-ecb	16	0	8
+cipher	cast5-ofb	16	8	1
+cipher	chacha20	32	16	1
+cipher	chacha20-poly1305	32	12	1
+cipher	des	8	8	8
+cipher	des-cbc	8	8	8
+cipher	des-cfb	8	8	1
+cipher	des-cfb1	8	8	1
+cipher	des-cfb8	8	8	1
+cipher	des-ecb	8	0	8
+cipher	des-ede	16	0	8
+cipher	des-ede-cbc	16	8	8
+cipher	des-ede-cfb	16	8	1
+cipher	des-ede-ecb	16	0	8
+cipher	des-ede-ofb	16	8	1
+cipher	des-ede3	24	0	8
+cipher	des-ede3-cbc	24	8	8
+cipher	des-ede3-cfb	24	8	1
+cipher	des-ede3-cfb1	24	8	1
+cipher	des-ede3-cfb8	24	8	1
+cipher	des-ede3-ecb	24	0	8
+cipher	des-ede3-ofb	24	8	1
+cipher	des-ofb	8	8	1
+cipher	des3	24	8	8
+cipher	des3-wrap	24	0	8
+cipher	desx	24	8	8
+cipher	desx-cbc	24	8	8
+cipher	id-aes128-CCM	16	7	1
+cipher	id-aes128-GCM	16	12	1
+cipher	id-aes128-wrap	16	8	8
+cipher	id-aes128-wrap-pad	16	4	8
+cipher	id-aes192-CCM	24	7	1
+cipher	id-aes192-GCM	24	12	1
+cipher	id-aes192-wrap	24	8	8
+cipher	id-aes192-wrap-pad	24	4	8
+cipher	id-aes256-CCM	32	7	1
+cipher	id-aes256-GCM	32	12	1
+cipher	id-aes256-wrap	32	8	8
+cipher	id-aes256-wrap-pad	32	4	8
+cipher	id-smime-alg-CMS3DESwrap	24	0	8
+cipher	rc2	16	8	8
+cipher	rc2-128	16	8	8
+cipher	rc2-40	5	8	8
+cipher	rc2-40-cbc	5	8	8
+cipher	rc2-64	8	8	8
+cipher	rc2-64-cbc	8	8	8
+cipher	rc2-cbc	16	8	8
+cipher	rc2-cfb	16	8	1
+cipher	rc2-ecb	16	0	8
+cipher	rc2-ofb	16	8	1
+cipher	rc4	16	0	1
+cipher	rc4-40	5	0	1
+cipher	rc4-hmac-md5	16	0	1
+cipher	seed	16	16	16
+cipher	seed-cbc	16	16	16
+cipher	seed-cfb	16	16	1
+cipher	seed-ecb	16	0	16
+cipher	seed-ofb	16	16	1
+cipher	sm4	16	16	16
+cipher	sm4-cbc	16	16	16
+cipher	sm4-cfb	16	16	1
+cipher	sm4-ctr	16	16	1
+cipher	sm4-ecb	16	0	16
+cipher	sm4-ofb	16	16	1
+alias-digest	BLAKE2B-512
+alias-digest	BLAKE2S-256
+alias-digest	BLAKE2b512
+alias-digest	BLAKE2s256
+alias-digest	KECCAK-KMAC-128
+alias-digest	KECCAK-KMAC-256
+alias-digest	KECCAK-KMAC128
+alias-digest	KECCAK-KMAC256
+alias-digest	MD4
+alias-digest	MD5
+alias-digest	MD5-SHA1
+alias-digest	NULL
+alias-digest	RIPEMD
+alias-digest	RIPEMD-160
+alias-digest	RIPEMD160
+alias-digest	RMD160
+alias-digest	RSA-MD4
+alias-digest	RSA-MD5
+alias-digest	RSA-RIPEMD160
+alias-digest	RSA-SHA1
+alias-digest	RSA-SHA1-2
+alias-digest	RSA-SHA224
+alias-digest	RSA-SHA256
+alias-digest	RSA-SHA3-224
+alias-digest	RSA-SHA3-256
+alias-digest	RSA-SHA3-384
+alias-digest	RSA-SHA3-512
+alias-digest	RSA-SHA384
+alias-digest	RSA-SHA512
+alias-digest	RSA-SHA512/224
+alias-digest	RSA-SHA512/256
+alias-digest	RSA-SM3
+alias-digest	SHA-1
+alias-digest	SHA-224
+alias-digest	SHA-256
+alias-digest	SHA-384
+alias-digest	SHA-512
+alias-digest	SHA-512/224
+alias-digest	SHA-512/256
+alias-digest	SHA1
+alias-digest	SHA2-224
+alias-digest	SHA2-256
+alias-digest	SHA2-384
+alias-digest	SHA2-512
+alias-digest	SHA2-512/224
+alias-digest	SHA2-512/256
+alias-digest	SHA224
+alias-digest	SHA256
+alias-digest	SHA3-224
+alias-digest	SHA3-256
+alias-digest	SHA3-384
+alias-digest	SHA3-512
+alias-digest	SHA384
+alias-digest	SHA512
+alias-digest	SHA512-224
+alias-digest	SHA512-256
+alias-digest	SHAKE-128
+alias-digest	SHAKE-256
+alias-digest	SHAKE128
+alias-digest	SHAKE256
+alias-digest	SM3
+alias-digest	SSL3-MD5
+alias-digest	SSL3-SHA1
+alias-digest	id-rsassa-pkcs1-v1_5-with-sha3-224
+alias-digest	id-rsassa-pkcs1-v1_5-with-sha3-256
+alias-digest	id-rsassa-pkcs1-v1_5-with-sha3-384
+alias-digest	id-rsassa-pkcs1-v1_5-with-sha3-512
+alias-digest	md4WithRSAEncryption
+alias-digest	md5WithRSAEncryption
+alias-digest	ripemd
+alias-digest	ripemd160WithRSA
+alias-digest	rmd160
+alias-digest	sha1WithRSAEncryption
+alias-digest	sha224WithRSAEncryption
+alias-digest	sha256WithRSAEncryption
+alias-digest	sha384WithRSAEncryption
+alias-digest	sha512-224WithRSAEncryption
+alias-digest	sha512-256WithRSAEncryption
+alias-digest	sha512WithRSAEncryption
+alias-digest	sm3WithRSAEncryption
+alias-digest	ssl3-md5
+alias-digest	ssl3-sha1
+alias-digest	whirlpool
+alias-cipher	AES-128-CBC	16	16	16
+alias-cipher	AES-128-CBC-CTS	-	-	-
+alias-cipher	AES-128-CBC-HMAC-SHA1	16	16	16
+alias-cipher	AES-128-CBC-HMAC-SHA256	16	16	16
+alias-cipher	AES-128-CFB	16	16	1
+alias-cipher	AES-128-CFB1	16	16	1
+alias-cipher	AES-128-CFB8	16	16	1
+alias-cipher	AES-128-CTR	16	16	1
+alias-cipher	AES-128-ECB	16	0	16
+alias-cipher	AES-128-OCB	16	12	16
+alias-cipher	AES-128-OFB	16	16	1
+alias-cipher	AES-128-SIV	-	-	-
+alias-cipher	AES-128-WRAP	16	8	8
+alias-cipher	AES-128-WRAP-INV	-	-	-
+alias-cipher	AES-128-WRAP-PAD	16	4	8
+alias-cipher	AES-128-WRAP-PAD-INV	-	-	-
+alias-cipher	AES-128-XTS	32	16	1
+alias-cipher	AES-192-CBC	24	16	16
+alias-cipher	AES-192-CBC-CTS	-	-	-
+alias-cipher	AES-192-CFB	24	16	1
+alias-cipher	AES-192-CFB1	24	16	1
+alias-cipher	AES-192-CFB8	24	16	1
+alias-cipher	AES-192-CTR	24	16	1
+alias-cipher	AES-192-ECB	24	0	16
+alias-cipher	AES-192-OCB	24	12	16
+alias-cipher	AES-192-OFB	24	16	1
+alias-cipher	AES-192-SIV	-	-	-
+alias-cipher	AES-192-WRAP	24	8	8
+alias-cipher	AES-192-WRAP-INV	-	-	-
+alias-cipher	AES-192-WRAP-PAD	24	4	8
+alias-cipher	AES-192-WRAP-PAD-INV	-	-	-
+alias-cipher	AES-256-CBC	32	16	16
+alias-cipher	AES-256-CBC-CTS	-	-	-
+alias-cipher	AES-256-CBC-HMAC-SHA1	32	16	16
+alias-cipher	AES-256-CBC-HMAC-SHA256	32	16	16
+alias-cipher	AES-256-CFB	32	16	1
+alias-cipher	AES-256-CFB1	32	16	1
+alias-cipher	AES-256-CFB8	32	16	1
+alias-cipher	AES-256-CTR	32	16	1
+alias-cipher	AES-256-ECB	32	0	16
+alias-cipher	AES-256-OCB	32	12	16
+alias-cipher	AES-256-OFB	32	16	1
+alias-cipher	AES-256-SIV	-	-	-
+alias-cipher	AES-256-WRAP	32	8	8
+alias-cipher	AES-256-WRAP-INV	-	-	-
+alias-cipher	AES-256-WRAP-PAD	32	4	8
+alias-cipher	AES-256-WRAP-PAD-INV	-	-	-
+alias-cipher	AES-256-XTS	64	16	1
+alias-cipher	AES128	16	16	16
+alias-cipher	AES128-WRAP	16	8	8
+alias-cipher	AES128-WRAP-INV	-	-	-
+alias-cipher	AES128-WRAP-PAD	16	4	8
+alias-cipher	AES128-WRAP-PAD-INV	-	-	-
+alias-cipher	AES192	24	16	16
+alias-cipher	AES192-WRAP	24	8	8
+alias-cipher	AES192-WRAP-INV	-	-	-
+alias-cipher	AES192-WRAP-PAD	24	4	8
+alias-cipher	AES192-WRAP-PAD-INV	-	-	-
+alias-cipher	AES256	32	16	16
+alias-cipher	AES256-WRAP	32	8	8
+alias-cipher	AES256-WRAP-INV	-	-	-
+alias-cipher	AES256-WRAP-PAD	32	4	8
+alias-cipher	AES256-WRAP-PAD-INV	-	-	-
+alias-cipher	ARIA-128-CBC	16	16	16
+alias-cipher	ARIA-128-CCM	16	7	1
+alias-cipher	ARIA-128-CFB	16	16	1
+alias-cipher	ARIA-128-CFB1	16	16	1
+alias-cipher	ARIA-128-CFB8	16	16	1
+alias-cipher	ARIA-128-CTR	16	16	1
+alias-cipher	ARIA-128-ECB	16	0	16
+alias-cipher	ARIA-128-GCM	16	12	1
+alias-cipher	ARIA-128-OFB	16	16	1
+alias-cipher	ARIA-192-CBC	24	16	16
+alias-cipher	ARIA-192-CCM	24	7	1
+alias-cipher	ARIA-192-CFB	24	16	1
+alias-cipher	ARIA-192-CFB1	24	16	1
+alias-cipher	ARIA-192-CFB8	24	16	1
+alias-cipher	ARIA-192-CTR	24	16	1
+alias-cipher	ARIA-192-ECB	24	0	16
+alias-cipher	ARIA-192-GCM	24	12	1
+alias-cipher	ARIA-192-OFB	24	16	1
+alias-cipher	ARIA-256-CBC	32	16	16
+alias-cipher	ARIA-256-CCM	32	7	1
+alias-cipher	ARIA-256-CFB	32	16	1
+alias-cipher	ARIA-256-CFB1	32	16	1
+alias-cipher	ARIA-256-CFB8	32	16	1
+alias-cipher	ARIA-256-CTR	32	16	1
+alias-cipher	ARIA-256-ECB	32	0	16
+alias-cipher	ARIA-256-GCM	32	12	1
+alias-cipher	ARIA-256-OFB	32	16	1
+alias-cipher	ARIA128	16	16	16
+alias-cipher	ARIA192	24	16	16
+alias-cipher	ARIA256	32	16	16
+alias-cipher	BF-CBC	16	8	8
+alias-cipher	BF-CFB	16	8	1
+alias-cipher	BF-ECB	16	0	8
+alias-cipher	BF-OFB	16	8	1
+alias-cipher	CAMELLIA-128-CBC	16	16	16
+alias-cipher	CAMELLIA-128-CBC-CTS	-	-	-
+alias-cipher	CAMELLIA-128-CFB	16	16	1
+alias-cipher	CAMELLIA-128-CFB1	16	16	1
+alias-cipher	CAMELLIA-128-CFB8	16	16	1
+alias-cipher	CAMELLIA-128-CTR	16	16	1
+alias-cipher	CAMELLIA-128-ECB	16	0	16
+alias-cipher	CAMELLIA-128-OFB	16	16	1
+alias-cipher	CAMELLIA-192-CBC	24	16	16
+alias-cipher	CAMELLIA-192-CBC-CTS	-	-	-
+alias-cipher	CAMELLIA-192-CFB	24	16	1
+alias-cipher	CAMELLIA-192-CFB1	24	16	1
+alias-cipher	CAMELLIA-192-CFB8	24	16	1
+alias-cipher	CAMELLIA-192-CTR	24	16	1
+alias-cipher	CAMELLIA-192-ECB	24	0	16
+alias-cipher	CAMELLIA-192-OFB	24	16	1
+alias-cipher	CAMELLIA-256-CBC	32	16	16
+alias-cipher	CAMELLIA-256-CBC-CTS	-	-	-
+alias-cipher	CAMELLIA-256-CFB	32	16	1
+alias-cipher	CAMELLIA-256-CFB1	32	16	1
+alias-cipher	CAMELLIA-256-CFB8	32	16	1
+alias-cipher	CAMELLIA-256-CTR	32	16	1
+alias-cipher	CAMELLIA-256-ECB	32	0	16
+alias-cipher	CAMELLIA-256-OFB	32	16	1
+alias-cipher	CAMELLIA128	16	16	16
+alias-cipher	CAMELLIA192	24	16	16
+alias-cipher	CAMELLIA256	32	16	16
+alias-cipher	CAST5-CBC	16	8	8
+alias-cipher	CAST5-CFB	16	8	1
+alias-cipher	CAST5-ECB	16	0	8
+alias-cipher	CAST5-OFB	16	8	1
+alias-cipher	ChaCha20	32	16	1
+alias-cipher	ChaCha20-Poly1305	32	12	1
+alias-cipher	DES-CBC	8	8	8
+alias-cipher	DES-CFB	8	8	1
+alias-cipher	DES-CFB1	8	8	1
+alias-cipher	DES-CFB8	8	8	1
+alias-cipher	DES-ECB	8	0	8
+alias-cipher	DES-EDE	16	0	8
+alias-cipher	DES-EDE-CBC	16	8	8
+alias-cipher	DES-EDE-CFB	16	8	1
+alias-cipher	DES-EDE-ECB	16	0	8
+alias-cipher	DES-EDE-OFB	16	8	1
+alias-cipher	DES-EDE3	24	0	8
+alias-cipher	DES-EDE3-CBC	24	8	8
+alias-cipher	DES-EDE3-CFB	24	8	1
+alias-cipher	DES-EDE3-CFB1	24	8	1
+alias-cipher	DES-EDE3-CFB8	24	8	1
+alias-cipher	DES-EDE3-ECB	24	0	8
+alias-cipher	DES-EDE3-OFB	24	8	1
+alias-cipher	DES-OFB	8	8	1
+alias-cipher	DES3	24	8	8
+alias-cipher	DES3-WRAP	24	0	8
+alias-cipher	DESX-CBC	24	8	8
+alias-cipher	NULL	-	-	-
+alias-cipher	RC2-40-CBC	5	8	8
+alias-cipher	RC2-64-CBC	8	8	8
+alias-cipher	RC2-CBC	16	8	8
+alias-cipher	RC2-CFB	16	8	1
+alias-cipher	RC2-ECB	16	0	8
+alias-cipher	RC2-OFB	16	8	1
+alias-cipher	RC4	16	0	1
+alias-cipher	RC4-40	5	0	1
+alias-cipher	RC4-HMAC-MD5	16	0	1
+alias-cipher	SEED-CBC	16	16	16
+alias-cipher	SEED-CFB	16	16	1
+alias-cipher	SEED-ECB	16	0	16
+alias-cipher	SEED-OFB	16	16	1
+alias-cipher	SM4	16	16	16
+alias-cipher	SM4-CBC	16	16	16
+alias-cipher	SM4-CFB	16	16	1
+alias-cipher	SM4-CFB128	16	16	1
+alias-cipher	SM4-CTR	16	16	1
+alias-cipher	SM4-ECB	16	0	16
+alias-cipher	SM4-OFB	16	16	1
+alias-cipher	SM4-OFB128	16	16	1
+alias-cipher	aes-128-ccm	16	7	1
+alias-cipher	aes-128-gcm	16	12	1
+alias-cipher	aes-192-ccm	24	7	1
+alias-cipher	aes-192-gcm	24	12	1
+alias-cipher	aes-256-ccm	32	7	1
+alias-cipher	aes-256-gcm	32	12	1
+alias-cipher	aes128	16	16	16
+alias-cipher	aes128-wrap	16	8	8
+alias-cipher	aes192	24	16	16
+alias-cipher	aes192-wrap	24	8	8
+alias-cipher	aes256	32	16	16
+alias-cipher	aes256-wrap	32	8	8
+alias-cipher	aria128	16	16	16
+alias-cipher	aria192	24	16	16
+alias-cipher	aria256	32	16	16
+alias-cipher	bf	16	8	8
+alias-cipher	blowfish	16	8	8
+alias-cipher	camellia128	16	16	16
+alias-cipher	camellia192	24	16	16
+alias-cipher	camellia256	32	16	16
+alias-cipher	cast	16	8	8
+alias-cipher	cast-cbc	16	8	8
+alias-cipher	des	8	8	8
+alias-cipher	des-ede-ecb	16	0	8
+alias-cipher	des-ede3-ecb	24	0	8
+alias-cipher	des3	24	8	8
+alias-cipher	des3-wrap	24	0	8
+alias-cipher	desx	24	8	8
+alias-cipher	id-aes128-CCM	16	7	1
+alias-cipher	id-aes128-GCM	16	12	1
+alias-cipher	id-aes128-wrap	16	8	8
+alias-cipher	id-aes128-wrap-pad	16	4	8
+alias-cipher	id-aes192-CCM	24	7	1
+alias-cipher	id-aes192-GCM	24	12	1
+alias-cipher	id-aes192-wrap	24	8	8
+alias-cipher	id-aes192-wrap-pad	24	4	8
+alias-cipher	id-aes256-CCM	32	7	1
+alias-cipher	id-aes256-GCM	32	12	1
+alias-cipher	id-aes256-wrap	32	8	8
+alias-cipher	id-aes256-wrap-pad	32	4	8
+alias-cipher	id-smime-alg-CMS3DESwrap	24	0	8
+alias-cipher	rc2	16	8	8
+alias-cipher	rc2-128	16	8	8
+alias-cipher	rc2-40	5	8	8
+alias-cipher	rc2-64	8	8	8
+alias-cipher	seed	16	16	16
+alias-cipher	sm4	16	16	16
+lookup		-	-	-
+lookup	206165732d3132382d636263	-	-	-
+lookup	4145532d3132382d43434d	16	7	1
+lookup	4145532d3132382d47434d	16	12	1
+lookup	4145532d3139322d43434d	24	7	1
+lookup	4145532d3139322d47434d	24	12	1
+lookup	4145532d3235362d43434d	32	7	1
+lookup	4145532d3235362d47434d	32	12	1
+lookup	4165732d3132382d436263	16	16	16
+lookup	4246	16	8	8
+lookup	424c4f5746495348	16	8	8
+lookup	43415354	16	8	8
+lookup	434153542d434243	16	8	8
+lookup	4348414348413230	32	16	1
+lookup	43484143484132302d504f4c5931333035	32	12	1
+lookup	444553	8	8	8
+lookup	44455358	24	8	8
+lookup	49442d4145533132382d43434d	16	7	1
+lookup	49442d4145533132382d47434d	16	12	1
+lookup	49442d4145533132382d57524150	16	8	8
+lookup	49442d4145533132382d575241502d504144	16	4	8
+lookup	49442d4145533139322d43434d	24	7	1
+lookup	49442d4145533139322d47434d	24	12	1
+lookup	49442d4145533139322d57524150	24	8	8
+lookup	49442d4145533139322d575241502d504144	24	4	8
+lookup	49442d4145533235362d43434d	32	7	1
+lookup	49442d4145533235362d47434d	32	12	1
+lookup	49442d4145533235362d57524150	32	8	8
+lookup	49442d4145533235362d575241502d504144	32	4	8
+lookup	49442d534d494d452d414c472d434d533344455357524150	24	0	8
+lookup	524332	16	8	8
+lookup	5243322d313238	16	8	8
+lookup	5243322d3430	5	8	8
+lookup	5243322d3634	8	8	8
+lookup	53454544	16	16	16
+lookup	6165732d3132382d6362630078	16	16	16
+lookup	696465612d636263	-	-	-
+lookup	6e6f7065	-	-	-

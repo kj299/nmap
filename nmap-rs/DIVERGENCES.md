@@ -5620,6 +5620,73 @@ the entry they replace).
 - `lpeg_slowness_regression`: the adversarial-slowness gate (D3 condition 4)
   of `lpeg-stall-limit-ends-finite-work`.
 
+## Milestone 6.5 step 0 — the spikes (`spikes/m65-tls-provider`, `spikes/m65-x509`; no code shipped)
+
+Measured, not yet ported: the D3 spike (`docs/M6.5-ANALYSIS.md` §14) ran
+rustls 0.23 with a first-party provider against nmap 7.94 on 61 loopback
+fixtures. The differences below are properties of the client chosen in D3,
+so they are opened now and land, pinned per fixture, with step f1
+(`sys::tls`). Each cites the fixture in
+`spikes/m65-tls-provider/fixtures/results/results.md`.
+
+- [ ] `nse-tls-modern-only` — rustls carries TLS 1.2 and 1.3 with ECDHE and
+      AEAD suites only, by design (`rustls-0.23.46/src/manual/features.rs`).
+      Where 7.94 reaches and the port will not: TLS 1.2 RSA key exchange
+      (`tls12-rsa-kx-gcm`), CBC suites (`tls12-ecdhe-cbc`), DHE
+      (`tls12-dhe2048`), DSA certificates (`dsa-dhe`), X448 and FFDHE groups
+      in TLS 1.3 (`tls13-x448`, `tls13-ffdhe2048`), and STARTTLS servers with
+      only such suites (`starttls-legacy`: 7.94 reconnects with AES128-SHA,
+      the port gets `HandshakeFailure`). Where both fail: TLS 1.0 and 1.1
+      only, a SHA-1-only signature algorithm, a secp256k1 certificate (neither
+      ClientHello offers an ECDSA signature algorithm for that curve). Retired by M6.7, legacy TLS.
+- [ ] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
+      40) when the server sends no `renegotiation_info` extension (RFC 5746,
+      OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates
+      the extension (`client/hs.rs:747`) and continues (`fake-noreneg`: the
+      spike sent ClientKeyExchange). The port reaches servers 7.94 refuses.
+      nmap never renegotiates, so nothing downstream depends on it; a vendor
+      patch of one check would restore the refusal if fidelity is wanted.
+- [ ] `nse-tls-handshake-64k` — rustls refuses a handshake message over
+      65,535 bytes (`msgs/deframer/handshake.rs:376`); OpenSSL's certificate
+      list limit is 102,400 (`SSL_MAX_CERT_LIST_DEFAULT`). A chain between
+      the two reaches 7.94 and not the port (`chain-over64k`: 86
+      certificates, 70,606 bytes, TLS 1.2 and 1.3); over 100 KiB both fail
+      (`chain-over100k`).
+- [ ] `nse-tls-sni-rustls-names` — for a string target that is an IP
+      literal, 7.94 sends it as SNI (`sni-ip-string`: `server_name` =
+      `127.0.0.1` in the server's trace); rustls sends none for an IP
+      address, and rejects names it cannot encode. A DNS name is sent by
+      both (`sni-name`). A host table sends none in both.
+- [ ] `nse-tls-alert-numbers` — where both sides reject, the alert the port
+      sends can differ from 7.94's: a certificate entry with trailing bytes
+      50 vs 42 (`fake-trail`), an undecodable certificate 42 vs 40
+      (`fake-garbage`), a key type not matching the suite 47 vs 40
+      (`fake-ecdsa-cert-rsa-suite`, `fake-ed25519-cert-rsa-suite`,
+      `fake-x25519-cert`, `fake-dh-cert`), an unknown key algorithm 80 vs
+      40 (`fake-unknownoid-cert`). The same alert for a bad
+      ServerKeyExchange signature (51, `fake-badsig`) and a bad TLS 1.3
+      CertificateVerify (`decrypt_error`, `bad13-corrupt-certverify`).
+      Servers do not act on a client's alert number; scripts see
+      `nil, "ERROR"` either way.
+- [ ] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
+      (M6.5 step b) refuse an operand over a per-operation cap with the
+      memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,
+      16,384 bits for every operand of `mod_exp`, 1,048,576 bits for
+      construction and the linear operations. nmap 7.94 computes up to
+      OpenSSL's own cap of 536,870,848 bits (`bn_lib.c:270`) and above it
+      silently returns 0 (`bignum_bin2bn` of 67,108,857 bytes prints `0`).
+      Set by the step-0 spike (`spikes/m65-bignum`, `docs/M6.5-ANALYSIS.md`
+      §14.3): at the sizes a peer can choose, one `mod_exp` or Miller-Rabin
+      round runs for hours to years in C and in Rust alike, with no point at
+      which the stall watchdog could stop it; the caps keep every single
+      call under the 10-minute watchdog with about five times to spare.
+      Visible where 7.94 would answer after minutes: `ssl-dh-params`'s
+      `is_safe_prime` on a DH group over 8,192 bits (7.94: about four
+      minutes at 16,384), ssh2's `mod_exp` with a `p` over 16,384 bits,
+      conversions past 1,048,576 bits; no standardised group reaches any
+      of them. The zero 7.94 returns would reach `mod_exp` or `div` as a
+      zero modulus, which `num-bigint` panics on, so the refusal is an error.
+
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which

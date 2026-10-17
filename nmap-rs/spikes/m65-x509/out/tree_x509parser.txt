@@ -1,0 +1,41 @@
+asn1-rs v0.7.2
+asn1-rs v0.7.2 (*)
+asn1-rs-derive v0.6.0 (proc-macro)
+asn1-rs-impl v0.2.0 (proc-macro)
+data-encoding v2.11.1
+der-parser v10.0.0
+deranged v0.5.9
+displaydoc v0.2.7 (proc-macro)
+displaydoc v0.2.7 (proc-macro) (*)
+lazy_static v1.5.1
+memchr v2.8.3
+minimal-lexical v0.2.1
+nom v7.1.3
+nom v7.1.3 (*)
+num-bigint v0.4.8
+num-conv v0.2.2
+num-integer v0.1.47
+num-traits v0.2.19
+oid-registry v0.8.1
+powerfmt v0.2.1
+proc-macro2 v1.0.107
+proc-macro2 v1.0.107 (*)
+quote v1.0.47
+quote v1.0.47 (*)
+rusticata-macros v4.1.0
+rusticata-macros v4.1.0 (*)
+syn v2.0.119
+syn v2.0.119 (*)
+syn v3.0.9
+syn v3.0.9 (*)
+synstructure v0.13.2
+thiserror v2.0.21
+thiserror v2.0.21 (*)
+thiserror-impl v2.0.21 (proc-macro)
+time v0.3.55
+time v0.3.55 (*)
+time-core v0.1.9
+time-macros v0.2.32 (proc-macro)
+unicode-ident v1.0.27
+x509-parser v0.18.1
+x509parser_probe v0.1.0 (/tmp/claude-0/-home-user-nmap/543e7f61-bb12-5b7e-9ada-a98346a34887/scratchpad/m65s0/x509/rs_x509parser)

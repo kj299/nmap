@@ -1,0 +1,2 @@
+len=67108856  bin2bn_ret=non-NULL  bits_in_num=536870848  is_zero=no  err=(none)
+len=67108857  bin2bn_ret=NULL  bits_in_num=0  is_zero=yes  err=error:01800072:bignum routines::bignum too long

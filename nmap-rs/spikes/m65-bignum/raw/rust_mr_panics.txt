@@ -1,0 +1,20 @@
+== num-bigint 0.4.8 panics ==
+BigUint / 0: PANIC
+BigUint % 0: PANIC
+BigUint::modpow(.., modulus=0): PANIC
+BigInt::modpow(negative exponent, odd modulus): PANIC
+BigInt::modpow(negative exponent, non-invertible modulus): PANIC
+== rust miller_rabin (random odd, typical) ==
+miller_rabin bits=8192 rounds=128 result=false
+miller_rabin bits=8192 rounds=128 result=false
+miller_rabin bits=8192 rounds=128 result=false
+miller_rabin 8192 0.299 0.301 0.288 median 0.299 VmHWM:	    2440 kB
+miller_rabin bits=16384 rounds=128 result=false
+miller_rabin bits=16384 rounds=128 result=false
+miller_rabin bits=16384 rounds=128 result=false
+miller_rabin 16384 0.286 0.296 0.325 median 0.296 VmHWM:	    2532 kB
+== rust miller_rabin on known 4096-bit prime (openssl prime -generate) ==
+miller_rabin bits=4096 rounds=128 result=true
+miller_rabin bits=4096 rounds=128 result=true
+miller_rabin bits=4096 rounds=128 result=true
+miller_rabin 4096 7076.995 6374.665 6973.344 median 6973.344 VmHWM:	    2532 kB

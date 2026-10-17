@@ -1,0 +1,9 @@
+[package]
+name = "x509cert_probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x509-cert = "0.3"
+# same crate x509-cert already pulls; listed only to turn on `ber` (EncodingRules::Ber) for the tolerant variant
+der = { version = "0.8", features = ["ber"] }

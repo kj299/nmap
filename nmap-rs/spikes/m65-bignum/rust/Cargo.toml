@@ -1,0 +1,18 @@
+[package]
+name = "bnbench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+rust-version = "1.88"
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+
+[[bin]]
+name = "bnbench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,17 @@
+crate                  ver        license                                rv     ed   bld  C/asm unsafe asm! forbid
+base64ct               1.8.3      Apache-2.0 OR MIT                      1.85   2024 -        0      4    0 -
+const-oid              0.10.2     Apache-2.0 OR MIT                      1.85   2024 -        0      1    0 deny
+der                    0.8.2      Apache-2.0 OR MIT                      1.85   2024 -        0      4    0 deny
+der_derive             0.8.0      Apache-2.0 OR MIT                      1.85   2024 -        0      0    0 forbid
+flagset                0.4.7      Apache-2.0                             1.65   2021 -        0      2    0 -
+pem-rfc7468            1.0.0      Apache-2.0 OR MIT                      1.85   2024 -        0      1    0 deny
+proc-macro2            1.0.107    MIT OR Apache-2.0                      1.71   2021 yes      0      6    0 -
+quote                  1.0.47     MIT OR Apache-2.0                      1.71   2021 yes      0      0    0 -
+spki                   0.8.1      Apache-2.0 OR MIT                      1.85   2024 -        0      0    0 forbid
+syn                    2.0.119    MIT OR Apache-2.0                      1.71   2021 -        0     71    0 -
+tls_codec              0.4.2      Apache-2.0 OR MIT                      1.74   2021 -        0      0    0 -
+tls_codec_derive       0.4.2      Apache-2.0 OR MIT                      1.74   2021 -        0      0    0 -
+unicode-ident          1.0.27     (MIT OR Apache-2.0) AND Unicode-3.0    1.71   2021 -        0      2    0 -
+x509-cert              0.3.0      Apache-2.0 OR MIT                      1.85   2024 -        0      0    0 forbid
+zeroize                1.9.1      Apache-2.0 OR MIT                      1.85   2024 -        0     17    1 -
+zeroize_derive         1.5.0      Apache-2.0 OR MIT                      1.85   2024 -        0      0    0 forbid

@@ -1,0 +1,2 @@
+== modexp_full 65536 (1 rep, timeout 150s) ==
+modexp_full 65536 96448.134 median 96448.134

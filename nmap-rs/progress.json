@@ -357,7 +357,7 @@
     "core::nse::openssl": {
       "unsafe_audited": {
         "files": 4,
-        "sha256": "eb785387bac12468121db7cf673a9ec8e701864e57058b207a89b52c9fca515e"
+        "sha256": "01008ec60413af79c3787bef4880f121ba590c5ca06667301a4496f22096d294"
       }
     },
     "core::nse::openssl::bn": {

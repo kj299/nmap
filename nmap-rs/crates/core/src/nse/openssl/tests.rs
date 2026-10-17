@@ -143,7 +143,7 @@ fn gc_is_present_and_inert() {
 fn the_bit_functions_mutate_the_shared_number() {
     let out = run("local a = openssl.bignum_dec2bn('-4') local b = a \
          local n = select('#', openssl.bignum_set_bit(a, 0)) \
-         b:set_bit(2^32 + 1) \
+         b:set_bit((1 << 32) + 1) \
          a:clear_bit(2) \
          return r(n, b:todec(), a:is_bit_set(1), a:is_bit_set(-1), a:num_bits(), a:num_bytes())");
     // -4 | 1 = -5; bit 2^32+1 is bit 1 as an `int`: -7; then bit 2 cleared: -3.

@@ -161,14 +161,26 @@ Here:
   answers `HOME` alone (`os-getenv-home-only`, M6.4e). `debug` is `getinfo`
   and `traceback` only.
 - **Files through a policy.** Scripts may read beneath nmap's data
-  directories and operator-named files. They may write operator-named files,
-  or beneath an operator-designated output directory, and may create
-  directories (`lfs.mkdir`) beneath such a directory only. A directory is
-  designated by the arguments the shipped scripts document as their output
-  directory, `http-fetch.destination` and three more
-  (`fspolicy::OUTPUT_DIR_ARGS`, `docs/LFS-ANALYSIS.md` D1); a value
-  elsewhere that names a directory (`url=/`) designates nothing. Paths are
-  compared and opened canonical, so `..` and symbolic links do not escape
+  directories and the files the operator names in an argument a shipped
+  script opens as a local file (`fspolicy::READ_FILE_ARGS`,
+  `WRITE_FILE_ARGS`, from a census of the shipped tree,
+  `docs/LFS-ANALYSIS.md` §8). They may write the files named in an argument
+  a shipped script writes, or beneath an operator-designated output
+  directory, and may create directories (`lfs.mkdir`) beneath such a
+  directory only, or on the way to one named before it exists. A directory
+  is designated by the arguments the shipped scripts document as their
+  output directory, `http-fetch.destination` and eight more
+  (`fspolicy::OUTPUT_DIR_ARGS`, D1). A value under any other argument opens
+  nothing: one that names a directory (`url=/`) designates nothing, and one
+  that names a file on the target
+  (`http-phpmyadmin-dir-traversal.file=/etc/passwd`) does not open this
+  host's file (`nse-file-args-documented`). Nothing writable may overlap
+  what nmap loads: a data directory in the search, whether or not it exists
+  yet (`~/.nmap`), what a link at its top or beneath its `nselib/` and
+  `scripts/` leads to, the scripts this run loads, or, on Unix, a hard link
+  to any of those files; so scripts cannot rewrite what this run or the next
+  loads (`nse-write-overlapping-data-dirs`, which names the residual cases).
+  Paths are compared and opened canonical, so `..` and symbolic links do not escape
   (`core::nse::fspolicy`, `sys::nsefs`). A name that is a link leading
   nowhere is not written through, which `fopen` would do, creating the
   link's target wherever it is (`nse-write-through-dangling-link`, found by
@@ -181,9 +193,8 @@ Here:
   - On Windows, unvalidated: a UNC path is canonicalised, which opens an SMB
     session, before the policy refuses it
     (`nse-fs-windows-unc-canonicalize`).
-  - **Open** (`nse-named-values-grant-files`, next): any argument value
-    that names a local file is readable and writable by every script, even
-    one that names a path on the target.
+  - A grant holds for every script in the run, not only the ones that
+    read the argument, as nmap's arguments are every script's.
 
 **Resource bounds.** A runaway script must not take the scanner down:
 

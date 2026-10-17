@@ -52,8 +52,8 @@ output directory (fspolicy::OUTPUT_DIR_ARGS), so the port's sandbox lets them
 write there; nmap has no sandbox. The one harness tolerance here: http-fetch lists its
 downloads in its XML in the order its parallel crawl finished them, which
 varies from run to run under 7.94 itself (measured: 5 runs, 4 orders), so in
-the scenarios UNORDERED names, and only in that script's table of that key,
-the <elem>s are compared sorted. Normal output, at default verbosity, prints
+the scenarios UNORDERED names, and only in that script's tables of those
+keys (its downloads, and its errors by URL), the <elem>s are compared sorted. Normal output, at default verbosity, prints
 only the summary line, and the tree must match exactly.
 """
 
@@ -104,12 +104,21 @@ SCENARIOS = [
                      "destination=@DEST/"]),
     ("fetch-path", ["-p", "7080", "--script", "http-fetch", "--script-args",
                     "http-fetch.destination=@DEST,http-fetch.paths=/a/top.html"]),
+    # A destination that does not exist yet: http-fetch makes it, parents
+    # and all, under 7.94, and the port lets it (D2).
+    ("fetch-new", ["-p", "7080", "--script", "http-fetch", "--script-args",
+                   "http-fetch.destination=@DEST/new/deeper/dest"]),
 ]
 
 # Per scenario, the (script id, table key) whose <elem>s are compared sorted.
+# http-fetch's ERROR table is keyed by URL, filled in the same crawl order,
+# and listed in the order its Lua table iterates: sorted too (the D2 review's
+# N4), though no scenario here fails a download yet.
+FETCH_TABLES = {("http-fetch", "Successfully Downloaded"), ("http-fetch", "ERROR")}
 UNORDERED = {
-    "fetch": {("http-fetch", "Successfully Downloaded")},
-    "fetch-short": {("http-fetch", "Successfully Downloaded")},
+    "fetch": FETCH_TABLES,
+    "fetch-short": FETCH_TABLES,
+    "fetch-new": FETCH_TABLES,
 }
 
 # Symbolic links made in @DEST before a scenario runs, (name, target).
@@ -284,7 +293,8 @@ def xml_rows(text, unordered=()):
         for s in parent.findall("script"):
             for t in s.findall("table"):
                 if (s.get("id"), t.get("key")) in unordered:
-                    elems = sorted(t.findall("elem"), key=lambda e: e.text or "")
+                    elems = sorted(t.findall("elem"),
+                                   key=lambda e: (e.get("key") or "", e.text or ""))
                     for e in t.findall("elem"):
                         t.remove(e)
                     for e in elems:

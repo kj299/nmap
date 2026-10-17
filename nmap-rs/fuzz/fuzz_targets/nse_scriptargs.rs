@@ -14,7 +14,8 @@
 //     out never needs a form the grammar lacks;
 //   * `sanitize` (`cstringSanityCheck`) keeps at most the length asked for, of
 //     the bytes before the first NUL, every one printable;
-//   * `fspolicy::output_dir_values` is total over any table, takes only
+//   * `fspolicy::{output_dir_values, read_file_values, write_file_values}`
+//     are total over any table, take only
 //     top-level string values (re-derived here from the same table, so this
 //     does not pin which keys designate: unit tests do), and a policy over
 //     what it designates never lets a script make a directory where it may
@@ -27,7 +28,10 @@
 use libfuzzer_sys::fuzz_target;
 use std::path::{Path, PathBuf};
 
-use nmap_core::nse::fspolicy::{output_dir_values, FsPolicy, OUTPUT_DIR_ARGS};
+use nmap_core::nse::fspolicy::{
+    output_dir_values, read_file_values, write_file_values, FsPolicy, OUTPUT_DIR_ARGS,
+    READ_FILE_ARGS, WRITE_FILE_ARGS,
+};
 use nmap_core::nse::nmaplib::sanitize;
 use nmap_core::nse::scriptargs::{parse, registry_args, ArgTable, ArgValue, ArgsError};
 
@@ -81,18 +85,22 @@ fn never_empty(t: &ArgTable) -> bool {
         })
 }
 
-fn check_output_dirs(t: &ArgTable) {
-    let want: Vec<Vec<u8>> = t
-        .fields
+fn top_level(t: &ArgTable, keys: &[&str]) -> Vec<Vec<u8>> {
+    t.fields
         .iter()
-        .filter(|(k, _)| OUTPUT_DIR_ARGS.iter().any(|a| a.as_bytes() == k.as_slice()))
+        .filter(|(k, _)| keys.iter().any(|a| a.as_bytes() == k.as_slice()))
         .filter_map(|(_, v)| match v {
             ArgValue::Str(s) => Some(s.clone()),
             ArgValue::Table(_) => None,
         })
-        .collect();
+        .collect()
+}
+
+fn check_output_dirs(t: &ArgTable) {
+    assert_eq!(read_file_values(t), top_level(t, &READ_FILE_ARGS), "read_file_values");
+    assert_eq!(write_file_values(t), top_level(t, &WRITE_FILE_ARGS), "write_file_values");
     let got = output_dir_values(t);
-    assert_eq!(got, want, "output_dir_values");
+    assert_eq!(got, top_level(t, &OUTPUT_DIR_ARGS), "output_dir_values");
     // Each designated value that reads as an absolute path, as a root.
     let roots: Vec<PathBuf> = got
         .iter()

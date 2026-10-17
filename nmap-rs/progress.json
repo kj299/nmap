@@ -189,7 +189,7 @@
       "fuzzed": "Neighbour-discovery I/O driver. Frame parsing is core::ndp::resolve_from_frame, covered by fuzz target ndp_advert; this module only drives the capture and the timeout."
     },
     "sys::nsefs": {
-      "fuzzed": "The ScriptFs over the real file system: it resolves a path as open(2) and mkdir(2) do (canonicalising, with the lookup's own errors, PATH_MAX, trailing '.' and separators), asks fspolicy, and opens the canonical path with O_NOFOLLOW, refusing to write through a name that is a link leading nowhere. It parses nothing. Pinned by tests that cover escaping a data directory by .. and by symlink, dangling links (w, a, w+, a+, r+), the path shapes against the kernel's errnos, named files, output directories, mkdir, and missing files; and end to end by nse_cli_differential's lfs and http-fetch scenarios against nmap 7.94."
+      "fuzzed": "The ScriptFs over the real file system: it resolves a path as open(2) and mkdir(2) do (canonicalising, with the lookup's own errors, PATH_MAX, trailing '.' and separators), asks fspolicy, and opens the canonical path with O_NOFOLLOW, refusing to write through a name that is a link leading nowhere. It builds the policy: output directories designated as they are or, when only missing, as their nearest existing ancestor and plain names (any other lookup error, '..' or a link leading nowhere refuses); and nothing writable that overlaps what nmap loads: every data directory in the search, existing or not, what links at its top or beneath its nselib/ and scripts/ lead to (a bounded walk), the chosen scripts, and on Unix hard links to those files. It parses nothing; the argument values it is given are fspolicy's, fuzzed by nse_scriptargs. Pinned by tests that cover escaping a data directory by .. and by symlink, dangling links (w, a, w+, a+, r+), the path shapes against the kernel's errnos, named files, output directories (existing, not yet existing, each refusal by reason), the overlap rules (absent data directory, linked nselib, nested link, hard link, chosen script), devices as read files, mkdir, and missing files; and end to end by nse_cli_differential's lfs and http-fetch scenarios against nmap 7.94 and its port-only file tests."
     },
     "sys::nsehost": {
       "fuzzed": "The host side of NSE: nselib/ and script lookup over the data directories, the interface list from sys::netif, random bytes from the OS, and a ScriptNet wrapper that timestamps polls. It parses no network or file data. Pinned by unit tests and exercised end to end by nse_cli_differential against nmap 7.94."
@@ -327,13 +327,13 @@
     "cli": {
       "unsafe_audited": {
         "files": 2,
-        "sha256": "2187d261d72ffc1be4694b32ef946147e1424926ab5f8374d497089b6f7c1fb5"
+        "sha256": "4aa066f2c4933c163434f6eb9b392075def3c99a338c328e19d2b025699959a6"
       }
     },
     "core::nse::fspolicy": {
       "unsafe_audited": {
         "files": 1,
-        "sha256": "e6e44253f512024e9d32e72cc68063293b65f88449ad447746cbece41634b55f"
+        "sha256": "bfed10b67711e42370332701bb1f17ade33c68d3f00131de43350e8837018f65"
       }
     },
     "core::nse::lfs": {
@@ -351,7 +351,7 @@
     "sys::nsefs": {
       "unsafe_audited": {
         "files": 1,
-        "sha256": "8a2ebbbdccb036abbcb63bd220c8cbcc39177cb727abcfde847d8bb98f5b5e02"
+        "sha256": "361971b67b5b9059a8b9960ff6a631e7e20f073e75021d408be09fa1a90f8683"
       }
     }
   }

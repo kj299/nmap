@@ -28,7 +28,7 @@ fn script_scans_print_as_under_nmap() {
         .expect("python3 runs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout.contains("0 of 19 scenarios differ"),
+        out.status.success() && stdout.contains("0 of 20 scenarios differ"),
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -337,5 +337,136 @@ fn only_documented_arguments_open_a_directory_to_scripts() {
     made.sort();
     assert_eq!(made, ["sub", "x"]);
     let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The port alone (D2, `nse-file-args-documented`): a value opens a file
+/// only from an argument a shipped script uses as a local file, as that
+/// script uses it. A path on the target (`http-phpmyadmin-dir-traversal.file`,
+/// `file`) opens nothing here; `userdb` reads and does not write; `outfile`
+/// writes. And nothing writable overlaps a data directory: such a
+/// designation is refused, with a warning.
+#[test]
+fn only_local_file_arguments_open_their_files() {
+    let script = "categories = {'safe'}\n\
+        local stdnse = require 'stdnse'\n\
+        prerule = function() return true end\n\
+        action = function()\n\
+          local p = stdnse.get_script_args('target')\n\
+          local r = io.open(p, 'r')\n\
+          local got = r and r:read('a') or 'no read'\n\
+          if r then r:close() end\n\
+          local w, err = io.open(p, 'a')\n\
+          if w then w:write('!') w:close() end\n\
+          return got .. ' / ' .. (w and 'wrote' or err:gsub('^.*: ', ''))\n\
+        end\n";
+    let d = datadir("files", &[("f-probe.nse", script)]);
+    let secret = std::env::temp_dir().join(format!("m64e-files-secret-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("m64e-files-home-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("home");
+    let run = |args: &str| {
+        std::fs::write(&secret, "secret").expect("secret");
+        let o = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
+            .env("HOME", &home)
+            .env_remove("NMAPDIR")
+            .arg("--datadir")
+            .arg(&d)
+            .args(["-sT", "-Pn", "-n", "-p", "1", "--script", "f-probe"])
+            .arg("--script-args")
+            .arg(args.replace("SECRET", &secret.to_string_lossy()))
+            .arg("127.0.0.1")
+            .output()
+            .expect("nmap-rs runs");
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            std::fs::read_to_string(&secret).expect("secret"),
+        )
+    };
+    for args in [
+        "target=SECRET,http-phpmyadmin-dir-traversal.file=SECRET",
+        "target=SECRET,file=SECRET",
+        "target=SECRET,url=SECRET",
+        "target=SECRET,nested={userdb=SECRET}",
+    ] {
+        let (out, _, after) = run(args);
+        assert!(
+            out.contains("|_f-probe: no read / Permission denied"),
+            "{args}: {out}"
+        );
+        assert_eq!(after, "secret", "{args}: written");
+    }
+    // Read arguments, by a library's key, a script's full key (jdwp-inject
+    // reads its `filename` locally: the review's M1) and the short key.
+    for args in [
+        "target=SECRET,userdb=SECRET",
+        "target=SECRET,jdwp-inject.filename=SECRET",
+        "target=SECRET,filename=SECRET",
+    ] {
+        let (out, _, after) = run(args);
+        assert!(
+            out.contains("|_f-probe: secret / Permission denied"),
+            "{args}: {out}"
+        );
+        assert_eq!(after, "secret", "{args}");
+    }
+    // A device, as nmap reads `userdb=/dev/null` (the review's L1).
+    let (out, _, _) = run("target=/dev/null,userdb=/dev/null");
+    assert!(
+        out.contains("/ Permission denied") && !out.contains("no read"),
+        "{out}"
+    );
+    let (out, _, after) = run("target=SECRET,outfile=SECRET");
+    assert!(out.contains("|_f-probe: secret / wrote"), "{out}");
+    assert_eq!(after, "secret!");
+    // An output directory inside the data directory, whose `nselib` is a
+    // link to the tree's: refused, said once, naming the link.
+    let (_, err, _) = run(&format!(
+        "target=SECRET,destination={}",
+        d.join("nselib").display()
+    ));
+    let want = format!("which {} leads to.", d.join("nselib").display());
+    assert!(
+        err.contains("NSE: Warning: scripts may not write to") && err.contains(&want),
+        "{err}"
+    );
+    assert_eq!(err.matches("NSE: Warning").count(), 1, "{err}");
+    // `~/.nmap` does not exist, but a later run would load it: neither the
+    // home holding it nor a way to it is writable (the review's H2).
+    for dest in [home.clone(), home.join(".nmap/nselib")] {
+        let (_, err, _) = run(&format!("target=SECRET,destination={}", dest.display()));
+        let want = format!(
+            "overlaps the data directory {}",
+            home.join(".nmap").display()
+        );
+        assert!(err.contains(&want), "{dest:?}: {err}");
+    }
+    assert!(!home.join(".nmap").exists());
+    // A script chosen by path, outside the data directories, is what this
+    // run loads: not writable, though named in a write argument (M2).
+    let own = home.join("own.nse");
+    std::fs::write(&own, script).expect("own script");
+    let o = Command::new(env!("CARGO_BIN_EXE_nmap-rs"))
+        .env("HOME", &home)
+        .env_remove("NMAPDIR")
+        .arg("--datadir")
+        .arg(&d)
+        .args(["-sT", "-Pn", "-n", "-p", "1", "--script"])
+        .arg(&own)
+        .arg("--script-args")
+        .arg(format!("target={0},outfile={0}", own.display()))
+        .arg("127.0.0.1")
+        .output()
+        .expect("nmap-rs runs");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("which this run loads"), "{err}");
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains("/ Permission denied"),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&own).expect("own"), script);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_file(&secret);
     let _ = std::fs::remove_dir_all(&d);
 }

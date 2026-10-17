@@ -22,52 +22,337 @@ use nmap_core::nse::stdlib::iolib::{FsError, OpenMode, ScriptFile, ScriptFs, Whe
 /// The real file system, behind a policy.
 pub struct PolicyFs {
     policy: FsPolicy,
+    refused: Vec<Refusal>,
+}
+
+/// An output directory or named file the policy did not grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// It overlaps what this run, or a later one, loads (the second field
+    /// says what): scripts could rewrite it.
+    Loaded(PathBuf, String),
+    /// An output directory that cannot be designated, and why.
+    Undesignatable(PathBuf, &'static str),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Loaded(p, what) => {
+                write!(f, "scripts may not write to {}: {what}", p.display())
+            }
+            Refusal::Undesignatable(p, why) => {
+                write!(f, "scripts may not write beneath {}: {why}", p.display())
+            }
+        }
+    }
+}
+
+/// An output directory the operator named, as the policy holds it: its
+/// canonical form when it exists; when it does not, its nearest existing
+/// ancestor, canonical, joined with the rest of the path, and the missing
+/// directories on the way, which a script may create (nmap's http-fetch
+/// creates a missing destination, parents and all).
+///
+/// Only a path that is *missing* climbs: any other failure to look it up
+/// (`ENOTDIR` for `file/`, `file/.` or `file/x`, a loop, `EACCES`) refuses
+/// it, as does a missing part that is a link leading nowhere. A `..` in the
+/// missing part, whose meaning depends on what is created later, refuses it
+/// too: it has no name to climb by (`nse-output-dir-dotdot-refused`). A `.`
+/// there is dropped by [`Path`](std::path::Path), as the kernel drops it
+/// once the directories exist.
+fn designate(dir: &std::path::Path) -> Result<(PathBuf, Vec<PathBuf>), &'static str> {
+    use std::io::ErrorKind::NotFound;
+    const UNREACHABLE: &str = "a part of it is not a directory, or cannot be looked up";
+    match dir.canonicalize() {
+        Ok(c) if c.is_dir() => return Ok((c, Vec::new())),
+        Ok(_) => return Err("it is not a directory"),
+        Err(e) if e.kind() != NotFound => return Err(UNREACHABLE),
+        Err(_) => {}
+    }
+    let mut rest = Vec::new();
+    let mut base = dir;
+    let anchor = loop {
+        let Some(name) = base.file_name() else {
+            return Err("it does not exist, and is not plain names beneath a directory that does");
+        };
+        rest.push(name.to_os_string());
+        base = match base.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        };
+        match base.canonicalize() {
+            Ok(c) => break c,
+            Err(e) if e.kind() == NotFound => {}
+            Err(_) => return Err(UNREACHABLE),
+        }
+    };
+    if !anchor.is_dir() {
+        return Err("a part of it is not a directory");
+    }
+    let mut missing = Vec::new();
+    let mut root = anchor;
+    for name in rest.iter().rev() {
+        root = root.join(name);
+        // Missing to `canonicalize`, yet there: a link leading nowhere.
+        if root.symlink_metadata().is_ok() {
+            return Err("a part of it is a link that leads nowhere");
+        }
+        missing.push(root.clone());
+    }
+    missing.pop(); // the directory itself is beneath itself
+    Ok((root, missing))
+}
+
+/// The most entries [`Loaded::of`] looks at beneath one run's `nselib/` and
+/// `scripts/` directories, links followed: the shipped tree has under 1,500,
+/// so this bounds a pathological data directory, not a real one.
+const WALK_LIMIT: usize = 65_536;
+
+/// What this run, or a later one, loads, which nothing writable may
+/// overlap (`nse-write-overlapping-data-dirs`): each data directory, whether
+/// or not it exists yet (a script must not create `~/.nmap/nselib` for the
+/// next run); what the entries of one that exists lead to, at its top and
+/// anywhere beneath its `nselib/` and `scripts/`, which links can put
+/// anywhere; and the scripts this run loads. Each with why, for the
+/// refusal; and on Unix the files among them by device and inode, so that a
+/// hard link to one is known by any name.
+struct Loaded {
+    paths: Vec<(PathBuf, String)>,
+    #[cfg(unix)]
+    inodes: std::collections::HashMap<(u64, u64), PathBuf>,
+}
+
+impl Loaded {
+    fn of(data_dirs: &[PathBuf], scripts: &[PathBuf]) -> Loaded {
+        let mut l = Loaded {
+            paths: Vec::new(),
+            #[cfg(unix)]
+            inodes: std::collections::HashMap::new(),
+        };
+        let mut budget = WALK_LIMIT;
+        for d in data_dirs {
+            let Ok(c) = d.canonicalize() else {
+                // Absent: where it would be once made.
+                if let Ok((root, _)) = designate(d) {
+                    let why = format!("it overlaps the data directory {}", root.display());
+                    l.paths.push((root, why));
+                }
+                continue;
+            };
+            if !c.is_dir() {
+                continue;
+            }
+            l.paths.push((
+                c.clone(),
+                format!("it overlaps the data directory {}", c.display()),
+            ));
+            if let Ok(entries) = std::fs::read_dir(&c) {
+                for e in entries.filter_map(Result::ok) {
+                    l.note(&e.path(), &c);
+                }
+            }
+            for sub in ["nselib", "scripts"] {
+                if let Ok(s) = c.join(sub).canonicalize() {
+                    l.walk(s, &mut budget);
+                }
+            }
+        }
+        for s in scripts {
+            if let Ok(c) = s.canonicalize() {
+                l.record(&c);
+                let why = format!(
+                    "it overlaps the script {}, which this run loads",
+                    c.display()
+                );
+                l.paths.push((c, why));
+            }
+        }
+        l
+    }
+
+    /// An entry of `within`: a link leading out of it is protected where it
+    /// leads; a file is recorded by inode. Returns a directory to walk.
+    fn note(&mut self, entry: &std::path::Path, within: &std::path::Path) -> Option<PathBuf> {
+        let meta = entry.symlink_metadata().ok()?;
+        if meta.file_type().is_symlink() {
+            let t = entry.canonicalize().ok()?;
+            self.record(&t);
+            if t.starts_with(within) {
+                return None;
+            }
+            let why = format!(
+                "it overlaps {}, which {} leads to",
+                t.display(),
+                entry.display()
+            );
+            self.paths.push((t.clone(), why));
+            return t.is_dir().then_some(t);
+        }
+        if meta.is_dir() {
+            return Some(entry.to_path_buf());
+        }
+        self.record(entry);
+        None
+    }
+
+    /// Everything beneath `root`, following links out of it, up to `budget`
+    /// entries in all.
+    fn walk(&mut self, root: PathBuf, budget: &mut usize) {
+        let mut seen = vec![root.clone()];
+        let mut stack = vec![(root.clone(), root)];
+        while let Some((dir, within)) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.filter_map(Result::ok) {
+                let Some(left) = budget.checked_sub(1) else {
+                    return;
+                };
+                *budget = left;
+                let path = e.path();
+                let linked = path
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_symlink());
+                if let Some(next) = self.note(&path, &within) {
+                    if !seen.contains(&next) {
+                        seen.push(next.clone());
+                        // A linked directory is walked as a root of its own.
+                        let within = if linked { next.clone() } else { within.clone() };
+                        stack.push((next, within));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn record(&mut self, file: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(file) {
+            if m.is_file() {
+                self.inodes.insert((m.dev(), m.ino()), file.to_path_buf());
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn record(&mut self, _file: &std::path::Path) {}
+
+    /// Why `p`, canonical, may not be writable, if it may not.
+    fn overlap(&self, p: &std::path::Path) -> Option<String> {
+        if let Some((_, why)) = self
+            .paths
+            .iter()
+            .find(|(d, _)| p.starts_with(d) || d.starts_with(p))
+        {
+            return Some(why.clone());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let m = std::fs::metadata(p).ok()?;
+            if let Some(f) = self.inodes.get(&(m.dev(), m.ino())) {
+                return Some(format!(
+                    "it is {}, which nmap loads, by another name",
+                    f.display()
+                ));
+            }
+        }
+        None
+    }
 }
 
 impl PolicyFs {
-    /// `data_dirs` readable, `output_dirs` readable and writable, with
-    /// directories creatable beneath them, and each of `named` that is a
-    /// file — or could be one, in an existing directory — readable and
-    /// writable. A data or output directory that does not exist, or is not a
-    /// directory, is dropped.
+    /// [`PolicyFs::for_run`] with no scripts of its own to protect.
     pub fn new(data_dirs: &[PathBuf], output_dirs: &[PathBuf], named: &[Vec<u8>]) -> PolicyFs {
-        let dirs = |ds: &[PathBuf]| -> Vec<PathBuf> {
-            ds.iter()
-                .filter_map(|d| d.canonicalize().ok())
-                .filter(|d| d.is_dir())
-                .collect()
-        };
-        let named = named
+        PolicyFs::for_run(data_dirs, &[], output_dirs, named)
+    }
+
+    /// Each of `data_dirs` that exists readable; each of `output_dirs`
+    /// readable and writable, with directories creatable beneath it and on
+    /// the way to it ([`designate`]); and each of `named` that is a file — or
+    /// could be one, in an existing directory — readable and writable. An
+    /// output directory or a named file that overlaps what nmap loads
+    /// ([`Loaded`]: the data directories, whether or not they exist, and
+    /// `scripts`, the scripts this run loads) is refused, and so is one that
+    /// cannot be designated; [`PolicyFs::refused`] says which, and why.
+    pub fn for_run(
+        data_dirs: &[PathBuf],
+        scripts: &[PathBuf],
+        output_dirs: &[PathBuf],
+        named: &[Vec<u8>],
+    ) -> PolicyFs {
+        let read_roots: Vec<PathBuf> = data_dirs
             .iter()
-            .filter_map(|n| match resolve(n) {
-                Ok(Target::Exists(p)) => Some(p),
+            .filter_map(|d| d.canonicalize().ok())
+            .filter(|d| d.is_dir())
+            .collect();
+        // Looked at only when something is to be writable.
+        let loaded =
+            (!output_dirs.is_empty() || !named.is_empty()).then(|| Loaded::of(data_dirs, scripts));
+        let overlap = |p: &std::path::Path| loaded.as_ref().and_then(|l| l.overlap(p));
+        let mut refused = Vec::new();
+        let mut write_roots = Vec::new();
+        let mut creatable = Vec::new();
+        for dir in output_dirs {
+            match designate(dir) {
+                Ok((root, missing)) => match overlap(&root) {
+                    Some(why) => refused.push(Refusal::Loaded(root, why)),
+                    None => {
+                        write_roots.push(root);
+                        creatable.extend(missing);
+                    }
+                },
+                Err(why) => refused.push(Refusal::Undesignatable(dir.clone(), why)),
+            }
+        }
+        let mut writable = Vec::new();
+        for n in named {
+            let p = match resolve(n) {
+                Ok(Target::Exists(p)) => p,
                 Ok(Target::New {
                     path,
                     dangling: false,
                     trailing: false,
-                }) => Some(path),
-                _ => None,
-            })
-            .filter(|p| !p.is_dir())
-            .collect();
+                }) => path,
+                _ => continue,
+            };
+            if p.is_dir() {
+                continue;
+            }
+            match overlap(&p) {
+                Some(why) => refused.push(Refusal::Loaded(p, why)),
+                None => writable.push(p),
+            }
+        }
         PolicyFs {
             policy: FsPolicy {
-                read_roots: dirs(data_dirs),
-                write_roots: dirs(output_dirs),
-                named,
+                read_roots,
+                write_roots,
+                named: writable,
                 read_named: Vec::new(),
+                creatable,
             },
+            refused,
         }
     }
 
-    /// Also readable, and only readable: each of `files` that exists. An
-    /// absent one is dropped, so a file created later is not let in.
+    /// The output directories and named files the policy refused.
+    pub fn refused(&self) -> &[Refusal] {
+        &self.refused
+    }
+
+    /// Also readable, and only readable: each of `files` that exists and is
+    /// not a directory (a device or a FIFO too, as nmap reads
+    /// `userdb=/dev/null`). An absent one is dropped, so a file created
+    /// later is not let in.
     pub fn with_read_files(mut self, files: &[PathBuf]) -> PolicyFs {
         self.policy.read_named.extend(
             files
                 .iter()
                 .filter_map(|f| f.canonicalize().ok())
-                .filter(|f| f.is_file()),
+                .filter(|f| !f.is_dir()),
         );
         self
     }
@@ -77,9 +362,10 @@ impl PolicyFs {
     }
 }
 
-/// The directories the operator designated for script output: the values
-/// of the arguments `fspolicy::OUTPUT_DIR_ARGS` names, as paths.
-pub fn output_dirs(values: &[Vec<u8>]) -> Vec<PathBuf> {
+/// Script-argument values as the paths the OS reads them as (bytes up to a
+/// NUL): the output directories of `fspolicy::OUTPUT_DIR_ARGS`, the files of
+/// `fspolicy::READ_FILE_ARGS`.
+pub fn paths(values: &[Vec<u8>]) -> Vec<PathBuf> {
     values.iter().filter_map(|v| path_of(v)).collect()
 }
 
@@ -268,7 +554,8 @@ impl ScriptFs for PolicyFs {
     }
 
     /// `mkdir(path, 0775)` (`nse_fs.cc:121`), on the canonical path, if it
-    /// is beneath a designated output directory. What does not resolve
+    /// is beneath a designated output directory or one of the missing
+    /// directories on the way to one ([`FsPolicy::allows_mkdir`]). What does not resolve
     /// fails as `mkdir` fails, whether or not the script may look
     /// ([`resolve`]: a missing parent is `ENOENT`, `f/x` on a file
     /// `ENOTDIR`, a loop `ELOOP`); a path that exists, a directory, a file
@@ -610,18 +897,264 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A destination named before it exists (`nse-output-dir-must-exist`,
+    /// closed by D2): its missing directories may be made, as http-fetch's
+    /// `create_directory` makes them, top down, and nothing beside them.
     #[test]
-    fn output_dirs_must_exist_and_be_directories() {
+    fn an_output_dir_that_does_not_exist_yet_can_be_made() {
+        let root = scratch("newdest");
+        let dest = root.join("new/deeper/dest");
+        let fs = PolicyFs::new(&[], std::slice::from_ref(&dest), &[]);
+        assert!(fs.refused().is_empty(), "{:?}", fs.refused());
+        let errno = |p: &Path| fs.mkdir(&bytes(p)).err().map(|e| e.errno);
+        // As http-fetch recurses: the deepest fails for its parent, ...
+        assert_eq!(errno(&dest.join("10.0.0.1")), Some(2));
+        assert_eq!(errno(&dest), Some(2));
+        // ... until the top, which may be made, and then each below it.
+        assert_eq!(errno(&root.join("new")), None);
+        assert_eq!(errno(&root.join("new/deeper")), None);
+        assert_eq!(errno(&dest), None);
+        assert_eq!(errno(&dest.join("10.0.0.1")), None);
+        let mut f = fs
+            .open(&bytes(&dest.join("10.0.0.1/index.html")), write_mode())
+            .expect("beneath");
+        f.write(b"page").expect("write");
+        // Not a file in the way, not a neighbour.
+        assert_eq!(
+            fs.open(&bytes(&root.join("new/x")), write_mode()).err(),
+            Some(FsError::denied())
+        );
+        assert_eq!(errno(&root.join("new/other")), Some(13));
+        assert_eq!(errno(&root.join("newer")), Some(13));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's hardening: nothing a script may write overlaps a data
+    /// directory, which this run and later runs load code from.
+    #[test]
+    fn nothing_writable_overlaps_a_data_directory() {
+        let root = scratch("overlap");
+        let data = root.join("share/nmap");
+        std::fs::create_dir_all(data.join("nselib")).expect("mkdir");
+        let fs = PolicyFs::new(
+            std::slice::from_ref(&data),
+            &[
+                root.clone(),
+                data.join("nselib"),
+                root.join("share/nmap/new"),
+            ],
+            &[
+                bytes(&data.join("nselib/stdnse.lua")),
+                bytes(&data.join("x.txt")),
+            ],
+        );
+        let p = fs.policy();
+        assert!(p.write_roots.is_empty(), "{:?}", p.write_roots);
+        assert!(p.named.is_empty(), "{:?}", p.named);
+        assert_eq!(fs.refused().len(), 5, "{:?}", fs.refused());
+        assert!(fs
+            .refused()
+            .iter()
+            .all(|r| matches!(r, Refusal::Loaded(..))));
+        // A data directory whose `nselib` is a link elsewhere: that is
+        // protected too.
+        #[cfg(unix)]
+        {
+            let elsewhere = root.join("elsewhere-nselib");
+            std::fs::create_dir_all(&elsewhere).expect("mkdir");
+            let data2 = root.join("data2");
+            std::fs::create_dir_all(&data2).expect("mkdir");
+            std::os::unix::fs::symlink(&elsewhere, data2.join("nselib")).expect("symlink");
+            let fs = PolicyFs::new(
+                std::slice::from_ref(&data2),
+                &[elsewhere.clone(), data2.join("nselib")],
+                &[bytes(&elsewhere.join("stdnse.lua"))],
+            );
+            assert!(
+                fs.policy().write_roots.is_empty(),
+                "{:?}",
+                fs.policy().write_roots
+            );
+            assert!(fs.policy().named.is_empty());
+            assert_eq!(fs.refused().len(), 3, "{:?}", fs.refused());
+        }
+        assert_eq!(
+            fs.mkdir(&bytes(&data.join("nselib/evil"))).err(),
+            Some(FsError::denied())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn output_dirs_must_be_directories_or_plain_names_beneath_one() {
         let root = scratch("outdirs");
         let file = root.join("file");
         std::fs::write(&file, b"x").expect("write");
-        let fs = PolicyFs::new(&[], &[root.join("absent"), file.clone()], &[]);
-        assert!(fs.policy().write_roots.is_empty());
+        let s = |p: &Path, tail: &str| PathBuf::from(format!("{}{tail}", p.display()));
+        // Each is refused alone, with no root, for its own reason: a file, a
+        // file named as a directory (`ENOTDIR`, which must not climb to the
+        // file's parent: the review's H1), and `..` in the missing part.
+        const UNREACHABLE: &str = "a part of it is not a directory, or cannot be looked up";
+        const DOTDOT: &str =
+            "it does not exist, and is not plain names beneath a directory that does";
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut refused = vec![
+            (file.clone(), "it is not a directory"),
+            (file.join("sub"), UNREACHABLE),
+            (s(&file, "/"), UNREACHABLE),
+            (s(&file, "/."), UNREACHABLE),
+            (s(&file, "//"), UNREACHABLE),
+            (s(&file, "/./"), UNREACHABLE),
+            (root.join("absent/../escape"), DOTDOT),
+            (root.join("absent/.."), DOTDOT),
+        ];
+        #[cfg(unix)]
+        {
+            // A link leading nowhere, at the destination or on the way.
+            std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).expect("link");
+            refused.push((
+                root.join("dangling"),
+                "a part of it is a link that leads nowhere",
+            ));
+            refused.push((
+                root.join("dangling/dest"),
+                "a part of it is a link that leads nowhere",
+            ));
+        }
+        for (dir, why) in &refused {
+            let fs = PolicyFs::new(&[], std::slice::from_ref(dir), &[]);
+            assert!(
+                fs.policy().write_roots.is_empty(),
+                "{dir:?}: {:?}",
+                fs.policy()
+            );
+            assert!(fs.policy().creatable.is_empty(), "{dir:?}");
+            assert_eq!(
+                fs.refused(),
+                [Refusal::Undesignatable(dir.clone(), why)],
+                "{dir:?}"
+            );
+        }
+        let refused: Vec<PathBuf> = refused.into_iter().map(|(d, _)| d).collect();
+        // The file is not writable through any of them.
+        let fs = PolicyFs::new(&[], &refused, &[]);
         assert_eq!(
-            output_dirs(&[b"/a\0b".to_vec(), Vec::new()]),
+            fs.open(&bytes(&file), write_mode()).err(),
+            Some(FsError::denied())
+        );
+        // A `.` in the missing part is dropped, as the kernel drops it.
+        let fs = PolicyFs::new(
+            &[],
+            &[root.join("new/./dest"), s(&root.join("new2"), "/.")],
+            &[],
+        );
+        assert!(fs.refused().is_empty(), "{:?}", fs.refused());
+        assert_eq!(
+            fs.policy().write_roots,
+            [root.join("new/dest"), root.join("new2")]
+        );
+        assert_eq!(
+            paths(&[b"/a\0b".to_vec(), Vec::new()]),
             vec![PathBuf::from("/a")]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's H2: a data directory that does not exist yet is
+    /// protected where it would be, so a script cannot create
+    /// `~/.nmap/nselib` for a later run to load.
+    #[test]
+    fn a_data_directory_that_does_not_exist_yet_is_protected() {
+        let root = scratch("absentdata");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let dot_nmap = home.join(".nmap");
+        let fs = PolicyFs::new(
+            std::slice::from_ref(&dot_nmap),
+            &[home.clone(), dot_nmap.join("nselib"), home.join(".nmapx")],
+            &[bytes(&dot_nmap.join("nse_main.lua"))],
+        );
+        assert_eq!(fs.policy().write_roots, [home.join(".nmapx")]);
+        assert!(
+            fs.policy().creatable.is_empty(),
+            "{:?}",
+            fs.policy().creatable
+        );
+        // The named file's directory does not exist: it is not granted.
+        assert!(fs.policy().named.is_empty());
+        assert_eq!(fs.refused().len(), 2, "{:?}", fs.refused());
+        assert!(fs
+            .refused()
+            .iter()
+            .all(|r| matches!(r, Refusal::Loaded(..))));
+        assert_eq!(fs.mkdir(&bytes(&dot_nmap)).err(), Some(FsError::denied()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's M2: what a link anywhere beneath `scripts/` or
+    /// `nselib/` leads to, a hard link to a data file, and the scripts this
+    /// run loads are protected too.
+    #[cfg(unix)]
+    #[test]
+    fn nested_links_hard_links_and_chosen_scripts_are_protected() {
+        let root = scratch("deep");
+        let data = root.join("data");
+        let dev = root.join("dev");
+        let own = root.join("own");
+        for d in [
+            data.join("scripts/sub"),
+            data.join("nselib"),
+            dev.clone(),
+            own.clone(),
+            root.join("out"),
+        ] {
+            std::fs::create_dir_all(d).expect("mkdir");
+        }
+        std::fs::write(dev.join("mine.nse"), b"-- mine").expect("write");
+        std::fs::write(data.join("nselib/lib.lua"), b"-- lib").expect("write");
+        std::fs::write(own.join("own.nse"), b"-- own").expect("write");
+        std::os::unix::fs::symlink(dev.join("mine.nse"), data.join("scripts/sub/mine.nse"))
+            .expect("link");
+        std::fs::hard_link(data.join("nselib/lib.lua"), root.join("out/lib.lua"))
+            .expect("hard link");
+        let fs = PolicyFs::for_run(
+            std::slice::from_ref(&data),
+            &[own.join("own.nse")],
+            &[dev.clone(), own.clone(), root.join("out")],
+            &[
+                bytes(&dev.join("mine.nse")),
+                bytes(&root.join("out/lib.lua")),
+                bytes(&own.join("own.nse")),
+                bytes(&root.join("free.txt")),
+            ],
+        );
+        // `out` holds the hard link, but is not itself loaded: only the
+        // named name of it is refused.
+        assert_eq!(fs.policy().write_roots, [root.join("out")]);
+        assert_eq!(fs.policy().named, [root.join("free.txt")]);
+        assert_eq!(fs.refused().len(), 5, "{:?}", fs.refused());
+        let text: Vec<String> = fs.refused().iter().map(|r| r.to_string()).collect();
+        assert!(
+            text.iter().any(|t| t.contains("by another name")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("which this run loads")),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|t| t.contains("leads to")), "{text:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review's L1: a read argument may name a device, as nmap reads
+    /// `userdb=/dev/null`; not a directory.
+    #[cfg(unix)]
+    #[test]
+    fn read_files_may_be_devices_not_directories() {
+        let fs = PolicyFs::new(&[], &[], &[])
+            .with_read_files(&[PathBuf::from("/dev/null"), PathBuf::from("/")]);
+        assert_eq!(fs.policy().read_named, [PathBuf::from("/dev/null")]);
+        assert!(fs.open(b"/dev/null", read_mode()).is_ok());
     }
 
     #[test]

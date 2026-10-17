@@ -206,7 +206,17 @@ jobs:
         with: { toolchain: "1.97.0" }
       - run: cargo install cargo-audit cargo-deny --locked
       - run: cargo audit
+      # deny.toml bans cc, cmake, ring, aws-lc-* and openssl-sys (M6.5 §6,
+      # "ship no C").
       - run: cargo deny check
+      # And no C compiler anywhere in the default build's graph, for any
+      # target: `cargo tree -i cc` must find no `cc` package at all.
+      - run: |
+          if out=$(cargo tree -i cc -e all --target all 2>&1); then
+            echo "$out"; echo "FAIL: the default build depends on cc (M6.5 §6)"; exit 1
+          fi
+          echo "$out" | grep -q "did not match any packages" || { echo "$out"; exit 1; }
+          echo "no cc in the default build"
 
   miri:
     name: miri (UB in unsafe)
@@ -495,6 +505,14 @@ jobs:
       # lists, under the class listed for it (7 cdepth, 1 drift794), and every
       # listed row must still differ; anything else fails.
       - run: bash tests/differential/m6/regen_m66_lpeg.sh --check-794
+      # M6.5 step a: nmap 7.94 over the `openssl` corpus must give the
+      # committed golden on every row it runs (the `ub:` rows, where the C is
+      # undefined, never run), after the golden's header (nmap, OpenSSL,
+      # OPENSSL_CONF, the legacy provider) matches this runner. Then the 61
+      # TLS fixtures: 7.94's result on each, run twice, must be the committed
+      # golden (the header first: seclevel, OpenSSL, nmap).
+      - run: bash tests/differential/m6/regen_m65.sh --check-794
+      - run: bash tests/differential/m6/regen_m65_tls.sh --check
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,
@@ -618,6 +636,16 @@ jobs:
       # port is compared with the golden by lpeg_tree_differential (in
       # `cargo test --all`).
       - run: bash tests/differential/m6/regen_m66b_trees.sh --check
+      # M6.5 step a — the `openssl` corpus (29,476 rows: digests, HMAC,
+      # ciphers, bignums, randomness, argument checks, 3,020 certificates).
+      # No nmap here: the cases must be what gen_m65_cases.py writes; the
+      # golden (7.94's), its drift pins, census and sanitizer-screen record
+      # must match them; this tree's nse_openssl.cc and nse_ssl_cert.cc,
+      # built standalone, must differ from the golden in exactly the pinned
+      # drift rows; Python ints, CPython's own hashes and nettle must agree
+      # with every row they can compute; and the C-sabotage record must be
+      # for these cases. 7.94 itself is checked in the differential job.
+      - run: bash tests/differential/m6/regen_m65.sh --check
 
       # M6.0 — the Lua VM itself. Same oracle as M6.1 and M6.2, used
       # differently: those gate parsers this port wrote, this one gates an

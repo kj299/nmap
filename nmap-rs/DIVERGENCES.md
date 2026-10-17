@@ -5687,6 +5687,66 @@ so they are opened now and land, pinned per fixture, with step f1
       of them. The zero 7.94 returns would reach `mod_exp` or `div` as a
       zero modulus, which `num-bigint` panics on, so the refusal is an error.
 
+## Milestone 6.5 step a — the `openssl` oracle (`tests/differential/m6`, `deny.toml`; no port code)
+
+The oracle steps b–e are measured against: 29,476 cases under nmap 7.94 and
+under this tree's C, built standalone (`tests/differential/m6/README.md`,
+"M6.5 step a"). It ships no port code, so nothing below is a divergence
+yet. Each entry fixes what the port will be held to when its step lands,
+and how the corpus pins it.
+
+- [ ] `nse-openssl-iv-length-uaf` (step d) — Phase 0's flaw
+      (`docs/M6.5-ANALYSIS.md` §12), now measured on the corpus. A
+      non-empty IV whose length is not the context's frees the cipher
+      context, then reads it for the message (`nse_openssl.cc:438-441,
+      499-502`). That covers any IV given to ECB, RC4 or another cipher
+      without one, and any IV one byte long or short. The 1,688 rows that
+      reach it are tagged `ub:iv-length-uaf` (`gen_m65_cases.py` `ub_iv`),
+      including the 8 argument rows of Phase 0. Before the tag existed,
+      7.94 crashed on more than 1,000 of them. No C runs them as written.
+      The golden records `ub` and `Length of iv is N; should be M`, taken
+      from the oracle's one named repair (`build_openssl_oracle.sh` reads the
+      length before the free). `gen_m65.py golden` requires the repaired C
+      to raise that message on exactly the tagged rows. The port raises it.
+- [ ] `nse-openssl-rc4-empty-key` (step d) — found by step a; Phase 0 had it
+      as "inferred, unverified" (§12). `encrypt`/`decrypt` with `rc4` or
+      `rc4-40` and a zero-length key reach libcrypto's `RC4_set_key` with
+      length 0, which reads 256 bytes from the key pointer. That is an
+      over-read of the Lua string (CWE-125; the script controls it). The
+      output differs on every run: 3 of 3 in the tree's C, and between two
+      7.94 runs. ASan does not see it, because libcrypto is not
+      instrumented. It surfaced as an untagged row that changed between the
+      golden's two runs. 2 rows, tagged `ub:rc4-empty-key`, with no golden.
+      `rc4-hmac-md5` refuses the length itself ("invalid key length").
+      Proposed for step d: the port refuses a zero-length RC4 key the same
+      way. Other variable-length ciphers measured deterministic with an
+      empty key: bf, cast5 and rc2 gave the same output in 3 of 3 runs.
+      Whether their key setup reads past a zero-length key has not been
+      established by reading OpenSSL.
+- [ ] `nse-openssl-rand-alias-name` (step b) — `bignum_rand` and
+      `bignum_pseudo_rand` are one C function under two names (`openssllib`,
+      `nse_openssl.cc`). An argument error names whichever one
+      `luaL_argerror`'s walk of `package.loaded` meets first, and Lua's
+      per-state hash seed (`liblua/lstate.c:71`, from the time and ASLR)
+      decides that order. The same row named either function between runs of
+      the tree's C. The port names the function as called. The 20 argument
+      rows are tagged `nondet:alias-name`, and the comparison treats the two
+      names as equal on those rows only.
+- Faithfully reproduced, and pinned by the corpus (the port must keep
+  these):
+  - GCM and 3DES key wrap with no IV encrypt under an IV libcrypto draws
+    (357 rows, `nondet:random-iv`, compared on shape);
+  - `rand_bytes(-1)` and `rand_pseudo_bytes(-1)` raise "Couldn't allocate
+    memory." (`malloc(SIZE_MAX)`; the sanitizer screen runs with
+    `allocator_may_return_null=1` so that ASan returns NULL as glibc does).
+- **Ship no C** (§6). `deny.toml` bans `cc`, `cmake`, `ring`, `aws-lc-sys`,
+  `aws-lc-rs` and `openssl-sys`. The one wrapper is `errno-dragonfly`, on
+  the optional `pcap` feature's path (pcap → errno 0.2), which links
+  libpcap/Npcap by design. The supply-chain job also requires
+  `cargo tree -i cc -e all --target all` to find no `cc` in the default
+  build. Removing the wrapper makes `cargo deny --all-features check bans`
+  fail on `cc`.
+
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which

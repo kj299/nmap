@@ -26,7 +26,22 @@ wildcards = "deny"
 # treats as wildcards; allow that so intra-workspace paths don't trip the gate.
 allow-wildcard-paths = true
 # Keep the dependency count auditable. A safety port earns trust by being small.
-# deny = [{ name = "openssl-sys" }]   # example: prefer rustls over C OpenSSL
+#
+# Ship no C (docs/M6.5-ANALYSIS.md §6 "ship no C", step a): no C compiler at
+# build time and no C crypto. TLS is rustls with a first-party provider (D3),
+# never ring, aws-lc or OpenSSL. CI also requires `cargo tree -i cc -e all
+# --target all` to find nothing in the default build. The one wrapper is the
+# optional `pcap` feature's path, pcap -> errno 0.2 -> errno-dragonfly, whose
+# build script compiles a shim for DragonFly BSD only; that feature links
+# libpcap/Npcap's C by design and is never the default build.
+deny = [
+    { crate = "cc", wrappers = ["errno-dragonfly"], reason = "ship no C (M6.5 §6)" },
+    { crate = "cmake", reason = "ship no C (M6.5 §6)" },
+    { crate = "ring", reason = "C and assembly crypto; TLS uses the first-party provider (M6.5 D3)" },
+    { crate = "aws-lc-sys", reason = "C crypto; TLS uses the first-party provider (M6.5 D3)" },
+    { crate = "aws-lc-rs", reason = "C crypto; TLS uses the first-party provider (M6.5 D3)" },
+    { crate = "openssl-sys", reason = "C OpenSSL; the port replaces it (M6.5)" },
+]
 
 [licenses]
 # Allow-list, not deny-list: positively approve every license present.

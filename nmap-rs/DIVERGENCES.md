@@ -5668,8 +5668,8 @@ so they are opened now and land, pinned per fixture, with step f1
       CertificateVerify (`decrypt_error`, `bad13-corrupt-certverify`).
       Servers do not act on a client's alert number; scripts see
       `nil, "ERROR"` either way.
-- [ ] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
-      (M6.5 step b) refuse an operand over a per-operation cap with the
+- [x] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
+      (M6.5 step b, `core::nse::openssl::bn`) refuse an operand over a per-operation cap with the
       memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,
       16,384 bits for every operand of `mod_exp`, 1,048,576 bits for
       construction and the linear operations. nmap 7.94 computes up to
@@ -5686,6 +5686,13 @@ so they are opened now and land, pinned per fixture, with step f1
       conversions past 1,048,576 bits; no standardised group reaches any
       of them. The zero 7.94 returns would reach `mod_exp` or `div` as a
       zero modulus, which `num-bigint` panics on, so the refusal is an error.
+      Since step b: no value is built over 1,048,576 bits (`bin2bn`,
+      `dec2bn`, `hex2bn`, `rand`, `add`, `set_bit`), nor where the memory
+      budget refuses its bytes, and the refusal is "not enough memory"
+      without a position. Pinned at and one past each cap by
+      `the_caps_hold_at_their_edges`, `the_decimal_cap_is_exact`,
+      `over_a_cap_is_not_enough_memory` and
+      `the_memory_budget_refuses_a_number`.
 
 ## Milestone 6.5 step a — the `openssl` oracle (`tests/differential/m6`, `deny.toml`; no port code)
 
@@ -5723,7 +5730,7 @@ and how the corpus pins it.
       empty key: bf, cast5 and rc2 gave the same output in 3 of 3 runs.
       Whether their key setup reads past a zero-length key has not been
       established by reading OpenSSL.
-- [ ] `nse-openssl-rand-alias-name` (step b) — `bignum_rand` and
+- [x] `nse-openssl-rand-alias-name` (step b) — `bignum_rand` and
       `bignum_pseudo_rand` are one C function under two names (`openssllib`,
       `nse_openssl.cc`). An argument error names whichever one
       `luaL_argerror`'s walk of `package.loaded` meets first, and Lua's
@@ -5731,7 +5738,9 @@ and how the corpus pins it.
       decides that order. The same row named either function between runs of
       the tree's C. The port names the function as called. The 20 argument
       rows are tagged `nondet:alias-name`, and the comparison treats the two
-      names as equal on those rows only.
+      names as equal on those rows only. Since step b:
+      `bad_arguments_are_named_as_the_port_names_them`, and the same
+      normalisation in `openssl_bn_differential`.
 - Faithfully reproduced, and pinned by the corpus (the port must keep
   these):
   - GCM and 3DES key wrap with no IV encrypt under an IV libcrypto draws
@@ -5746,6 +5755,105 @@ and how the corpus pins it.
   `cargo tree -i cc -e all --target all` to find no `cc` in the default
   build. Removing the wrapper makes `cargo deny --all-features check bans`
   fail on `cc`.
+
+## Milestone 6.5 step b — `BIGNUM` (`core::nse::openssl::{bn, rand}`; not registered)
+
+The `openssl` module's `BIGNUM` half: the 19 `bignum_*` functions, the 11
+methods and the shared userdata (`nse_openssl.cc:40-277,551-566,657-670`),
+over `num-bigint` (E2), with the module's one randomness seam, the OS
+CSPRNG (E3). The module is **not registered** before step g (D2(D)):
+`runtime::tests::openssl_is_not_registered` holds `require "openssl"` failing
+in the NSE state, and `only_tests_register_lpeg_and_openssl` holds the
+test-only registration to tests and fuzz targets.
+
+**Gated** by `openssl_bn_differential`: the 11,170 rows of the step-a corpus
+tagged `b` and the `bnmeta` row, run by the oracle's own case runner
+(`oracle/m65_core.lua`) through the port, all equal to nmap 7.94's golden.
+The only exemptions are named:
+- `q=N`, the stale-error count, is not compared (`nse-openssl-error-queue-stale`);
+- random rows compare by shape (`nondet:random`);
+- the two names of `l_bignum_rand` are equal on the 20 `nondet:alias-name`
+  rows.
+
+The golden itself agrees with Python ints on every row they can compute (step
+a, `oracle/xref_m65.py`). Also gated:
+- 24 unit tests in the module, which Miri runs (two heavy ones natively only);
+- the fuzz target `nse_openssl_bignum`, against a machine-integer model and a
+  deterministic 64-bit Miller-Rabin;
+- 13 sabotages (`docs/M6.5-ANALYSIS.md`, §11 row b).
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nse-openssl-bignum-gc-callable` — the C puts `__gc` in the methods
+      table and sets `__index` to the metatable (`nse_openssl.cc:564,
+      665-666`), so `bn:__gc()` runs `BN_clear_free` and every later use of
+      the number reads freed memory (CWE-416; Phase 0 measured rc=139 under
+      valgrind). Here `__gc` is present, so the metatable's shape is the
+      C's, but inert: it checks its argument (`BIGNUM expected`) and does
+      nothing. Pinned by `gc_is_present_and_inert`.
+- [x] `openssl-random-failure-raises` — when the random source fails,
+      `BN_check_prime` returns -1, which the C pushes as `true`
+      (`nse_openssl.cc:189-199`), so a failed witness draw reports a
+      composite as prime. Here the call raises `Failure in RAND_bytes.`,
+      the words `rand_bytes` uses for the same failure. A failed
+      `bignum_rand` gives 0, as the C's ignored `BN_rand` failure does. The
+      source is the OS CSPRNG, which does not fail on the supported
+      platforms. Pinned by `miller_rabin_runs_the_rounds_openssl_runs`
+      (a broken source) and `rand_is_bounded_and_its_top_bit_is_free`.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- `bignum_div` by 0 gives `0, 0`, and `bignum_mod_exp` modulo 0 gives 0:
+  OpenSSL refuses both and the C ignores the refusal
+  (`nse_openssl.cc:105,127`). `num-bigint` would panic on both; the layer
+  checks first.
+- `mod_exp` ignores the signs of `p` and `m`, reduces the base into
+  `[0, |m|)`, and gives 0 modulo ±1. Division truncates, the remainder taking
+  the dividend's sign.
+- The bit positions and `bignum_rand`'s bit count are the C's `int`, the low
+  32 bits of the Lua integer: `set_bit(2^32 + 1)` sets bit 1. Negative
+  positions change nothing and test false; a negative bit count gives 0.
+- `bn2hex` is uppercase, two digits per byte, `0` for zero. `bn2mpi` keeps
+  the sign in the top bit. `dec2bn` and `hex2bn` read an optional `-` and the
+  longest run of digits, up to the first NUL, and give 0 for none.
+- `is_prime` is `BN_check_prime`'s structure:
+  - trial division by 64 to 2,048 primes by size;
+  - then 64 Miller-Rabin rounds up to 2,048 bits and 128 above, with random
+    witnesses.
+
+  `bignum_rand`'s top bit is free (`BN_rand(…, -1, 0)`).
+- `__tostring` is `bn2hex`; `__index` is the metatable itself; every script
+  shares the one metatable.
+- `nse-openssl-not-constant-time` — `mod_exp` and the Miller-Rabin rounds
+  are not constant-time, as the C's `BN_mod_exp` without
+  `BN_FLG_CONSTTIME` is not. Scripts use them on public values (DH and
+  SSH group checks, `rsa-vuln-roca`). The TLS provider never uses this layer
+  for anything secret (§6).
+
+### Differences, open and documented
+
+- [x] `nse-openssl-error-queue-stale` (its `BIGNUM` half) — the C's bignum
+      functions ignore OpenSSL's errors and leave them queued
+      (`nse_openssl.cc:89,105,127`). The next `OpenSSL error:` any function
+      reports is the oldest queued one, so after `bignum_div(x, 0)` a bad-key
+      `encrypt` says `bignum routines::div by zero` (§2). The port has no
+      queue: each failure reports its own error. The corpus's `q=N` column
+      is therefore not compared. The cipher half lands at step d (E4).
+- [x] `openssl-bad-argument-naming` — as `nmapdb-bad-argument-naming`:
+      - From Lua code, a function is named by the name it is registered
+        under (`'bignum_add'`, `'tohex'`). 7.94 names it as `getfuncname`
+        describes the call: the field, local, upvalue or global it was
+        called through, and for a method call `calling 'tohex' on bad self`.
+        The two agree on a direct field call such as `openssl.bignum_add(…)`
+        or `bn.tohex(…)`.
+      - Under `pcall`, and from `tostring`, the name is the library entry of
+        the C function, as `pushglobalfuncname` finds it:
+        `'openssl.bignum_bn2hex'` for `bn2hex`, `tohex` and `__tostring`.
+        `__gc` is in no table it searches, so it is `'?'`.
+
+      Every row of the corpus calls through `pcall` and agrees. Pinned by
+      `bad_arguments_are_named_as_the_port_names_them`.
+- [x] `nse-bignum-operand-cap` (above, step 0) applies from here.
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

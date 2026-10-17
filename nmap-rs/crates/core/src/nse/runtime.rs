@@ -471,14 +471,16 @@ mod tests {
         );
     }
 
-    /// Nothing calls `lpeg::register_for_tests` but the `lpeg` module's own
-    /// tests, the integration tests and the fuzz targets: a search of every
-    /// crate's sources, so a caller anywhere else — the engine, the command
-    /// line — fails here, not only one in this file. The runtime registers
-    /// the module through `lpeg::load_lpeg` alone.
+    /// Nothing calls `lpeg::register_for_tests` or
+    /// `openssl::register_for_tests` but the modules' own tests, the
+    /// integration tests and the fuzz targets: a search of every crate's
+    /// sources, so a caller anywhere else — the engine, the command line —
+    /// fails here, not only one in this file. The runtime registers `lpeg`
+    /// through `lpeg::load_lpeg` alone, and `openssl` not at all before step
+    /// g ([`openssl_is_not_registered`]).
     #[test]
     #[cfg_attr(miri, ignore = "reads the source tree")]
-    fn only_tests_register_lpeg() {
+    fn only_tests_register_lpeg_and_openssl() {
         let call = format!("{}(", ["register", "_for_tests"].concat());
         let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..")];
         let (mut files, mut callers) = (0usize, Vec::new());
@@ -488,7 +490,8 @@ mod tests {
                 if path.is_dir() {
                     let skip = path.ends_with("tests")
                         || path.ends_with("target")
-                        || path.ends_with("nse/lpeg");
+                        || path.ends_with("nse/lpeg")
+                        || path.ends_with("nse/openssl");
                     if !skip {
                         dirs.push(path);
                     }
@@ -502,6 +505,35 @@ mod tests {
             }
         }
         assert!(files > 100, "searched only {files} files");
-        assert!(callers.is_empty(), "lpeg is registered by {callers:?}");
+        assert!(
+            callers.is_empty(),
+            "lpeg or openssl is registered by {callers:?}"
+        );
+    }
+
+    /// `openssl` is not registered (`docs/M6.5-ANALYSIS.md` D2(D), E7): its
+    /// parts land step by step and the module only at step g, once TLS
+    /// works. Until then `require "openssl"` fails in the NSE state, as it
+    /// does in an nmap built without OpenSSL, and nothing names it in
+    /// `package.loaded` or the globals. Step g turns this into the
+    /// registration test.
+    #[test]
+    fn openssl_is_not_registered() {
+        use super::*;
+        let mut lua = bare_state();
+        let out = run_chunk(
+            &mut lua,
+            "=t",
+            b"local ok = pcall(require, 'openssl') \
+              return ok, rawget(_G, 'openssl'), package.loaded.openssl, \
+                     package.preload and package.preload.openssl",
+            1_000_000,
+        );
+        assert_eq!(
+            out,
+            ChunkOutcome::Returned(["false", "nil", "nil", "nil"].map(str::to_string).to_vec())
+        );
+        let src = include_str!("runtime.rs");
+        assert!(!src.contains(&["openssl", "::load"].concat()));
     }
 }

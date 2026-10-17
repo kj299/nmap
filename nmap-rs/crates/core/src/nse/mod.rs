@@ -23,6 +23,7 @@ pub mod lpeg;
 pub mod net;
 pub mod nmapdb;
 pub mod nmaplib;
+pub mod openssl;
 pub mod package;
 pub mod results;
 pub mod runtime;

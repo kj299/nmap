@@ -174,10 +174,13 @@ Here:
   nothing: one that names a directory (`url=/`) designates nothing, and one
   that names a file on the target
   (`http-phpmyadmin-dir-traversal.file=/etc/passwd`) does not open this
-  host's file (`nse-file-args-documented`). Nothing writable may overlap a
-  data directory or what its entries lead to, so scripts cannot rewrite
-  `nselib/` or `scripts/` (`nse-write-overlapping-data-dirs`). Paths are
-  compared and opened canonical, so `..` and symbolic links do not escape
+  host's file (`nse-file-args-documented`). Nothing writable may overlap
+  what nmap loads: a data directory in the search, whether or not it exists
+  yet (`~/.nmap`), what a link at its top or beneath its `nselib/` and
+  `scripts/` leads to, the scripts this run loads, or, on Unix, a hard link
+  to any of those files; so scripts cannot rewrite what this run or the next
+  loads (`nse-write-overlapping-data-dirs`, which names the residual cases).
+  Paths are compared and opened canonical, so `..` and symbolic links do not escape
   (`core::nse::fspolicy`, `sys::nsefs`). A name that is a link leading
   nowhere is not written through, which `fopen` would do, creating the
   link's target wherever it is (`nse-write-through-dangling-link`, found by

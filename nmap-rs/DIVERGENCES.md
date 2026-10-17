@@ -5765,10 +5765,10 @@ commit to change the C this step reads.
       its top, every save failed, and http-fetch still printed `Successfully
       Downloaded Everything At: DEST/...`. Now an output directory named
       before it exists is designated as its nearest existing ancestor,
-      canonical, joined with the rest of the path, which must be plain names
-      (a `.` or `..` there refuses the designation, reported on standard
-      error); the missing directories above it may be made, each itself and
-      nothing beside it (`FsPolicy::creatable`). Measured end to end against
+      canonical, joined with the rest of the path (a `.` there is dropped, as
+      the kernel drops it; a `..` refuses it, `nse-output-dir-dotdot-refused`);
+      the missing directories above it may be made, each itself and nothing
+      beside it (`FsPolicy::creatable`). Measured end to end against
       7.94 with a fresh `new/deeper/dest`: the same tree and output. Pinned by
       the `fetch-new` scenario,
       `nsefs::tests::an_output_dir_that_does_not_exist_yet_can_be_made`,
@@ -5785,43 +5785,99 @@ commit to change the C this step reads.
 - [x] `nse-file-args-documented` (security) — a value opens a file to
       scripts only under an argument the shipped scripts open as a local
       file, from a census of every argument read and every `io.open` and
-      `io.lines` in the shipped tree: `fspolicy::READ_FILE_ARGS` (52 keys,
+      `io.lines` in the shipped tree: `fspolicy::READ_FILE_ARGS` (53 keys,
       readable: `userdb`, `passdb`, `brute.credfile`, `dns-brute.hostlist`,
-      `targets-xml.iX`, ...) and `WRITE_FILE_ARGS` (20 keys, readable and
-      writable: the `*.outfile`s, `ajp-request.filename`, the `*.map_path`s,
-      ...). By full key, and by the short key `stdnse.get_script_args` also
-      accepts only where every shipped reader of that short key opens a local
-      file the same way: never `file` (three scripts read it as a file on the
-      target), and `filename` only to read, since `ajp-request.filename`
-      writes: under nmap, `filename=/x` also makes ajp-request write `/x`;
-      here ajp-request cannot. Only top-level string values count:
-      `nested={userdb=/x}` and `{/x}` grant nothing. A local path under an
-      argument the census missed opens nothing, where nmap opens it; a path
-      under an argument read through `nmap.fetchfile` alone needs no grant,
-      as `fetchfile` searches only the data directories. A grant holds for
+      `jdwp-inject.filename`, `targets-xml.iX`, ...) and `WRITE_FILE_ARGS`
+      (20 keys, readable and writable: the `*.outfile`s,
+      `ajp-request.filename`, the `*.map_path`s, ...). By full key, and by
+      the short key `stdnse.get_script_args` also accepts only where every
+      shipped reader of that short key opens a local file as the table
+      grants: never `file` (three scripts read it as a file on the target),
+      and `filename` only to read, since `ajp-request.filename` writes:
+      under nmap, `filename=/x` also makes ajp-request write `/x`; here
+      ajp-request cannot. Only top-level string values count:
+      `nested={userdb=/x}` and `{/x}` grant nothing. A read value may name
+      any file but a directory (nmap reads `userdb=/dev/null`). A local path
+      under an argument the census missed opens nothing, where nmap opens
+      it; a value a script looks up with `nmap.fetchfile` alone is found
+      beneath the data directories, readable already. A grant holds for
       every script in the run, as nmap's arguments do: binding a key to the
       scripts that read it, which the lfs review suggested, is not done.
-      `smb-psexec`'s `config` is run with `loadfile`, which scripts do not
-      have (`require-searches-only-nselib`), so it is not listed. Pinned by
-      `fspolicy::tests::only_local_file_arguments_name_files`,
-      `the_tables_are_disjoint`, the CLI's
-      `only_local_file_arguments_open_their_files` and the `nse_scriptargs`
-      fuzz target; sabotaged with `file` added to the read table.
+      The census is `CENSUS` in `fspolicy`'s tests, each key with the line
+      that reads it. Pinned by
+      `fspolicy::tests::the_census_cites_the_lines_that_read_each_key`,
+      `the_tables_are_the_census` (with a pinned list of target-path and
+      template keys never to list),
+      `every_reader_of_a_short_key_opens_a_local_file`,
+      `only_local_file_arguments_name_files`, `the_tables_are_disjoint`, the
+      CLI's `only_local_file_arguments_open_their_files` and the
+      `nse_scriptargs` fuzz target. The D2 review found
+      `jdwp-inject.filename` missing (M1), a device refused (L1), and the
+      tables' contents unpinned (L2): fixed.
 - [x] `nse-write-overlapping-data-dirs` (security) — the lfs review's
-      hardening, done in D2's step. An output directory or a file named for
-      writing that is in a data directory or holds one, or overlaps what a
-      data directory's entries lead to (`nselib`, `scripts` and the data
-      files, which a link can put anywhere), is refused: scripts could
-      otherwise write what this run and later runs load. nmap has no such
-      rule, so `http-fetch.destination=/usr/share/nmap/nselib` mirrors a
-      server into the libraries there and saves nothing here. Each refusal,
-      and each output directory that cannot be designated, is reported on
-      standard error before the scan (`NSE: Warning: scripts may not write
-      to P: it overlaps the data directory D.`), which nmap does not print.
+      hardening, done in D2's step and widened by D2's review (H2, M2).
+      Nothing writable may overlap what nmap loads: an output directory, a
+      missing directory on the way to one, or a file named for writing is
+      refused when it overlaps
+      - a data directory in the search (`--datadir`, `NMAPDIR`, `~/.nmap`,
+        the executable's directory and `../share/nmap`, the install
+        directory), **whether or not it exists**: an absent one is
+        protected where it would be, as the next run loads it. So
+        `destination=$HOME` is refused, and `destination=~/.nmap/nselib`;
+      - what a link leads to, at a data directory's top or anywhere beneath
+        its `nselib/` and `scripts/`, followed out, up to 65,536 entries;
+      - a script this run loads (`--script ~/dev/mine.nse`);
+      - on Unix, any of those files by device and inode, so a hard link to
+        one is refused by any name.
+
+      nmap has no such rule, so `http-fetch.destination=/usr/share/nmap/nselib`
+      mirrors a server into the libraries there and saves nothing here. Each
+      refusal, and each output directory that cannot be designated, is
+      reported on standard error before the scan (`NSE: Warning: scripts may
+      not write to P: it overlaps the data directory D.`, or `... it
+      overlaps T, which L leads to.`), which nmap does not print. The set is
+      worked out only when something writable was named. **Residual:** a
+      hard link to a data file planted *beneath* an output directory
+      (checked by name only for named files; with the kernel's
+      `protected_hardlinks`, only someone who can already write the data
+      file can make one); an absent data directory with `..` in its missing
+      part; links past the 65,536-entry bound; hard links on Windows.
       Pinned by `nsefs::tests::nothing_writable_overlaps_a_data_directory`
-      (a linked `nselib` too) and the CLI's
-      `only_local_file_arguments_open_their_files`; sabotaged with the check
-      removed.
+      (a linked `nselib` too),
+      `a_data_directory_that_does_not_exist_yet_is_protected`,
+      `nested_links_hard_links_and_chosen_scripts_are_protected` and the
+      CLI's `only_local_file_arguments_open_their_files` (`HOME` pointed at
+      a scratch directory with no `~/.nmap`; a chosen script named in
+      `outfile`); each fix sabotaged and caught.
+- [ ] `nse-output-dir-dotdot-refused` — an output directory named before it
+      exists, with `..` in its missing part (`DEST/new/../dest2`), or with a
+      missing part that is a link leading nowhere, is not designated: what
+      `..` means depends on what is created later, and a link leading
+      nowhere could be pointed anywhere. With `..`, 7.94's http-fetch makes
+      `DEST/new` and writes beneath `DEST/dest2` (a 21-entry tree, measured
+      by D2's review), and the port saves nothing and says why on standard
+      error. Through a link leading nowhere 7.94 saves nothing either (the
+      same tree, measured by the review); the port adds the warning. A `.` there is dropped, as the kernel drops it, and matches
+      7.94. Pinned by
+      `nsefs::tests::output_dirs_must_be_directories_or_plain_names_beneath_one`.
+- [ ] `nse-fetchfile-dotdot-refused` — `nmap.fetchfile("../../../etc/hostname")`
+      resolves outside the data directories; 7.94 then reads the file, and
+      the port refuses the open, since the policy reads beneath the data
+      directories only. Older than D2; found by its review (O1).
+- [ ] `nse-loadfile-file-args` — `mysql-audit.filename`,
+      `http-devframework.fingerprintfile` and smb-psexec's `config` name a
+      Lua file the script runs with `loadfile`, which scripts do not have
+      here (`require-searches-only-nselib`), so those scripts fail on it
+      whatever the policy says. If `loadfile` is ever ported, they become
+      read keys in `fspolicy::READ_FILE_ARGS` (D2's review, O3).
+- [ ] `nse-libssh2-key-file-args` — `ssh.privatekeys` and `ssh.publickeys`
+      (table values, which the top-level string rule does not cover) and
+      `ssh-run.privatekey` name local key files; they will need grants when
+      `libssh2` is ported (D2's review, O2).
+- [ ] `nse-supermicro-default-out-cwd` — without `out`, supermicro-ipmi-conf
+      writes `<ip>_bmc.conf` into the working directory, which scripts may not
+      write; nmap writes it. Older than D2; found by its review (O4), not
+      verified end to end.
 - [ ] `lfs-bad-argument-naming` — as `nmapdb-bad-argument-naming`: a bad
       argument names the function `'mkdir'` when Lua code called it and
       `'lfs.mkdir'` from a C function such as `pcall`. 7.94 names it as

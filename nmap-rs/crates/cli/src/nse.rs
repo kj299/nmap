@@ -191,20 +191,27 @@ fn open(setup: Setup) -> Result<Running, String> {
     // also make directories (`lfs.mkdir`); a value under any other argument
     // opens nothing (D2). Also readable, never writable: the scripts the
     // operator chose, wherever they are (`--script ./mine.nse`), and their
-    // SSH client files, for `ssh1.lua`.
+    // SSH client files, for `ssh1.lua`. Nothing writable may overlap what
+    // nmap loads: every data directory in the search, whether or not it
+    // exists yet, and the chosen scripts (`nse-write-overlapping-data-dirs`).
     let home = datadir::home();
-    let read_only: Vec<PathBuf> = chosen
+    let scripts: Vec<PathBuf> = chosen
         .scripts
         .iter()
         .map(|c| PathBuf::from(String::from_utf8_lossy(&c.path).into_owned()))
+        .collect();
+    let read_only: Vec<PathBuf> = scripts
+        .iter()
+        .cloned()
         .chain(
             home.iter()
                 .flat_map(|h| [h.join(".ssh/config"), h.join(".ssh/known_hosts")]),
         )
         .chain(paths(&read_file_values(&args)))
         .collect();
-    let fs = PolicyFs::new(
-        &data.existing(),
+    let fs = PolicyFs::for_run(
+        data.dirs(),
+        &scripts,
         &paths(&output_dir_values(&args)),
         &write_file_values(&args),
     )

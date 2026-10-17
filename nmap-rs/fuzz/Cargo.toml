@@ -389,3 +389,10 @@ name = "nse_protocols"
 path = "fuzz_targets/nse_protocols.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "nse_openssl_bignum"
+path = "fuzz_targets/nse_openssl_bignum.rs"
+test = false
+doc = false
+bench = false

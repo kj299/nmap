@@ -5,6 +5,10 @@
 --
 --   run{ openssl = <module>, parse = <parse_ssl_certificate>,
 --        cases = PATH, certs = PATH, out = PATH, start = N }
+--   runner{ openssl = <module>, parse = <...>, certs = PATH, drain = false }
+--        -> a function from one case row to its result row (the port's
+--           gates call it row by row; `drain = false` skips the error-queue
+--           drain, which needs `openssl.decrypt`, and writes q=-)
 --
 -- Case row (oracle/gen_m65_cases.py):  ID TAGS OP SUB ARG...
 -- Result row:                          ID <TAB> STATUS <TAB> VALUES <TAB> q=N
@@ -43,7 +47,7 @@ local function unhex(h)
   return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end))
 end
 
-function M.run(env)
+function M.runner(env)
   local openssl, parse = env.openssl, env.parse
   local BNMT = getmetatable(openssl.bignum_dec2bn("1"))
   local function is_bn(v) return type(v) == "userdata" and getmetatable(v) == BNMT end
@@ -233,6 +237,34 @@ function M.run(env)
     end
   end
 
+  local do_drain = env.drain ~= false
+  return function(line)
+    local f = {}
+    for tok in line:gmatch("[^\t]+") do f[#f + 1] = tok end
+    local id, op, sub = f[1], f[3], f[4]
+    local args = { n = #f - 4 }
+    local okdec, derr = pcall(function()
+      for i = 5, #f do args[i - 4] = decode(f[i]) end
+    end)
+    local r
+    if not okdec then
+      r = table.pack(false, "decode: " .. tostring(derr))
+    else
+      r = table.pack(OPS[op](sub, args))
+    end
+    local parts = {}
+    if r[1] then
+      for i = 2, r.n do parts[#parts + 1] = render(r[i]) end
+    else
+      parts[1] = render_err(r[2])
+    end
+    return id .. "\t" .. (r[1] and "ok" or "err") .. "\t" .. table.concat(parts, " ")
+      .. "\tq=" .. (do_drain and tostring(drain()) or "-")
+  end
+end
+
+function M.run(env)
+  local row = M.runner(env)
   local start = tonumber(env.start or 1)
   local out = assert(io.open(env.out, "a"))
   local idx = 0
@@ -240,27 +272,7 @@ function M.run(env)
     if line ~= "" and line:sub(1, 1) ~= "#" then
       idx = idx + 1
       if idx >= start then
-        local f = {}
-        for tok in line:gmatch("[^\t]+") do f[#f + 1] = tok end
-        local id, op, sub = f[1], f[3], f[4]
-        local args = { n = #f - 4 }
-        local okdec, derr = pcall(function()
-          for i = 5, #f do args[i - 4] = decode(f[i]) end
-        end)
-        local r
-        if not okdec then
-          r = table.pack(false, "decode: " .. tostring(derr))
-        else
-          r = table.pack(OPS[op](sub, args))
-        end
-        local parts = {}
-        if r[1] then
-          for i = 2, r.n do parts[#parts + 1] = render(r[i]) end
-        else
-          parts[1] = render_err(r[2])
-        end
-        out:write(id, "\t", r[1] and "ok" or "err", "\t", table.concat(parts, " "),
-          "\tq=", tostring(drain()), "\n")
+        out:write(row(line), "\n")
         out:flush()
       end
     end

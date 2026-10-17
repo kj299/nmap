@@ -70,5 +70,27 @@ memchr = "2"
 # Cargo.lock and the two can never disagree about what a `Gc` is.
 gc-arena = "=0.5.3"
 
+# `core::nse::openssl::bn` — the `openssl` module's BIGNUM (M6.5 step b, E2).
+# num-bigint does the arithmetic; the first-party layer over it owns
+# OpenSSL's observable semantics (text formats, sign rules, the silent zeros,
+# int truncation, `BN_check_prime`'s structure) and the operand caps, and
+# pre-checks the four inputs num-bigint panics on. Without `rand`: the
+# randomness comes from the one seam below. num-integer and num-traits are
+# its own dependencies, named here for their traits; 3 crates in all, deny and
+# MSRV clean (docs/M6.5-ANALYSIS.md §10).
+#
+# Under D2(D) the crypto lands before the module is registered (step g), so
+# this dependency precedes the shipped code that earns it, for one milestone
+# (E7); `nse::runtime` asserts that `openssl` is not registered.
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-integer = { version = "0.1", default-features = false, features = ["std"] }
+num-traits = { version = "0.2", default-features = false, features = ["std"] }
+
+# The one randomness seam (E3): `BIGNUM` random numbers and Miller-Rabin
+# witnesses now; `rand_bytes` and the TLS provider later. The OS CSPRNG, and
+# seedable only under `cfg(test)`. Already in Cargo.lock through piccolo's
+# `rand`, so it adds no crate.
+getrandom = "0.2"
+
 [lints]
 workspace = true

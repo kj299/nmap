@@ -1,0 +1,7 @@
+[package]
+name = "x509parser_probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x509-parser = "0.18"

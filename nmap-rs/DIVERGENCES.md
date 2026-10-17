@@ -5620,6 +5620,55 @@ the entry they replace).
 - `lpeg_slowness_regression`: the adversarial-slowness gate (D3 condition 4)
   of `lpeg-stall-limit-ends-finite-work`.
 
+## Milestone 6.5 step 0 — the spikes (`spikes/m65-tls-provider`, `spikes/m65-x509`; no code shipped)
+
+Measured, not yet ported: the D3 spike (`docs/M6.5-ANALYSIS.md` §14) ran
+rustls 0.23 with a first-party provider against nmap 7.94 on 61 loopback
+fixtures. The differences below are properties of the client chosen in D3,
+so they are opened now and land, pinned per fixture, with step f1
+(`sys::tls`). Each cites the fixture in
+`spikes/m65-tls-provider/fixtures/results/results.md`.
+
+- [ ] `nse-tls-modern-only` — rustls carries TLS 1.2 and 1.3 with ECDHE and
+      AEAD suites only, by design (`rustls-0.23.46/src/manual/features.rs`).
+      Where 7.94 reaches and the port will not: TLS 1.2 RSA key exchange
+      (`tls12-rsa-kx-gcm`), CBC suites (`tls12-ecdhe-cbc`), DHE
+      (`tls12-dhe2048`), DSA certificates (`dsa-dhe`), X448 and FFDHE groups
+      in TLS 1.3 (`tls13-x448`, `tls13-ffdhe2048`), and STARTTLS servers with
+      only such suites (`starttls-legacy`: 7.94 reconnects with AES128-SHA,
+      the port gets `HandshakeFailure`). Where both fail: TLS 1.0 and 1.1
+      only, a SHA-1-only signature algorithm, a secp256k1 certificate (neither
+      ClientHello offers an ECDSA signature algorithm for that curve). Retired by M6.7, legacy TLS.
+- [ ] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
+      40) when the server sends no `renegotiation_info` extension (RFC 5746,
+      OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates
+      the extension (`client/hs.rs:747`) and continues (`fake-noreneg`: the
+      spike sent ClientKeyExchange). The port reaches servers 7.94 refuses.
+      nmap never renegotiates, so nothing downstream depends on it; a vendor
+      patch of one check would restore the refusal if fidelity is wanted.
+- [ ] `nse-tls-handshake-64k` — rustls refuses a handshake message over
+      65,535 bytes (`msgs/deframer/handshake.rs:376`); OpenSSL's certificate
+      list limit is 102,400 (`SSL_MAX_CERT_LIST_DEFAULT`). A chain between
+      the two reaches 7.94 and not the port (`chain-over64k`: 86
+      certificates, 70,606 bytes, TLS 1.2 and 1.3); over 100 KiB both fail
+      (`chain-over100k`).
+- [ ] `nse-tls-sni-rustls-names` — for a string target that is an IP
+      literal, 7.94 sends it as SNI (`sni-ip-string`: `server_name` =
+      `127.0.0.1` in the server's trace); rustls sends none for an IP
+      address, and rejects names it cannot encode. A DNS name is sent by
+      both (`sni-name`). A host table sends none in both.
+- [ ] `nse-tls-alert-numbers` — where both sides reject, the alert the port
+      sends can differ from 7.94's: a certificate entry with trailing bytes
+      50 vs 42 (`fake-trail`), an undecodable certificate 42 vs 40
+      (`fake-garbage`), a key type not matching the suite 47 vs 40
+      (`fake-ecdsa-cert-rsa-suite`, `fake-ed25519-cert-rsa-suite`,
+      `fake-x25519-cert`, `fake-dh-cert`), an unknown key algorithm 80 vs
+      40 (`fake-unknownoid-cert`). The same alert for a bad
+      ServerKeyExchange signature (51, `fake-badsig`) and a bad TLS 1.3
+      CertificateVerify (`decrypt_error`, `bad13-corrupt-certverify`).
+      Servers do not act on a client's alert number; scripts see
+      `nil, "ERROR"` either way.
+
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which

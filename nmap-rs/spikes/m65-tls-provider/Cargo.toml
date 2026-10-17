@@ -1,0 +1,37 @@
+# M6.5 step 0, the D3 spike: a first-party rustls CryptoProvider that verifies
+# handshake signatures, over RustCrypto primitives of the digest-0.10 /
+# cipher-0.4 generation the tree already locks (E1), with no C anywhere in its
+# tree. Scratch: detached from the workspace (own [workspace]) so nothing here
+# touches the main build. Its FINDING (provider size, crate union, unsafe
+# count, reach against the step-0 fixtures) decides D3 in
+# docs/M6.5-ANALYSIS.md.
+[package]
+name = "m65-tls-provider-spike"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-pki-types = "1"
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p521 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+x25519-dalek = { version = "2", default-features = false, features = ["alloc", "zeroize"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-traits = { version = "0.2", default-features = false }
+getrandom = "0.2"
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+subtle = { version = "2", default-features = false }
+
+[workspace]
+
+[profile.release]
+overflow-checks = true

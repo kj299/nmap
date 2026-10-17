@@ -349,8 +349,7 @@ fn digests_and_hmac_through_the_binding() {
 }
 
 /// `rand_bytes` and `rand_pseudo_bytes`: the length asked for; a negative
-/// one is `size_t`-enormous and `malloc` refuses it, as the allocator
-/// refuses 2^62 bytes (no abort); draws differ (E3).
+/// one is `size_t`-enormous and `malloc` refuses it; draws differ (E3).
 #[test]
 fn random_bytes_have_the_length_asked_for() {
     let out = run(
@@ -361,14 +360,27 @@ fn random_bytes_have_the_length_asked_for() {
                   #openssl.rand_bytes(1000), a ~= b, c ~= d, a ~= c, \
                   select(2, pcall(function() return openssl.rand_bytes(-1) end)), \
                   e(openssl.rand_pseudo_bytes, math.mininteger), \
-                  e(openssl.rand_bytes, 1 << 62), \
                   e(openssl.rand_bytes, 1.5))",
     );
     assert_eq!(
         out,
         "0|1|1000|true|true|true|s:t:1: Couldn't allocate memory.|\
-         s:Couldn't allocate memory.|s:Couldn't allocate memory.|\
+         s:Couldn't allocate memory.|\
          s:bad argument #1 to 'openssl.rand_bytes' (number has no integer representation)"
+    );
+}
+
+/// A length the allocator cannot grant is the C's failed `malloc`, not an
+/// abort (`try_reserve`). Miri reports the request as resource exhaustion
+/// instead of failing it, so this runs natively only.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_ungrantable_length_is_a_failed_malloc() {
+    let out = run("return r(select(2, pcall(openssl.rand_bytes, 1 << 62)), \
+         select(2, pcall(openssl.rand_pseudo_bytes, 1 << 62)))");
+    assert_eq!(
+        out,
+        "s:Couldn't allocate memory.|s:Couldn't allocate memory."
     );
 }
 

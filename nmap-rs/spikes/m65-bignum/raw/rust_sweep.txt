@@ -1,0 +1,31 @@
+== rust modpow_e17 (timeout 120 each) ==
+modpow_e17 8192 2.725 2.656 2.509 median 2.656 VmHWM:	    2584 kB
+modpow_e17 16384 10.556 12.587 11.580 median 11.580 VmHWM:	    2696 kB
+modpow_e17 65536 166.502 192.373 292.569 median 192.373 VmHWM:	    2736 kB
+modpow_e17 524280 13739.818 12269.950 10624.976 median 12269.950 VmHWM:	    4528 kB
+modpow_e17 1048576 TIMEOUT(>120s) rc=124
+modpow_e17 8388608 TIMEOUT(>120s) rc=124
+== rust trialdiv (timeout 120 each) ==
+trialdiv 8192 1.372 1.400 1.395 median 1.395 VmHWM:	    2456 kB
+trialdiv 16384 3.016 3.144 2.997 median 3.016 VmHWM:	    2504 kB
+trialdiv 65536 12.038 11.770 11.671 median 11.770 VmHWM:	    2544 kB
+trialdiv 524280 94.373 96.368 96.317 median 96.317 VmHWM:	    2640 kB
+trialdiv 1048576 190.735 187.651 187.214 median 187.651 VmHWM:	    2668 kB
+trialdiv 8388608 1546.101 1562.942 1552.910 median 1552.910 VmHWM:	    4492 kB
+== rust from_dec (timeout 120 each) ==
+from_dec 8192 0.026 0.013 0.014 median 0.014 VmHWM:	    2776 kB
+from_dec 16384 0.039 0.032 0.031 median 0.032 VmHWM:	    2840 kB
+from_dec 65536 0.401 0.454 0.408 median 0.408 VmHWM:	    2964 kB
+from_dec 524280 24.757 34.731 36.097 median 34.731 VmHWM:	    4084 kB
+from_dec 1048576 105.130 101.451 100.897 median 101.451 VmHWM:	    5140 kB
+from_dec 8388608 6530.458 6506.649 6496.398 median 6506.649 VmHWM:	   22596 kB
+== rust to_dec (timeout 120 each) ==
+to_dec 8192 0.068 0.044 0.038 median 0.044 VmHWM:	    2500 kB
+to_dec 16384 0.155 0.106 0.098 median 0.106 VmHWM:	    2604 kB
+to_dec 65536 0.862 0.846 0.753 median 0.846 VmHWM:	    2892 kB
+to_dec 524280 17.916 17.240 17.139 median 17.240 VmHWM:	    4080 kB
+to_dec 1048576 49.922 49.591 55.093 median 49.922 VmHWM:	    5004 kB
+to_dec 8388608 1218.573 median 1218.573 VmHWM:	   19708 kB
+== rust modpow_dh (timeout 120 each) ==
+modpow_dh 8192 74.453 72.209 70.800 median 72.209 VmHWM:	    2520 kB
+modpow_dh 16384 266.516 266.987 316.220 median 266.987 VmHWM:	    2708 kB

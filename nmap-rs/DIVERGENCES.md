@@ -5668,6 +5668,24 @@ so they are opened now and land, pinned per fixture, with step f1
       CertificateVerify (`decrypt_error`, `bad13-corrupt-certverify`).
       Servers do not act on a client's alert number; scripts see
       `nil, "ERROR"` either way.
+- [ ] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
+      (M6.5 step b) refuse an operand over a per-operation cap with the
+      memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,
+      16,384 bits for every operand of `mod_exp`, 1,048,576 bits for
+      construction and the linear operations. nmap 7.94 computes up to
+      OpenSSL's own cap of 536,870,848 bits (`bn_lib.c:270`) and above it
+      silently returns 0 (`bignum_bin2bn` of 67,108,857 bytes prints `0`).
+      Set by the step-0 spike (`spikes/m65-bignum`, `docs/M6.5-ANALYSIS.md`
+      §14.3): at the sizes a peer can choose, one `mod_exp` or Miller-Rabin
+      round runs for hours to years in C and in Rust alike, with no point at
+      which the stall watchdog could stop it; the caps keep every single
+      call under the 10-minute watchdog with about five times to spare.
+      Visible where 7.94 would answer after minutes: `ssl-dh-params`'s
+      `is_safe_prime` on a DH group over 8,192 bits (7.94: about four
+      minutes at 16,384), ssh2's `mod_exp` with a `p` over 16,384 bits,
+      conversions past 1,048,576 bits; no standardised group reaches any
+      of them. The zero 7.94 returns would reach `mod_exp` or `div` as a
+      zero modulus, which `num-bigint` panics on, so the refusal is an error.
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

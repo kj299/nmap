@@ -1,0 +1,8 @@
+Starting Nmap 7.94SVN ( https://nmap.org ) at 2026-10-17 02:19 UTC
+Pre-scan script results:
+| bncap: 
+| len=67108856  bn2hex[1..16]="FFFFFFFFFFFFFFFF"  #hex=134217712  -> nonzero
+|_len=67108857  bn2hex[1..16]="0"  #hex=1  -> ZERO
+WARNING: No targets were specified, so 0 hosts scanned.
+Nmap done: 0 IP addresses (0 hosts up) scanned in 1.96 seconds
+nmap rc=0 wall=2s

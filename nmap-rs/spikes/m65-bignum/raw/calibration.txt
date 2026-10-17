@@ -1,0 +1,16 @@
+# Calibration pass (C, ./bench <op> <bits> 3), run alone before the sweeps; verbatim program output.
+modexp_full 8192 119.210 119.392 121.317 median 119.392
+modexp_full 16384 955.501 965.630 979.983 median 965.630
+bn2dec 8192 0.084 0.095 0.095 median 0.095
+bn2dec 16384 0.265 0.270 0.286 median 0.270
+bn2dec 65536 3.814 3.865 4.041 median 3.865
+dec2bn 8192 0.010 0.011 0.056 median 0.011
+dec2bn 16384 0.032 0.032 0.034 median 0.032
+dec2bn 65536 0.408 0.416 0.429 median 0.416
+trialdiv 8192 3.155 3.304 3.403 median 3.304
+trialdiv 65536 26.646 26.700 26.816 median 26.700
+trialdiv 524280 214.883 217.609 218.267 median 217.609
+modexp_dh 8192 29.995 30.187 30.252 median 30.187
+modexp_dh 16384 119.018 120.669 131.675 median 120.669
+modexp_dh 65536 3021.432 3069.515 3069.645 median 3069.515
+# (bn2dec/dec2bn/trialdiv were re-measured in the full sweeps; the sweep medians are the ones in RESULT.md tables.)

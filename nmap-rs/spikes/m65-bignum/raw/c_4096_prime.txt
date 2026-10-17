@@ -1,0 +1,5 @@
+modexp_full 4096 15.400 15.852 16.834 median 15.852 maxrss_kb 5744
+generated 4096-bit prime in 4915.8 ms (num_bits=4096)
+BN_check_prime(4096-bit prime) rep0 = 2022.058 ms (result=1)
+BN_check_prime(4096-bit prime) rep1 = 1965.671 ms (result=1)
+BN_check_prime(4096-bit prime) rep2 = 1962.413 ms (result=1)

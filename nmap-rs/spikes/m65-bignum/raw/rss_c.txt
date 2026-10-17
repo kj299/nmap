@@ -1,0 +1,3 @@
+dec2bn 524280 27.122 median 27.122 maxrss_kb 6000
+dec2bn 8388608 6637.575 median 6637.575 maxrss_kb 12008
+bn2dec 524280 324.483 median 324.483 maxrss_kb 5872

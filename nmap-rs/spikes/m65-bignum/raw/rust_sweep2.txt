@@ -1,0 +1,28 @@
+== rust modpow_full ==
+modpow_full 8192 344.687 333.551 322.908 median 333.551 VmHWM:	    2612 kB
+modpow_full 16384 2202.792 2151.010 2152.660 median 2152.660 VmHWM:	    2612 kB
+== rust modpow_dh ==
+modpow_dh 8192 69.347 68.995 69.657 median 69.347 VmHWM:	    2516 kB
+modpow_dh 16384 264.114 261.792 293.242 median 264.114 VmHWM:	    2644 kB
+modpow_dh 65536 4287.732 4372.096 4227.699 median 4287.732 VmHWM:	    2740 kB
+== rust trialdiv ==
+trialdiv 8192 1.377 1.373 1.410 median 1.377 VmHWM:	    2476 kB
+trialdiv 16384 2.873 2.811 2.821 median 2.821 VmHWM:	    2544 kB
+trialdiv 65536 11.740 11.785 11.653 median 11.740 VmHWM:	    2488 kB
+trialdiv 524280 94.407 94.184 94.264 median 94.264 VmHWM:	    2524 kB
+trialdiv 1048576 190.902 188.669 187.949 median 188.669 VmHWM:	    2668 kB
+trialdiv 8388608 1538.711 1535.484 1529.530 median 1535.484 VmHWM:	    4448 kB
+== rust from_dec ==
+from_dec 8192 0.021 0.010 0.010 median 0.010 VmHWM:	    2724 kB
+from_dec 16384 0.041 0.031 0.031 median 0.031 VmHWM:	    2868 kB
+from_dec 65536 0.421 0.391 0.390 median 0.391 VmHWM:	    2996 kB
+from_dec 524280 25.382 24.548 24.810 median 24.810 VmHWM:	    4156 kB
+from_dec 1048576 98.820 97.130 102.993 median 98.820 VmHWM:	    5244 kB
+from_dec 8388608 6563.460 median 6563.460 VmHWM:	   19840 kB
+== rust to_dec ==
+to_dec 8192 0.067 0.044 0.039 median 0.044 VmHWM:	    2504 kB
+to_dec 16384 0.159 0.114 0.100 median 0.114 VmHWM:	    2588 kB
+to_dec 65536 0.878 0.756 0.747 median 0.756 VmHWM:	    2712 kB
+to_dec 524280 19.237 19.032 16.826 median 19.032 VmHWM:	    3952 kB
+to_dec 1048576 48.904 48.865 48.110 median 48.865 VmHWM:	    5052 kB
+to_dec 8388608 1146.459 median 1146.459 VmHWM:	   19644 kB

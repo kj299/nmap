@@ -1,9 +1,10 @@
 //! The binding through the VM, in-module so that Miri runs it. The
-//! differential corpus (`tests/openssl_bn_differential.rs`, 11,171 rows
-//! against nmap 7.94) holds the oracle's answers; these pin what the corpus
-//! does not reach: argument errors from Lua code, the metamethods, the caps,
-//! shared mutation, the memory accounting, and the rounds a primality test
-//! yields between.
+//! differential corpora (`tests/openssl_bn_differential.rs`, 11,171 rows,
+//! and `tests/openssl_digest_differential.rs`, 2,322, against nmap 7.94)
+//! hold the oracle's answers; these pin what the corpus does not reach:
+//! argument errors from Lua code, the metamethods, the caps, shared
+//! mutation, the memory accounting, the rounds a primality test yields
+//! between, and the random functions' lengths and budget.
 
 use super::*;
 use crate::nse::stdlib::{load_format, load_patterns, load_tail};
@@ -82,16 +83,22 @@ fn the_metatable_is_luaopen_openssls() {
 }
 
 #[test]
-fn the_library_has_the_bignum_functions_and_nothing_else_yet() {
+fn the_library_has_steps_b_and_c_and_nothing_else_yet() {
     let out = run(
         "local k = {} for name, v in pairs(openssl) do k[#k + 1] = name .. ':' .. type(v) end \
          table.sort(k) return #k .. ' ' .. table.concat(k, ',')",
     );
-    assert!(
-        out.starts_with("19 bignum_add:function,bignum_bin2bn:function"),
-        "{out}"
+    assert_eq!(
+        out,
+        "27 bignum_add:function,bignum_bin2bn:function,bignum_bn2bin:function,\
+         bignum_bn2dec:function,bignum_bn2hex:function,bignum_bn2mpi:function,\
+         bignum_clear_bit:function,bignum_dec2bn:function,bignum_div:function,\
+         bignum_hex2bn:function,bignum_is_bit_set:function,bignum_is_prime:function,\
+         bignum_is_safe_prime:function,bignum_mod_exp:function,bignum_num_bits:function,\
+         bignum_num_bytes:function,bignum_pseudo_rand:function,bignum_rand:function,\
+         bignum_set_bit:function,digest:function,hmac:function,md4:function,md5:function,\
+         rand_bytes:function,rand_pseudo_bytes:function,ripemd160:function,sha1:function"
     );
-    assert!(out.ends_with("bignum_set_bit:function"), "{out}");
 }
 
 /// `openssl-bad-argument-naming`: from Lua code, the name a function is
@@ -291,4 +298,148 @@ fn rand_bits_are_narrowed_to_int() {
          end \
          return r(max <= 8, nonzero, openssl.bignum_rand((1 << 32) - 1):num_bits())");
     assert_eq!(out, "true|true|0");
+}
+
+/// `NSE_DECLARE_DIGEST` inserts the algorithm's name below the arguments
+/// (`nse_openssl.cc:336-347`), so `md5`'s message is argument #2, from Lua
+/// code as from C; an unknown name is printed up to its NUL; a number is a
+/// string to `luaL_checkstring`, for the name and the message alike.
+#[test]
+fn digest_errors_are_the_cs() {
+    let out = run(
+        "local function e(f, ...) return select(2, pcall(f, ...)) end \
+         return r(select(2, pcall(function() return openssl.md5() end)), \
+                  select(2, pcall(function() return openssl.sha1({}) end)), \
+                  e(openssl.ripemd160, nil), \
+                  e(openssl.digest, 'nope\\0md5', ''), \
+                  e(openssl.hmac, 'sha3-256', 'k', 'm'), \
+                  e(openssl.digest, 42, 'x'), \
+                  openssl.md5(42) == openssl.md5('42'), \
+                  openssl.digest('MD5\\0junk', 1.5) == openssl.md5('1.5'), \
+                  openssl.hmac('SHA-256', 7, 8) == openssl.hmac('sha256', '7', '8'))",
+    );
+    assert_eq!(
+        out,
+        "s:t:1: bad argument #2 to 'md5' (string expected, got no value)|\
+         s:t:1: bad argument #2 to 'sha1' (string expected, got table)|\
+         s:bad argument #2 to 'openssl.ripemd160' (string expected, got nil)|\
+         s:Unknown digest algorithm: nope|\
+         s:Unknown digest algorithm: sha3-256|\
+         s:Unknown digest algorithm: 42|true|true|true"
+    );
+}
+
+/// The digests and HMAC through the binding, against published vectors
+/// (the full sets are `digest::tests`).
+#[test]
+fn digests_and_hmac_through_the_binding() {
+    let out = run("local function hex(s) return (s:gsub('.', function(c) \
+           return ('%02x'):format(c:byte()) end)) end \
+         return r(hex(openssl.md4('abc')), hex(openssl.md5('')), hex(openssl.sha1('abc')), \
+                  hex(openssl.ripemd160('abc')), hex(openssl.digest('sha512-224', 'abc')), \
+                  hex(openssl.hmac('md5', 'Jefe', 'what do ya want for nothing?')))");
+    assert_eq!(
+        out,
+        "s:a448017aaf21d8525fc10ae87aa6729d|s:d41d8cd98f00b204e9800998ecf8427e|\
+         s:a9993e364706816aba3e25717850c26c9cd0d89d|\
+         s:8eb208f7e05d987a9b044a8e98c6b087f15a0bfc|\
+         s:4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa|\
+         s:750c783e6ab0b503eaa86e310a5db738"
+    );
+}
+
+/// `rand_bytes` and `rand_pseudo_bytes`: the length asked for; a negative
+/// one is `size_t`-enormous and `malloc` refuses it, as the allocator
+/// refuses 2^62 bytes (no abort); draws differ (E3).
+#[test]
+fn random_bytes_have_the_length_asked_for() {
+    let out = run(
+        "local function e(f, ...) return select(2, pcall(f, ...)) end \
+         local a, b = openssl.rand_bytes(32), openssl.rand_bytes(32) \
+         local c, d = openssl.rand_pseudo_bytes(32), openssl.rand_pseudo_bytes(32) \
+         return r(#openssl.rand_bytes(0), #openssl.rand_pseudo_bytes(1), \
+                  #openssl.rand_bytes(1000), a ~= b, c ~= d, a ~= c, \
+                  select(2, pcall(function() return openssl.rand_bytes(-1) end)), \
+                  e(openssl.rand_pseudo_bytes, math.mininteger), \
+                  e(openssl.rand_bytes, 1 << 62), \
+                  e(openssl.rand_bytes, 1.5))",
+    );
+    assert_eq!(
+        out,
+        "0|1|1000|true|true|true|s:t:1: Couldn't allocate memory.|\
+         s:Couldn't allocate memory.|s:Couldn't allocate memory.|\
+         s:bad argument #1 to 'openssl.rand_bytes' (number has no integer representation)"
+    );
+}
+
+/// The bytes come out of the memory budget: a draw the budget cannot hold is
+/// refused with its "not enough memory" before anything is drawn, as a
+/// bignum is (7.94 has no budget; its `malloc` would grant it).
+#[test]
+#[cfg_attr(miri, ignore)] // megabytes of random bytes
+fn the_memory_budget_refuses_random_bytes() {
+    let mut lua = state();
+    lua.set_memory_limit(lua.total_memory() + (8 << 20));
+    let (out, _) = run_sliced(
+        &mut lua,
+        "return r(#openssl.rand_bytes(1 << 20), \
+                  select(2, pcall(openssl.rand_bytes, 16 << 20)), \
+                  select(2, pcall(openssl.rand_pseudo_bytes, 16 << 20)))",
+        i32::MAX,
+    );
+    assert_eq!(out, "1048576|s:not enough memory|s:not enough memory");
+}
+
+/// A draw the budget refuses takes nothing from the source: with the test
+/// generator seeded, the draw after a refused one is the seed's first.
+#[test]
+#[cfg_attr(miri, ignore)] // megabytes of budget
+fn a_refused_draw_takes_no_randomness() {
+    let mut lua = state();
+    lua.set_memory_limit(lua.total_memory() + (8 << 20));
+    rand::seed_for_tests(Some(11));
+    let (refused, _) = run_sliced(
+        &mut lua,
+        "return r(select(2, pcall(openssl.rand_bytes, 16 << 20)), openssl.rand_bytes(16))",
+        i32::MAX,
+    );
+    rand::seed_for_tests(Some(11));
+    let (fresh, _) = run_sliced(&mut lua, "return r(openssl.rand_bytes(16))", i32::MAX);
+    rand::seed_for_tests(None);
+    assert_eq!(refused, format!("s:not enough memory|{fresh}"));
+}
+
+/// E3's release check: the seam is the operating system's CSPRNG, not a
+/// generator seeded the same way in every process. Two child processes of
+/// this test binary each draw 32 bytes through `rand_bytes`; a fixed seed
+/// would give both the same bytes (in-process checks cannot see it).
+#[test]
+#[cfg_attr(miri, ignore)] // spawns processes
+fn draws_differ_across_processes() {
+    const CHILD: &str = "NMAP_RS_OPENSSL_RAND_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let out = run("return (openssl.rand_bytes(32):gsub('.', function(c) \
+             return ('%02x'):format(c:byte()) end))");
+        println!("draw={out}");
+        return;
+    }
+    let draw = || {
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "nse::openssl::tests::draws_differ_across_processes",
+            ])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("spawn");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.lines()
+            // libtest prints the test's name on the same line first.
+            .find_map(|l| l.split_once("draw=").map(|(_, d)| d.trim().to_string()))
+            .unwrap_or_else(|| panic!("no draw in {text}"))
+    };
+    let (a, b) = (draw(), draw());
+    assert_eq!(a.len(), 64);
+    assert_ne!(a, b, "two processes drew the same bytes");
 }

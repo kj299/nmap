@@ -555,6 +555,25 @@ def rows():
     add("k-sigalg", "param-tag0 expect=ok", cert(sig_alg=seq(oid(SHA256_RSA), b"\x20\x00")))
     add("k-sigalg", "param-tag0-indefinite expect=ok", cert(sig_alg=seq(oid(SHA256_RSA), b"\x20\x80\x00\x00")))
     add("k-sigalg", "param-tag0-primitive-is-eoc expect=reject", cert(sig_alg=seq(oid(SHA256_RSA), b"\x00\x00")))
+
+    # Constructed strings nested around a primitive one, definite and
+    # indefinite: asn1_collect refuses past ASN1_MAX_STRING_NEST (5).
+    def nested(depth, inf, inner=tlv(0x04, b"A")):
+        v = inner
+        for _ in range(depth):
+            v = b"\x24\x80" + v + b"\x00\x00" if inf else tlv(0x24, v)
+        return v
+
+    for depth in (5, 6, 7):
+        for inf in (False, True):
+            form = "indefinite" if inf else "definite"
+            want = "ok" if depth <= 5 else "reject"
+            add("k-nest", "ext-value-%d-%s expect=%s" % (depth, form, want),
+                cert(exts=[seq(oid("1.2.3.4"), nested(depth, inf))]))
+    for depth in (5, 6):
+        add("k-nest", "subject-utf8-%d expect=%s" % (depth, "ok" if depth <= 5 else "reject"),
+            # A constructed UTF8String whose segments nest `depth` deep in all.
+            cert(subject=name((CN, tlv(0x2C, nested(depth - 1, False, tlv(0x0C, b"v")))))))
     return out
 
 

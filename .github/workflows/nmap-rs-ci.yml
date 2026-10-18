@@ -643,12 +643,12 @@ jobs:
       # must match them; this tree's nse_openssl.cc and nse_ssl_cert.cc,
       # built standalone, must differ from the golden in exactly the pinned
       # drift rows; Python ints, CPython's own hashes and nettle must agree
-      # with every row they can compute; the step-c digest name table (399
-      # spellings) must be what the standalone C resolves; and the C-sabotage
-      # record must be for these cases. 7.94 itself is checked in the
-      # differential job. The port is compared with the golden by
-      # openssl_bn_differential and openssl_digest_differential (in
-      # `cargo test --all`).
+      # with every row they can compute (nettle for the step-d ciphers); the
+      # digest and cipher name tables (399 and 643 spellings) must be what the
+      # standalone C resolves, and m65_drift_tree.txt its answers on the drift
+      # rows; and the C-sabotage record must be for these cases. 7.94 itself
+      # is checked in the differential job. The port is compared with the
+      # golden by the openssl_*_differential gates (in `cargo test --all`).
       - run: bash tests/differential/m6/regen_m65.sh --check
 
       # M6.0 — the Lua VM itself. Same oracle as M6.1 and M6.2, used

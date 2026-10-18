@@ -9,6 +9,10 @@
 //! - **Random rows** (any `nondet:` tag but `alias-name`) are compared on
 //!   status and [`shape`], as `gen_m65.py`'s `shape` compares two 7.94 runs.
 //! - Anything else a step normalises, it does in its `adjust`, and names.
+//!   A row tagged `ub:` must be among them: the golden holds no 7.94 answer
+//!   for it.
+//! - [`drift_tree`]: the tree's C's answer on each drift row
+//!   (`m65_drift_tree.txt`), which a step holds the port to there (D1 (c)).
 #![allow(dead_code)] // each gate uses part of it
 
 use std::path::{Path, PathBuf};
@@ -182,7 +186,6 @@ pub fn run_step(
         if !select(&row) {
             continue;
         }
-        assert!(!row.tags.iter().any(|t| t.starts_with("ub:")), "{line}");
         ran = ran.saturating_add(1);
         let out = run_row(&mut lua, &runner_row, line);
         let g: Vec<&str> = out.split('\t').collect();
@@ -193,6 +196,12 @@ pub fn run_step(
         };
         let mut want = golden[row.fields[0]].clone();
         adjust(&row, &mut got, &mut want);
+        // A row where the C is undefined (`ub:`) has no 7.94 answer to hold
+        // the port to: its step must say what the port gives there.
+        assert_ne!(
+            want.status, "ub",
+            "{line}: a ub row the step left as it was"
+        );
         if row
             .tags
             .iter()
@@ -236,4 +245,33 @@ pub fn render_str(s: &[u8]) -> String {
     }
     out.push('"');
     out
+}
+
+/// `m65_drift_tree.txt`: the tree's C's answer on each row where it differs
+/// from 7.94 by a §2 family (`m65_drift.txt`), by case ID.
+pub fn drift_tree() -> std::collections::HashMap<String, Answer> {
+    read("m65_drift_tree.txt")
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (
+                f[0].to_string(),
+                Answer {
+                    status: f[1].to_string(),
+                    values: f.get(2).copied().unwrap_or("").to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// `m65_drift.txt`: each drift row's §2 family, by case ID.
+pub fn drift_families() -> std::collections::HashMap<String, String> {
+    read("m65_drift.txt")
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(id, fam)| (id.to_string(), fam.to_string()))
+        .collect()
 }

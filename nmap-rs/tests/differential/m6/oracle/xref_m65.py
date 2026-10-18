@@ -10,7 +10,11 @@ OpenSSL (docs/M6.5-ANALYSIS.md §11 step a, "independent references"):
     and HACL* from 3.12) for the digest, hash
     and HMAC rows (HMAC computed here, RFC 2104);
   - nettle (libnettle.so.8, through ctypes) for md4, ripemd160, sha512-224,
-    sha512-256 and sm3.
+    sha512-256 and sm3;
+  - nettle's DES, AES and CAST-128 block functions for every `encrypt`,
+    `decrypt` and round-trip row on a D4(b) cipher (`m65_cipher_names.txt`,
+    step d) that 7.94 answered, with ECB, CBC and PKCS#7 written here, and
+    `DES_string_to_key` written here from its comment.
 
     python3 oracle/xref_m65.py      exit 1 on any disagreement
 
@@ -250,6 +254,129 @@ def int32(tok):
     return p - (1 << 32) if p >= 1 << 31 else p
 
 
+# ---- the D4 ciphers (step d) --------------------------------------------------------------
+
+D4_CIPHERS = {  # canonical name -> (nettle family, key length, block, CBC)
+    "des-ecb": ("des", 8, 8, False), "des-cbc": ("des", 8, 8, True),
+    "aes-128-ecb": ("aes128", 16, 16, False), "aes-128-cbc": ("aes128", 16, 16, True),
+    "aes-192-ecb": ("aes192", 24, 16, False), "aes-192-cbc": ("aes192", 24, 16, True),
+    "aes-256-ecb": ("aes256", 32, 16, False), "aes-256-cbc": ("aes256", 32, 16, True),
+    "cast5-ecb": ("cast128", 16, 8, False), "cast5-cbc": ("cast128", 16, 8, True),
+}
+
+
+def cipher_classes():
+    out = {}
+    for line in open(os.path.join(M6, "m65_cipher_names.txt")):
+        if not line.startswith("#"):
+            h, c = line.rstrip("\n").split("\t")
+            out[bytes.fromhex(h)] = c
+    return out
+
+
+def nettle_blocks(family, key, encrypt):
+    """A function running nettle's block cipher over whole blocks."""
+    ctx = ctypes.create_string_buffer(8192)
+    if family == "des":
+        NETTLE.nettle_des_set_key(ctx, key)  # nettle ignores the parity bits too
+        fn = NETTLE.nettle_des_encrypt if encrypt else NETTLE.nettle_des_decrypt
+    elif family == "cast128":
+        # CAST_set_key: the first 16 bytes, a shorter key zero-padded, 12 rounds
+        # up to 10 bytes; nettle's cast5_set_key takes 5 to 16 with the same rules.
+        k = key[:16].ljust(5, b"\0")
+        NETTLE.nettle_cast5_set_key(ctx, ctypes.c_size_t(len(k)), k)
+        fn = NETTLE.nettle_cast128_encrypt if encrypt else NETTLE.nettle_cast128_decrypt
+    else:
+        getattr(NETTLE, "nettle_%s_set_%s_key" % (family, "encrypt" if encrypt else "decrypt"))(ctx, key)
+        fn = getattr(NETTLE, "nettle_%s_%s" % (family, "encrypt" if encrypt else "decrypt"))
+
+    def run(data):
+        out = ctypes.create_string_buffer(len(data))
+        fn(ctx, ctypes.c_size_t(len(data)), out, data)
+        return out.raw
+    return run
+
+
+def cipher_ref(canon, encrypt, key, iv, data, padding):
+    """What EVP gives for a D4 cipher: the output, or None where it errors."""
+    family, klen, bs, cbc = D4_CIPHERS[canon]
+    if family != "cast128" and len(key) != klen:
+        return None
+    if iv is not None and len(iv) != (bs if cbc else 0):
+        return None
+    if len(data) % bs and not (encrypt and padding) or not encrypt and padding and not data:
+        return None
+    if encrypt and padding:
+        n = bs - len(data) % bs
+        data = data + bytes([n]) * n
+    blk = nettle_blocks(family, key, encrypt)
+    chain, out = (iv or bytes(bs)) if cbc else None, b""
+    for i in range(0, len(data), bs):
+        b = data[i:i + bs]
+        if not cbc:
+            out += blk(b)
+        elif encrypt:
+            chain = blk(bytes(x ^ y for x, y in zip(b, chain)))
+            out += chain
+        else:
+            out += bytes(x ^ y for x, y in zip(blk(b), chain))
+            chain = b
+    if not encrypt and padding:
+        n = out[-1]
+        if n == 0 or n > bs or out[-n:] != bytes([n]) * n:
+            return None
+        out = out[:-n]
+    return out
+
+
+def des_string_to_key(d):
+    """`l_DES_string_to_key`, from its comment: seven bits of each byte, the
+    low bit of every key byte clear (the C's data[7] is the string's NUL)."""
+    d = d + b"\0"
+    key = [d[0] & 0xFE]
+    for i in range(1, 8):
+        key.append(((d[i - 1] << (8 - i)) | (d[i] >> i)) & 0xFE)
+    return bytes(key)
+
+
+def check_ciphers(cases, golden, ok):
+    """Step d's rows on D4 ciphers, against nettle."""
+    classes = cipher_classes()
+    for cid, (st, vals) in golden.items():
+        tags, op, sub, args = cases[cid]
+        if st != "ok" or tags[0] != "d" or any(t.startswith(("nondet:", "ivnul", "ub:")) for t in tags):
+            continue
+        if op == "call" and sub == "DES_string_to_key":
+            ok("des2key", unstr(vals) == des_string_to_key(lstr(args[0])), cid)
+            continue
+        if op == "call" and sub in ("encrypt", "decrypt"):
+            name, rest, kinds = lstr(args[0]), args[1:], [sub == "encrypt"]
+        elif op == "rt":
+            name, rest, kinds = sub.encode(), args, [True, False]
+        else:
+            continue
+        canon = classes.get(name)
+        if canon not in D4_CIPHERS or len(rest) < 3:
+            continue
+        key, data = lstr(rest[0]), lstr(rest[2])
+        iv = lstr(rest[1]) if rest[1] != "nil" else None
+        iv = iv or None  # an empty IV is none
+        pad = len(rest) > 3 and rest[3] not in ("nil", "F")
+        if key is None or data is None:
+            continue
+        ct = cipher_ref(canon, kinds[0], key, iv, data, pad)
+        if op == "call":
+            ok("cipher", ct is not None and unstr(vals) == ct, cid, canon)
+        else:
+            # OPS.rt: the ciphertext, then whether decrypting it gives the data
+            # back, or "dec-err" and the error.
+            toks = re.findall(STR + r"|\S+", vals)
+            back = cipher_ref(canon, False, key, iv, ct, pad) if ct is not None else None
+            second = '"dec-err"' if back is None else str(back == data).lower()
+            ok("cipher-rt", ct is not None and len(toks) > 1 and unstr(toks[0]) == ct
+               and toks[1] == second, cid, canon)
+
+
 # ---- the checks -----------------------------------------------------------------------
 
 
@@ -352,12 +479,14 @@ def main():
                     want = "%s %s" % (str(safe).lower(), str(pr).lower())
                 ok("prime", vals == want, cid, "%s" % v)
 
+    check_ciphers(cases, golden, ok)
     for k in sorted(counts):
         print("%-10s %6d rows agree" % (k, counts[k]))
     print("unverified digest names: %s" % ", ".join(sorted(unverified)))
     if not unverified <= UNVERIFIED | {"sm3", "rsa-sm3", "sm3withrsaencryption"}:
         bad.append("names with no reference: %s" % sorted(unverified - UNVERIFIED))
-    for want in ("bn-render", "digest", "hmac", "add", "div", "mod_exp", "bits", "prime"):
+    for want in ("bn-render", "digest", "hmac", "add", "div", "mod_exp", "bits", "prime",
+                 "cipher", "cipher-rt", "des2key"):
         if not counts.get(want):
             bad.append("no %s row was checked" % want)
     for b in bad[:30]:

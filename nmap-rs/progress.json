@@ -40,6 +40,9 @@
     "core::nse::openssl::bn": [
       "nse_openssl_bignum"
     ],
+    "core::nse::openssl::cipher": [
+      "nse_openssl_cipher"
+    ],
     "core::nse::openssl::digest": [
       "nse_openssl_digest"
     ],
@@ -156,7 +159,7 @@
       "fuzzed": "The script-facing half of NSE sockets: it checks a script's arguments (ports, protocols, timeouts, families) as nse_nsock.cc checks them and hands data to the host as opaque bytes. It parses no network data; receive_buf's delimiter search is in the prelude's Lua, on the VM's own pattern matcher, which is fuzzed. Exercised end to end by nse_net_differential (three scenarios against nmap 7.94, every argument error included), and pinned by sabotage."
     },
     "core::nse::openssl": {
-      "fuzzed": "Binding only: reads Lua arguments through the shared LuaArgs and type_error helpers and hands bytes and integers to core::nse::openssl::bn and ::digest, which nse_openssl_bignum and nse_openssl_digest fuzz, and lengths to the randomness seam. Exercised against nmap 7.94 by openssl_bn_differential's 11,171 rows and openssl_digest_differential's 2,322, among them every function with every wrong argument type."
+      "fuzzed": "Binding only: reads Lua arguments through the shared LuaArgs and type_error helpers and hands bytes and integers to core::nse::openssl::bn, ::digest and ::cipher, which nse_openssl_bignum, nse_openssl_digest and nse_openssl_cipher fuzz, and lengths to the randomness seam. Exercised against nmap 7.94 by openssl_bn_differential's 11,171 rows, openssl_digest_differential's 2,322 and openssl_cipher_differential's 12,949, among them every function with every wrong argument type."
     },
     "core::nse::openssl::rand": {
       "fuzzed": "No parser: fills a caller's buffer from the OS CSPRNG (getrandom), seedable only under cfg(test). Gated by its non-constancy tests."
@@ -263,6 +266,7 @@
     "core::nse::nmaplib": "unsafe_audited",
     "core::nse::openssl": "unsafe_audited",
     "core::nse::openssl::bn": "unsafe_audited",
+    "core::nse::openssl::cipher": "unsafe_audited",
     "core::nse::openssl::digest": "unsafe_audited",
     "core::nse::openssl::rand": "unsafe_audited",
     "core::nse::package": "unsafe_audited",
@@ -360,14 +364,36 @@
     },
     "core::nse::openssl": {
       "unsafe_audited": {
-        "files": 5,
-        "sha256": "169b7e01d853918325b6fcf9c6d1f0a5bf9f0b897fade9d410bff0569fb6cfdd"
+        "files": 6,
+        "sha256": "978c2963f6916a3011a6d235b8e081714488a9fc047624c5b7123a41765f5498"
       }
     },
     "core::nse::openssl::bn": {
       "unsafe_audited": {
         "files": 1,
         "sha256": "1ff92a68da46c7dd5ae39dd0e58989d0f897c77fd99b2c526d8852a3ffb35706"
+      }
+    },
+    "core::nse::openssl::cipher": {
+      "differential": {
+        "files": 1,
+        "sha256": "5e997e497cf9923e50e8a2ae98f4647b092d280c5435d304ae1de6dbe26ae799"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "5e997e497cf9923e50e8a2ae98f4647b092d280c5435d304ae1de6dbe26ae799"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "5e997e497cf9923e50e8a2ae98f4647b092d280c5435d304ae1de6dbe26ae799"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "5e997e497cf9923e50e8a2ae98f4647b092d280c5435d304ae1de6dbe26ae799"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "5e997e497cf9923e50e8a2ae98f4647b092d280c5435d304ae1de6dbe26ae799"
       }
     },
     "core::nse::openssl::digest": {

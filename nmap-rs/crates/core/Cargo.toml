@@ -105,5 +105,17 @@ sha1 = { version = "0.10", default-features = false }
 ripemd = { version = "0.1", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
+# `core::nse::openssl::cipher` — the module's ciphers (M6.5 step d, E1):
+# RustCrypto's des, aes and cast5 block primitives, on the cipher 0.4
+# generation (0.5 would add duplicates and fails the MSRV). The first-party
+# layer owns everything OpenSSL makes observable: name resolution (D4(b):
+# DES, AES-128/192/256 and CAST5, in ECB and CBC), the key-length and IV
+# rules, ECB and CBC chaining, PKCS#7 padding off by default, and the exact
+# error strings. Not constant-time for DES and CAST5 (S-box tables), as
+# OpenSSL's are not (`nse-openssl-not-constant-time`).
+aes = { version = "0.8", default-features = false }
+des = { version = "0.8", default-features = false }
+cast5 = { version = "0.11", default-features = false }
+
 [lints]
 workspace = true

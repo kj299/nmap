@@ -571,3 +571,62 @@ fn the_memory_budget_refuses_a_cipher_output() {
     );
     assert_eq!(out, "true");
 }
+
+/// A DER TLV with a minimal definite length.
+fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut v = asn1::tlv(u32::from(tag & 0x1f), tag & 0xc0, tag & 0x20 != 0, content);
+    v[0] = tag;
+    v
+}
+
+/// A certificate with an RSA key and, as its one extension, an OID OpenSSL
+/// has no method for over `n` bytes of value.
+fn cert_with_extension(n: usize) -> Vec<u8> {
+    let seq = |parts: &[Vec<u8>]| der(0x30, &parts.concat());
+    let alg = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b]), der(5, &[])]);
+    let name = seq(&[der(0x31, &seq(&[der(6, &[0x55, 4, 3]), der(0x0c, b"m")]))]);
+    let time = |s: &[u8]| der(0x17, s);
+    let rsa = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), der(5, &[])]);
+    let key = seq(&[der(2, &[0x00, 0xc1]), der(2, &[3])]);
+    let mut bits = vec![0];
+    bits.extend_from_slice(&key);
+    let ext = seq(&[der(6, &[0x2a, 3, 4]), der(4, &vec![0x41; n])]);
+    let tbs = seq(&[
+        der(0xa0, &der(2, &[2])),
+        der(2, &[1]),
+        alg.clone(),
+        name.clone(),
+        seq(&[time(b"200101000000Z"), time(b"300101000000Z")]),
+        name,
+        seq(&[rsa, der(3, &bits)]),
+        der(0xa3, &seq(&[ext])),
+    ]);
+    seq(&[tbs, alg, der(3, &[0, 0x5a])])
+}
+
+/// A certificate's bytes the userdata keeps, its re-encoding for `digest`
+/// and the DER it was parsed from, are on the VM's books while it lives
+/// (§1.4), and come off when it is collected.
+#[test]
+fn certificates_are_accounted_to_the_heap() {
+    const N: usize = 64 << 10;
+    let mut lua = state();
+    lua.enter(|ctx| {
+        ctx.set_global("parse", cert::parse_for_tests(ctx));
+        let d = cert_with_extension(N);
+        ctx.set_global("der", piccolo::String::from_slice(&ctx, &d));
+    });
+    // `collectgarbage()` is a no-op in piccolo; collect from outside.
+    lua.gc_collect();
+    let before = lua.total_memory();
+    let (out, _) = run_sliced(&mut lua, "c = parse(der) return r(c.subject.commonName)", i32::MAX);
+    assert_eq!(out, "s:m");
+    lua.gc_collect();
+    let held = lua.total_memory();
+    // The two copies, besides the PEM (4/3 of one) that is a Lua string.
+    assert!(held - before >= 3 * N, "{before} -> {held}");
+    run_sliced(&mut lua, "c = nil return 1", i32::MAX);
+    lua.gc_collect();
+    let after = lua.total_memory();
+    assert!(held.saturating_sub(after) >= 3 * N, "{held} -> {after}");
+}

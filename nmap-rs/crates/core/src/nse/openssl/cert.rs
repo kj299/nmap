@@ -30,6 +30,7 @@ use piccolo::{
 
 use super::bn::Bn;
 use super::digest;
+use super::err;
 use super::ext;
 use super::objects::{self, nid_of, NID_UNDEF};
 use super::pubkey::{EcInfo, Kind};
@@ -45,8 +46,9 @@ pub const SSL_CERT_T: &str = "SSL_CERT";
 /// What `parse_ssl_cert` returns with `nil` when the key did not decode:
 /// `ERR_error_string` of `X509_PUBKEY_get0`'s `EVP_R_DECODE_ERROR`, the one
 /// error a key that failed to decode leaves (`x_pubkey.c`). The C prints the
-/// *oldest* queued error, which can be a stale one from earlier work
-/// (`nse-openssl-error-queue-stale`); the port has no queue.
+/// *oldest* queued error: the first an extension's printing raised, when one
+/// did (`ext`), else this. It can also be a stale one from earlier work
+/// (`nse-openssl-error-queue-stale`); the port keeps no queue across calls.
 pub const KEY_ERROR: &str =
     "Error parsing cert: error:03000072:digital envelope routines::decode error";
 
@@ -245,11 +247,16 @@ fn parse<'gc>(ctx: Context<'gc>, der: &[u8]) -> Result<Vec<Value<'gc>>, Failure>
     validity.set_field(ctx, "notAfter", time_value(ctx, &cert.not_after));
     attrs.set_field(ctx, "validity", validity);
     attrs.set_field(ctx, "pem", string(ctx, &x509::pem(&encoded)));
-    if let Some(exts) = extensions_table(ctx, &cert)? {
+    let mut first_error = None;
+    if let Some(exts) = extensions_table(ctx, &cert, &mut first_error)? {
         attrs.set_field(ctx, "extensions", exts);
     }
     let Some(key) = &cert.spki.key else {
-        return Ok(vec![Value::Nil, string(ctx, KEY_ERROR.as_bytes())]);
+        let msg = match first_error {
+            Some(code) => format!("Error parsing cert: {}", err::error_string(code)),
+            None => KEY_ERROR.to_string(),
+        };
+        return Ok(vec![Value::Nil, string(ctx, msg.as_bytes())]);
     };
     let pk = Table::new(&ctx);
     // Only EVP_PKEY_EC gets curve parameters and only EVP_PKEY_RSA its
@@ -339,8 +346,13 @@ fn time_value<'gc>(ctx: Context<'gc>, t: &Time) -> Value<'gc> {
 }
 
 /// `x509_extensions_to_table`: `nil` when there are none, else an array of
-/// `{name, critical = true when set, value | error = true}`.
-fn extensions_table<'gc>(ctx: Context<'gc>, cert: &Cert) -> Result<Option<Table<'gc>>, Failure> {
+/// `{name, critical = true when set, value | error = true}`. `first_error`
+/// gets the first error the printing raised, which the C leaves queued.
+fn extensions_table<'gc>(
+    ctx: Context<'gc>,
+    cert: &Cert,
+    first_error: &mut Option<u32>,
+) -> Result<Option<Table<'gc>>, Failure> {
     let Some(exts) = cert.extensions.as_ref().filter(|e| !e.is_empty()) else {
         return Ok(None);
     };
@@ -361,7 +373,11 @@ fn extensions_table<'gc>(ctx: Context<'gc>, cert: &Cert) -> Result<Option<Table<
         if e.is_critical() {
             t.set_field(ctx, "critical", true);
         }
-        match ext::print(&e.oid, &e.value) {
+        let printed = ext::print(&e.oid, &e.value);
+        if first_error.is_none() {
+            *first_error = printed.error;
+        }
+        match printed.value {
             Some(text) => t.set_field(ctx, "value", string(ctx, &text)),
             None => t.set_field(ctx, "error", true),
         };

@@ -7,7 +7,8 @@ OpenSSL has no name for, and the NID an OID's DER maps to (`OBJ_obj2nid`).
 which decide whether a certificate's EC key is a valid point and which curve
 explicit parameters are, and their names (`OSSL_EC_curve_nid2name`).
 `core::nse::openssl::err` prints OpenSSL's error codes as `ERR_error_string`
-does, for the libraries the certificate code raises from. The three tables
+does, for the libraries the certificate code raises from and the reasons all
+libraries share (`ERR_R_`, valued from `err.h.in`). The three tables
 are OpenSSL's data, so they are generated from OpenSSL's own source
 rather than written by hand (D11, `docs/M6.5-ANALYSIS.md` §9 and §14.4).
 
@@ -15,7 +16,7 @@ rather than written by hand (D11, `docs/M6.5-ANALYSIS.md` §9 and §14.4).
 |---|---|
 | upstream | <https://github.com/openssl/openssl>, release `openssl-3.0.13` |
 | tarball | `openssl-3.0.13.tar.gz`, sha256 `88525753f79d3bec27d2fa7c66aa0b92b3aa9498dafd93d7cfa4b3780cdae313` |
-| files | `crypto/objects/objects.txt`, `crypto/objects/obj_mac.num`, `crypto/ec/ec_curve.c`, `crypto/evp/ec_support.c`, `crypto/err/openssl.txt`, `crypto/err/err.c`, `LICENSE.txt`, unchanged |
+| files | `crypto/objects/objects.txt`, `crypto/objects/obj_mac.num`, `crypto/ec/ec_curve.c`, `crypto/evp/ec_support.c`, `crypto/err/openssl.txt`, `crypto/err/err.c`, `include/openssl/err.h.in`, `LICENSE.txt`, unchanged |
 | license | Apache-2.0 (`LICENSE.txt`, `NOTICE`) |
 | generated | `crates/core/src/nse/openssl/objects_table.rs`, `curves_table.rs` and `errors_table.rs`, by `gen.py` (rustfmt skips them: `#[rustfmt::skip]` on their `mod` lines) |
 | local changes | none |
@@ -29,6 +30,7 @@ The sha256 of each file as committed:
 a02d33c2a012fff1f356440685af5ca80071c39f5af83575a2a812e01c3a6233  ec_support.c
 9eac6fc37488d397e677a71ee2f91641f6d7248778e9e8f72d064bb757cbe105  openssl.txt
 c8804a5e699b97a83e99066495d79105546bb4e7ae9538955c8d68e6e1b92c0d  err.c
+f608a39952fb1254beda7ca68b6b413710297a79f2ae51096f0486444eb0ba6e  err.h.in
 7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a  LICENSE.txt
 ```
 
@@ -67,7 +69,7 @@ maps to the lower, as `OBJ_obj2nid`'s search finds it.
 tar -xzf openssl-3.0.13.tar.gz
 cp openssl-3.0.13/crypto/objects/{objects.txt,obj_mac.num} openssl-3.0.13/crypto/ec/ec_curve.c \
    openssl-3.0.13/crypto/evp/ec_support.c openssl-3.0.13/crypto/err/{openssl.txt,err.c} \
-   openssl-3.0.13/LICENSE.txt .
+   openssl-3.0.13/include/openssl/err.h.in openssl-3.0.13/LICENSE.txt .
 python3 -I -B gen.py
 python3 -I -B gen.py --check-obj-dat openssl-3.0.13/crypto/objects/obj_dat.h
 python3 -I -B gen.py --check-libcrypto

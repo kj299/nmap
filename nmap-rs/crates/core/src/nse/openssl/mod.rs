@@ -69,6 +69,7 @@ pub mod objects;
 mod objects_table;
 pub mod pubkey;
 pub mod rand;
+pub mod text;
 pub mod x509;
 
 use std::cell::{Ref, RefCell};

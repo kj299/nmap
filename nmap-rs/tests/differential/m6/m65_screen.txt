@@ -4,8 +4,8 @@
 flags: -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -DLUA_USE_APICHECK
 ASAN_OPTIONS: detect_leaks=0:abort_on_error=0:allocator_may_return_null=1
 UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-728dd23f48a4575c39798077bcb6d303011e1b9be6ec7d62d8db222d9cd4979b nmap-rs/tests/differential/m6/m65_cases.txt
-d8932829a63137249706ff9ddad3806d9f00f18463776b04c13b201d8e42195b nmap-rs/tests/differential/m6/m65_certs.txt
+8f02ab1513f7904581640d452d36be0f5185453c5f8f0d2be2939292029b52af nmap-rs/tests/differential/m6/m65_cases.txt
+0f67fbc87a02af9ebf9c2971ce131e79b125bb90d28f1ad75a308f0df3125144 nmap-rs/tests/differential/m6/m65_certs.txt
 0d115e471f650d2e8795cb9904bd6156ae13db989319f099ba96a773e26c695f nmap-rs/tests/differential/m6/oracle/m65_core.lua
 4a00cbc0ac818063edd4dd1ecab147633d20e929580f70ad8f8c4971e4dfef37 nmap-rs/tests/differential/m6/oracle/m65_driver.lua
 de226e926761edfb85c2a954e0f50af18af1ffba48e224a65422df5bb4dcb373 nmap-rs/tests/differential/m6/oracle/build_openssl_oracle.sh

@@ -20,7 +20,9 @@ pub const fn pack(lib: u32, reason: u32) -> u32 {
 }
 
 /// `ERR_error_string`: `error:%08lX:LIB::REASON`, the library and reason
-/// named where OpenSSL names them, `lib(N)` and `reason(N)` where not.
+/// named where OpenSSL names them, `lib(N)` and `reason(N)` where not. A
+/// reason is looked up under its library, then under library 0, where the
+/// reasons every library shares are (`ERR_reason_error_string`).
 #[must_use]
 pub fn error_string(code: u32) -> String {
     let lib = code >> 23;
@@ -29,12 +31,11 @@ pub fn error_string(code: u32) -> String {
         .iter()
         .find(|&&(l, _)| l == lib)
         .map_or_else(|| format!("lib({lib})"), |&(_, n)| n.to_string());
-    let rname = REASONS
-        .binary_search_by(|&(l, r, _)| (l, r).cmp(&(lib, reason)))
-        .map_or_else(
-            |_| format!("reason({reason})"),
-            |i| REASONS[i].2.to_string(),
-        );
+    let find = |lib: u32| REASONS.binary_search_by(|&(l, r, _)| (l, r).cmp(&(lib, reason)));
+    let rname = find(lib).or_else(|_| find(0)).map_or_else(
+        |_| format!("reason({reason})"),
+        |i| REASONS[i].2.to_string(),
+    );
     format!("error:{code:08X}:{lname}::{rname}")
 }
 
@@ -61,6 +62,10 @@ mod tests {
         assert_eq!(
             error_string(asn1(ASN1_R_NO_MATCHING_CHOICE_TYPE)),
             "error:0680008F:asn1 encoding routines::no matching choice type"
+        );
+        assert_eq!(
+            error_string(pack(LIB_X509V3, ERR_R_MALLOC_FAILURE)),
+            "error:110C0100:X509 V3 routines::malloc failure"
         );
     }
 }

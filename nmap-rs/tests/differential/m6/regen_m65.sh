@@ -5,7 +5,10 @@
 #                                twice), the drift pins, the sanitizer screen and the
 #                                census in place, then cross-check (needs nmap)
 #   ./regen_m65.sh --check       FAIL unless the committed files are consistent and
-#                                current, this tree's C differs from the golden in
+#                                current (the OpenSSL tables from crates/vendor/
+#                                openssl-data, the generated k and p certificate rows,
+#                                each as the golden shows it expected), this tree's
+#                                C differs from the golden in
 #                                exactly the pinned rows and answers as
 #                                m65_drift_tree.txt holds there, the digest and
 #                                cipher name tables (oracle/gen_m65_*_names.py)
@@ -30,6 +33,7 @@ cd "$HERE"
 case "${1:-}" in
   "")
     command -v nmap >/dev/null || { echo "FAIL: regeneration runs nmap 7.94 and needs it" >&2; exit 1; }
+    python3 -I -B oracle/gen_m65_x509.py
     python3 -B oracle/gen_m65_cases.py m65_algs.txt m65_certs.txt m65_cases.txt
     python3 -B oracle/gen_m65.py golden
     python3 -B oracle/gen_m65.py drift
@@ -39,9 +43,13 @@ case "${1:-}" in
     python3 -I -B oracle/gen_m65_digest_names.py
     python3 -I -B oracle/gen_m65_cipher_names.py
     python3 -I -B oracle/xref_m65.py
+    python3 -I -B oracle/gen_m65_x509.py --check-golden
     echo "m6.5 openssl: regenerated; run oracle/sabotage_m65.py to re-measure the corpus"
     ;;
   --check)
+    python3 -I -B ../../../crates/vendor/openssl-data/gen.py --check
+    python3 -I -B oracle/gen_m65_x509.py --check
+    python3 -I -B oracle/gen_m65_x509.py --check-golden
     python3 -B oracle/gen_m65_cases.py --self-test
     python3 -B oracle/gen_m65.py --check
     bash oracle/build_openssl_oracle.sh >/dev/null

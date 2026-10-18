@@ -13,7 +13,10 @@
 //! The corpus is `m65_certs.txt`: Phase 0's 2,876 certificates (1,092 OIDs
 //! as subject attributes and as extensions, 11 string tags, time edge cases,
 //! 18 key types with 13 well-formed extensions each, 143 truncations, 400
-//! byte flips) and the 144 BER rows of E5's spike, plus the argument checks.
+//! byte flips), the 144 BER rows of E5's spike, step e's 354 key-type, Name
+//! and extension-framing rows and its 253 printer rows (every extension
+//! method `X509V3_EXT_print` has, and the error each failure leaves for
+//! "Error parsing cert"), plus the argument checks.
 //!
 //! - **Not compared:** `q=N` (the harness's doc).
 //! - **The year** (`nse-sslcert-validity-year`, D1 (c)): the port follows
@@ -24,11 +27,10 @@
 
 mod m65;
 
-/// The fewest rows the gate must run: the 3,030 rows tagged `e`.
-const MIN_ROWS: usize = 3_030;
+/// The fewest rows the gate must run: the 3,637 rows tagged `e`.
+const MIN_ROWS: usize = 3_637;
 
 #[test]
-#[ignore = "step e2: the extension printers are not ported yet"]
 fn every_certificate_row_matches_nmap_794() {
     let ran = m65::run_step_with(true, MIN_ROWS, |row| row.tags.contains(&"e"), |_, _, _| {});
     assert!(ran >= MIN_ROWS);

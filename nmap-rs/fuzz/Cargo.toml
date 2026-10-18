@@ -425,3 +425,17 @@ path = "fuzz_targets/nse_openssl_cipher.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nse_sslcert_der"
+path = "fuzz_targets/nse_sslcert_der.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nse_x509_ext_print"
+path = "fuzz_targets/nse_x509_ext_print.rs"
+test = false
+doc = false
+bench = false

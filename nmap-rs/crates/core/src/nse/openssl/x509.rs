@@ -501,7 +501,7 @@ pub fn name(p: &[u8], opt: bool) -> Res<Option<(Vec<NameEntry>, usize)>> {
 }
 
 /// `X509_NAME_ENTRY`: `{ OBJECT, ASN1_PRINTABLE }`.
-fn name_entry(p: &[u8]) -> Res<((Vec<u8>, Prim), usize)> {
+pub fn name_entry(p: &[u8]) -> Res<((Vec<u8>, Prim), usize)> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let oid = s.req(false, oid)?;
     let value = s.req(true, |q, opt| mstring(q, bit::PRINTABLE, opt))?;

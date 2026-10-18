@@ -540,7 +540,7 @@ def self_test():
     for r in a:
         for tok in r[3:]:
             assert re.match(r"^(nil|T|F|tbl|fn|s:([0-9a-f]{2})*|bn[dhb]:([0-9a-f]{2})*|"
-                            r"i:-?\d+|f:[\d.]+|der:[xbk]\d+)$", tok), tok
+                            r"i:-?\d+|f:[\d.]+|der:[xbkp]\d+)$", tok), tok
     print("self-test ok: %d rows, deterministic" % len(a))
 
 

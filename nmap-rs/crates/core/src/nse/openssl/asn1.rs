@@ -18,10 +18,25 @@
 //! counter decremented is first checked non-zero, as the C checks it.
 #![allow(clippy::arithmetic_side_effects)]
 
-/// A decode failure. The C raises one of a few dozen reasons; nmap discards
-/// them all (`d2i_X509` returns NULL and `parse_ssl_certificate` nil).
+use super::err::{self, *};
+
+/// A decode failure: the packed code of the *first* error OpenSSL raises on
+/// the way ([`err::pack`]), the one `ERR_get_error` would return. Each is
+/// made where the C raises it and passed up unchanged, since the C's outer
+/// layers only add errors after it. nmap discards them when a certificate
+/// does not decode (`parse_ssl_certificate` returns nil), but prints the
+/// first one an extension's printing raised when the key then fails
+/// (`cert`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Bad;
+pub struct Bad(pub u32);
+
+impl Bad {
+    /// An ASN.1 reason (`ERR_LIB_ASN1`).
+    #[must_use]
+    pub const fn asn1(reason: u32) -> Bad {
+        Bad(err::asn1(reason))
+    }
+}
 
 pub type Res<T> = Result<T, Bad>;
 
@@ -171,8 +186,10 @@ pub struct Hdr {
 pub fn get_object(p: &[u8]) -> Res<(Hdr, bool)> {
     let omax = p.len();
     if omax == 0 {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_TOO_SMALL));
     }
+    // Every other failure is the `err:` label's "header too long".
+    let hdr_err = Bad::asn1(ASN1_R_HEADER_TOO_LONG);
     let first = p[0];
     let cons = first & 0x20 != 0;
     let class = first & 0xc0;
@@ -181,7 +198,7 @@ pub fn get_object(p: &[u8]) -> Res<(Hdr, bool)> {
     let tag: u32;
     if first & 0x1f == 0x1f {
         if max == 0 {
-            return Err(Bad);
+            return Err(hdr_err);
         }
         let mut l: u64 = 0;
         while p[i] & 0x80 != 0 {
@@ -189,30 +206,30 @@ pub fn get_object(p: &[u8]) -> Res<(Hdr, bool)> {
             i += 1;
             max -= 1;
             if max == 0 {
-                return Err(Bad);
+                return Err(hdr_err);
             }
             if l > (i32::MAX as u64 >> 7) {
-                return Err(Bad);
+                return Err(hdr_err);
             }
         }
         l = (l << 7) | u64::from(p[i] & 0x7f);
         i += 1;
         max -= 1;
         if max == 0 {
-            return Err(Bad);
+            return Err(hdr_err);
         }
-        tag = u32::try_from(l).map_err(|_| Bad)?;
+        tag = u32::try_from(l).map_err(|_| hdr_err)?;
     } else {
         tag = u32::from(first & 0x1f);
         if max == 0 {
-            return Err(Bad);
+            return Err(hdr_err);
         }
     }
     // asn1_get_length, with `max` the bytes after the identifier.
-    let (len, inf, used) = get_length(&p[i..], max)?;
+    let (len, inf, used) = get_length(&p[i..], max).ok_or(hdr_err)?;
     i += used;
     if inf && !cons {
-        return Err(Bad);
+        return Err(hdr_err);
     }
     let too_long = len > (omax - i) as u64;
     let hdr = Hdr {
@@ -226,23 +243,24 @@ pub fn get_object(p: &[u8]) -> Res<(Hdr, bool)> {
     Ok((hdr, too_long))
 }
 
-/// `asn1_get_length`: (length, indefinite, octets used).
-fn get_length(p: &[u8], max: usize) -> Res<(u64, bool, usize)> {
+/// `asn1_get_length`: (length, indefinite, octets used), or `None` where it
+/// returns 0.
+fn get_length(p: &[u8], max: usize) -> Option<(u64, bool, usize)> {
     if max < 1 {
-        return Err(Bad);
+        return None;
     }
-    let mut max = max - 1;
+    let max = max - 1;
     let b = p[0];
     if b == 0x80 {
-        return Ok((0, true, 1));
+        return Some((0, true, 1));
     }
     if b & 0x80 == 0 {
-        return Ok((u64::from(b), false, 1));
+        return Some((u64::from(b), false, 1));
     }
     let mut n = usize::from(b & 0x7f);
     // `if (max < i + 1) return 0`: one octet more than the length octets.
     if max < n + 1 {
-        return Err(Bad);
+        return None;
     }
     let mut k = 1usize;
     while n > 0 && p[k] == 0 {
@@ -250,7 +268,7 @@ fn get_length(p: &[u8], max: usize) -> Res<(u64, bool, usize)> {
         n -= 1;
     }
     if n > 8 {
-        return Err(Bad);
+        return None;
     }
     let mut ret: u64 = 0;
     while n > 0 {
@@ -258,12 +276,10 @@ fn get_length(p: &[u8], max: usize) -> Res<(u64, bool, usize)> {
         k += 1;
         n -= 1;
     }
-    max = max.saturating_sub(0);
-    let _ = max;
     if ret > LONG_MAX {
-        return Err(Bad);
+        return None;
     }
-    Ok((ret, false, k))
+    Some((ret, false, k))
 }
 
 /// `asn1_check_tlen` without the context cache (equivalent: the cache only
@@ -272,18 +288,18 @@ fn get_length(p: &[u8], max: usize) -> Res<(u64, bool, usize)> {
 /// OPTIONAL field.
 pub fn check_tlen(p: &[u8], want: Option<(u32, u8)>, opt: bool) -> Res<Option<Hdr>> {
     if p.is_empty() {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_TOO_SMALL));
     }
     let (mut h, too_long) = get_object(p)?;
     if too_long {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_TOO_LONG));
     }
     if let Some((t, c)) = want {
         if t != h.tag || c != h.class {
             if opt {
                 return Ok(None);
             }
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_WRONG_TAG));
         }
     }
     if h.inf {
@@ -316,12 +332,12 @@ pub fn find_end(p: &[u8], len: usize, inf: bool) -> Res<usize> {
             len -= 2;
             continue;
         }
-        let h = check_tlen(&p[off..off + len], None, false)?.ok_or(Bad)?;
+        let h = check_tlen(&p[off..off + len], None, false)?.ok_or(Bad(0))?;
         let q = off;
         off += h.hdr_len;
         if h.inf {
             if expected == u64::from(u32::MAX) {
-                return Err(Bad);
+                return Err(Bad(err::pack(LIB_ASN1, 0)));
             }
             expected += 1;
         } else {
@@ -330,7 +346,7 @@ pub fn find_end(p: &[u8], len: usize, inf: bool) -> Res<usize> {
         len -= off - q;
     }
     if expected != 0 {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_MISSING_EOC));
     }
     Ok(off)
 }
@@ -346,7 +362,7 @@ pub fn collect(out: &mut Vec<u8>, p: &[u8], len: usize, inf: bool, depth: u32) -
         let q = off;
         if check_eoc(&p[off..off + len]) {
             if !inf {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_UNEXPECTED_EOC));
             }
             off += 2;
             inf = false;
@@ -354,11 +370,11 @@ pub fn collect(out: &mut Vec<u8>, p: &[u8], len: usize, inf: bool, depth: u32) -
         }
         // asn1_check_tlen(..., tag -1, V_ASN1_UNIVERSAL, ...): the tag is
         // not checked (exptag < 0), the class neither.
-        let h = check_tlen(&p[off..off + len], None, false)?.ok_or(Bad)?;
+        let h = check_tlen(&p[off..off + len], None, false)?.ok_or(Bad(0))?;
         off += h.hdr_len;
         if h.cons {
             if depth >= MAX_STRING_NEST {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_NESTED_ASN1_STRING));
             }
             off += collect(out, &p[off..], h.len, h.inf, depth + 1)?;
         } else if h.len > 0 {
@@ -368,7 +384,7 @@ pub fn collect(out: &mut Vec<u8>, p: &[u8], len: usize, inf: bool, depth: u32) -
         len -= off - q;
     }
     if inf {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_MISSING_EOC));
     }
     Ok(off)
 }
@@ -433,7 +449,7 @@ pub fn primitive(
 /// for a class that is not universal. ANY is never OPTIONAL in the C
 /// (`ASN1_R_ILLEGAL_OPTIONAL_ANY`).
 pub fn any(p: &[u8]) -> Res<(Prim, usize)> {
-    let h = check_tlen(p, None, false)?.ok_or(Bad)?;
+    let h = check_tlen(p, None, false)?.ok_or(Bad(0))?;
     let utype: i64 = if h.class != UNIVERSAL {
         V_ASN1_OTHER
     } else {
@@ -453,7 +469,7 @@ fn decode_body(p: &[u8], h: Hdr, utype: i64) -> Res<(Prim, usize)> {
     let is_set = utype == i64::from(tag::SET);
     if is_seq || is_set || utype == V_ASN1_OTHER {
         if utype != V_ASN1_OTHER && !h.cons {
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_TYPE_NOT_CONSTRUCTED));
         }
         let end = content_start + find_end(&p[content_start..], h.len, h.inf)?;
         let kind = if is_seq {
@@ -471,13 +487,13 @@ fn decode_body(p: &[u8], h: Hdr, utype: i64) -> Res<(Prim, usize)> {
             end,
         ));
     }
-    let utype = u32::try_from(utype).map_err(|_| Bad)?;
+    let utype = u32::try_from(utype).map_err(|_| Bad(0))?;
     let (content, end): (std::borrow::Cow<'_, [u8]>, usize) = if h.cons {
         if matches!(
             utype,
             tag::NULL | tag::BOOLEAN | tag::OBJECT | tag::INTEGER | tag::ENUMERATED
         ) {
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_TYPE_NOT_PRIMITIVE));
         }
         let mut buf = Vec::new();
         let used = collect(&mut buf, &p[content_start..], h.len, h.inf, 0)?;
@@ -498,13 +514,13 @@ pub fn c2i(cont: &[u8], utype: u32) -> Res<Prim> {
         }
         tag::NULL => {
             if !cont.is_empty() {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_NULL_IS_WRONG_LENGTH));
             }
             Prim::Null
         }
         tag::BOOLEAN => {
             if cont.len() != 1 {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_BOOLEAN_IS_WRONG_LENGTH));
             }
             Prim::Bool(cont[0])
         }
@@ -522,10 +538,10 @@ pub fn c2i(cont: &[u8], utype: u32) -> Res<Prim> {
         }
         _ => {
             if utype == tag::BMPSTRING && cont.len() & 1 != 0 {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_BMPSTRING_IS_WRONG_LENGTH));
             }
             if utype == tag::UNIVERSALSTRING && cont.len() & 3 != 0 {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_UNIVERSALSTRING_IS_WRONG_LENGTH));
             }
             Prim::Str {
                 utype,
@@ -540,12 +556,13 @@ pub fn c2i(cont: &[u8], utype: u32) -> Res<Prim> {
 /// knows is valid by construction and skips the scan; its encodings never
 /// start a sub-identifier with `0x80`, so the result is the same.)
 pub fn check_oid(cont: &[u8]) -> Res<()> {
+    let bad = Bad::asn1(ASN1_R_INVALID_OBJECT_ENCODING);
     if cont.is_empty() || cont.len() > i32::MAX as usize || cont[cont.len() - 1] & 0x80 != 0 {
-        return Err(Bad);
+        return Err(bad);
     }
     for (i, &b) in cont.iter().enumerate() {
         if b == 0x80 && (i == 0 || cont[i - 1] & 0x80 == 0) {
-            return Err(Bad);
+            return Err(bad);
         }
     }
     Ok(())
@@ -554,9 +571,11 @@ pub fn check_oid(cont: &[u8]) -> Res<()> {
 /// `ossl_c2i_ASN1_BIT_STRING`: the unused-bits octet (at most 7) and the
 /// data, its last octet masked by `0xff << unused`.
 pub fn c2i_bit_string(cont: &[u8]) -> Res<(u8, Vec<u8>)> {
-    let (&unused, rest) = cont.split_first().ok_or(Bad)?;
+    let (&unused, rest) = cont
+        .split_first()
+        .ok_or(Bad::asn1(ASN1_R_STRING_TOO_SHORT))?;
     if unused > 7 {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_INVALID_BIT_STRING_BITS_LEFT));
     }
     let mut data = rest.to_vec();
     if let Some(last) = data.last_mut() {
@@ -567,7 +586,9 @@ pub fn c2i_bit_string(cont: &[u8]) -> Res<(u8, Vec<u8>)> {
 
 /// `c2i_ibuf`'s checks: content present, not padded. Returns the sign.
 pub fn c2i_ibuf_check(p: &[u8]) -> Res<bool> {
-    let (&first, rest) = p.split_first().ok_or(Bad)?;
+    let (&first, rest) = p
+        .split_first()
+        .ok_or(Bad::asn1(ASN1_R_ILLEGAL_ZERO_CONTENT))?;
     let neg = first & 0x80 != 0;
     if rest.is_empty() {
         return Ok(neg);
@@ -580,7 +601,7 @@ pub fn c2i_ibuf_check(p: &[u8]) -> Res<bool> {
         false
     };
     if pad && neg == (rest[0] & 0x80 != 0) {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_ILLEGAL_PADDING));
     }
     Ok(neg)
 }

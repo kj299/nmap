@@ -28,6 +28,12 @@
 use num_bigint::BigUint;
 
 use super::asn1::{self, check_tlen, tag, Bad, Prim, Res, CONTEXT, UNIVERSAL};
+use super::err::{pack, EVP_R_DECODE_ERROR, LIB_EVP};
+
+/// What a key's own checks raise. `x509_pubkey_ex_d2i_ex` pops every error
+/// its decode raised (`ERR_pop_to_mark`), so the reason is never seen: a key
+/// that did not decode leaves only `X509_PUBKEY_get0`'s "decode error".
+const DECODE: Bad = Bad(pack(LIB_EVP, EVP_R_DECODE_ERROR));
 use super::ec::{self, Group};
 use super::objects::nid_of;
 use super::x509::{algor, explicit, Algor, Seq};
@@ -127,7 +133,7 @@ fn bignum(p: &[u8], opt: bool) -> Res<Option<(BigUint, usize)>> {
         return Ok(None);
     };
     if h.cons {
-        return Err(Bad);
+        return Err(DECODE);
     }
     let end = h.hdr_len + h.len;
     Ok(Some((BigUint::from_bytes_be(&p[h.hdr_len..end]), end)))
@@ -136,11 +142,11 @@ fn bignum(p: &[u8], opt: bool) -> Res<Option<(BigUint, usize)>> {
 /// `d2i_ASN1_INTEGER` then `ASN1_INTEGER_to_BN`: a signed integer, checked as
 /// `c2i_ibuf` checks; its magnitude (the sign does not change a size).
 fn asn1_integer(p: &[u8]) -> Res<BigUint> {
-    match asn1::primitive(p, tag::INTEGER, None, false)?.ok_or(Bad)? {
+    match asn1::primitive(p, tag::INTEGER, None, false)?.ok_or(DECODE)? {
         (Prim::Int { content, .. }, _) => {
             Ok(BigUint::from_bytes_be(&asn1::int_magnitude(&content)))
         }
-        _ => Err(Bad),
+        _ => Err(DECODE),
     }
 }
 
@@ -181,12 +187,12 @@ fn seq_param(alg: &Algor) -> Option<&[u8]> {
 /// `rsa_pub_decode`: `RSAPublicKey` `{ n, e }` from the BIT STRING, then the
 /// parameters (`ossl_rsa_param_decode`: only RSA-PSS's are read).
 fn rsa(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
-    let mut s = Seq::open(key, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(key, None, false)?.ok_or(DECODE)?;
     let n = s.req(false, bignum)?;
     let e = s.req(true, bignum)?;
     s.finish()?;
     if kind == Kind::RsaPss && alg.param.is_some() {
-        let raw = seq_param(alg).ok_or(Bad)?;
+        let raw = seq_param(alg).ok_or(DECODE)?;
         pss_params(raw)?;
     }
     Ok(PubKey {
@@ -212,17 +218,17 @@ const NID_MGF1: u16 = 911;
 /// MGF1 with a SEQUENCE `X509_ALGOR` for its hash, and both hashes digests
 /// OpenSSL knows. Salt length and trailer are not checked here.
 fn pss_params(raw: &[u8]) -> Res<()> {
-    let mut s = Seq::open(raw, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(raw, None, false)?.ok_or(DECODE)?;
     let hash = s.field(true, false, |q, opt| {
-        explicit(q, 0, CONTEXT, opt, |r| algor(r, false)?.ok_or(Bad))
+        explicit(q, 0, CONTEXT, opt, |r| algor(r, false)?.ok_or(DECODE))
     })?;
     let mgf = s.field(true, false, |q, opt| {
-        explicit(q, 1, CONTEXT, opt, |r| algor(r, false)?.ok_or(Bad))
+        explicit(q, 1, CONTEXT, opt, |r| algor(r, false)?.ok_or(DECODE))
     })?;
     for t in [2, 3] {
         s.field(true, t == 3, |q, opt| {
             explicit(q, t, CONTEXT, opt, |r| {
-                asn1::primitive(r, tag::INTEGER, None, false)?.ok_or(Bad)
+                asn1::primitive(r, tag::INTEGER, None, false)?.ok_or(DECODE)
             })
         })?;
     }
@@ -230,17 +236,17 @@ fn pss_params(raw: &[u8]) -> Res<()> {
     let known = |a: &Algor| PSS_DIGESTS.contains(&nid_of(&a.oid));
     if let Some(mgf) = &mgf {
         if nid_of(&mgf.oid) != NID_MGF1 {
-            return Err(Bad);
+            return Err(DECODE);
         }
-        let inner = seq_param(mgf).ok_or(Bad)?;
-        let (mask_hash, _) = algor(inner, false)?.ok_or(Bad)?;
+        let inner = seq_param(mgf).ok_or(DECODE)?;
+        let (mask_hash, _) = algor(inner, false)?.ok_or(DECODE)?;
         if !known(&mask_hash) {
-            return Err(Bad);
+            return Err(DECODE);
         }
     }
     if let Some(h) = &hash {
         if !known(h) {
-            return Err(Bad);
+            return Err(DECODE);
         }
     }
     Ok(())
@@ -249,26 +255,26 @@ fn pss_params(raw: &[u8]) -> Res<()> {
 // ---- DSA and DH ----------------------------------------------------------------
 
 /// `dsa_pub_decode`: parameters a SEQUENCE (`DSAparams` `{ p, q, g }`),
-/// NULL or absent; the key an INTEGER. Bits are `p`'s, or 0 without
-/// parameters (`DSA_bits` is -1, which `EVP_PKEY_get_bits` makes 0).
+/// NULL or absent; the key an INTEGER. Then the provider's
+/// `ossl_d2i_DSA_PUBKEY` refuses a key without `p`, `q` and `g`, so only the
+/// SEQUENCE decodes (measured: the `k-dsa` rows). Bits are `p`'s.
 fn dsa(alg: &Algor, key: &[u8]) -> Res<PubKey> {
     let p = match ptype(alg) {
         Some(tag::SEQUENCE) => {
-            let raw = seq_param(alg).ok_or(Bad)?;
-            let mut s = Seq::open(raw, None, false)?.ok_or(Bad)?;
+            let raw = seq_param(alg).ok_or(DECODE)?;
+            let mut s = Seq::open(raw, None, false)?.ok_or(DECODE)?;
             let p = s.req(false, bignum)?;
             s.req(false, bignum)?;
             s.req(true, bignum)?;
             s.finish()?;
-            Some(p)
+            p
         }
-        Some(tag::NULL) | None => None,
-        Some(_) => return Err(Bad),
+        _ => return Err(DECODE),
     };
     asn1_integer(key)?;
     Ok(PubKey {
         kind: Kind::Dsa,
-        bits: p.map_or(0, |p| p.bits()),
+        bits: p.bits(),
         rsa: None,
         ec: None,
     })
@@ -279,10 +285,10 @@ fn dsa(alg: &Algor, key: &[u8]) -> Res<PubKey> {
 /// vparams OPTIONAL }` for DHX; the key an INTEGER. Bits are `p`'s.
 fn dh(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
     let raw = match ptype(alg) {
-        Some(tag::SEQUENCE) => seq_param(alg).ok_or(Bad)?,
-        _ => return Err(Bad),
+        Some(tag::SEQUENCE) => seq_param(alg).ok_or(DECODE)?,
+        _ => return Err(DECODE),
     };
-    let mut s = Seq::open(raw, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(raw, None, false)?.ok_or(DECODE)?;
     let p = s.req(false, bignum)?;
     if kind == Kind::Dh {
         s.req(false, bignum)?;
@@ -325,31 +331,32 @@ const NID_SM2: u16 = 1172;
 
 /// `eckey_pub_decode`: the group from the parameters
 /// (`ossl_ec_key_param_from_x509_algor`: an OID naming a built-in curve, or
-/// explicit parameters), then the point (`o2i_ECPublicKey`). Then the
-/// decoder's check (`ec_check`): an SM2-curve key is SM2's or EC's, any
-/// other is not SM2's.
+/// explicit parameters), then the point (`o2i_ECPublicKey`). A key on the
+/// SM2 curve is an SM2 key whichever OID carried it (`EVP_PKEY_assign`:
+/// "the SM2 curve must be SM2 type"), and the SM2 OID with any other curve
+/// is no key (`ec_check`); measured on the `k-sm2` and `k-ec` rows.
 fn ec_key(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
     let (group, info) = match &alg.param {
         Some(Prim::Oid(c)) => {
             let nid = nid_of(c);
-            let curve = ec::curve(nid).ok_or(Bad)?;
+            let curve = ec::curve(nid).ok_or(DECODE)?;
             (Group::builtin(curve), EcInfo::Named(nid))
         }
         Some(Prim::Encoded {
             utype: asn1::Utype::Sequence,
             raw,
         }) => ec_parameters(raw)?,
-        _ => return Err(Bad),
+        _ => return Err(DECODE),
     };
     if !group.point_ok(key) {
-        return Err(Bad);
+        return Err(DECODE);
     }
     let sm2 = info == EcInfo::Named(NID_SM2);
     if kind == Kind::Sm2 && !sm2 {
-        return Err(Bad);
+        return Err(DECODE);
     }
     Ok(PubKey {
-        kind,
+        kind: if sm2 { Kind::Sm2 } else { kind },
         bits: group.order_bits(),
         rsa: None,
         ec: Some(info),
@@ -375,7 +382,7 @@ const MAX_FIELD_BITS: u64 = 661;
 /// (`ossl_ec_curve_nid_from_params`, the seed ignored and the cofactor
 /// guessed); any other is explicit.
 fn ec_parameters(raw: &[u8]) -> Res<(Group, EcInfo)> {
-    let mut s = Seq::open(raw, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(raw, None, false)?.ok_or(DECODE)?;
     s.req(false, int32)?;
     let (char2, field) = s.req(false, field_id)?;
     let (a, b) = s.req(false, x962_curve)?;
@@ -386,16 +393,16 @@ fn ec_parameters(raw: &[u8]) -> Res<(Group, EcInfo)> {
     let (p, field_bits) = match field {
         Field::Prime((neg, p)) => {
             if neg || p.bits() == 0 {
-                return Err(Bad);
+                return Err(DECODE);
             }
             let bits = p.bits();
             if bits > MAX_FIELD_BITS {
-                return Err(Bad);
+                return Err(DECODE);
             }
             // EC_GROUP_new_curve_GFp: Montgomery needs an odd modulus, and
             // ec_GFp_simple_group_set_curve a prime "> 3".
             if bits <= 2 || !p.bit(0) {
-                return Err(Bad);
+                return Err(DECODE);
             }
             (p, bits)
         }
@@ -420,21 +427,21 @@ fn ec_parameters(raw: &[u8]) -> Res<(Group, EcInfo)> {
         order: BigUint::default(),
     };
     if base.is_empty() {
-        return Err(Bad);
+        return Err(DECODE);
     }
-    let (gx, gy) = group.decode_point(&base).ok_or(Bad)?;
+    let (gx, gy) = group.decode_point(&base).ok_or(DECODE)?;
     let (oneg, order) = order;
     if oneg || order.bits() == 0 || order.bits() > field_bits + 1 {
-        return Err(Bad);
+        return Err(DECODE);
     }
     // EC_GROUP_set_generator's own bound is against the field's bits, which
     // for a binary field is the polynomial's, one more than m.
     if order.bits() > p.bits() + 1 {
-        return Err(Bad);
+        return Err(DECODE);
     }
     if let Some((cneg, c)) = &cofactor {
         if *cneg && c.bits() != 0 {
-            return Err(Bad);
+            return Err(DECODE);
         }
     }
     group.order = order;
@@ -443,16 +450,20 @@ fn ec_parameters(raw: &[u8]) -> Res<(Group, EcInfo)> {
     // lookup fails, and so does the decode.
     let (gx, gy) = match (gx, gy) {
         (Some(x), Some(y)) => (x, y),
-        _ => return Err(Bad),
+        _ => return Err(DECODE),
     };
     let guessed = guess_cofactor(&group);
     let param_len = byte_len(&group.order).max(byte_len(&group.p));
+    // BN_bn2binpad: big-endian, zero-padded to param_len (zero is all
+    // padding: to_bytes_be gives it one octet).
     let pad = |v: &BigUint| {
-        let bytes = v.to_bytes_be();
+        let bytes = if v.bits() == 0 {
+            Vec::new()
+        } else {
+            v.to_bytes_be()
+        };
         let mut out = vec![0u8; param_len.saturating_sub(bytes.len())];
-        if v.bits() != 0 {
-            out.extend_from_slice(&bytes);
-        }
+        out.extend_from_slice(&bytes);
         out
     };
     let mine: Vec<u8> = [&group.p, &group.a, &group.b, &gx, &gy, &group.order]
@@ -515,7 +526,7 @@ fn field_id(p: &[u8], opt: bool) -> Res<Option<((bool, Field), usize)>> {
         }
         _ => {
             s.req(true, |q, _| asn1::any(q).map(Some))?;
-            return Err(Bad);
+            return Err(DECODE);
         }
     };
     Ok(Some((out, s.finish()?)))
@@ -539,7 +550,7 @@ fn char_two(p: &[u8], opt: bool) -> Res<Option<((u64, BigUint), usize)>> {
             let (neg, k) = s.req(true, signed_integer)?;
             let k = asn1_integer_get(neg, &k);
             if m > MAX_FIELD_BITS as i64 || !(m > k && k > 0) {
-                return Err(Bad);
+                return Err(DECODE);
             }
             for e in [m, k, 0] {
                 set(&mut poly, e);
@@ -548,7 +559,7 @@ fn char_two(p: &[u8], opt: bool) -> Res<Option<((u64, BigUint), usize)>> {
         NID_PP_BASIS => {
             let (k1, k2, k3) = s.req(true, pentanomial)?;
             if m > MAX_FIELD_BITS as i64 || !(m > k3 && k3 > k2 && k2 > k1 && k1 > 0) {
-                return Err(Bad);
+                return Err(DECODE);
             }
             for e in [m, k1, k2, k3, 0] {
                 set(&mut poly, e);
@@ -556,7 +567,7 @@ fn char_two(p: &[u8], opt: bool) -> Res<Option<((u64, BigUint), usize)>> {
         }
         _ => {
             s.req(true, |q, _| asn1::any(q).map(Some))?;
-            return Err(Bad);
+            return Err(DECODE);
         }
     }
     let used = s.finish()?;
@@ -585,7 +596,7 @@ fn x962_curve(p: &[u8], opt: bool) -> asn1::Field<(Vec<u8>, Vec<u8>)> {
     let seed = s.field(true, true, |q, opt| super::x509::bit_string(q, None, opt))?;
     let used = s.finish()?;
     if seed.is_some_and(|(_, d)| d.is_empty()) {
-        return Err(Bad);
+        return Err(DECODE);
     }
     Ok(Some(((a, b), used)))
 }
@@ -598,7 +609,7 @@ fn signed_integer(p: &[u8], opt: bool) -> Res<Option<((bool, BigUint), usize)>> 
             (neg, BigUint::from_bytes_be(&asn1::int_magnitude(&content))),
             n,
         )),
-        Some(_) => return Err(Bad),
+        Some(_) => return Err(DECODE),
         None => None,
     })
 }
@@ -623,7 +634,7 @@ fn int32(p: &[u8], opt: bool) -> Res<Option<(i64, usize)>> {
         return Ok(None);
     };
     if h.cons {
-        return Err(Bad);
+        return Err(DECODE);
     }
     let end = h.hdr_len + h.len;
     let c = &p[h.hdr_len..end];
@@ -633,17 +644,17 @@ fn int32(p: &[u8], opt: bool) -> Res<Option<(i64, usize)>> {
     let neg = asn1::c2i_ibuf_check(c)?;
     let mag = asn1::int_magnitude(c);
     if mag.len() > 8 {
-        return Err(Bad);
+        return Err(DECODE);
     }
     let v = mag.iter().fold(0u64, |a, &b| (a << 8) | u64::from(b));
     let v = if neg {
         if v > 1 << 31 {
-            return Err(Bad);
+            return Err(DECODE);
         }
         -(i64::try_from(v).unwrap_or(0))
     } else {
         if v > (1 << 31) - 1 {
-            return Err(Bad);
+            return Err(DECODE);
         }
         i64::try_from(v).unwrap_or(0)
     };
@@ -654,7 +665,7 @@ fn int32(p: &[u8], opt: bool) -> Res<Option<(i64, usize)>> {
 /// exactly the type's length. Bits are fixed: 253, 448, 256, 456.
 fn ecx(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
     if alg.param.is_some() {
-        return Err(Bad);
+        return Err(DECODE);
     }
     let (len, bits) = match kind {
         Kind::X25519 => (32, 253),
@@ -663,7 +674,7 @@ fn ecx(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
         _ => (57, 456),
     };
     if key.len() != len {
-        return Err(Bad);
+        return Err(DECODE);
     }
     Ok(PubKey {
         kind,

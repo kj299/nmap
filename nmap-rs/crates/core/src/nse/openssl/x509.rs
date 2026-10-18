@@ -27,6 +27,7 @@ use super::asn1::{
     self, bit, check_eoc, check_tlen, i2d_any, primitive, tag, tlv, Bad, Prim, Res, CONTEXT,
     UNIVERSAL,
 };
+use super::err::*;
 use super::pubkey::{self, PubKey};
 
 /// `X509_NAME_MAX`: a Name's encoding is read from at most this many bytes
@@ -133,7 +134,7 @@ impl<'a> Seq<'a> {
             return Ok(None);
         };
         if !h.cons {
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_SEQUENCE_NOT_CONSTRUCTED));
         }
         Ok(Some(Seq {
             p,
@@ -157,24 +158,35 @@ impl<'a> Seq<'a> {
         last: bool,
         f: impl FnOnce(&'a [u8], bool) -> Res<Option<(T, usize)>>,
     ) -> Res<Option<T>> {
-        let missing = |optional: bool| if optional { Ok(None) } else { Err(Bad) };
+        // A required field after the data ran out: the C finishes the
+        // SEQUENCE first, so an indefinite one still owed its EOC raises
+        // "missing EOC" before "field missing".
+        let missing = |optional: bool, eoc: bool| {
+            if optional {
+                Ok(None)
+            } else if eoc {
+                Err(Bad::asn1(ASN1_R_MISSING_EOC))
+            } else {
+                Err(Bad::asn1(ASN1_R_FIELD_MISSING))
+            }
+        };
         if self.ended {
-            return missing(optional);
+            return missing(optional, self.eoc);
         }
         if self.len == 0 {
             self.ended = true;
-            return missing(optional);
+            return missing(optional, self.eoc);
         }
         let window = &self.p[self.off..self.off + self.len];
         if check_eoc(window) {
             if !self.eoc {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_UNEXPECTED_EOC));
             }
             self.off += 2;
             self.len -= 2;
             self.eoc = false;
             self.ended = true;
-            return missing(optional);
+            return missing(optional, false);
         }
         let isopt = !last && optional;
         match f(window, isopt)? {
@@ -193,7 +205,7 @@ impl<'a> Seq<'a> {
         last: bool,
         f: impl FnOnce(&'a [u8], bool) -> Res<Option<(T, usize)>>,
     ) -> Res<T> {
-        self.field(false, last, f)?.ok_or(Bad)
+        self.field(false, last, f)?.ok_or(Bad(0))
     }
 
     /// The end of the SEQUENCE: its EOC if indefinite, nothing left if
@@ -201,13 +213,13 @@ impl<'a> Seq<'a> {
     pub fn finish(mut self) -> Res<usize> {
         if self.eoc {
             if !check_eoc(&self.p[self.off..self.off + self.len]) {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_MISSING_EOC));
             }
             self.off += 2;
             self.len -= 2;
         }
         if !self.nolen && self.len != 0 {
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_SEQUENCE_LENGTH_MISMATCH));
         }
         let _ = self.hdr;
         Ok(self.off)
@@ -227,18 +239,18 @@ pub fn explicit<'a, T>(
         return Ok(None);
     };
     if !h.cons {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_EXPLICIT_TAG_NOT_CONSTRUCTED));
     }
     let body = &p[h.hdr_len..h.hdr_len + h.len];
     let (v, used) = inner(body)?;
     let mut used = used;
     if h.inf {
         if !check_eoc(&body[used..]) {
-            return Err(Bad);
+            return Err(Bad::asn1(ASN1_R_MISSING_EOC));
         }
         used += 2;
     } else if h.len - used != 0 {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_EXPLICIT_LENGTH_MISMATCH));
     }
     Ok(Some((v, h.hdr_len + used)))
 }
@@ -262,7 +274,7 @@ pub fn seq_of<'a, T>(
     while len > 0 {
         if check_eoc(&p[off..off + len]) {
             if !eoc {
-                return Err(Bad);
+                return Err(Bad::asn1(ASN1_R_UNEXPECTED_EOC));
             }
             off += 2;
             eoc = false;
@@ -274,7 +286,7 @@ pub fn seq_of<'a, T>(
         len -= used;
     }
     if eoc {
-        return Err(Bad);
+        return Err(Bad::asn1(ASN1_R_MISSING_EOC));
     }
     Ok(Some((out, off)))
 }
@@ -282,9 +294,20 @@ pub fn seq_of<'a, T>(
 /// A multi-string (`ASN1_ITYPE_MSTRING`): any universal tag whose bit is in
 /// `mask`, decoded as that type.
 pub fn mstring(p: &[u8], mask: u32, opt: bool) -> Res<Option<(Prim, usize)>> {
-    let h = check_tlen(p, None, true)?.ok_or(Bad)?;
-    if h.class != UNIVERSAL || asn1::tag2bit(h.tag) & mask == 0 {
-        return if opt { Ok(None) } else { Err(Bad) };
+    let h = check_tlen(p, None, true)?.ok_or(Bad(0))?;
+    if h.class != UNIVERSAL {
+        return if opt {
+            Ok(None)
+        } else {
+            Err(Bad::asn1(ASN1_R_MSTRING_NOT_UNIVERSAL))
+        };
+    }
+    if asn1::tag2bit(h.tag) & mask == 0 {
+        return if opt {
+            Ok(None)
+        } else {
+            Err(Bad::asn1(ASN1_R_MSTRING_WRONG_TAG))
+        };
     }
     primitive(p, h.tag, None, false)
 }
@@ -297,7 +320,7 @@ fn prim(p: &[u8], utype: u32, opt: bool) -> Res<Option<(Prim, usize)>> {
 // ---- the X509 templates ---------------------------------------------------------
 
 fn x509(p: &[u8]) -> Res<Cert> {
-    let mut s = Seq::open(p, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let (tbs, cinf) = s.req(false, |q, _| {
         x509_cinf(q).map(|(t, c, n)| Some(((t, c), n)))
     })?;
@@ -340,11 +363,11 @@ struct Cinf {
 
 /// `X509_CINF` (`ASN1_SEQUENCE_enc`): the fields, and the encoding cached.
 fn x509_cinf(p: &[u8]) -> Res<(Vec<u8>, Cinf, usize)> {
-    let mut s = Seq::open(p, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     // version [0] EXPLICIT INTEGER OPTIONAL: any integer.
     s.field(true, false, |q, opt| {
         explicit(q, 0, CONTEXT, opt, |r| {
-            prim(r, tag::INTEGER, false)?.ok_or(Bad)
+            prim(r, tag::INTEGER, false)?.ok_or(Bad(0))
         })
     })?;
     s.req(false, |q, opt| prim(q, tag::INTEGER, opt))?;
@@ -357,7 +380,7 @@ fn x509_cinf(p: &[u8]) -> Res<(Vec<u8>, Cinf, usize)> {
     s.field(true, false, |q, opt| bit_string(q, Some((2, CONTEXT)), opt))?;
     let extensions = s.field(true, true, |q, opt| {
         explicit(q, 3, CONTEXT, opt, |r| {
-            seq_of(r, (tag::SEQUENCE, UNIVERSAL), false, extension)?.ok_or(Bad)
+            seq_of(r, (tag::SEQUENCE, UNIVERSAL), false, extension)?.ok_or(Bad(0))
         })
     })?;
     let used = s.finish()?;
@@ -435,7 +458,7 @@ fn time(p: &[u8], opt: bool) -> Res<Option<(Time, usize)>> {
 
 /// `X509_EXTENSION`: `{ OBJECT, BOOLEAN OPTIONAL, OCTET STRING }`.
 fn extension(p: &[u8]) -> Res<(Extension, usize)> {
-    let mut s = Seq::open(p, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let oid = s.req(false, oid)?;
     let critical = s.field(true, false, |q, opt| {
         Ok(prim(q, tag::BOOLEAN, opt)?.map(|(v, n)| match v {
@@ -462,7 +485,7 @@ fn extension(p: &[u8]) -> Res<(Extension, usize)> {
 pub fn name(p: &[u8], opt: bool) -> Res<Option<(Vec<NameEntry>, usize)>> {
     let p = &p[..p.len().min(X509_NAME_MAX)];
     let Some((rdns, used)) = seq_of(p, (tag::SEQUENCE, UNIVERSAL), opt, |q| {
-        seq_of(q, (tag::SET, UNIVERSAL), false, name_entry)?.ok_or(Bad)
+        seq_of(q, (tag::SET, UNIVERSAL), false, name_entry)?.ok_or(Bad(0))
     })?
     else {
         return Ok(None);
@@ -470,9 +493,7 @@ pub fn name(p: &[u8], opt: bool) -> Res<Option<(Vec<NameEntry>, usize)>> {
     let mut out = Vec::new();
     for (set, rdn) in rdns.into_iter().enumerate() {
         for (oid, value) in rdn {
-            if !canon_ok(&value) {
-                return Err(Bad);
-            }
+            canon(&value)?;
             out.push(NameEntry { oid, value, set });
         }
     }
@@ -481,7 +502,7 @@ pub fn name(p: &[u8], opt: bool) -> Res<Option<(Vec<NameEntry>, usize)>> {
 
 /// `X509_NAME_ENTRY`: `{ OBJECT, ASN1_PRINTABLE }`.
 fn name_entry(p: &[u8]) -> Res<((Vec<u8>, Prim), usize)> {
-    let mut s = Seq::open(p, None, false)?.ok_or(Bad)?;
+    let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let oid = s.req(false, oid)?;
     let value = s.req(true, |q, opt| mstring(q, bit::PRINTABLE, opt))?;
     let used = s.finish()?;
@@ -490,15 +511,19 @@ fn name_entry(p: &[u8]) -> Res<((Vec<u8>, Prim), usize)> {
 
 /// Whether `asn1_string_canon` succeeds on an entry's value: the string
 /// types it canonicalises (`ASN1_MASK_CANON`) must convert to UTF-8
-/// (`ASN1_STRING_to_UTF8`): valid UTF-8, and code points that are valid
-/// Unicode in a BMPString or UniversalString. Every other type is copied.
-#[must_use]
-pub fn canon_ok(v: &Prim) -> bool {
+/// (`ASN1_STRING_to_UTF8`, `ASN1_mbstring_ncopy`): valid UTF-8 ("invalid
+/// utf8string"), and code points that are valid Unicode in a BMPString or
+/// UniversalString ("illegal characters"). Every other type is copied.
+pub fn canon(v: &Prim) -> Res<()> {
     let Prim::Str { utype, data } = v else {
-        return true;
+        return Ok(());
     };
-    match *utype {
-        tag::UTF8STRING => utf8_chars(data).is_some(),
+    let ok = match *utype {
+        tag::UTF8STRING => {
+            return utf8_chars(data)
+                .map(|_| ())
+                .ok_or(Bad::asn1(ASN1_R_INVALID_UTF8STRING));
+        }
         tag::BMPSTRING => data
             .chunks(2)
             .all(|c| is_unicode_valid(u32::from(c[0]) << 8 | u32::from(c[1]))),
@@ -506,6 +531,11 @@ pub fn canon_ok(v: &Prim) -> bool {
             .chunks(4)
             .all(|c| is_unicode_valid(u32::from_be_bytes([c[0], c[1], c[2], c[3]]))),
         _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(Bad::asn1(ASN1_R_ILLEGAL_CHARACTERS))
     }
 }
 

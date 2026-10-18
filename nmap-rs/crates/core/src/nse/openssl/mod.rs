@@ -56,11 +56,16 @@ pub mod asn1;
 pub mod bn;
 pub mod cert;
 pub mod cipher;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
 mod curves_table;
 pub mod digest;
 pub mod ec;
+pub mod err;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
+mod errors_table;
 pub mod ext;
 pub mod objects;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
 mod objects_table;
 pub mod pubkey;
 pub mod rand;

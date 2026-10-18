@@ -32,7 +32,7 @@ use super::bn::Bn;
 use super::digest;
 use super::ext;
 use super::objects::{self, nid_of, NID_UNDEF};
-use super::pubkey::EcInfo;
+use super::pubkey::{EcInfo, Kind};
 use super::x509::{self, Cert, NameEntry, Time};
 use super::{push_bignum, string, Failure};
 use crate::nse::nmaplib::Fail;
@@ -252,9 +252,11 @@ fn parse<'gc>(ctx: Context<'gc>, der: &[u8]) -> Result<Vec<Value<'gc>>, Failure>
         return Ok(vec![Value::Nil, string(ctx, KEY_ERROR.as_bytes())]);
     };
     let pk = Table::new(&ctx);
-    if let Some(info) = key.ec {
+    // Only EVP_PKEY_EC gets curve parameters and only EVP_PKEY_RSA its
+    // numbers (`nse_ssl_cert.cc:617-662`): not SM2, not RSA-PSS.
+    if let (Kind::Ec, Some(info)) = (key.kind, key.ec) {
         pk.set_field(ctx, "ecdhparams", ecdhparams(ctx, info));
-    } else if let Some((n, e)) = &key.rsa {
+    } else if let (Kind::Rsa, Some((n, e))) = (key.kind, &key.rsa) {
         let e = Bn::from_bin(e).map_err(|_| Failure::Refused)?;
         pk.set_field(ctx, "exponent", push_bignum(ctx, e));
         let n = Bn::from_bin(n).map_err(|_| Failure::Refused)?;

@@ -12,7 +12,9 @@ m65_algs.txt and m65_certs.txt); oracle/m65_core.lua runs it under
     gen_m65.py golden            run 7.94 twice: m65_golden.txt (refuses if an
                                  untagged row differs between the runs)
     gen_m65.py drift             run the tree's C: m65_drift.txt (refuses a
-                                 difference no family explains)
+                                 difference no family explains), and the tree's
+                                 answer on each drift row, m65_drift_tree.txt,
+                                 which the port is held to there (D1 (c))
     gen_m65.py screen            run the sanitizer build over every case:
                                  m65_screen.txt (refuses any report)
     gen_m65.py census            rows per exposed function: m65_census.txt
@@ -22,7 +24,8 @@ m65_algs.txt and m65_certs.txt); oracle/m65_core.lua runs it under
     gen_m65.py --check-794       CI, differential job: the header matches, then
                                  7.94 agrees with the golden on every row
     gen_m65.py --check-tree      local: the tree's C differs from the golden in
-                                 exactly the pinned rows, each for its family
+                                 exactly the pinned rows, each for its family,
+                                 and gives the answers m65_drift_tree.txt holds
 
 A row whose answer is random is tagged `nondet:` in the cases; it is compared
 on its status and the shape of its values (lengths, types, a bignum's sign
@@ -52,6 +55,7 @@ CERTS = os.path.join(M6, "m65_certs.txt")
 ALGS = os.path.join(M6, "m65_algs.txt")
 GOLDEN = os.path.join(M6, "m65_golden.txt")
 DRIFT = os.path.join(M6, "m65_drift.txt")
+DRIFT_TREE = os.path.join(M6, "m65_drift_tree.txt")
 SCREEN = os.path.join(M6, "m65_screen.txt")
 CENSUS = os.path.join(M6, "m65_census.txt")
 CORE = os.path.join(HERE, "m65_core.lua")
@@ -355,12 +359,27 @@ def drift():
                  "# or gone. Families: %s\n" % ", ".join("%s %d" % kv for kv in sorted(counts.items())))
         for cid, fam in rows:
             fh.write("%s\t%s\n" % (cid, fam))
+    with open(DRIFT_TREE, "w") as fh:
+        fh.write(drift_tree_text(rows, tree))
     print("drift: %d rows: %s" % (len(rows), counts), file=sys.stderr)
 
 
+def drift_tree_text(rows, tree):
+    """m65_drift_tree.txt: the tree's C's answer on each drift row, which the
+    port is held to there: the tree is the spec (D1 (c))."""
+    out = ["# M6.5: this tree's C on each row of m65_drift.txt (oracle/gen_m65.py drift):",
+           "# the answer the port is held to where 7.94 differs by a §2 family.",
+           "# ID<TAB>STATUS<TAB>VALUES"]
+    out += ["%s\t%s\t%s" % (cid, tree[cid][0], tree[cid][1]) for cid, _ in rows]
+    return "\n".join(out) + "\n"
+
+
 def check_tree():
-    rows, unexplained, _, _ = drift_rows()
+    rows, unexplained, tree, _ = drift_rows()
     pinned = [tuple(l.rstrip("\n").split("\t")) for l in open(DRIFT) if not l.startswith("#")]
+    if open(DRIFT_TREE).read() != drift_tree_text(rows, tree):
+        raise SystemExit("m65_drift_tree.txt is not the tree's C's answers on the drift rows: "
+                         "run `gen_m65.py drift`")
     if unexplained or rows != pinned:
         added = sorted(set(rows) - set(pinned))
         gone = sorted(set(pinned) - set(rows))

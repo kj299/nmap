@@ -3,11 +3,13 @@
 //! 19 `bignum_*` functions, the 11 methods, and the shared userdata other
 //! modules hand scripts (`SSL_CERT`'s RSA `exponent` and `modulus`, step e).
 //! Step c: `md4`, `md5`, `sha1`, `ripemd160`, `digest`, `hmac`, `rand_bytes`
-//! and `rand_pseudo_bytes`.
+//! and `rand_pseudo_bytes`. Step d: `encrypt`, `decrypt` and
+//! `DES_string_to_key`.
 //!
 //! - [`bn`], pure: the values and OpenSSL's semantics over `num-bigint`,
 //!   with the operand caps. Fuzzed and run under Miri on its own.
 //! - [`digest`], pure: D4(b)'s digests, OpenSSL's names for them, and HMAC.
+//! - [`cipher`], pure: D4(b)'s ciphers, their names, and the EVP rules.
 //! - [`rand`]: the one randomness seam (E3), for `rand_*` as for the rest.
 //! - this file, the binding.
 //!
@@ -51,6 +53,7 @@
 //! for each 64-byte block).
 
 pub mod bn;
+pub mod cipher;
 pub mod digest;
 pub mod rand;
 
@@ -204,6 +207,9 @@ enum F {
     Hmac,
     RandBytes,
     RandPseudoBytes,
+    Encrypt,
+    Decrypt,
+    DesStringToKey,
 }
 
 impl F {
@@ -238,13 +244,17 @@ impl F {
             F::Hmac => "openssl.hmac",
             F::RandBytes => "openssl.rand_bytes",
             F::RandPseudoBytes => "openssl.rand_pseudo_bytes",
+            F::Encrypt => "openssl.encrypt",
+            F::Decrypt => "openssl.decrypt",
+            F::DesStringToKey => "openssl.DES_string_to_key",
         })
     }
 }
 
-/// `openssllib`'s entries (`nse_openssl.cc:568-597`): the `BIGNUM` ones
-/// (step b), and the digests, HMAC and randomness (step c).
-const LIBRARY: [(&str, F); 27] = [
+/// `openssllib`'s entries (`nse_openssl.cc:568-600`): the `BIGNUM` ones
+/// (step b), the digests, HMAC and randomness (step c), and the ciphers
+/// (step d).
+const LIBRARY: [(&str, F); 30] = [
     ("bignum_num_bits", F::NumBits),
     ("bignum_num_bytes", F::NumBytes),
     ("bignum_set_bit", F::SetBit),
@@ -272,6 +282,9 @@ const LIBRARY: [(&str, F); 27] = [
     ("ripemd160", F::Ripemd160),
     ("digest", F::Digest),
     ("hmac", F::Hmac),
+    ("encrypt", F::Encrypt),
+    ("decrypt", F::Decrypt),
+    ("DES_string_to_key", F::DesStringToKey),
 ];
 
 /// `bignum_methods` (`nse_openssl.cc:551-566`; `is_bit_set` is listed twice
@@ -397,6 +410,24 @@ fn algorithm(name: &[u8]) -> Result<digest::Alg, Fail> {
         msg.extend_from_slice(c_str(name));
         Fail::err(msg)
     })
+}
+
+/// A cipher failure as the C raises it: `NSE_SSL_LUA_ERR`'s `OpenSSL error:`
+/// and the error OpenSSL queued, or the IV check's own words with the
+/// lengths as `int`s (`nse_openssl.cc:37-38,431-433`).
+fn cipher_error(e: cipher::CipherError) -> Fail {
+    match (e, e.openssl_text()) {
+        (_, Some(text)) => Fail::err(format!("OpenSSL error: {text}")),
+        (cipher::CipherError::IvLength { got, want }, None) => {
+            let int = |n: usize| narrow(i64::try_from(n).unwrap_or(i64::MAX));
+            Fail::err(format!(
+                "Length of iv is {}; should be {}",
+                int(got),
+                int(want)
+            ))
+        }
+        (_, None) => Fail::err("OpenSSL error: error:00000000:lib(0)::reason(0)"),
+    }
 }
 
 /// Fuel for hashing or drawing `bytes` bytes: [`fuel_units`] of the number
@@ -559,6 +590,46 @@ fn call<'gc>(
             }
             exec.fuel().consume(hash_fuel(len));
             vec![string(ctx, &buf)]
+        }
+        F::Encrypt | F::Decrypt => {
+            // The name is looked up before any other argument is read
+            // (`nse_openssl.cc:407-409`).
+            let name = args.string(1)?;
+            let c = cipher::resolve(&name).ok_or_else(|| {
+                let mut msg = b"Unknown cipher algorithm: ".to_vec();
+                msg.extend_from_slice(c_str(&name));
+                Fail::err(msg)
+            })?;
+            let key = args.string(2)?;
+            // `luaL_optlstring(L, 3, NULL, ...)`, and an empty IV is none.
+            let iv = match args.get(3) {
+                None | Some(Value::Nil) => None,
+                Some(_) => Some(args.string(3)?),
+            };
+            let data = args.string(4)?;
+            let padding = args.get(5).is_some_and(|v| v.to_bool());
+            let iv = iv.as_deref().filter(|iv| !iv.is_empty());
+            // The output comes out of the memory budget first, as random
+            // bytes do; then `malloc`'s failure is the C's.
+            let cap = cipher::out_capacity(data.len());
+            if !piccolo::budget::allows(cap) {
+                return Err(Failure::Refused);
+            }
+            let mut out = Vec::new();
+            if out.try_reserve_exact(cap).is_err() {
+                return Err(Fail::err(NO_MEMORY).into());
+            }
+            exec.fuel().consume(hash_fuel(data.len()));
+            cipher::crypt(c, f == F::Encrypt, &key, iv, &data, padding, &mut out)
+                .map_err(cipher_error)?;
+            vec![string(ctx, &out)]
+        }
+        F::DesStringToKey => {
+            let s = args.string(1)?;
+            let Ok(seven) = <&[u8; 7]>::try_from(&s[..]) else {
+                return Err(Fail::err("String must have length of 7 bytes.").into());
+            };
+            vec![string(ctx, &cipher::des_string_to_key(seven))]
         }
     };
     stack.clear();

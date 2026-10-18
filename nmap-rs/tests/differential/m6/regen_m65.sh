@@ -6,9 +6,10 @@
 #                                census in place, then cross-check (needs nmap)
 #   ./regen_m65.sh --check       FAIL unless the committed files are consistent and
 #                                current, this tree's C differs from the golden in
-#                                exactly the pinned rows, the digest name table
-#                                (oracle/gen_m65_digest_names.py) is what this
-#                                tree's C resolves, the independent references
+#                                exactly the pinned rows and answers as
+#                                m65_drift_tree.txt holds there, the digest and
+#                                cipher name tables (oracle/gen_m65_*_names.py)
+#                                are what this tree's C resolves, the independent references
 #                                agree, and the sabotage record is for these cases
 #                                (no nmap needed)
 #   ./regen_m65.sh --check-794   FAIL unless this machine is the environment the
@@ -36,6 +37,7 @@ case "${1:-}" in
     python3 -B oracle/gen_m65.py census
     bash oracle/build_openssl_oracle.sh >/dev/null
     python3 -I -B oracle/gen_m65_digest_names.py
+    python3 -I -B oracle/gen_m65_cipher_names.py
     python3 -I -B oracle/xref_m65.py
     echo "m6.5 openssl: regenerated; run oracle/sabotage_m65.py to re-measure the corpus"
     ;;
@@ -45,6 +47,7 @@ case "${1:-}" in
     bash oracle/build_openssl_oracle.sh >/dev/null
     python3 -B oracle/gen_m65.py --check-tree
     python3 -I -B oracle/gen_m65_digest_names.py --check
+    python3 -I -B oracle/gen_m65_cipher_names.py --check
     python3 -I -B oracle/xref_m65.py
     want="$(sha256sum m65_cases.txt | cut -c1-16)"
     grep -q "(cases $want)" m65_sabotage.txt || {

@@ -1,6 +1,7 @@
 //! The binding through the VM, in-module so that Miri runs it. The
 //! differential corpora (`tests/openssl_bn_differential.rs`, 11,171 rows,
-//! and `tests/openssl_digest_differential.rs`, 2,322, against nmap 7.94)
+//! `tests/openssl_digest_differential.rs`, 2,322, and
+//! `tests/openssl_cipher_differential.rs`, 12,949, against nmap 7.94)
 //! hold the oracle's answers; these pin what the corpus does not reach:
 //! argument errors from Lua code, the metamethods, the caps, shared
 //! mutation, the memory accounting, the rounds a primality test yields
@@ -83,20 +84,22 @@ fn the_metatable_is_luaopen_openssls() {
 }
 
 #[test]
-fn the_library_has_steps_b_and_c_and_nothing_else_yet() {
+fn the_library_has_steps_b_to_d_and_nothing_else_yet() {
     let out = run(
         "local k = {} for name, v in pairs(openssl) do k[#k + 1] = name .. ':' .. type(v) end \
          table.sort(k) return #k .. ' ' .. table.concat(k, ',')",
     );
     assert_eq!(
         out,
-        "27 bignum_add:function,bignum_bin2bn:function,bignum_bn2bin:function,\
+        "30 DES_string_to_key:function,bignum_add:function,bignum_bin2bn:function,\
+         bignum_bn2bin:function,\
          bignum_bn2dec:function,bignum_bn2hex:function,bignum_bn2mpi:function,\
          bignum_clear_bit:function,bignum_dec2bn:function,bignum_div:function,\
          bignum_hex2bn:function,bignum_is_bit_set:function,bignum_is_prime:function,\
          bignum_is_safe_prime:function,bignum_mod_exp:function,bignum_num_bits:function,\
          bignum_num_bytes:function,bignum_pseudo_rand:function,bignum_rand:function,\
-         bignum_set_bit:function,digest:function,hmac:function,md4:function,md5:function,\
+         bignum_set_bit:function,decrypt:function,digest:function,encrypt:function,\
+         hmac:function,md4:function,md5:function,\
          rand_bytes:function,rand_pseudo_bytes:function,ripemd160:function,sha1:function"
     );
 }
@@ -454,4 +457,117 @@ fn draws_differ_across_processes() {
     let (a, b) = (draw(), draw());
     assert_eq!(a.len(), 64);
     assert_ne!(a, b, "two processes drew the same bytes");
+}
+
+/// `l_encrypt` looks the cipher up before it reads any other argument, then
+/// reads the key, the IV (`nil` or empty: none) and the data, and treats
+/// the padding argument as `lua_toboolean` does; the key is checked before
+/// the IV, whose message is the C's own (`nse_openssl.cc:405-441`).
+#[test]
+fn cipher_arguments_are_read_as_the_c_reads_them() {
+    let out = run("local function e(...) return select(2, pcall(...)) end \
+         local k8, k16 = ('k'):rep(8), ('k'):rep(16) \
+         return r(e(openssl.encrypt, 'rc4', nil, {}, nil), \
+                  e(openssl.decrypt, 'nope\\0des', nil, nil, nil), \
+                  e(openssl.encrypt, 'des\\0junk', nil, nil, 'x'), \
+                  e(openssl.decrypt, 'des', k8, false, 'x'), \
+                  e(openssl.encrypt, 'des', k8, nil), \
+                  e(openssl.encrypt, 'des', 'short', 'iv', 'x'), \
+                  e(openssl.encrypt, 'des', k8, 'iv', 'x'), \
+                  e(openssl.encrypt, 'aes-128-ecb', k16, ('i'):rep(16), ''), \
+                  e(openssl.encrypt, 'des', k8, nil, 'x'), \
+                  #openssl.encrypt('des', k8, nil, 'x', 0), \
+                  #openssl.encrypt('des', k8, '', 'x', ''), \
+                  openssl.encrypt('des', k8, nil, 12345678) == openssl.encrypt('des', k8, nil, '12345678'), \
+                  openssl.encrypt('des', k8, nil, 'abcdefgh') == openssl.encrypt('des', k8, ('\\0'):rep(8), 'abcdefgh'))");
+    assert_eq!(
+        out,
+        "s:Unknown cipher algorithm: rc4|\
+         s:Unknown cipher algorithm: nope|\
+         s:bad argument #2 to 'openssl.encrypt' (string expected, got nil)|\
+         s:bad argument #3 to 'openssl.decrypt' (string expected, got boolean)|\
+         s:bad argument #4 to 'openssl.encrypt' (string expected, got no value)|\
+         s:OpenSSL error: error:03000082:digital envelope routines::invalid key length|\
+         s:Length of iv is 2; should be 8|\
+         s:Length of iv is 16; should be 0|\
+         s:OpenSSL error: error:1C80006B:Provider routines::wrong final block length|\
+         8|8|true|true"
+    );
+}
+
+/// Decryption's two failures, and a round trip under each D4 cipher.
+#[test]
+fn ciphers_round_trip_and_refuse_bad_padding() {
+    let out = run("local function e(...) return select(2, pcall(...)) end \
+         local t = {} \
+         for _, c in ipairs{{'des', 8, 8}, {'des-ecb', 8, 0}, {'aes128', 16, 16}, \
+                             {'aes-192-ecb', 24, 0}, {'aes-256-cbc', 32, 16}, {'cast', 16, 8}, \
+                             {'cast5-ecb', 16, 0}} do \
+           local k, iv = ('K'):rep(c[2]), c[3] > 0 and ('V'):rep(c[3]) or nil \
+           local ct = openssl.encrypt(c[1], k, iv, 'attack at dawn', true) \
+           t[#t + 1] = tostring(openssl.decrypt(c[1], k, iv, ct, true) == 'attack at dawn') \
+         end \
+         local k = ('K'):rep(8) \
+         return r(table.concat(t, ','), \
+                  e(openssl.decrypt, 'des', k, nil, openssl.encrypt('des', k, nil, 'abcdefgh'), true), \
+                  e(openssl.decrypt, 'des', k, nil, '', true), \
+                  #openssl.decrypt('des', k, nil, ''))");
+    assert_eq!(
+        out,
+        "s:true,true,true,true,true,true,true|\
+         s:OpenSSL error: error:1C800064:Provider routines::bad decrypt|\
+         s:OpenSSL error: error:1C80006B:Provider routines::wrong final block length|0"
+    );
+}
+
+/// `DES_string_to_key` takes exactly seven bytes.
+#[test]
+fn des_string_to_key_takes_seven_bytes() {
+    let out = run("local function e(...) return select(2, pcall(...)) end \
+         return r(#openssl.DES_string_to_key('1234567'), \
+                  e(openssl.DES_string_to_key, '123456'), \
+                  select(2, pcall(function() return openssl.DES_string_to_key('12345678') end)), \
+                  e(openssl.DES_string_to_key, nil))");
+    assert_eq!(
+        out,
+        "8|s:String must have length of 7 bytes.|\
+         s:t:1: String must have length of 7 bytes.|\
+         s:bad argument #1 to 'openssl.DES_string_to_key' (string expected, got nil)"
+    );
+}
+
+/// The output comes out of the memory budget, which is asked for what the C
+/// allocates, the data and a block more (`malloc(data_len +
+/// EVP_MAX_BLOCK_LENGTH)`), before anything is computed. With 16 bytes of
+/// room over a 16 MiB input, a 16 MiB string still fits but the cipher's
+/// reservation does not: without the check the call would succeed. (The
+/// collections let the budget see the heap: it grants what would fit beside
+/// what the last full collection left live, `piccolo::budget`.)
+#[test]
+#[cfg_attr(miri, ignore)] // megabytes of data
+fn the_memory_budget_refuses_a_cipher_output() {
+    let mut lua = state();
+    lua.set_memory_limit(lua.total_memory() + (64 << 20));
+    run_sliced(
+        &mut lua,
+        "big = ('x'):rep(16 << 20) collectgarbage() return 1",
+        i32::MAX,
+    );
+    // Collected again outside that chunk, so the heap the limit is measured
+    // from holds `big` and nothing the chunk left behind.
+    run_sliced(&mut lua, "collectgarbage() return 1", i32::MAX);
+    lua.set_memory_limit(lua.total_memory() + (16 << 20) + 16);
+    let (out, _) = run_sliced(
+        &mut lua,
+        "collectgarbage() \
+         return r(select(2, pcall(openssl.encrypt, 'des', ('k'):rep(8), nil, big)))",
+        i32::MAX,
+    );
+    assert_eq!(out, "s:not enough memory");
+    let (out, _) = run_sliced(
+        &mut lua,
+        "collectgarbage() return r((pcall(string.rep, 'y', 16 << 20)))",
+        i32::MAX,
+    );
+    assert_eq!(out, "true");
 }

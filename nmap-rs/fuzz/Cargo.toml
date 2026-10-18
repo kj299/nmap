@@ -34,6 +34,11 @@ md-5 = { version = "0.10", default-features = false }
 sha1 = { version = "0.10", default-features = false }
 ripemd = { version = "0.1", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+# And the block ciphers `::cipher` is built on, for `nse_openssl_cipher`,
+# which checks the port's ECB and CBC against the crates' own block calls.
+aes = { version = "0.8", default-features = false }
+des = { version = "0.8", default-features = false }
+cast5 = { version = "0.11", default-features = false }
 
 [dependencies.nmap-core]
 path = "../crates/core"
@@ -410,6 +415,13 @@ bench = false
 [[bin]]
 name = "nse_openssl_digest"
 path = "fuzz_targets/nse_openssl_digest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nse_openssl_cipher"
+path = "fuzz_targets/nse_openssl_cipher.rs"
 test = false
 doc = false
 bench = false

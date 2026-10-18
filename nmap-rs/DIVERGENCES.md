@@ -5855,6 +5855,125 @@ a, `oracle/xref_m65.py`). Also gated:
       `bad_arguments_are_named_as_the_port_names_them`.
 - [x] `nse-bignum-operand-cap` (above, step 0) applies from here.
 
+## Milestone 6.5 step c — digests, HMAC, randomness (`core::nse::openssl::digest`; not registered)
+
+`md4`, `md5`, `sha1`, `ripemd160`, `digest`, `hmac`, `rand_bytes` and
+`rand_pseudo_bytes` (`nse_openssl.cc:279-366`), over RustCrypto's md4,
+md-5, sha1, ripemd and sha2 (E1) and the step-b randomness seam (E3). Name
+resolution and HMAC (RFC 2104) are first-party. Still **not registered**
+(D2(D)); the test-only registration now holds 27 functions.
+
+**Gated** by `openssl_digest_differential`: all 2,322 rows of the step-a
+corpus tagged `c`, run by the oracle's runner through the port and equal to
+nmap 7.94's golden. That covers `digest` over every `supported_digests` name
+at the block edges of every digest, the names' aliases, case variants and
+near misses, the four fixed-name digests at the same lengths, `hmac` around
+each block size, the random functions, and every argument check. The only
+exemptions are named:
+- `q=N` is not compared;
+- random rows compare by shape;
+- 740 rows are pinned to `openssl-algorithm-subset` (below): 590 `digest`
+  and 150 `hmac`, only where 7.94 succeeded.
+
+Also gated:
+- **The name table** (`m65_digest_names.txt`, `oracle/gen_m65_digest_names.py`).
+  399 spellings, each classified by the oracle's digest of "abc" against
+  published vectors: 160 resolve to the ten D4 algorithms, 66 to other
+  digests, and 173 to nothing. They include:
+  - every `supported_digests` name and alias, and every name the corpus passes;
+  - case variants;
+  - the OIDs, with padding, leading zeros and `OID.` prefixes;
+  - a NUL with junk after it;
+  - separators changed.
+
+  The port resolves all 399 as recorded
+  (`every_recorded_spelling_resolves_as_the_oracle_does`), and
+  `regen_m65.sh --check` regenerates the table from the tree's C.
+- **Unit tests:** the published vectors (RFC 1320, RFC 1321, FIPS 180-4,
+  RIPEMD-160), RFC 2202 and RFC 4231 HMAC including keys longer than a
+  block, and the binding's errors, lengths and budget. Miri runs them,
+  except four that read the corpus, spawn processes or fill megabytes.
+- **Fuzz:** `nse_openssl_digest` checks:
+  - name resolution against case and NUL changes;
+  - each digest against the crate's own hash fed in two pieces;
+  - HMAC against a reference that takes the block size from the crate's
+    trait.
+
+  12,853,436 runs were clean.
+- **Sabotage:** 10 port variants, each caught (`docs/M6.5-ANALYSIS.md`, §11
+  row c).
+
+The new crates add no C. `md4` and `ripemd` forbid `unsafe`. On x86_64,
+`md-5` has one `unsafe` block (a slice cast) and `sha1` has three (a slice
+cast and the SHA-NI path, selected at run time by `cpufeatures`), as the
+registry ledger records for `aes` and `ed25519-dalek`.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `openssl-algorithm-subset` (D4(b)) — the port offers md4, md5, sha1,
+      ripemd160, sha224, sha256, sha384, sha512, sha512-224 and sha512-256,
+      under every name OpenSSL 3.0.13 gives them. 7.94 also accepts SHA-3,
+      SHAKE, BLAKE2, SM3, whirlpool and `MD5-SHA1`, under 66 spellings. The
+      port refuses those as `Unknown digest algorithm: <name>`, the error
+      7.94 gives a name it does not know. No script or library passes one
+      (§3).
+      - **UB in the C behind the pin:** `hmac` over SHAKE, an XOF, fails
+        inside `HMAC()`. The C ignores the failure and pushes `digest_len`
+        bytes, a variable never set (`nse_openssl.cc:352,362-364`,
+        CWE-457). 7.94 returned `""` on all 18 such rows.
+      - **Pinned by** the gate's 740 rewritten rows and by
+        `names_resolve_case_insensitively_up_to_a_nul`.
+- [x] `openssl-rand-length-over-int` — `RAND_bytes` and nbase's
+      `get_random_bytes` take the length as an `int`, while the buffer is
+      `malloc(len)` and the C pushes all `len` bytes
+      (`nse_openssl.cc:279-303`).
+      - A length of 2^32 or more whose low 32 bits are under 2^31 fills only
+        those low bits' worth of bytes. The rest is uninitialised heap
+        memory handed to the script (CWE-908).
+      - `rand_pseudo_bytes` with a length in [2^31, 2^32) fills nothing.
+      - The port fills every byte.
+      - It keeps `rand_bytes`' `Failure in RAND_bytes.` for a length in
+        [2^31, 2^32), since `RAND_bytes` refuses a negative `int`.
+      - Only lengths of 2 GiB or more reach any of this, so it is argued
+        here, not gated.
+- [x] `openssl-random-bytes-budget` — the bytes come out of the memory
+      budget before anything is drawn. A draw the budget cannot hold is
+      refused with its `not enough memory`, as a bignum is (7.94 has no
+      budget, and its `malloc` grants it). Pinned by
+      `the_memory_budget_refuses_random_bytes` and
+      `a_refused_draw_takes_no_randomness`.
+- [x] `openssl-rand-pseudo-is-csprng` — the C's `rand_pseudo_bytes` is
+      nbase's ARC4 stream (`nbase/nbase_rnd.c:112-196`), which is not
+      cryptographic. The port draws from the OS CSPRNG, the source of every
+      other random byte in the module (E3). Stronger, not weaker. A test
+      checks that the source differs across processes
+      (`draws_differ_across_processes`), so a generator seeded the same way
+      in every build fails.
+- [x] `openssl-random-failure-raises` (step b) now covers `rand_bytes` and
+      `rand_pseudo_bytes`: a failed source raises `Failure in RAND_bytes.`
+      for both. In the C, `get_random_bytes` cannot fail.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- **Name lookup:**
+  - ASCII case-insensitive;
+  - only up to the first NUL, and the error prints the name up to it;
+  - a number is a name (`luaL_checkstring`), so `digest(42, s)` is
+    `Unknown digest algorithm: 42`.
+- **`md5(s)` is `digest("md5", s)`** with the name inserted below the
+  arguments, so a bad message is argument #2 (`NSE_DECLARE_DIGEST`).
+- **HMAC follows RFC 2104:** a key longer than the block is hashed first.
+  The blocks are 64 bytes for MD4, MD5, SHA-1, RIPEMD-160, SHA-224 and
+  SHA-256, and 128 for the SHA-512 family.
+- **The random functions' errors:** a negative length is `size_t`-enormous,
+  and `malloc` refuses it: `Couldn't allocate memory.`, with the caller's
+  position. So does a length the allocator cannot grant (2^62).
+
+### Differences, open and documented
+
+- [x] `openssl-bad-argument-naming` (step b) applies: `'md5'` from Lua code,
+      `'openssl.md5'` under `pcall`.
+
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which

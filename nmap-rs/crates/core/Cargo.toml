@@ -92,5 +92,18 @@ num-traits = { version = "0.2", default-features = false, features = ["std"] }
 # `rand`, so it adds no crate.
 getrandom = "0.2"
 
+# `core::nse::openssl::digest` — the module's digests and HMAC (M6.5 step c,
+# E1): RustCrypto's md4, md-5, sha1, ripemd and sha2, on the digest 0.10
+# generation ed25519-dalek already locks (sha2 is already in Cargo.lock
+# through it). The first-party layer owns OpenSSL's name resolution (D4(b):
+# these five families and their aliases, nothing else) and HMAC (RFC 2104).
+# `default-features = false` keeps them `no_std` and off `asm`; the hashes
+# are exhaustively vector-tested, as SHA-256 was in-tree for sigstore.
+md4 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+ripemd = { version = "0.1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
 [lints]
 workspace = true

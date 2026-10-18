@@ -25,6 +25,16 @@ cargo-fuzz = true
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 libfuzzer-sys = "0.4"
 
+# The RustCrypto digests `core::nse::openssl::digest` is built on, for
+# `nse_openssl_digest`'s reference HMAC, which takes each digest's block size
+# from the crate's own trait rather than the port's table. Already in the
+# graph through nmap-core; these name the edges.
+md4 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+ripemd = { version = "0.1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
 [dependencies.nmap-core]
 path = "../crates/core"
 
@@ -393,6 +403,13 @@ doc = false
 [[bin]]
 name = "nse_openssl_bignum"
 path = "fuzz_targets/nse_openssl_bignum.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nse_openssl_digest"
+path = "fuzz_targets/nse_openssl_digest.rs"
 test = false
 doc = false
 bench = false

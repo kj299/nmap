@@ -2,10 +2,13 @@
 //! `docs/M6.5-ANALYSIS.md` §11 orders it. Step b: the `BIGNUM` half — the
 //! 19 `bignum_*` functions, the 11 methods, and the shared userdata other
 //! modules hand scripts (`SSL_CERT`'s RSA `exponent` and `modulus`, step e).
+//! Step c: `md4`, `md5`, `sha1`, `ripemd160`, `digest`, `hmac`, `rand_bytes`
+//! and `rand_pseudo_bytes`.
 //!
 //! - [`bn`], pure: the values and OpenSSL's semantics over `num-bigint`,
 //!   with the operand caps. Fuzzed and run under Miri on its own.
-//! - [`rand`]: the one randomness seam (E3).
+//! - [`digest`], pure: D4(b)'s digests, OpenSSL's names for them, and HMAC.
+//! - [`rand`]: the one randomness seam (E3), for `rand_*` as for the rest.
 //! - this file, the binding.
 //!
 //! **Not registered.** Under D2(D) the module is registered last, at step g,
@@ -37,15 +40,18 @@
 //! its search meets first, an order Lua's hash seed decides; the port names
 //! the one called (`nse-openssl-rand-alias-name`). A value over a cap
 //! ([`bn`], `nse-bignum-operand-cap`) raises "not enough memory", without a
-//! position, as an allocation failure does.
+//! position, as an allocation failure does; so do random bytes the memory
+//! budget will not hold (`openssl-random-bytes-budget`).
 //!
 //! **Time.** `is_prime` and `is_safe_prime` run their Miller-Rabin rounds as
 //! a [`Sequence`], paying fuel for each, so the VM — and the stall watchdog
 //! above it — sees every round (§6); one round of the largest operand takes
 //! about a third of a second. `mod_exp` is one native computation and pays
-//! its fuel when it returns.
+//! its fuel when it returns, as hashing and drawing random bytes do (`fuel_units`
+//! for each 64-byte block).
 
 pub mod bn;
+pub mod digest;
 pub mod rand;
 
 use std::cell::{Ref, RefCell};
@@ -67,6 +73,12 @@ use super::stdlib::{lua_error, lua_error_bytes, type_error, LuaArgs};
 /// The metatable's name (`luaL_newmetatable(L, "BIGNUM")`), and the type
 /// name in argument errors.
 pub const BIGNUM_T: &str = "BIGNUM";
+
+/// `l_rand_bytes`' and `l_rand_pseudo_bytes`' message when `malloc` fails
+/// (`nse_openssl.cc:283,297`): a negative length, which `size_t` makes
+/// enormous, or one the allocator refuses. A length the memory budget
+/// refuses is the budget's "not enough memory", as for a bignum.
+const NO_MEMORY: &str = "Couldn't allocate memory.";
 
 /// The message of a value over a cap, or of bytes the budget refused.
 const REFUSED: &str = "not enough memory";
@@ -184,6 +196,14 @@ enum F {
     ModExp,
     Div,
     Free,
+    Digest,
+    Md4,
+    Md5,
+    Sha1,
+    Ripemd160,
+    Hmac,
+    RandBytes,
+    RandPseudoBytes,
 }
 
 impl F {
@@ -210,12 +230,21 @@ impl F {
             F::ModExp => "openssl.bignum_mod_exp",
             F::Div => "openssl.bignum_div",
             F::Free => return None,
+            F::Digest => "openssl.digest",
+            F::Md4 => "openssl.md4",
+            F::Md5 => "openssl.md5",
+            F::Sha1 => "openssl.sha1",
+            F::Ripemd160 => "openssl.ripemd160",
+            F::Hmac => "openssl.hmac",
+            F::RandBytes => "openssl.rand_bytes",
+            F::RandPseudoBytes => "openssl.rand_pseudo_bytes",
         })
     }
 }
 
-/// `openssllib`'s `BIGNUM` entries (`nse_openssl.cc:568-587`).
-const LIBRARY: [(&str, F); 19] = [
+/// `openssllib`'s entries (`nse_openssl.cc:568-597`): the `BIGNUM` ones
+/// (step b), and the digests, HMAC and randomness (step c).
+const LIBRARY: [(&str, F); 27] = [
     ("bignum_num_bits", F::NumBits),
     ("bignum_num_bytes", F::NumBytes),
     ("bignum_set_bit", F::SetBit),
@@ -235,6 +264,14 @@ const LIBRARY: [(&str, F); 19] = [
     ("bignum_add", F::Add),
     ("bignum_mod_exp", F::ModExp),
     ("bignum_div", F::Div),
+    ("rand_bytes", F::RandBytes),
+    ("rand_pseudo_bytes", F::RandPseudoBytes),
+    ("md4", F::Md4),
+    ("md5", F::Md5),
+    ("sha1", F::Sha1),
+    ("ripemd160", F::Ripemd160),
+    ("digest", F::Digest),
+    ("hmac", F::Hmac),
 ];
 
 /// `bignum_methods` (`nse_openssl.cc:551-566`; `is_bit_set` is listed twice
@@ -352,6 +389,22 @@ fn cubic_fuel(words: u64) -> i32 {
     fuel_units(w.saturating_mul(w).saturating_mul(w))
 }
 
+/// `EVP_get_digestbyname(name)`, or `l_digest`'s and `l_hmac`'s error: the
+/// name up to its first NUL, as `%s` prints it (`nse_openssl.cc:317,360`).
+fn algorithm(name: &[u8]) -> Result<digest::Alg, Fail> {
+    digest::resolve(name).ok_or_else(|| {
+        let mut msg = b"Unknown digest algorithm: ".to_vec();
+        msg.extend_from_slice(c_str(name));
+        Fail::err(msg)
+    })
+}
+
+/// Fuel for hashing or drawing `bytes` bytes: [`fuel_units`] of the number
+/// of 64-byte blocks.
+fn hash_fuel(bytes: usize) -> i32 {
+    fuel_units(u64::try_from(bytes.div_ceil(64)).unwrap_or(u64::MAX))
+}
+
 /// What a call returns now, or the primality test still to run.
 enum Done {
     Now,
@@ -369,6 +422,18 @@ fn call<'gc>(
     stack: &mut Stack<'gc, '_>,
     f: F,
 ) -> Result<Done, Failure> {
+    // `NSE_DECLARE_DIGEST`: `md5(s)` is `digest("md5", s)`, with the name
+    // inserted below the arguments, so the message is argument #2
+    // (`nse_openssl.cc:336-347`).
+    if let Some(name) = match f {
+        F::Md4 => Some("md4"),
+        F::Md5 => Some("md5"),
+        F::Sha1 => Some("sha1"),
+        F::Ripemd160 => Some("ripemd160"),
+        _ => None,
+    } {
+        stack.push_front(string(ctx, name.as_bytes()));
+    }
     let args = LuaArgs { ctx, stack };
     let out: Vec<Value<'gc>> = match f {
         F::NumBits => {
@@ -452,6 +517,48 @@ fn call<'gc>(
         F::Free => {
             check(&args, 1)?;
             vec![]
+        }
+        F::Digest | F::Md4 | F::Md5 | F::Sha1 | F::Ripemd160 => {
+            let name = args.string(1)?;
+            let msg = args.string(2)?;
+            let alg = algorithm(&name)?;
+            exec.fuel().consume(hash_fuel(msg.len()));
+            vec![string(ctx, &digest::digest(alg, &msg))]
+        }
+        F::Hmac => {
+            let name = args.string(1)?;
+            let key = args.string(2)?;
+            let msg = args.string(3)?;
+            let alg = algorithm(&name)?;
+            exec.fuel()
+                .consume(hash_fuel(key.len().saturating_add(msg.len())));
+            vec![string(ctx, &digest::hmac(alg, &key, &msg))]
+        }
+        F::RandBytes | F::RandPseudoBytes => {
+            // `size_t len = luaL_checkinteger(L, 1)`: a negative length is
+            // enormous, and `malloc` refuses it.
+            let len = usize::try_from(args.check_integer(1)?).map_err(|_| Fail::err(NO_MEMORY))?;
+            // The bytes come out of the memory budget first, which refuses
+            // with its "not enough memory" (7.94 has none); then `malloc`'s
+            // own failure is the C's.
+            if !piccolo::budget::allows(len) {
+                return Err(Failure::Refused);
+            }
+            let mut buf = Vec::new();
+            if buf.try_reserve_exact(len).is_err() {
+                return Err(Fail::err(NO_MEMORY).into());
+            }
+            // `RAND_bytes` takes the length as an `int` and fails on a
+            // negative one (`nse_openssl.cc:285`).
+            if f == F::RandBytes && narrow(i64::try_from(len).unwrap_or(i64::MAX)) < 0 {
+                return Err(Failure::Random);
+            }
+            buf.resize(len, 0);
+            if !rand::fill(&mut buf) {
+                return Err(Failure::Random);
+            }
+            exec.fuel().consume(hash_fuel(len));
+            vec![string(ctx, &buf)]
         }
     };
     stack.clear();

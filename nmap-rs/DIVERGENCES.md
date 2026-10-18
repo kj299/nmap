@@ -5702,7 +5702,7 @@ under this tree's C, built standalone (`tests/differential/m6/README.md`,
 yet. Each entry fixes what the port will be held to when its step lands,
 and how the corpus pins it.
 
-- [ ] `nse-openssl-iv-length-uaf` (step d) — Phase 0's flaw
+- [x] `nse-openssl-iv-length-uaf` (step d) — Phase 0's flaw
       (`docs/M6.5-ANALYSIS.md` §12), now measured on the corpus. A
       non-empty IV whose length is not the context's frees the cipher
       context, then reads it for the message (`nse_openssl.cc:438-441,
@@ -5715,7 +5715,11 @@ and how the corpus pins it.
       from the oracle's one named repair (`build_openssl_oracle.sh` reads the
       length before the free). `gen_m65.py golden` requires the repaired C
       to raise that message on exactly the tagged rows. The port raises it.
-- [ ] `nse-openssl-rc4-empty-key` (step d) — found by step a; Phase 0 had it
+      Since step d: the 102 such rows on D4 ciphers in
+      `openssl_cipher_differential`, and
+      `cipher_arguments_are_read_as_the_c_reads_them`; the rest are on
+      ciphers outside D4, which the port refuses by name first.
+- [x] `nse-openssl-rc4-empty-key` (step d) — found by step a; Phase 0 had it
       as "inferred, unverified" (§12). `encrypt`/`decrypt` with `rc4` or
       `rc4-40` and a zero-length key reach libcrypto's `RC4_set_key` with
       length 0, which reads 256 bytes from the key pointer. That is an
@@ -5729,7 +5733,11 @@ and how the corpus pins it.
       way. Other variable-length ciphers measured deterministic with an
       empty key: bf, cast5 and rc2 gave the same output in 3 of 3 runs.
       Whether their key setup reads past a zero-length key has not been
-      established by reading OpenSSL.
+      established by reading OpenSSL. **Closed by D4(b) at step d:** the
+      port offers no RC4 (nor bf, rc2), so both rows are `Unknown cipher
+      algorithm` (`openssl-algorithm-subset`). The one variable-length
+      cipher it offers, CAST5, sets an empty key as 16 zero bytes, as
+      `CAST_set_key(len = 0)` does, reading nothing.
 - [x] `nse-openssl-rand-alias-name` (step b) — `bignum_rand` and
       `bignum_pseudo_rand` are one C function under two names (`openssllib`,
       `nse_openssl.cc`). An argument error names whichever one
@@ -5973,6 +5981,151 @@ registry ledger records for `aes` and `ed25519-dalek`.
 
 - [x] `openssl-bad-argument-naming` (step b) applies: `'md5'` from Lua code,
       `'openssl.md5'` under `pcall`.
+
+## Milestone 6.5 step d — ciphers (`core::nse::openssl::cipher`; not registered)
+
+`encrypt`, `decrypt` and `DES_string_to_key` (`nse_openssl.cc:405-549`),
+over RustCrypto's des, aes and cast5 block primitives (E1). Everything
+OpenSSL's EVP layer makes observable is first-party:
+- name resolution for D4(b)'s ten ciphers;
+- the key-length rules;
+- the IV checks;
+- ECB and CBC;
+- PKCS#7, off by default;
+- the exact error strings.
+
+Still **not registered** (D2(D)); the test-only registration now holds 30
+functions.
+
+**Gated** by `openssl_cipher_differential`: all 12,949 step-a corpus rows
+tagged `d`, run by the oracle's runner through the port and equal to nmap
+7.94's golden after three named adjustments, each counted by the gate:
+- **11,749 rows pinned to `openssl-algorithm-subset`** (below): every row
+  on a cipher outside D4. The C looks the name up before it reads any other
+  argument (`nse_openssl.cc:407-409`), so on these rows the port's answer
+  depends on the name alone. The pinned rows break down by 7.94's answer:
+  6,336 succeeded, 3,825 raised an error, and 1,588 were tagged `ub:`.
+- **30 `ivnul` drift rows held to the tree's C** (`openssl-iv-leading-nul`,
+  below). Their answers are `m65_drift_tree.txt`, which `gen_m65.py drift`
+  now writes for every drift row and `--check-tree` verifies.
+- **102 `ub:iv-length-uaf` rows held to the message the C means**
+  (`nse-openssl-iv-length-uaf`).
+
+The other 1,068 rows, 214 of them `DES_string_to_key`, are compared with
+7.94 directly.
+
+Also gated:
+- **The name table** (`m65_cipher_names.txt`,
+  `oracle/gen_m65_cipher_names.py`): 643 spellings classified by what the
+  tree's C encrypts them to. They include every cipher name, alias and
+  lookup of `m65_algs.txt`, every name the corpus passes, case variants,
+  OIDs, NULs, separators and near misses. 75 resolve to the ten D4
+  ciphers, 358 are other ciphers, and 210 are unknown. The port resolves
+  all 643 as recorded, and `regen_m65.sh --check` regenerates the table.
+- **nettle** (`oracle/xref_m65.py`) recomputes every D4 row 7.94 answered,
+  using nettle's DES, AES and CAST-128 blocks with ECB, CBC and PKCS#7
+  written in Python: 292 calls, 133 round trips, and the 200
+  `DES_string_to_key` rows from that function's own comment. It agrees
+  with every one.
+- **Unit tests:** the published vectors, which are FIPS-197 C.1–C.3, SP
+  800-38A F.2.1, FIPS 81 and SP 500-20 (DES), and RFC 2144 B.1 (CAST5 at
+  128, 80 and 40 bits). Also the key, IV and padding rules and the
+  binding's argument order, errors and budget. Miri runs them on the soft
+  backends.
+- **Fuzz:** `nse_openssl_cipher` checks:
+  - EVP's failure order;
+  - round trips;
+  - output lengths;
+  - the first block of ECB and CBC against the crates' own block call, so
+    the mode code is checked against the primitive;
+  - `DES_string_to_key` against a bit-string reimplementation.
+
+  25,018,008 runs were clean.
+- **Sabotage:** 11 port variants, each caught (`docs/M6.5-ANALYSIS.md`, §11
+  row d).
+
+The new crates add no C. des and cast5 have no `unsafe`; cipher has 2
+blocks and inout 22, for in-place buffers. aes has its AES-NI and ARMv8
+intrinsics, chosen at run time by `cpufeatures`, with a constant-time
+fixsliced software fallback.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `openssl-algorithm-subset` (D4(b), step c) now covers ciphers. The
+      port offers DES, AES-128/192/256 and CAST5 in ECB and CBC, under
+      every name OpenSSL 3.0.13 gives them: the `des`, `aes128`, `cast` and
+      `cast-cbc` aliases and the OIDs.
+      - **What 7.94 also accepts:** 3DES, DESX, RC2, RC4, Blowfish,
+        CAMELLIA, ARIA, SEED, SM4, ChaCha20 and ChaCha20-Poly1305, the AES
+        and DES modes other than ECB and CBC (CFB, OFB, CTR, GCM, CCM, OCB,
+        XTS, key wrap, SIV and the stitched CBC-HMAC), and CAST5's CFB and
+        OFB. 358 spellings in all.
+      - **How the port answers them:** `Unknown cipher algorithm: <name>`.
+      - **Why:** no script or library passes one (§3). Several are broken
+        in the C anyway: GCM encryption returns no tag and its decryption
+        always fails; CCM, OCB and XTS fail; RC4 with an empty key over-reads
+        (`nse-openssl-rc4-empty-key`).
+- [x] `nse-openssl-iv-length-uaf` (step a) — the port raises `Length of iv
+      is N; should be M`, after the key check, as the C means to.
+- [x] `openssl-iv-leading-nul` (§2's `ivnul` family; D1 (c)) — 7.94 read
+      the IV with `luaL_optstring`, so an IV whose first byte is NUL was no
+      IV. It encrypted under zeros and skipped the length check
+      (`3be01efb1:nse_openssl.cc:390-394`). This tree's C reads it with
+      `luaL_optlstring`, and only `nil` or `""` is none
+      (`nse_openssl.cc:413,416-417`). That is upstream's fix #2640
+      (`3d99250c8`): in 7.94, `nping-brute.nse:101-103`'s 16 random bytes
+      authenticated with the wrong IV one run in 256. The port follows the
+      tree. Pinned by the 30 rows held to `m65_drift_tree.txt`.
+- [x] `openssl-cipher-output-budget` — the output comes out of the memory
+      budget before anything is computed. The budget is asked for what
+      `l_encrypt` allocates, the data and 32 bytes more
+      (`nse_openssl.cc:445`), for both directions; `l_decrypt` allocates
+      the data's length (`:506`). A refusal is the budget's
+      `not enough memory`, as for a bignum or random bytes. Pinned by
+      `the_memory_budget_refuses_a_cipher_output`.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- **Argument order:** the cipher name is looked up before the key, IV and
+  data are read, so a bad name hides a bad argument.
+  - The key length is checked before the IV.
+  - DES and AES take exactly their key length; anything else is `OpenSSL
+    error: error:03000082:digital envelope routines::invalid key length`.
+  - CAST5 takes any key from 0 bytes up: `CAST_set_key` uses the first 16,
+    pads a shorter key with zeros, and runs 12 rounds for 10 bytes or
+    fewer.
+- **The IV:**
+  - `nil` or `""` is none, which means a zero IV for CBC.
+  - Any other IV must be the mode's length (0 for ECB), or the error is
+    `Length of iv is N; should be M`, the lengths printed as `int`s.
+- **Padding:**
+  - PKCS#7, and only if the fifth argument is truthy (`lua_toboolean`:
+    `0` and `""` turn it on).
+  - Without padding, a partial final block is `error:1C80006B:Provider
+    routines::wrong final block length`.
+  - With it, decrypting no whole block gives the same error, and a bad pad
+    is `error:1C800064:Provider routines::bad decrypt`.
+- **`DES_string_to_key`:** exactly 7 bytes, or `String must have length of
+  7 bytes.`.
+  - The C reads `data[7]`, the Lua string's terminating NUL
+    (`nse_openssl.cc:543`). Its one bit lands in key[7]'s low bit, which the
+    C clears, so no byte there could change the key. The port reads 0. A
+    sabotage reading `0xff` instead is an equivalent mutant, which is why
+    the sabotage list leaves it out.
+  - Parity is not set: `DES_set_odd_parity` is commented out in the C. DES
+    ignores parity bits anyway.
+- `nse-openssl-not-constant-time` (step b) extends to DES and CAST5, whose
+  S-box tables index on key and data, as OpenSSL's do. AES's software
+  fallback is fixsliced and constant-time.
+
+### Differences, open and documented
+
+- [x] `nse-openssl-error-queue-stale` (its cipher half, E4) — the C reports
+      the *oldest* queued OpenSSL error, so an error left by an earlier
+      call (a bignum's, step b) can stand in for the cipher's own. The port
+      has no queue, and each failure reports its own first error, which is
+      what the golden, drained after every case, records.
+- [x] `openssl-bad-argument-naming` (step b) applies.
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

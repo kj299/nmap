@@ -1,6 +1,6 @@
 //! The `openssl` module's ciphers (M6.5 step d), pure: no Lua.
 //!
-//! `l_encrypt` and `l_decrypt` (`nse_openssl.cc:405-535`) drive OpenSSL's
+//! `l_encrypt` and `l_decrypt` (`nse_openssl.cc:405-527`) drive OpenSSL's
 //! EVP layer; this is that layer's observable behaviour for D4(b)'s ten
 //! ciphers, over RustCrypto's block primitives (E1):
 //!
@@ -313,7 +313,7 @@ pub fn out_capacity(data_len: usize) -> usize {
 }
 
 /// `l_DES_string_to_key`: seven bytes spread over eight, seven bits each,
-/// the low bit of every byte clear (`nse_openssl.cc:537-555`). The C reads a
+/// the low bit of every byte clear (`nse_openssl.cc:529-549`). The C reads a
 /// `data[7]` that a 7-byte Lua string has only as its terminating NUL; it is
 /// 0 here.
 #[must_use]

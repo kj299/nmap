@@ -414,7 +414,7 @@ fn algorithm(name: &[u8]) -> Result<digest::Alg, Fail> {
 
 /// A cipher failure as the C raises it: `NSE_SSL_LUA_ERR`'s `OpenSSL error:`
 /// and the error OpenSSL queued, or the IV check's own words with the
-/// lengths as `int`s (`nse_openssl.cc:37-38,431-433`).
+/// lengths as `int`s (`nse_openssl.cc:37-38,438-441`).
 fn cipher_error(e: cipher::CipherError) -> Fail {
     match (e, e.openssl_text()) {
         (_, Some(text)) => Fail::err(format!("OpenSSL error: {text}")),

@@ -461,7 +461,16 @@ mod tests {
 
     #[test]
     fn generators_decode_in_every_form() {
-        for c in curves() {
+        // Every curve natively; under Miri, the two smallest of each field
+        // type (the arithmetic is the same code, and all 82 take hours there).
+        let mut picked: Vec<_> = curves().iter().collect();
+        if cfg!(miri) {
+            picked.sort_by_key(|c| (c.char2, c.p.len()));
+            let prime: Vec<_> = picked.iter().filter(|c| !c.char2).take(2).copied().collect();
+            let binary: Vec<_> = picked.iter().filter(|c| c.char2).take(2).copied().collect();
+            picked = prime.into_iter().chain(binary).collect();
+        }
+        for c in picked {
             let g = Group::builtin(c);
             let len = if c.char2 {
                 usize::try_from(g.degree().div_ceil(8)).unwrap()

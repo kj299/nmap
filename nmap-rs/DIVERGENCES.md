@@ -6153,24 +6153,28 @@ here links OpenSSL; everything OpenSSL decides is ported:
 Still **not registered** (D2(D)): `parse_ssl_certificate` belongs to the
 `nmap` socket module, which step f gives TLS.
 
-**Gated** by `openssl_cert_differential`: all 3,637 corpus rows tagged `e`,
+**Gated** by `openssl_cert_differential`: all 3,648 corpus rows tagged `e`,
 run by the oracle's runner through the port and equal to nmap 7.94's golden
 byte for byte, with no exemption. The rows:
 - Phase 0's 2,876 certificates: 1,092 OIDs as subject attributes and as
   extensions, 11 string tags, time edge cases, 18 key types with 13
   well-formed extensions each, 143 truncations, 400 byte flips;
 - E5's 144 BER rows;
-- step e's 354 generated rows (`oracle/gen_m65_x509.py`): key types and
+- step e's 365 generated rows (`oracle/gen_m65_x509.py`): key types and
   their parameter shapes, every curve's generator in each point form,
   explicit parameters and each of their checks, Name values, extension
-  framing;
+  framing, a tag-0 signature parameter, constructed strings six and seven
+  levels deep;
 - step e's 253 printer rows: each method on well-formed and malformed
   values, and the error each failure leaves for "Error parsing cert";
 - the argument checks.
 
-The 607 generated rows carry their expected outcome, written from the C by
+The 618 generated rows carry their expected outcome, written from the C by
 hand (for a printer, the exact text), and `gen_m65_x509.py --check-golden`
-holds 7.94's golden to it: all 607 agree.
+holds 7.94's golden to it: all 618 agree. 7.94 corrected two of those
+readings before the port was compared: `val_prn` prints the otherName
+labels' own colon and its separator (`othername: UPN::user@x`), and
+`asn1_collect` reads six nested constructed strings, not five.
 
 Also gated:
 - **The tables** (`crates/vendor/openssl-data/gen.py`): 1,248 NIDs, 82
@@ -6191,9 +6195,18 @@ Also gated:
   deterministic, named errors). Seeds include constructed strings nested 5
   and 6 deep, 10,000 nested indefinite lengths, OIDs of 587 and 5,000
   bytes, a SAN of 2,000 DirNames and a relative name of 1,000 entries.
-  FUZZ_RESULT
+  `nse_x509_ext_print` ran 762,529 inputs clean. `nse_sslcert_der` found
+  one certificate whose re-encoding does not decode: a signature algorithm
+  parameter of universal tag 0 in a constructed header (`20 00`), which
+  `i2d_X509` writes primitive, as an EOC. 7.94's PEM of it has the same
+  bytes, so the port is right; the property now excepts exactly that case,
+  three `k-sigalg` rows pin it, and the target then ran 9,464,197 inputs
+  clean.
 - **Sabotage:** 7 port variants, each caught (`docs/M6.5-ANALYSIS.md`, §11
-  row e). SABOTAGE_RESULT
+  row e). The first run missed two: the string-depth bound (no row
+  nested constructed strings past the limit; the `k-nest` rows now do) and
+  the heap accounting, which no corpus row can see and
+  `certificates_are_accounted_to_the_heap` was written to catch.
 
 ### Security / robustness (divergence from the C, deliberately)
 

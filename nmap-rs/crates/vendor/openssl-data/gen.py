@@ -18,7 +18,8 @@
                                          and names as the curve table
 
 The inputs are OpenSSL 3.0.13's `crypto/objects/objects.txt`, `obj_mac.num`,
-`crypto/ec/ec_curve.c` and `crypto/evp/ec_support.c`, committed next to this
+`crypto/ec/ec_curve.c` and `crypto/evp/ec_support.c` (and for the error
+table `crypto/err/openssl.txt`, `crypto/err/err.c` and `include/openssl/err.h.in`), committed next to this
 script under their own licence (Apache-2.0: LICENSE.txt, NOTICE). The curves
 are `ec_curve.c`'s non-FIPS `curve_list` (each curve once: its `#if` branches
 differ only in the implementation method) and their data blocks; the names

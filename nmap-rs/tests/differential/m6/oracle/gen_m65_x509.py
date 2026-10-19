@@ -557,7 +557,9 @@ def rows():
     add("k-sigalg", "param-tag0-primitive-is-eoc expect=reject", cert(sig_alg=seq(oid(SHA256_RSA), b"\x00\x00")))
 
     # Constructed strings nested around a primitive one, definite and
-    # indefinite: asn1_collect refuses past ASN1_MAX_STRING_NEST (5).
+    # indefinite: asn1_collect counts the levels below the outer header and
+    # refuses past ASN1_MAX_STRING_NEST (5), so six constructed levels are
+    # read and seven are not.
     def nested(depth, inf, inner=tlv(0x04, b"A")):
         v = inner
         for _ in range(depth):
@@ -567,11 +569,11 @@ def rows():
     for depth in (5, 6, 7):
         for inf in (False, True):
             form = "indefinite" if inf else "definite"
-            want = "ok" if depth <= 5 else "reject"
+            want = "ok" if depth <= 6 else "reject"
             add("k-nest", "ext-value-%d-%s expect=%s" % (depth, form, want),
                 cert(exts=[seq(oid("1.2.3.4"), nested(depth, inf))]))
-    for depth in (5, 6):
-        add("k-nest", "subject-utf8-%d expect=%s" % (depth, "ok" if depth <= 5 else "reject"),
+    for depth in (6, 7):
+        add("k-nest", "subject-utf8-%d expect=%s" % (depth, "ok" if depth <= 6 else "reject"),
             # A constructed UTF8String whose segments nest `depth` deep in all.
             cert(subject=name((CN, tlv(0x2C, nested(depth - 1, False, tlv(0x0C, b"v")))))))
     return out

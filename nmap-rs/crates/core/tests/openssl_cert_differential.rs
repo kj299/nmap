@@ -13,7 +13,7 @@
 //! The corpus is `m65_certs.txt`: Phase 0's 2,876 certificates (1,092 OIDs
 //! as subject attributes and as extensions, 11 string tags, time edge cases,
 //! 18 key types with 13 well-formed extensions each, 143 truncations, 400
-//! byte flips), the 144 BER rows of E5's spike, step e's 354 key-type, Name
+//! byte flips), the 144 BER rows of E5's spike, step e's 365 key-type, Name
 //! and extension-framing rows and its 253 printer rows (every extension
 //! method `X509V3_EXT_print` has, and the error each failure leaves for
 //! "Error parsing cert"), plus the argument checks.
@@ -27,8 +27,8 @@
 
 mod m65;
 
-/// The fewest rows the gate must run: the 3,637 rows tagged `e`.
-const MIN_ROWS: usize = 3_637;
+/// The fewest rows the gate must run: the 3,648 rows tagged `e`.
+const MIN_ROWS: usize = 3_648;
 
 #[test]
 fn every_certificate_row_matches_nmap_794() {

@@ -31,7 +31,9 @@ pub fn cstr(s: &[u8]) -> &[u8] {
 /// the text's first `buf_len - 1` bytes, or nothing where it fails (content
 /// past 586 bytes: the buffer's first byte is cleared before anything else).
 pub fn obj2txt_buf(oid: &[u8], buf_len: usize, no_name: bool) -> Vec<u8> {
-    let mut t = objects::obj2txt(oid, no_name).unwrap_or_default().into_bytes();
+    let mut t = objects::obj2txt(oid, no_name)
+        .unwrap_or_default()
+        .into_bytes();
     t.truncate(buf_len.saturating_sub(1));
     t
 }
@@ -122,13 +124,11 @@ pub fn bio_dump(out: &mut Vec<u8>, data: &[u8]) {
             }
         }
         out.extend_from_slice(b"  ");
-        out.extend(chunk.iter().map(|&b| {
-            if (b' '..=b'~').contains(&b) {
-                b
-            } else {
-                b'.'
-            }
-        }));
+        out.extend(
+            chunk
+                .iter()
+                .map(|&b| if (b' '..=b'~').contains(&b) { b } else { b'.' }),
+        );
         out.push(b'\n');
     }
 }
@@ -161,9 +161,9 @@ impl Int {
 pub fn i2s_integer(v: &Int) -> Vec<u8> {
     let skip = v.mag.iter().take_while(|&&b| b == 0).count();
     let mag = &v.mag[skip..];
-    let bits = mag
-        .first()
-        .map_or(0, |&b| (mag.len() - 1) * 8 + (8 - b.leading_zeros() as usize));
+    let bits = mag.first().map_or(0, |&b| {
+        (mag.len() - 1) * 8 + (8 - b.leading_zeros() as usize)
+    });
     let sign = if v.neg && !mag.is_empty() { "-" } else { "" };
     if bits < 128 {
         let n = mag.iter().fold(0u128, |n, &b| (n << 8) | u128::from(b));
@@ -521,7 +521,7 @@ pub fn name_oneline(entries: &[NameEntry], len: usize, e: &mut Errs) -> Option<V
             return None;
         }
         let mut doit = [true; 4];
-        if value_type(&ne.value) == i64::from(tag::GENERALSTRING) && q.len() % 4 == 0 {
+        if value_type(&ne.value) == i64::from(tag::GENERALSTRING) && q.len().is_multiple_of(4) {
             let mut nz = [false; 4];
             for (j, &b) in q.iter().enumerate() {
                 if b != 0 {
@@ -653,7 +653,11 @@ fn print_ex(out: &mut Vec<u8>, v: &Prim) {
         return;
     };
     let data = super::x509::string_data(v);
-    let (width, conv) = if width == 0 { (1, false) } else { (width, true) };
+    let (width, conv) = if width == 0 {
+        (1, false)
+    } else {
+        (width, true)
+    };
     let mut body = Vec::new();
     let mut quotes = false;
     let chars: Vec<u32> = data
@@ -817,7 +821,10 @@ mod tests {
             set,
         };
         let mut out = Vec::new();
-        name_print_ex(&mut out, &[ent(b" a,b", 0), ent(b"x\"\\\x01", 1), ent(b"#", 1)]);
+        name_print_ex(
+            &mut out,
+            &[ent(b" a,b", 0), ent(b"x\"\\\x01", 1), ent(b"#", 1)],
+        );
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "CN = \" a,b\", CN = x\\\"\\\\\\01 + CN = #"

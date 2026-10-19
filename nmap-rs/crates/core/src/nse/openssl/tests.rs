@@ -588,11 +588,17 @@ fn cert_with_extension(n: usize) -> Vec<u8> {
 /// As [`cert_with_extension`], its subject's one attribute under `subject_oid`.
 fn cert_with(subject_oid: &[u8], n: usize) -> Vec<u8> {
     let seq = |parts: &[Vec<u8>]| der(0x30, &parts.concat());
-    let alg = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b]), der(5, &[])]);
+    let alg = seq(&[
+        der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b]),
+        der(5, &[]),
+    ]);
     let name = seq(&[der(0x31, &seq(&[der(6, &[0x55, 4, 3]), der(0x0c, b"m")]))]);
     let subject = seq(&[der(0x31, &seq(&[der(6, subject_oid), der(0x0c, b"m")]))]);
     let time = |s: &[u8]| der(0x17, s);
-    let rsa = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), der(5, &[])]);
+    let rsa = seq(&[
+        der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]),
+        der(5, &[]),
+    ]);
     let key = seq(&[der(2, &[0x00, 0xc1]), der(2, &[3])]);
     let mut bits = vec![0];
     bits.extend_from_slice(&key);
@@ -620,12 +626,16 @@ fn certificates_are_accounted_to_the_heap() {
     lua.enter(|ctx| {
         ctx.set_global("parse", cert::parse_for_tests(ctx));
         let d = cert_with_extension(N);
-        ctx.set_global("der", piccolo::String::from_slice(&ctx, &d));
+        ctx.set_global("der", piccolo::String::from_slice(&ctx, d));
     });
     // `collectgarbage()` is a no-op in piccolo; collect from outside.
     lua.gc_collect();
     let before = lua.total_memory();
-    let (out, _) = run_sliced(&mut lua, "c = parse(der) return r(c.subject.commonName)", i32::MAX);
+    let (out, _) = run_sliced(
+        &mut lua,
+        "c = parse(der) return r(c.subject.commonName)",
+        i32::MAX,
+    );
     assert_eq!(out, "s:m");
     lua.gc_collect();
     let held = lua.total_memory();
@@ -649,9 +659,12 @@ fn an_unrenderable_subject_oid_is_not_enough_memory() {
         ctx.set_global("parse", cert::parse_for_tests(ctx));
         let mut long = vec![0x2a];
         long.resize(587, 0x01);
-        ctx.set_global("bad", piccolo::String::from_slice(&ctx, &cert_with(&long, 0)));
+        ctx.set_global(
+            "bad",
+            piccolo::String::from_slice(&ctx, cert_with(&long, 0)),
+        );
         long.truncate(586);
-        ctx.set_global("ok", piccolo::String::from_slice(&ctx, &cert_with(&long, 0)));
+        ctx.set_global("ok", piccolo::String::from_slice(&ctx, cert_with(&long, 0)));
     });
     let (out, _) = run_sliced(&mut lua, "return r(pcall(parse, bad))", i32::MAX);
     assert_eq!(out, "false|s:not enough memory");

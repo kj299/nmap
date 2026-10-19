@@ -466,7 +466,12 @@ mod tests {
         let mut picked: Vec<_> = curves().iter().collect();
         if cfg!(miri) {
             picked.sort_by_key(|c| (c.char2, c.p.len()));
-            let prime: Vec<_> = picked.iter().filter(|c| !c.char2).take(2).copied().collect();
+            let prime: Vec<_> = picked
+                .iter()
+                .filter(|c| !c.char2)
+                .take(2)
+                .copied()
+                .collect();
             let binary: Vec<_> = picked.iter().filter(|c| c.char2).take(2).copied().collect();
             picked = prime.into_iter().chain(binary).collect();
         }

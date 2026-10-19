@@ -221,7 +221,9 @@ fn print_nid(nid: u16, p: &[u8], e: &mut Errs) -> Option<Vec<u8>> {
             }
         }
         NID_EXT_KEY_USAGE | NID_OCSP_ACCEPTABLE_RESPONSES => {
-            let oids = d2i(e, || item(seq_of(p, SEQ, false, |q| req(object(q, None, false)))))?;
+            let oids = d2i(e, || {
+                item(seq_of(p, SEQ, false, |q| req(object(q, None, false))))
+            })?;
             let mut list = None;
             for o in &oids {
                 add_value(&mut list, None::<&[u8]>, Some(&text::i2t(o, 80)));
@@ -248,9 +250,8 @@ fn print_nid(nid: u16, p: &[u8], e: &mut Errs) -> Option<Vec<u8>> {
         NID_SXNET => {
             let (version, ids) = d2i(e, || sxnet(p))?;
             match text::get_int64(&version, e).filter(|&v| v != i64::MAX) {
-                Some(v) => out.extend_from_slice(
-                    format!("Version: {} (0x{:X})", v + 1, v as u64).as_bytes(),
-                ),
+                Some(v) => out
+                    .extend_from_slice(format!("Version: {} (0x{:X})", v + 1, v as u64).as_bytes()),
                 None => out.extend_from_slice(b"Version: <unsupported>"),
             }
             for (zone, user) in &ids {
@@ -378,7 +379,12 @@ fn print_nid(nid: u16, p: &[u8], e: &mut Errs) -> Option<Vec<u8>> {
         }
         NID_ISSUER_SIGN_TOOL => {
             let tools = d2i(e, || issuer_sign_tool(p))?;
-            let labels = ["signTool    : ", "cATool      : ", "signToolCert: ", "cAToolCert  : "];
+            let labels = [
+                "signTool    : ",
+                "cATool      : ",
+                "signToolCert: ",
+                "cAToolCert  : ",
+            ];
             for (i, (label, v)) in labels.iter().zip(&tools).enumerate() {
                 if i > 0 {
                     out.push(b'\n');
@@ -388,7 +394,9 @@ fn print_nid(nid: u16, p: &[u8], e: &mut Errs) -> Option<Vec<u8>> {
             }
         }
         NID_TLSFEATURE => {
-            let ints = d2i(e, || item(seq_of(p, SEQ, false, |q| req(integer(q, None, false)))))?;
+            let ints = d2i(e, || {
+                item(seq_of(p, SEQ, false, |q| req(integer(q, None, false))))
+            })?;
             let mut list = None;
             for v in &ints {
                 match text::integer_get(v, e) {
@@ -455,18 +463,22 @@ fn enumerated(p: &[u8]) -> Field<Int> {
 
 /// An OBJECT IDENTIFIER's content octets.
 fn object(p: &[u8], imp: Option<(u32, u8)>, opt: bool) -> Field<Vec<u8>> {
-    Ok(asn1::primitive(p, tag::OBJECT, imp, opt)?.map(|(v, n)| match v {
-        Prim::Oid(c) => (c, n),
-        _ => unreachable!("OBJECT decodes to Prim::Oid"),
-    }))
+    Ok(
+        asn1::primitive(p, tag::OBJECT, imp, opt)?.map(|(v, n)| match v {
+            Prim::Oid(c) => (c, n),
+            _ => unreachable!("OBJECT decodes to Prim::Oid"),
+        }),
+    )
 }
 
 /// A BOOLEAN's octet.
 fn boolean(p: &[u8], imp: Option<(u32, u8)>, opt: bool) -> Field<u8> {
-    Ok(asn1::primitive(p, tag::BOOLEAN, imp, opt)?.map(|(v, n)| match v {
-        Prim::Bool(b) => (b, n),
-        _ => unreachable!("BOOLEAN decodes to Prim::Bool"),
-    }))
+    Ok(
+        asn1::primitive(p, tag::BOOLEAN, imp, opt)?.map(|(v, n)| match v {
+            Prim::Bool(b) => (b, n),
+            _ => unreachable!("BOOLEAN decodes to Prim::Bool"),
+        }),
+    )
 }
 
 /// A NULL.
@@ -530,7 +542,9 @@ fn general_name(p: &[u8], opt: bool) -> Field<Gn> {
         s.field(true, false, |q, o| {
             explicit(q, 0, CONTEXT, o, mstr(bit::DIRECTORYSTRING))
         })?;
-        s.req(true, |q, o| explicit(q, 1, CONTEXT, o, mstr(bit::DIRECTORYSTRING)))?;
+        s.req(true, |q, o| {
+            explicit(q, 1, CONTEXT, o, mstr(bit::DIRECTORYSTRING))
+        })?;
         let n = s.finish()?;
         return Ok(Some((Gn::Edi, n)));
     }
@@ -556,10 +570,17 @@ fn general_names(p: &[u8], want: (u32, u8), opt: bool) -> Field<Vec<Gn>> {
 }
 
 /// `PKEY_USAGE_PERIOD`: `{ [0] IMPLICIT GeneralizedTime OPTIONAL, [1] ... }`.
-fn pkey_usage_period(p: &[u8]) -> Res<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+/// The two GeneralizedTimes' contents, each optional.
+type Period = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn pkey_usage_period(p: &[u8]) -> Res<Period> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
-    let a = s.field(true, false, |q, o| string(q, tag::GENERALIZEDTIME, ctx(0), o))?;
-    let b = s.field(true, true, |q, o| string(q, tag::GENERALIZEDTIME, ctx(1), o))?;
+    let a = s.field(true, false, |q, o| {
+        string(q, tag::GENERALIZEDTIME, ctx(0), o)
+    })?;
+    let b = s.field(true, true, |q, o| {
+        string(q, tag::GENERALIZEDTIME, ctx(1), o)
+    })?;
     s.finish()?;
     Ok((a, b))
 }
@@ -590,7 +611,10 @@ struct Notice {
 }
 
 /// `POLICYINFO`: `{ OBJECT, SEQUENCE OF POLICYQUALINFO OPTIONAL }`.
-fn policy_info(p: &[u8]) -> Res<((Vec<u8>, Option<Vec<Qual>>), usize)> {
+/// A policy's OID and its qualifiers, if the field is present.
+type PolicyInfo = (Vec<u8>, Option<Vec<Qual>>);
+
+fn policy_info(p: &[u8]) -> Res<(PolicyInfo, usize)> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let oid = s.req(false, |q, o| object(q, None, o))?;
     let quals = s.field(true, true, |q, o| seq_of(q, SEQ, o, policy_qual_info))?;
@@ -603,7 +627,7 @@ fn policy_qual_info(p: &[u8]) -> Res<(Qual, usize)> {
     let oid = s.req(false, |q, o| object(q, None, o))?;
     let q = match nid_of(&oid) {
         NID_ID_QT_CPS => Qual::Cps(s.req(true, |q, o| string(q, tag::IA5STRING, None, o))?),
-        NID_ID_QT_UNOTICE => Qual::Notice(s.req(true, |q, o| user_notice(q, o))?),
+        NID_ID_QT_UNOTICE => Qual::Notice(s.req(true, user_notice)?),
         _ => {
             s.req(true, |q, _| asn1::any(q).map(Some))?;
             Qual::Other(oid)
@@ -622,7 +646,9 @@ fn user_notice(p: &[u8], opt: bool) -> Field<Notice> {
             return Ok(None);
         };
         let org = r.req(false, |q, o| mstring(q, bit::DISPLAYTEXT, o))?;
-        let nos = r.req(true, |q, o| seq_of(q, SEQ, o, |q| req(integer(q, None, false))))?;
+        let nos = r.req(true, |q, o| {
+            seq_of(q, SEQ, o, |q| req(integer(q, None, false)))
+        })?;
         let n = r.finish()?;
         Ok(Some(((x509::string_data(&org).to_vec(), nos), n)))
     })?;
@@ -686,7 +712,9 @@ struct DistPoint {
 /// STRING OPTIONAL, [2] IMPLICIT SEQUENCE OF GENERAL_NAME OPTIONAL }`.
 fn dist_point(p: &[u8]) -> Res<(DistPoint, usize)> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
-    let name = s.field(true, false, |q, o| explicit(q, 0, CONTEXT, o, dist_point_name))?;
+    let name = s.field(true, false, |q, o| {
+        explicit(q, 0, CONTEXT, o, dist_point_name)
+    })?;
     let reasons = s.field(true, false, |q, o| bit_string(q, ctx(1), o))?;
     let crl_issuer = s.field(true, true, |q, o| general_names(q, (2, CONTEXT), o))?;
     let n = s.finish()?;
@@ -715,7 +743,9 @@ struct Idp {
 /// [5] IMPLICIT BOOLEAN DEFAULT FALSE but [3] IMPLICIT BIT STRING OPTIONAL }`.
 fn issuing_dist_point(p: &[u8]) -> Res<Idp> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
-    let name = s.field(true, false, |q, o| explicit(q, 0, CONTEXT, o, dist_point_name))?;
+    let name = s.field(true, false, |q, o| {
+        explicit(q, 0, CONTEXT, o, dist_point_name)
+    })?;
     let only_user = s.field(true, false, |q, o| boolean(q, ctx(1), o))?;
     let only_ca = s.field(true, false, |q, o| boolean(q, ctx(2), o))?;
     let reasons = s.field(true, false, |q, o| bit_string(q, ctx(3), o))?;
@@ -733,7 +763,10 @@ fn issuing_dist_point(p: &[u8]) -> Res<Idp> {
 }
 
 /// `SXNET`: `{ INTEGER, SEQUENCE OF { INTEGER zone, OCTET STRING user } }`.
-fn sxnet(p: &[u8]) -> Res<(Int, Vec<(Int, Vec<u8>)>)> {
+/// The version, and each id's zone and user.
+type Sxnet = (Int, Vec<(Int, Vec<u8>)>);
+
+fn sxnet(p: &[u8]) -> Res<Sxnet> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let version = s.req(false, |q, o| integer(q, None, o))?;
     let ids = s.req(true, |q, o| {
@@ -808,12 +841,19 @@ enum AsIdOrRange {
 
 /// `ASIdentifiers`: `{ [0] EXPLICIT ASIdentifierChoice OPTIONAL, [1] ... }`,
 /// each `None` inside for `inherit`.
-type AsIds = (Option<Option<Vec<AsIdOrRange>>>, Option<Option<Vec<AsIdOrRange>>>);
+type AsIds = (
+    Option<Option<Vec<AsIdOrRange>>>,
+    Option<Option<Vec<AsIdOrRange>>>,
+);
 
 fn as_identifiers(p: &[u8]) -> Res<AsIds> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
-    let asnum = s.field(true, false, |q, o| explicit(q, 0, CONTEXT, o, as_id_choice_d2i))?;
-    let rdi = s.field(true, true, |q, o| explicit(q, 1, CONTEXT, o, as_id_choice_d2i))?;
+    let asnum = s.field(true, false, |q, o| {
+        explicit(q, 0, CONTEXT, o, as_id_choice_d2i)
+    })?;
+    let rdi = s.field(true, true, |q, o| {
+        explicit(q, 1, CONTEXT, o, as_id_choice_d2i)
+    })?;
     s.finish()?;
     Ok((asnum, rdi))
 }
@@ -847,7 +887,9 @@ type CrlId = (Option<Vec<u8>>, Option<Int>, Option<Vec<u8>>);
 fn ocsp_crlid(p: &[u8]) -> Res<CrlId> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let url = s.field(true, false, |q, o| {
-        explicit(q, 0, CONTEXT, o, |r| req(string(r, tag::IA5STRING, None, false)))
+        explicit(q, 0, CONTEXT, o, |r| {
+            req(string(r, tag::IA5STRING, None, false))
+        })
     })?;
     let num = s.field(true, false, |q, o| {
         explicit(q, 1, CONTEXT, o, |r| req(integer(r, None, false)))
@@ -907,8 +949,12 @@ type NameConstraints = (Option<Vec<Gn>>, Option<Vec<Gn>>);
 
 fn name_constraints(p: &[u8]) -> Res<NameConstraints> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
-    let a = s.field(true, false, |q, o| seq_of(q, (0, CONTEXT), o, general_subtree))?;
-    let b = s.field(true, true, |q, o| seq_of(q, (1, CONTEXT), o, general_subtree))?;
+    let a = s.field(true, false, |q, o| {
+        seq_of(q, (0, CONTEXT), o, general_subtree)
+    })?;
+    let b = s.field(true, true, |q, o| {
+        seq_of(q, (1, CONTEXT), o, general_subtree)
+    })?;
     s.finish()?;
     Ok((a, b))
 }
@@ -924,7 +970,10 @@ fn general_subtree(p: &[u8]) -> Res<(Gn, usize)> {
 }
 
 /// `POLICY_MAPPING`: `{ OBJECT, OBJECT }`.
-fn policy_mapping(p: &[u8]) -> Res<((Vec<u8>, Vec<u8>), usize)> {
+/// The issuer and subject domain policies.
+type Mapping = (Vec<u8>, Vec<u8>);
+
+fn policy_mapping(p: &[u8]) -> Res<(Mapping, usize)> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let a = s.req(false, |q, o| object(q, None, o))?;
     let b = s.req(true, |q, o| object(q, None, o))?;
@@ -1424,7 +1473,7 @@ fn i2r_idp(out: &mut Vec<u8>, idp: &Idp) {
 }
 
 /// `i2r_certpol` at indent 0.
-fn i2r_certpol(out: &mut Vec<u8>, pols: &[(Vec<u8>, Option<Vec<Qual>>)]) {
+fn i2r_certpol(out: &mut Vec<u8>, pols: &[PolicyInfo]) {
     for (i, (oid, quals)) in pols.iter().enumerate() {
         if i > 0 {
             out.push(b'\n');
@@ -1622,8 +1671,8 @@ fn i2r_ip_addr_blocks(out: &mut Vec<u8>, fams: &[AddrFamily]) -> bool {
                             if !i2r_address(out, afi, 0, bs) {
                                 return false;
                             }
-                            let plen = i64::try_from(bs.1.len()).unwrap_or(i64::MAX) * 8
-                                - i64::from(bs.0);
+                            let plen =
+                                i64::try_from(bs.1.len()).unwrap_or(i64::MAX) * 8 - i64::from(bs.0);
                             out.extend_from_slice(format!("/{plen}\n").as_bytes());
                         }
                         AddrOrRange::Range(min, max) => {
@@ -1950,7 +1999,9 @@ mod tests {
             (None, None)
         );
         assert_eq!(
-            show(NID_INVALIDITY_DATE, &tlv(0x17, b"200101000000Z")).1.as_deref(),
+            show(NID_INVALIDITY_DATE, &tlv(0x17, b"200101000000Z"))
+                .1
+                .as_deref(),
             Some("error:068000A8:asn1 encoding routines::wrong tag")
         );
         assert_eq!(show(NID_OCSP_NOCHECK, &[5, 0]), (Some(String::new()), None));
@@ -1965,17 +2016,31 @@ mod tests {
         );
         assert_eq!(show(NID_KEY_USAGE, &[3, 1, 0]).0, None);
         assert_eq!(
-            show(NID_BASIC_CONSTRAINTS, &[0x30, 6, 1, 1, 0xff, 2, 1, 3]).0.as_deref(),
+            show(NID_BASIC_CONSTRAINTS, &[0x30, 6, 1, 1, 0xff, 2, 1, 3])
+                .0
+                .as_deref(),
             Some("CA:TRUE, pathlen:3")
         );
         assert_eq!(
             show(NID_BASIC_CONSTRAINTS, &[0x30, 0]).0.as_deref(),
             Some("CA:FALSE")
         );
-        let (v, err) = show(NID_TLSFEATURE, &tlv(0x30, &[tlv(2, &[5]), tlv(2, &[1; 17])].concat()));
-        assert_eq!(v.as_deref(), Some("status_request, 0x0101010101010101010101010101010101"));
-        assert_eq!(err.as_deref(), Some("error:068000DF:asn1 encoding routines::too large"));
-        assert_eq!(show(NID_CRL_REASON, &[10, 1, 8]).0.as_deref(), Some("Remove From CRL"));
+        let (v, err) = show(
+            NID_TLSFEATURE,
+            &tlv(0x30, &[tlv(2, &[5]), tlv(2, &[1; 17])].concat()),
+        );
+        assert_eq!(
+            v.as_deref(),
+            Some("status_request, 0x0101010101010101010101010101010101")
+        );
+        assert_eq!(
+            err.as_deref(),
+            Some("error:068000DF:asn1 encoding routines::too large")
+        );
+        assert_eq!(
+            show(NID_CRL_REASON, &[10, 1, 8]).0.as_deref(),
+            Some("Remove From CRL")
+        );
     }
 
     #[test]

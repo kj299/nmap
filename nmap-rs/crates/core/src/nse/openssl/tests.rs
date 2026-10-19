@@ -582,9 +582,15 @@ fn der(tag: u8, content: &[u8]) -> Vec<u8> {
 /// A certificate with an RSA key and, as its one extension, an OID OpenSSL
 /// has no method for over `n` bytes of value.
 fn cert_with_extension(n: usize) -> Vec<u8> {
+    cert_with(&[0x55, 4, 3], n)
+}
+
+/// As [`cert_with_extension`], its subject's one attribute under `subject_oid`.
+fn cert_with(subject_oid: &[u8], n: usize) -> Vec<u8> {
     let seq = |parts: &[Vec<u8>]| der(0x30, &parts.concat());
     let alg = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b]), der(5, &[])]);
     let name = seq(&[der(0x31, &seq(&[der(6, &[0x55, 4, 3]), der(0x0c, b"m")]))]);
+    let subject = seq(&[der(0x31, &seq(&[der(6, subject_oid), der(0x0c, b"m")]))]);
     let time = |s: &[u8]| der(0x17, s);
     let rsa = seq(&[der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), der(5, &[])]);
     let key = seq(&[der(2, &[0x00, 0xc1]), der(2, &[3])]);
@@ -597,7 +603,7 @@ fn cert_with_extension(n: usize) -> Vec<u8> {
         alg.clone(),
         name.clone(),
         seq(&[time(b"200101000000Z"), time(b"300101000000Z")]),
-        name,
+        subject,
         seq(&[rsa, der(3, &bits)]),
         der(0xa3, &seq(&[ext])),
     ]);
@@ -629,4 +635,30 @@ fn certificates_are_accounted_to_the_heap() {
     lua.gc_collect();
     let after = lua.total_memory();
     assert!(held.saturating_sub(after) >= 3 * N, "{held} -> {after}");
+}
+
+/// A subject attribute whose OID `OBJ_obj2txt` refuses (content past 586
+/// bytes) is "not enough memory" at once: the C's `obj_to_key` doubles its
+/// buffer until the allocator refuses (`nse-sslcert-obj-to-key-unbounded`),
+/// which is why no golden row runs one. 586 bytes still render, as an array
+/// of the arcs.
+#[test]
+fn an_unrenderable_subject_oid_is_not_enough_memory() {
+    let mut lua = state();
+    lua.enter(|ctx| {
+        ctx.set_global("parse", cert::parse_for_tests(ctx));
+        let mut long = vec![0x2a];
+        long.resize(587, 0x01);
+        ctx.set_global("bad", piccolo::String::from_slice(&ctx, &cert_with(&long, 0)));
+        long.truncate(586);
+        ctx.set_global("ok", piccolo::String::from_slice(&ctx, &cert_with(&long, 0)));
+    });
+    let (out, _) = run_sliced(&mut lua, "return r(pcall(parse, bad))", i32::MAX);
+    assert_eq!(out, "false|s:not enough memory");
+    let (out, _) = run_sliced(
+        &mut lua,
+        "local c = parse(ok) for k, v in pairs(c.subject) do return r(#k, k[1], k[587], v) end",
+        i32::MAX,
+    );
+    assert_eq!(out, "587|s:1|s:1|s:m");
 }

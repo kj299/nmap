@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nmap_core::nse::openssl::cert::parse_for_tests;
 use nmap_core::nse::openssl::register_for_tests;
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{
@@ -40,6 +41,14 @@ pub fn read(file: &str) -> String {
 /// A state with the stdlib and `openssl`, and the runner's row function:
 /// `require "m65_core".runner{ openssl = openssl, drain = false }`.
 pub fn runner() -> (Lua, StashedFunction) {
+    runner_with(false)
+}
+
+/// [`runner`], and for step e `parse_ssl_certificate` and the certificate
+/// corpus: `runner{ ..., parse = parse_ssl_certificate, certs = PATH }`. The
+/// runner reads the corpus with `io.lines`, which a bare state lacks; a
+/// test-only one serves the file's lines from a table.
+pub fn runner_with(certs: bool) -> (Lua, StashedFunction) {
     let mut lua = Lua::core();
     let core = read("oracle/m65_core.lua");
     let load = lua.enter(|ctx| {
@@ -51,9 +60,37 @@ pub fn runner() -> (Lua, StashedFunction) {
         // lacks: any function does.
         let print = Callback::from_fn(&ctx, |_, _, _| Ok(CallbackReturn::Return));
         ctx.set_global("print", print);
-        let c = Closure::load(ctx, Some("@m65_core.lua"), core.as_bytes()).expect("compiles");
-        ctx.stash(Executor::start(ctx, c.into(), ()))
+        if certs {
+            let lines = Table::new(&ctx);
+            for (i, l) in read("m65_certs.txt").lines().enumerate() {
+                let l = ctx.intern(l.as_bytes());
+                lines
+                    .set(ctx, i64::try_from(i).unwrap().saturating_add(1), l)
+                    .unwrap();
+            }
+            ctx.set_global("__m65_cert_lines", lines);
+            let io = Closure::load(
+                ctx,
+                Some("=io"),
+                &b"io = { lines = function() local t, i = __m65_cert_lines, 0 \
+                   return function() i = i + 1 return t[i] end end }"[..],
+            )
+            .expect("compiles");
+            ctx.stash(Executor::start(ctx, io.into(), ()))
+        } else {
+            let c = Closure::load(ctx, Some("@m65_core.lua"), core.as_bytes()).expect("compiles");
+            ctx.stash(Executor::start(ctx, c.into(), ()))
+        }
     });
+    let load = if certs {
+        finish(&mut lua, &load).expect("io.lines");
+        lua.enter(|ctx| {
+            let c = Closure::load(ctx, Some("@m65_core.lua"), core.as_bytes()).expect("compiles");
+            ctx.stash(Executor::start(ctx, c.into(), ()))
+        })
+    } else {
+        load
+    };
     let module = finish(&mut lua, &load).expect("m65_core.lua loads");
     let make = lua.enter(|ctx| {
         let Value::Table(m) = ctx.fetch(&module) else {
@@ -63,6 +100,10 @@ pub fn runner() -> (Lua, StashedFunction) {
         let env = Table::new(&ctx);
         env.set_field(ctx, "openssl", register_for_tests(ctx, None));
         env.set_field(ctx, "drain", false);
+        if certs {
+            env.set_field(ctx, "parse", parse_for_tests(ctx));
+            env.set_field(ctx, "certs", "m65_certs.txt");
+        }
         ctx.stash(Executor::start(ctx, runner, env))
     });
     let made = finish(&mut lua, &make).expect("runner{...}");
@@ -157,6 +198,16 @@ pub struct Answer {
 pub fn run_step(
     min_rows: usize,
     select: impl Fn(&Row<'_>) -> bool,
+    adjust: impl FnMut(&Row<'_>, &mut Answer, &mut Answer),
+) -> usize {
+    run_step_with(false, min_rows, select, adjust)
+}
+
+/// [`run_step`], with the certificate corpus loaded when `certs`.
+pub fn run_step_with(
+    certs: bool,
+    min_rows: usize,
+    select: impl Fn(&Row<'_>) -> bool,
     mut adjust: impl FnMut(&Row<'_>, &mut Answer, &mut Answer),
 ) -> usize {
     let golden: std::collections::HashMap<String, Answer> = read("m65_golden.txt")
@@ -174,7 +225,7 @@ pub fn run_step(
         })
         .collect();
     let cases = read("m65_cases.txt");
-    let (mut lua, runner_row) = runner();
+    let (mut lua, runner_row) = runner_with(certs);
     let (mut ran, mut bad) = (0usize, Vec::new());
     for line in cases.lines() {
         if line.starts_with('#') || line.is_empty() {
@@ -221,7 +272,13 @@ pub fn run_step(
         ran >= min_rows,
         "only {ran} rows ran, fewer than {min_rows}"
     );
-    for b in bad.iter().take(30) {
+    // M65_SHOW_ALL=1 prints every differing row, not the first 30.
+    let show = if std::env::var_os("M65_SHOW_ALL").is_some() {
+        usize::MAX
+    } else {
+        30
+    };
+    for b in bad.iter().take(show) {
         eprintln!("{b}");
     }
     assert!(

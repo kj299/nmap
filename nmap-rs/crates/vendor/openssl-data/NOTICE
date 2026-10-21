@@ -1,0 +1,10 @@
+objects.txt, obj_mac.num, ec_curve.c, ec_support.c, openssl.txt, err.c and
+LICENSE.txt in this directory are copied unchanged from OpenSSL 3.0.13
+(crypto/objects/objects.txt, crypto/objects/obj_mac.num, crypto/ec/ec_curve.c,
+crypto/evp/ec_support.c, crypto/err/openssl.txt, crypto/err/err.c, LICENSE.txt), Copyright The OpenSSL Project Authors, licensed under the Apache
+License 2.0 (LICENSE.txt).
+
+crates/core/src/nse/openssl/objects_table.rs, curves_table.rs and
+errors_table.rs are generated
+from those files by gen.py in this directory, and so are works derived from
+them under the same licence. gen.py itself is part of nmap-rs.

@@ -6127,6 +6127,162 @@ fixsliced software fallback.
       what the golden, drained after every case, records.
 - [x] `openssl-bad-argument-naming` (step b) applies.
 
+## Milestone 6.5 step e — X.509 (`core::nse::openssl::{asn1, x509, pubkey, ec, ext, text, objects, err, cert}`; not registered)
+
+`parse_ssl_certificate`, the `SSL_CERT` object, `cert:digest` and the PEM
+(`nse_ssl_cert.cc:160-722`), over a first-party X.509 reader (E5). Nothing
+here links OpenSSL; everything OpenSSL decides is ported:
+- `d2i_X509`'s template decoder (`tasn_dec.c`): BER lengths in every long
+  form, indefinite lengths, constructed strings five deep, CHOICE and ANY
+  DEFINED BY, the last SEQUENCE field never optional while data remains,
+  trailing bytes ignored, and each failure's first error as OpenSSL
+  raises it;
+- `i2d_X509`'s re-encoding, which `pem` and `digest` are computed over;
+- Name canonicalisation (`ASN1_STRING_to_UTF8`), which refuses a
+  certificate whose Name holds a string it cannot convert;
+- every key type OpenSSL 3.0.13 decodes (RSA, RSA-PSS, DSA, DH, DHX, EC
+  with the 82 built-in curves and explicit parameters over prime and binary
+  fields, SM2, X25519, X448, Ed25519, Ed448), with the C's checks;
+- `X509V3_EXT_print` for every method of `standard_exts.h` (49 NIDs), and
+  the text forms they print through: `ASN1_TIME_print`, `X509_NAME_oneline`,
+  `X509_NAME_print_ex` one-line, `ASN1_STRING_print`, `i2s_ASN1_INTEGER`,
+  `BIO_hex_string`, `BIO_dump`;
+- OpenSSL's object table, curves and error strings, generated from its
+  source (D11, `crates/vendor/openssl-data`).
+
+Still **not registered** (D2(D)): `parse_ssl_certificate` belongs to the
+`nmap` socket module, which step f gives TLS.
+
+**Gated** by `openssl_cert_differential`: all 3,648 corpus rows tagged `e`,
+run by the oracle's runner through the port and equal to nmap 7.94's golden
+byte for byte, with no exemption. The rows:
+- Phase 0's 2,876 certificates: 1,092 OIDs as subject attributes and as
+  extensions, 11 string tags, time edge cases, 18 key types with 13
+  well-formed extensions each, 143 truncations, 400 byte flips;
+- E5's 144 BER rows;
+- step e's 365 generated rows (`oracle/gen_m65_x509.py`): key types and
+  their parameter shapes, every curve's generator in each point form,
+  explicit parameters and each of their checks, Name values, extension
+  framing, a tag-0 signature parameter, constructed strings six and seven
+  levels deep;
+- step e's 253 printer rows: each method on well-formed and malformed
+  values, and the error each failure leaves for "Error parsing cert";
+- the argument checks.
+
+The 618 generated rows carry their expected outcome, written from the C by
+hand (for a printer, the exact text), and `gen_m65_x509.py --check-golden`
+holds 7.94's golden to it: all 618 agree. 7.94 corrected two of those
+readings before the port was compared: `val_prn` prints the otherName
+labels' own colon and its separator (`othername: UPN::user@x`), and
+`asn1_collect` reads six nested constructed strings, not five.
+
+Also gated:
+- **The tables** (`crates/vendor/openssl-data/gen.py`): 1,248 NIDs, 82
+  curves and 766 error strings, generated from OpenSSL 3.0.13's
+  `objects.txt`, `obj_mac.num`, `ec_curve.c`, `ec_support.c`,
+  `openssl.txt`, `err.c` and `err.h.in`. `--check` (in CI) refuses a hand
+  edit; `--check-obj-dat` and `--check-libcrypto` compare every entry with
+  OpenSSL's own generated `obj_dat.h` and with libcrypto 3.0.13.
+- **Unit tests** under Miri: the reader's lengths, tags and errors; every
+  curve's generator in each form; the printers' text forms (times,
+  integers, hex, names, escapes); a certificate's bytes on the VM's books
+  while it lives, and off them when it is collected.
+- **Fuzz:** `nse_sslcert_der` (whole certificates: no panic at any nesting
+  depth or OID length; the re-encoding decodes to the same certificate and
+  re-encodes to itself; the PEM is its 64-column base64; each extension's
+  text linear in its value; each error one OpenSSL names) and
+  `nse_x509_ext_print` (each method on arbitrary values: no panic, linear,
+  deterministic, named errors). Seeds include constructed strings nested 5
+  and 6 deep, 10,000 nested indefinite lengths, OIDs of 587 and 5,000
+  bytes, a SAN of 2,000 DirNames and a relative name of 1,000 entries.
+  `nse_x509_ext_print` ran 762,529 inputs clean. `nse_sslcert_der` found
+  one certificate whose re-encoding does not decode: a signature algorithm
+  parameter of universal tag 0 in a constructed header (`20 00`), which
+  `i2d_X509` writes primitive, as an EOC. 7.94's PEM of it has the same
+  bytes, so the port is right; the property now excepts exactly that case,
+  three `k-sigalg` rows pin it, and the target then ran 9,464,197 inputs
+  clean.
+- **Sabotage:** 7 port variants, each caught (`docs/M6.5-ANALYSIS.md`, §11
+  row e). The first run missed two: the string-depth bound (no row
+  nested constructed strings past the limit; the `k-nest` rows now do) and
+  the heap accounting, which no corpus row can see and
+  `certificates_are_accounted_to_the_heap` was written to catch.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nse-sslcert-gc-callable` (Phase 0) — `__gc` is present and inert, so
+      a script that calls `getmetatable(cert).__gc(cert)` frees nothing and
+      the certificate stays usable.
+- [x] `nse-sslcert-obj-to-key-unbounded` (Phase 0) — a subject or issuer
+      attribute whose OID `OBJ_obj2txt` refuses (content over 586 bytes)
+      makes `obj_to_key` double its buffer for as long as the call returns
+      -1, which it always does: 7.94 grows the heap until the allocator
+      refuses, so no golden row runs one. The port raises `not enough
+      memory`, the error that ends the C's loop, at once. Pinned by
+      `an_unrenderable_subject_oid_is_not_enough_memory`.
+- [x] `nse-sslcert-assert-on-lib-return`, `nse-sslcert-rsa-param-unchecked`,
+      `nse-sslcert-rsa-pubkey-uaf-pre30` (Phase 0) — no path asserts or
+      aborts; the key's numbers are the port's own values, never NULL and
+      never freed under a script.
+- [x] `nse-openssl-error-queue-stale` (its certificate half, E4) — the C
+      prints the *oldest* queued error with "Error parsing cert", which can
+      be one an earlier call left. The port reports the first error raised
+      in the same call (by an extension's printing, else the key's decode
+      error), which is what the golden, drained after every case, records.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- **What decodes.** Everything `d2i_X509` accepts and refuses, including
+  its leniencies (trailing bytes, BER, the last field's optionality) and
+  the Name canonicalisation that refuses a certificate over a malformed
+  string. The key decoders keep OpenSSL's checks: an SM2-curve key is SM2
+  under either OID, DSA needs all three parameters, explicit EC parameters
+  are matched against the built-in curves with the seed ignored and the
+  cofactor guessed.
+- **The validity year** (`nse-sslcert-validity-year`, D1 (c)): the full
+  year, as 7.94's `time_to_tm` gives it, not the tree's raw `tm_year`.
+- **An extension name of 256 or more characters** is its first 255 and a
+  NUL; an OID too long to render raises `memory allocation error: block
+  too big` (`nse-sslcert-objname-length`'s Lua side; the port leaks no
+  BIO). Pinned by the k rows.
+- **The printers**, each exactly as 3.0.13 prints:
+  - an extension OpenSSL has no method for, or whose value does not
+    decode, is `error = true`; bytes after a value's item are ignored;
+  - the OCSP nonce, archive cutoff, invalidity date and hold instruction
+    printers begin with `BIO_printf("%*s", 0, "")`, which returns 0, so
+    those extensions are always errors (once their value decodes);
+  - `i2s` text stops at its first NUL (`%s`), and so does `%.*s`;
+  - an email, DNS or URI name holding a NUL fails the list with "malloc
+    failure" raised; an otherName of an unknown type with one raises it and
+    prints `<unsupported>`;
+  - `X509V3_EXT_val_prn` prints `name:value`, so the otherName names, which
+    end in a colon, print two (`othername: UPN::user@x`);
+  - a DirName in a list is `X509_NAME_oneline` in 255 bytes, stopping at
+    the first entry that does not fit; elsewhere it is `X509_NAME_print_ex`'s
+    RFC 2253 one-line form, quoting and escaping as OpenSSL does;
+  - `ASN1_INTEGER_get` and `ASN1_ENUMERATED_get` raise "too large" or "too
+    small" past 64 bits, and the printers carry on (`ASN1_ENUMERATED_get` is
+    `0xffffffff` past eight octets, raising nothing);
+  - the authority key identifier names its key id `keyid` only when an
+    issuer or serial follows, and prints the serial's magnitude;
+  - the admission printer names an OID OpenSSL does not know `undefined`;
+  - a CT timestamp outside years 1900 to 9999 prints nothing.
+- **"Error parsing cert"** reports the first error any extension's printing
+  raised, from an extension that printed or one that failed, and the key's
+  `decode error` only when none did.
+
+### Differences, open and documented
+
+- [x] `nse-sslcert-subject-order` — at `-vv`, `ssl-cert`'s `stringify_name`
+      lists the subject's other attributes in `pairs` order
+      (`scripts/ssl-cert.nse:244-254`). PUC-Lua seeds its string hashes per
+      state from the time and ASLR (`liblua/lstate.c:71`), so 7.94's order is
+      not reproducible: five runs of one table of 12 attribute names gave
+      five orders. No golden row can pin it. The port's order is piccolo's,
+      the same on every run. The structured output (`name_to_table`) sorts
+      its keys and is unaffected.
+- [x] `openssl-bad-argument-naming` (step b) applies.
+
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 
 M6.6 D1 (c): `get_path_separator` and `mkdir` through the file policy, which

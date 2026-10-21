@@ -52,10 +52,25 @@
 //! its fuel when it returns, as hashing and drawing random bytes do (`fuel_units`
 //! for each 64-byte block).
 
+pub mod asn1;
 pub mod bn;
+pub mod cert;
 pub mod cipher;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
+mod curves_table;
 pub mod digest;
+pub mod ec;
+pub mod err;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
+mod errors_table;
+pub mod ext;
+pub mod objects;
+#[rustfmt::skip] // generated: crates/vendor/openssl-data/gen.py --check
+mod objects_table;
+pub mod pubkey;
 pub mod rand;
+pub mod text;
+pub mod x509;
 
 use std::cell::{Ref, RefCell};
 use std::pin::Pin;

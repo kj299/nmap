@@ -17,10 +17,16 @@
 //! The host does the I/O: `sys::nsenet` over tokio. This crate does no I/O
 //! of its own and stays free of `unsafe`.
 //!
+//! # SSL
+//!
+//! `connect(..., "ssl")` and `reconnect_ssl` start a TLS handshake on the
+//! host (`sys::tls`, M6.5 step f1), named by the server name nmap's rules
+//! give ([`sni_name`]). `get_ssl_certificate` raises on a socket that never
+//! started a handshake, as the C does, and otherwise returns nil: the
+//! certificate's table comes with step f2 (`nse-tls-no-certificate-table`).
+//!
 //! # What is not here yet
 //!
-//! SSL (`connect(..., "ssl")`, `reconnect_ssl`, `get_ssl_certificate`) needs
-//! the `openssl` module, and answers as an nmap built without OpenSSL does.
 //! Packet capture (`pcap_open`, `pcap_receive`) answers as a socket that
 //! cannot be opened. `--script-trace` is not traced.
 
@@ -115,6 +121,31 @@ pub trait ScriptNet {
         remote: SocketAddr,
         timeout: Option<Duration>,
     );
+    /// `nsock_connect_ssl`: connect `sock` over TCP and handshake, both
+    /// within `timeout`, sending `sni` as the server name where the client
+    /// can. A socket whose TCP connection succeeded is an SSL socket
+    /// ([`ScriptNet::is_ssl`]) whether or not the handshake then did.
+    fn connect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        local: Option<SocketAddr>,
+        remote: SocketAddr,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    );
+    /// `nsock_reconnect_ssl`: handshake over `sock`'s TCP connection.
+    fn reconnect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    );
+    /// `nsock_iod_check_ssl`: whether `sock` has started a handshake.
+    fn is_ssl(&self, sock: SockId) -> bool;
+    /// The certificate the server sent first, once the handshake is done.
+    fn peer_certificate(&self, sock: SockId) -> Option<Vec<u8>>;
     /// `nsock_setup_udp`: an unconnected UDP socket for `sendto` and
     /// `receive`; the OS's error text when it cannot be made.
     fn setup_udp(
@@ -164,6 +195,23 @@ impl ScriptNet for NoNet {
         _: Option<Duration>,
     ) {
     }
+    fn connect_ssl(
+        &mut self,
+        _: OpId,
+        _: SockId,
+        _: Option<SocketAddr>,
+        _: SocketAddr,
+        _: Option<Duration>,
+        _: Option<Vec<u8>>,
+    ) {
+    }
+    fn reconnect_ssl(&mut self, _: OpId, _: SockId, _: Option<Duration>, _: Option<Vec<u8>>) {}
+    fn is_ssl(&self, _: SockId) -> bool {
+        false
+    }
+    fn peer_certificate(&self, _: SockId) -> Option<Vec<u8>> {
+        None
+    }
     fn setup_udp(&mut self, _: SockId, _: bool, _: Option<SocketAddr>) -> Result<(), String> {
         Ok(())
     }
@@ -201,6 +249,10 @@ struct SockState {
     bound: Option<SocketAddr>,
     /// `receive_buf`'s buffer (`BUFFER_I`).
     buffer: Vec<u8>,
+    /// The connection's host name (`nsock_iod_set_hostname`, from the last
+    /// connect's `targetname`, up to its first NUL as `strdup` copies it):
+    /// the server name a handshake sends.
+    hostname: Option<Vec<u8>>,
 }
 
 /// The socket userdata.
@@ -219,6 +271,7 @@ impl Socket {
             timeout: DEFAULT_TIMEOUT,
             bound: None,
             buffer: Vec::new(),
+            hostname: None,
         };
     }
 
@@ -313,6 +366,8 @@ pub(crate) fn load_net<'gc>(
         install(ctx, t, &lib, name, shown, body);
     }
     install(ctx, t, &lib, "is_open", "?", l_is_open);
+    install(ctx, t, &lib, "reconnect_ssl", "?", l_reconnect_ssl);
+    install(ctx, t, &lib, "get_ssl_certificate", "?", l_get_ssl_certificate);
     install(ctx, t, &lib, "release", "?", l_release);
     install(ctx, nmap, &lib, "resolve", "nmap.resolve", l_resolve);
     t.set_field(ctx, "max_parallelism", Value::Integer(max_parallelism));
@@ -409,6 +464,7 @@ fn l_new<'gc>(
             timeout: DEFAULT_TIMEOUT,
             bound: None,
             buffer: Vec::new(),
+            hostname: None,
         }),
     };
     let u = UserData::new_static(&ctx, sock);
@@ -482,17 +538,48 @@ fn lua_text<'gc>(ctx: Context<'gc>, v: Value<'gc>) -> Option<Vec<u8>> {
 }
 
 /// `nseU_checktarget`: the address to connect to, from a host table or a
-/// string.
-fn check_target(a: &LuaArgs<'_, '_, '_>, n: usize) -> Result<Vec<u8>, Fail> {
+/// string, and the target name: the table's `targetname`, or the string
+/// itself.
+fn check_target(a: &LuaArgs<'_, '_, '_>, n: usize) -> Result<(Vec<u8>, Option<Vec<u8>>), Fail> {
     match a.get(n) {
         Some(Value::Table(t)) => {
             let ip = lua_text(a.ctx, t.get_value(a.ctx, "ip"));
             let name = lua_text(a.ctx, t.get_value(a.ctx, "targetname"));
-            ip.or(name)
-                .ok_or_else(|| Fail::arg(n, "host table lacks 'ip' or 'targetname' fields"))
+            match ip.or_else(|| name.clone()) {
+                Some(addr) => Ok((addr, name)),
+                None => Err(Fail::arg(n, "host table lacks 'ip' or 'targetname' fields")),
+            }
         }
-        _ => Ok(a.string(n)?.into_owned()),
+        _ => {
+            let s = a.string(n)?.into_owned();
+            Ok((s.clone(), Some(s)))
+        }
     }
+}
+
+/// `SSL_set_tlsext_host_name`'s refusal, which 7.94 makes fatal
+/// (`nsock_core.c:380-382`: "QUITTING!"; `nse-ssl-sni-fatal`). Here it is
+/// a Lua error in the script that connected.
+pub const SNI_REFUSED: &str =
+    "SSL_set_tlsext_host_name failed: error:0A00013F:SSL routines::ssl3 ext invalid servername";
+
+/// The server name a handshake sends for a connection named `hostname`:
+/// none without one; an empty name, or one over 255 bytes, is refused as
+/// OpenSSL refuses it.
+///
+/// # Errors
+/// [`SNI_REFUSED`], for a name OpenSSL refuses.
+pub fn sni_name(hostname: Option<&[u8]>) -> Result<Option<Vec<u8>>, &'static str> {
+    match hostname {
+        None => Ok(None),
+        Some(h) if h.is_empty() || h.len() > 255 => Err(SNI_REFUSED),
+        Some(h) => Ok(Some(h.to_vec())),
+    }
+}
+
+/// `strdup`: what the C keeps of a Lua string.
+fn c_string(s: &[u8]) -> Vec<u8> {
+    super::nmaplib::c_str(s).to_vec()
 }
 
 /// `nseU_checkport`: the port, from a port table or a number, as a
@@ -521,7 +608,11 @@ fn truncate_u16(n: i64) -> u16 {
 
 /// The connect's protocol option (`luaL_checkoption(L, 4, default, op)`):
 /// 0 tcp, 1 udp, 2 ssl.
-fn connect_option(sock: &Socket, a: &LuaArgs<'_, '_, '_>) -> Result<(u16, Vec<u8>, usize), Fail> {
+#[allow(clippy::type_complexity)]
+fn connect_option(
+    sock: &Socket,
+    a: &LuaArgs<'_, '_, '_>,
+) -> Result<(u16, (Vec<u8>, Option<Vec<u8>>), usize), Fail> {
     let host = check_target(a, 2)?;
     let (port, table_proto) = check_port(a, 3)?;
     let default = match table_proto {
@@ -581,11 +672,7 @@ fn l_connect<'gc>(
 ) -> Result<(), Fail> {
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
-    let (port, host, what) = connect_option(sock, &a)?;
-    if what == 2 {
-        safe_error(ctx, s, "sorry, you don't have OpenSSL");
-        return Ok(());
-    }
+    let (port, (host, targetname), what) = connect_option(sock, &a)?;
     let family = if lib.borrow().ipv6 {
         Family::Inet6
     } else {
@@ -602,10 +689,18 @@ fn l_connect<'gc>(
     if sock.state.borrow().open {
         host_net.borrow_mut().close(sock.id);
     }
+    // `"ssl"` is TLS over TCP, on a UDP socket too (7.94's
+    // `nse_nsock.cc:564-567`; DTLS came later).
     let proto = if what == 1 {
         NetProto::Udp
     } else {
         NetProto::Tcp
+    };
+    let hostname = targetname.as_deref().map(c_string);
+    let sni = if what == 2 {
+        Some(sni_name(hostname.as_deref()).map_err(Fail::err)?)
+    } else {
+        None
     };
     let op = op_id(lib);
     {
@@ -613,17 +708,65 @@ fn l_connect<'gc>(
         st.open = true;
         st.proto = proto;
         st.v6 = ip.is_ipv6();
+        st.hostname = hostname;
     }
     let (bound, timeout) = (sock.state.borrow().bound, sock.timeout());
-    host_net.borrow_mut().connect(
-        op,
-        sock.id,
-        proto,
-        bound,
-        SocketAddr::new(ip, port),
-        timeout,
-    );
+    let remote = SocketAddr::new(ip, port);
+    match sni {
+        Some(sni) => host_net
+            .borrow_mut()
+            .connect_ssl(op, sock.id, bound, remote, timeout, sni),
+        None => host_net
+            .borrow_mut()
+            .connect(op, sock.id, proto, bound, remote, timeout),
+    }
     s.replace(ctx, op_value(op));
+    Ok(())
+}
+
+/// The glue's `reconnect_ssl(sock)`: a handshake over the connection.
+fn l_reconnect_ssl<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
+    let a = args(ctx, s);
+    let sock = socket(&a, 1)?;
+    check_open(lib, sock)?;
+    // 7.94 asserts `lastproto != IPPROTO_UDP` (`nsock_connect.c:527`) and
+    // aborts (`nse-reconnect-ssl-udp-abort`).
+    if sock.state.borrow().proto == NetProto::Udp {
+        return Err(Fail::err(RECONNECT_UDP));
+    }
+    let sni = sni_name(sock.state.borrow().hostname.as_deref()).map_err(Fail::err)?;
+    let op = op_id(lib);
+    let host = lib.borrow().host.clone();
+    host.borrow_mut()
+        .reconnect_ssl(op, sock.id, sock.timeout(), sni);
+    s.replace(ctx, op_value(op));
+    Ok(())
+}
+
+/// What `reconnect_ssl` raises on a UDP socket, where 7.94 aborts.
+pub const RECONNECT_UDP: &str = "reconnect_ssl: not supported on a UDP socket";
+
+/// `get_ssl_certificate(sock)`: `nse_nsock_get_ssl`'s check, then the
+/// certificate. A socket that never started a handshake raises; one that
+/// did returns nil until step f2 parses its certificate
+/// (`nse-tls-no-certificate-table`).
+fn l_get_ssl_certificate<'gc>(
+    lib: &Rc<RefCell<NetLib>>,
+    ctx: Context<'gc>,
+    s: &mut piccolo::Stack<'gc, '_>,
+) -> Result<(), Fail> {
+    let a = args(ctx, s);
+    let sock = socket(&a, 1)?;
+    let host = lib.borrow().host.clone();
+    let ssl = sock.state.borrow().open && host.borrow().is_ssl(sock.id);
+    if !ssl {
+        return Err(Fail::arg(1, "not a SSL socket"));
+    }
+    s.replace(ctx, Value::Nil);
     Ok(())
 }
 
@@ -653,7 +796,7 @@ fn l_sendto<'gc>(
     let a = args(ctx, s);
     let sock = socket(&a, 1)?;
     check_open(lib, sock)?;
-    let host = check_target(&a, 2)?;
+    let (host, _) = check_target(&a, 2)?;
     let (port, _) = check_port(&a, 3)?;
     let data = a.string(4)?.into_owned();
     let ip = match resolve_for(lib, &host, Family::Unspec) {

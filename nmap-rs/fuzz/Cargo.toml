@@ -43,6 +43,17 @@ cast5 = { version = "0.11", default-features = false }
 [dependencies.nmap-core]
 path = "../crates/core"
 
+# The TLS client (M6.5 step f1), for `nse_tls_server_flight` and
+# `nse_tls_verifier`; rustls names the connection the first one drives.
+# Both already in the graph through nmap-sys's TLS client.
+[dependencies.nmap-sys]
+path = "../crates/sys"
+
+[dependencies.rustls]
+version = "0.23.46"
+default-features = false
+features = ["std", "tls12"]
+
 # The vendored Lua VM, for `nse_lpeg_build`, which runs pattern construction
 # through the VM with the test-only `lpeg` registration. Already in the graph
 # through nmap-core; this names the edge.
@@ -436,6 +447,20 @@ bench = false
 [[bin]]
 name = "nse_x509_ext_print"
 path = "fuzz_targets/nse_x509_ext_print.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nse_tls_server_flight"
+path = "fuzz_targets/nse_tls_server_flight.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nse_tls_verifier"
+path = "fuzz_targets/nse_tls_verifier.rs"
 test = false
 doc = false
 bench = false

@@ -32,6 +32,26 @@ tokio = { version = "1", features = ["net", "time", "rt", "rt-multi-thread", "ma
 # without it.
 pcap = { version = "2", optional = true }
 socket2 = "0.6.5"
+# The TLS client (M6.5 step f1, `sys::tls`; D3, docs/M6.5-ANALYSIS.md §14.1):
+# rustls 0.23 over a first-party CryptoProvider, never ring or aws-lc (the C
+# ban in deny.toml). The primitives are RustCrypto's, of the digest-0.10 /
+# cipher-0.4 generation the tree already locks (sha2, aes, ed25519-dalek's
+# curve25519-dalek): AES-GCM and ChaCha20-Poly1305, HMAC, ECDH and ECDSA on
+# P-256/P-384/P-521, X25519. RSA verification is first-party over
+# num-bigint (the `rsa` crate carries RUSTSEC-2023-0071). Randomness is the
+# one seam of `core::nse::openssl::rand` (E3); rand_core only adapts it.
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p521 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+x25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "2.1.1", default-features = false }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+rand_core = { version = "0.6", default-features = false }
 
 [features]
 default = []

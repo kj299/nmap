@@ -60,7 +60,10 @@ fn verdict(connect: Option<Result<(), io::ErrorKind>>, elapsed: Duration) -> Con
 /// Probe one TCP port by attempting a full connect, bounded by `timeout`.
 ///
 /// - Handshake completes → **open** (`syn-ack`); the socket is dropped
-///   immediately (we only needed to confirm the handshake).
+///   immediately (we only needed to confirm the handshake), with a zero
+///   linger so the drop is a RST, as nmap's `init_socket` sets it
+///   (`scan_engine_connect.cc:379-392`): the service sees the scan end as
+///   nmap's ends, not as a graceful close.
 /// - `ConnectionRefused` → **closed** (`conn-refused`).
 /// - `timeout` elapsed, or any other error → **filtered** (`no-response`).
 ///
@@ -68,7 +71,10 @@ fn verdict(connect: Option<Result<(), io::ErrorKind>>, elapsed: Duration) -> Con
 pub async fn tcp_connect(addr: SocketAddr, timeout: Duration) -> ConnectResult {
     let start = Instant::now();
     let connect = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-        Ok(Ok(_stream)) => Some(Ok(())),
+        Ok(Ok(stream)) => {
+            let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+            Some(Ok(()))
+        }
         Ok(Err(e)) => Some(Err(e.kind())),
         Err(_elapsed) => None,
     };
@@ -226,6 +232,28 @@ mod tests {
         assert_eq!(r.state, PortState::Open);
         assert_eq!(r.reason, Reason::ConnAccept);
         assert!(r.rtt.is_some());
+    }
+
+    #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]
+    #[tokio::test]
+    async fn an_open_port_probe_ends_in_a_reset() {
+        // nmap's connect scan lingers 0, so the service reads ECONNRESET,
+        // not a clean end of file (found by the M6.5 f1 TLS fixtures: a TLS
+        // server logs the two differently).
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let r = tcp_connect(addr, Duration::from_secs(2)).await;
+        assert_eq!(r.state, PortState::Open);
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1];
+        let got = tokio::io::AsyncReadExt::read(&mut peer, &mut buf).await;
+        assert_eq!(
+            got.map_err(|e| e.kind()),
+            Err(io::ErrorKind::ConnectionReset),
+            "a graceful close"
+        );
     }
 
     #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]

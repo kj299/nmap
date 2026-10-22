@@ -15,6 +15,16 @@
 //! - closing a socket drops its pending operations, which never complete;
 //! - one read returns at most [`MAX_READ`] bytes, where nsock has no bound.
 //!
+//! An SSL socket ([`crate::tls`]) reads as 7.94's nsock reads it over
+//! OpenSSL, measured on the `io-*` fixtures (`m65_tls_golden.txt`): a read
+//! that meets the end of the connection succeeds with what it has, or else
+//! is `EOF`; every later read is `ERROR` at once if the peer closed TCP
+//! without a `close_notify`, and waits out its time-out if it sent one
+//! (nsock's edge-triggered poll never sees the socket readable again). A
+//! TLS error is `ERROR`, losing what the read had collected, as `SSL_read`'s
+//! failure does. Closing an SSL socket sends a `close_notify` if the socket
+//! takes it at once (`SSL_shutdown` in `nsock_iod_delete`).
+//!
 //! There is no `unsafe` here: tokio's socket API is safe.
 
 use std::collections::HashMap;
@@ -27,6 +37,8 @@ use nmap_core::nse::net::{
     Completion, Family, NetProto, NetStatus, OpId, ReadMode, ScriptNet, SockId,
 };
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+
+use crate::tls::{client_config, server_name, ReadEvent, TlsStream};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -34,6 +46,27 @@ use tokio::task::AbortHandle;
 enum Sock {
     Tcp(Arc<TcpStream>),
     Udp(Arc<UdpSocket>),
+    /// A TLS connection.
+    Tls(Arc<TlsSock>),
+    /// A TCP connection whose handshake failed or is under way: an SSL
+    /// socket to `get_ssl_certificate` (nsock created its `SSL` once TCP
+    /// connected), unusable for I/O.
+    TlsDown(Arc<TcpStream>),
+}
+
+/// How a TLS connection's end was seen by a read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TlsEnd {
+    /// The peer sent `close_notify`.
+    Notify,
+    /// The peer closed TCP without one.
+    Abrupt,
+}
+
+struct TlsSock {
+    stream: TlsStream,
+    /// Set by the read that met the end.
+    ended: Mutex<Option<TlsEnd>>,
 }
 
 type Socks = Arc<Mutex<HashMap<SockId, Sock>>>;
@@ -185,6 +218,80 @@ async fn read_udp(s: Arc<UdpSocket>, t: Option<Duration>) -> Completion {
     }
 }
 
+async fn read_tls(s: Arc<TlsSock>, mode: ReadMode, t: Option<Duration>) -> Completion {
+    let ended = s.ended.lock().ok().and_then(|e| *e);
+    match ended {
+        Some(TlsEnd::Abrupt) => return Completion::Failed(NetStatus::Error),
+        Some(TlsEnd::Notify) => {
+            // Nothing will make the socket readable to nsock again.
+            within(t, std::future::pending::<()>()).await;
+            return Completion::Failed(NetStatus::Timeout);
+        }
+        None => {}
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let reading = async {
+        loop {
+            match s.stream.read().await {
+                ReadEvent::Data(d) => {
+                    buf.extend_from_slice(&d);
+                    if satisfied(mode, &buf) {
+                        return None;
+                    }
+                }
+                ReadEvent::Closed { notify } => {
+                    if let Ok(mut e) = s.ended.lock() {
+                        *e = Some(if notify { TlsEnd::Notify } else { TlsEnd::Abrupt });
+                    }
+                    return Some(NetStatus::Eof);
+                }
+                ReadEvent::Error => return Some(NetStatus::Error),
+            }
+        }
+    };
+    match within(t, reading).await {
+        Some(None) => Completion::Data(buf),
+        // `SSL_read` failed: what the read had is lost.
+        Some(Some(NetStatus::Error)) => Completion::Failed(NetStatus::Error),
+        Some(Some(st)) if buf.is_empty() => Completion::Failed(st),
+        None if buf.is_empty() => Completion::Failed(NetStatus::Timeout),
+        _ => Completion::Data(buf),
+    }
+}
+
+/// The handshake over a connected `tcp`, recording the socket as an SSL
+/// socket first; the completion it ends with.
+async fn handshake(
+    socks: Socks,
+    sock: SockId,
+    tcp: Arc<TcpStream>,
+    sni: Option<Vec<u8>>,
+) -> Completion {
+    if let Ok(mut m) = socks.lock() {
+        m.insert(sock, Sock::TlsDown(tcp.clone()));
+    }
+    let peer = match tcp.peer_addr() {
+        Ok(a) => a.ip(),
+        Err(_) => return Completion::Failed(NetStatus::Error),
+    };
+    let name = server_name(sni.as_deref(), peer);
+    match TlsStream::handshake(tcp, client_config(), name).await {
+        Ok(stream) => {
+            if let Ok(mut m) = socks.lock() {
+                m.insert(
+                    sock,
+                    Sock::Tls(Arc::new(TlsSock {
+                        stream,
+                        ended: Mutex::new(None),
+                    })),
+                );
+            }
+            Completion::Done
+        }
+        Err(()) => Completion::Failed(NetStatus::Error),
+    }
+}
+
 impl ScriptNet for TokioNet {
     fn connect(
         &mut self,
@@ -221,6 +328,67 @@ impl ScriptNet for TokioNet {
             }
             Completion::Done
         });
+    }
+
+    fn connect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        local: Option<SocketAddr>,
+        remote: SocketAddr,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    ) {
+        self.close(sock);
+        let socks = self.socks.clone();
+        self.spawn(op, Some(sock), async move {
+            // One time-out for the TCP connect and the handshake together
+            // (`nse_nsock.cc:586`, one nsock event).
+            let both = async {
+                let tcp = match tcp_connect(local, remote).await {
+                    Ok(s) => Arc::new(s),
+                    Err(_) => return Completion::Failed(NetStatus::Error),
+                };
+                handshake(socks, sock, tcp, sni).await
+            };
+            within(timeout, both)
+                .await
+                .unwrap_or(Completion::Failed(NetStatus::Timeout))
+        });
+    }
+
+    fn reconnect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    ) {
+        let s = self.sock(sock);
+        let socks = self.socks.clone();
+        self.spawn(op, Some(sock), async move {
+            let tcp = match s {
+                Some(Sock::Tcp(t)) => t,
+                // An established connection: OpenSSL's `SSL_connect` on it
+                // returns at once.
+                Some(Sock::Tls(_)) => return Completion::Done,
+                _ => return Completion::Failed(NetStatus::Error),
+            };
+            within(timeout, handshake(socks, sock, tcp, sni))
+                .await
+                .unwrap_or(Completion::Failed(NetStatus::Timeout))
+        });
+    }
+
+    fn is_ssl(&self, sock: SockId) -> bool {
+        matches!(self.sock(sock), Some(Sock::Tls(_) | Sock::TlsDown(_)))
+    }
+
+    fn peer_certificate(&self, sock: SockId) -> Option<Vec<u8>> {
+        match self.sock(sock)? {
+            Sock::Tls(t) => t.stream.leaf(),
+            _ => None,
+        }
     }
 
     fn setup_udp(
@@ -262,7 +430,8 @@ impl ScriptNet for TokioNet {
                     .await
                 }
                 Some(Sock::Udp(u)) => within(timeout, async { u.send(&data).await.is_ok() }).await,
-                None => Some(false),
+                Some(Sock::Tls(t)) => within(timeout, async { t.stream.write(&data).await.is_ok() }).await,
+                Some(Sock::TlsDown(_)) | None => Some(false),
             };
             match sent {
                 Some(true) => Completion::Done,
@@ -302,14 +471,20 @@ impl ScriptNet for TokioNet {
             match s {
                 Some(Sock::Tcp(t)) => read_tcp(t, mode, timeout).await,
                 Some(Sock::Udp(u)) => read_udp(u, timeout).await,
-                None => Completion::Failed(NetStatus::Error),
+                Some(Sock::Tls(t)) => read_tls(t, mode, timeout).await,
+                Some(Sock::TlsDown(_)) | None => Completion::Failed(NetStatus::Error),
             }
         });
     }
 
     fn close(&mut self, sock: SockId) {
-        if let Ok(mut m) = self.socks.lock() {
-            m.remove(&sock);
+        let gone = self.socks.lock().ok().and_then(|mut m| m.remove(&sock));
+        if let Some(Sock::Tls(t)) = gone {
+            // A writable socket is so at once; a full one gets no
+            // close_notify, as SSL_shutdown's one non-blocking write gives none.
+            self.rt.block_on(async {
+                let _ = tokio::time::timeout(Duration::from_millis(50), t.stream.close_notify()).await;
+            });
         }
         let on: Vec<OpId> = self
             .tasks
@@ -337,7 +512,11 @@ impl ScriptNet for TokioNet {
 
     fn info(&self, sock: SockId) -> Option<(SocketAddr, SocketAddr)> {
         match self.sock(sock)? {
-            Sock::Tcp(t) => Some((t.local_addr().ok()?, t.peer_addr().ok()?)),
+            Sock::Tcp(t) | Sock::TlsDown(t) => Some((t.local_addr().ok()?, t.peer_addr().ok()?)),
+            Sock::Tls(t) => {
+                let tcp = t.stream.tcp();
+                Some((tcp.local_addr().ok()?, tcp.peer_addr().ok()?))
+            }
             Sock::Udp(u) => {
                 let local = u.local_addr().ok()?;
                 let remote = u

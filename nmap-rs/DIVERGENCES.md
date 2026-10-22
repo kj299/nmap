@@ -4046,11 +4046,13 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
 
 ### Differences, open and documented
 
-- [ ] `nse-no-ssl` — `connect(..., "ssl")` and `reconnect_ssl` answer
-      "sorry, you don't have OpenSSL", and `get_ssl_certificate` and
-      `nmap.socket.parse_ssl_certificate` raise "SSL is not available". This
-      is how an nmap built without OpenSSL behaves. TLS needs the `openssl`
-      module (`nse-c-modules-pending`).
+- [ ] `nse-no-ssl` — `nmap.socket.parse_ssl_certificate` raises "SSL is
+      not available", as in an nmap built without OpenSSL, until the
+      `openssl` module is registered (M6.5 step g; `nse-c-modules-pending`).
+      Since M6.5 step f1, `connect(..., "ssl")` and `reconnect_ssl` make TLS
+      connections, and `get_ssl_certificate` raises on a socket that is not
+      SSL and returns nil on one that is (`nse-tls-no-certificate-table`,
+      until step f2).
 - [ ] `nse-no-pcap-sockets` — `pcap_open` raises `can't open pcap reader on
       <device>`, as nmap does when it cannot open the device, and
       `pcap_receive` raises `not a pcap socket`. Scripts that sniff
@@ -5629,7 +5631,7 @@ so they are opened now and land, pinned per fixture, with step f1
 (`sys::tls`). Each cites the fixture in
 `spikes/m65-tls-provider/fixtures/results/results.md`.
 
-- [ ] `nse-tls-modern-only` — rustls carries TLS 1.2 and 1.3 with ECDHE and
+- [x] `nse-tls-modern-only` — rustls carries TLS 1.2 and 1.3 with ECDHE and
       AEAD suites only, by design (`rustls-0.23.46/src/manual/features.rs`).
       Where 7.94 reaches and the port will not: TLS 1.2 RSA key exchange
       (`tls12-rsa-kx-gcm`), CBC suites (`tls12-ecdhe-cbc`), DHE
@@ -5639,25 +5641,37 @@ so they are opened now and land, pinned per fixture, with step f1
       the port gets `HandshakeFailure`). Where both fail: TLS 1.0 and 1.1
       only, a SHA-1-only signature algorithm, a secp256k1 certificate (neither
       ClientHello offers an ECDSA signature algorithm for that curve). Retired by M6.7, legacy TLS.
-- [ ] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
+      Pinned by step f1 (`gen_m65_tls.py`, `PORT_PINS`): `tls12-rsa-kx-gcm`,
+      `tls12-ecdhe-cbc`, `tls12-dhe2048`, `dsa-dhe`, `tls13-x448`,
+      `tls13-ffdhe2048`, `starttls-legacy`, and `dual-tls12-clientpref` (the
+      same RSA leaf as 7.94, over an ECDHE suite where 7.94 took DHE-RSA
+      with CBC).
+- [x] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
       40) when the server sends no `renegotiation_info` extension (RFC 5746,
       OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates
       the extension (`client/hs.rs:747`) and continues (`fake-noreneg`: the
       spike sent ClientKeyExchange). The port reaches servers 7.94 refuses.
       nmap never renegotiates, so nothing downstream depends on it; a vendor
       patch of one check would restore the refusal if fidelity is wanted.
-- [ ] `nse-tls-handshake-64k` — rustls refuses a handshake message over
+      Pinned by step f1: `fake-noreneg`.
+- [x] `nse-tls-handshake-64k` — rustls refuses a handshake message over
       65,535 bytes (`msgs/deframer/handshake.rs:376`); OpenSSL's certificate
       list limit is 102,400 (`SSL_MAX_CERT_LIST_DEFAULT`). A chain between
       the two reaches 7.94 and not the port (`chain-over64k`: 86
       certificates, 70,606 bytes, TLS 1.2 and 1.3); over 100 KiB both fail
-      (`chain-over100k`).
-- [ ] `nse-tls-sni-rustls-names` — for a string target that is an IP
+      (`chain-over100k`). Pinned by step f1: `chain-over64k`,
+      `chain13-over64k`.
+- [x] `nse-tls-sni-rustls-names` — for a string target that is an IP
       literal, 7.94 sends it as SNI (`sni-ip-string`: `server_name` =
       `127.0.0.1` in the server's trace); rustls sends none for an IP
       address, and rejects names it cannot encode. A DNS name is sent by
-      both (`sni-name`). A host table sends none in both.
-- [ ] `nse-tls-alert-numbers` — where both sides reject, the alert the port
+      both (`sni-name`). A host table sends none in both. Step f1 measured
+      the target-name shapes: 7.94 sends any bytes OpenSSL takes, and the
+      port sends none for a name with a space (`sni-table-badname`) or a
+      label over 63 bytes (`sni-table-255`), and drops a trailing dot
+      (`sni-table-upper-dot`: `LocalHost.` is sent as `LocalHost`). Pinned
+      by step f1: those three, `sni-ip-string` and `udp-ssl`.
+- [x] `nse-tls-alert-numbers` — where both sides reject, the alert the port
       sends can differ from 7.94's: a certificate entry with trailing bytes
       50 vs 42 (`fake-trail`), an undecodable certificate 42 vs 40
       (`fake-garbage`), a key type not matching the suite 47 vs 40
@@ -5667,7 +5681,13 @@ so they are opened now and land, pinned per fixture, with step f1
       ServerKeyExchange signature (51, `fake-badsig`) and a bad TLS 1.3
       CertificateVerify (`decrypt_error`, `bad13-corrupt-certverify`).
       Servers do not act on a client's alert number; scripts see
-      `nil, "ERROR"` either way.
+      `nil, "ERROR"` either way. Step f1's verifier sends 7.94's 47 for a key
+      that does not fit the suite and for a key type TLS refuses (rustls
+      sends 47 for a peer that misbehaved), which leaves two: a certificate
+      entry with trailing bytes, 50 in 7.94 and 42 in the port, and a
+      certificate with no usable key, 80 and 46 (no error a rustls verifier
+      returns is sent as 50 or 80). Pinned: `fake-trail`,
+      `fake-unknownoid-cert`.
 - [x] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
       (M6.5 step b, `core::nse::openssl::bn`) refuse an operand over a per-operation cap with the
       memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,
@@ -6282,6 +6302,141 @@ Also gated:
       the same on every run. The structured output (`name_to_table`) sorts
       its keys and is unaffected.
 - [x] `openssl-bad-argument-naming` (step b) applies.
+
+## Milestone 6.5 step f1 — the TLS client (`sys::tls`, `sys::nsenet`, `core::nse::net`; `openssl` not registered)
+
+`connect(..., "ssl")`, `reconnect_ssl` and `get_ssl_certificate`'s
+raise/nil contract (`nse_nsock.cc:467-487,493-590,889-909` at
+`3be01efb1`), over a TLS client of the port's own: rustls 0.23 with the
+first-party `CryptoProvider` the step-0 spike measured (D3,
+`docs/M6.5-ANALYSIS.md` §14.1), in `sys::tls` (D10), `forbid(unsafe_code)`:
+- TLS 1.3 and 1.2, ECDHE with AES-GCM and ChaCha20-Poly1305 on X25519,
+  P-256, P-521 and P-384, offered in 7.94's order (RSA-signed suites before
+  ECDSA-signed ones at each strength, so a dual-certificate server honouring
+  client preference gives 7.94's RSA leaf);
+- no chain verification, but every check OpenSSL's client makes whatever
+  the verify mode (§1.3): each certificate entry decoded by `core`'s
+  `d2i_X509` and filling its entry exactly, the leaf's key present and of a
+  type TLS takes, the ServerKeyExchange or CertificateVerify signature
+  verified under it (RSA PKCS#1 and PSS first-party over num-bigint, ECDSA
+  P-256/384/521 in strict DER, Ed25519 `verify_strict`), the key's family
+  matching the scheme (and in TLS 1.3 its curve), with OpenSSL's alert 47
+  for a key that does not fit;
+- the server name from the connection's target name (the string itself, or
+  a host table's `targetname`, cut at its first NUL), kept for
+  `reconnect_ssl`; one time-out for the TCP connect and the handshake; no
+  session reuse; a `close_notify` on close;
+- reads that meet the end of a TLS connection as 7.94's nsock reads them
+  (below); `ERROR` for every handshake failure.
+
+The module stays **unregistered** (D2(D)): `nmap.have_ssl()` is false and
+`require "openssl"` fails until step g. sslcert therefore keeps its
+`_WITHOUT_RECONNECT` path, as §1.2 required: with TLS on and `openssl`
+absent, `nselib_differential`, `scripts_differential`, `nse_cli_differential`
+and every other gate of the workspace pass unchanged.
+
+**Gated** by the step-a fixtures, now 86 (`tests/differential/m6/m65_tls/`,
+`oracle/gen_m65_tls.py --check ... --client ... --nmap-rs ...`, CI's
+differential job): each fixture server is run for 7.94 and again for the
+port, whose CLI runs the same probe script, so the server sees the port's
+whole NSE path; the golden records 7.94's result and what the server saw of
+it (the server name, version, suite, group, signature algorithm, alerts, the
+server's error). **65 rows equal 7.94's, and 21 differ, each pinned to the
+entry below that explains it** (`PORT_PINS`; a pin that stops differing
+fails). The leaf is compared too: until step f2, `get_ssl_certificate`
+returns nil, so where the port's probe reaches `ok leaf=none` the
+`m65_tlsprobe` example of `nmap-sys` (the port's socket host, driven as
+`core::nse::net` drives it) gives the leaf's SHA-256, length and CN, which
+must be 7.94's. Step f1 added 25 rows, recorded on 7.94 twice: how reads
+meet the end of a TLS connection (12), the `get_ssl_certificate` contract,
+UDP sockets (2), server names from a target name (7), a silent STARTTLS
+server, and teardown mid-handshake (2).
+
+Also gated: `sys::tls`'s unit tests (the verifier's refusals, OpenSSL's own
+signatures as known answers, `testdata/vectors.txt`; fresh key shares; the
+ClientHello's suite order; whole handshakes against a rustls server over
+the same provider; record lengths) and `crates/sys/tests/nse_tls.rs` (every
+rule above through the engine, in each `cargo test`, `ftp.auth` and
+`comm.tryssl` included). FUZZ_F1 SABOTAGE_F1
+
+Found on the way:
+- **nmap's connect scan resets its probe connections** (`SO_LINGER` 0,
+  `scan_engine_connect.cc:379-392`); the port's closed them gracefully, so a
+  service saw a FIN where nmap sends a RST (a TLS server logs "unexpected
+  eof" for one and nothing for the other). Fixed in `sys::net::tcp_connect`
+  and pinned by `an_open_port_probe_ends_in_a_reset`; no ledger entry, as
+  the port now does what nmap does.
+- **`s_server -trace` was losing output**: step a's generator stopped
+  `s_server` with SIGTERM while its trace sat in stdio's block buffer, so
+  some rows recorded too little (a ClientHello, a sent alert). The
+  generator now runs it line-buffered (`stdbuf -oL`) and 7.94's golden
+  gained what was missing: the alerts on four rows, the group and signature
+  algorithm on `chain-over100k`.
+
+### Security / robustness (divergence from the C, deliberately)
+
+- [x] `nse-ssl-sni-fatal` — a target name OpenSSL refuses as a server name
+      (empty, or over 255 bytes) makes 7.94's `SSL_set_tlsext_host_name`
+      fail inside nsock, which calls `fatal`: the whole run quits
+      (`QUITTING!`, `nsock_core.c:380-382`), after the TCP connection is
+      made. The port raises the same text as a Lua error in the script that
+      connected (`SSL_set_tlsext_host_name failed: error:0A00013F:SSL
+      routines::ssl3 ext invalid servername`), before connecting, from
+      `connect(..., "ssl")` and from `reconnect_ssl` alike. A 255-byte name
+      is taken. Pinned: `sni-table-empty`, `sni-table-256`.
+- [x] `nse-reconnect-ssl-udp-abort` — `reconnect_ssl` on a UDP socket
+      reaches `assert(nsi->lastproto != IPPROTO_UDP)`
+      (`nsock_connect.c:527`) and aborts 7.94 (measured). The port raises
+      `reconnect_ssl: not supported on a UDP socket`. Pinned:
+      `udp-reconnect`.
+
+### Faithfully reproduced (deliberately *not* "fixed")
+
+- **The end of a TLS connection.** 7.94's nsock polls edge-triggered over
+  OpenSSL's buffers, and measured on `m65_tls/eofsrv.py` (`io-*`, twelve
+  rows, the same over two runs): a read that meets the end of the
+  connection succeeds with what it has, or else is `EOF`; every later read
+  is `ERROR` at once if the peer closed TCP without a `close_notify`, and
+  waits out its whole time-out (`TIMEOUT`) if it sent one, TCP closed or
+  not. The port reads so (`sys::nsenet::read_tls`). A TLS error is `ERROR`
+  and loses what that read had collected, as `SSL_read`'s failure does.
+- **`"ssl"` from a UDP socket** is TLS over TCP to the same port, as in
+  7.94 (`nse_nsock.cc:564-567`; DTLS came later). Gated: `udp-ssl`.
+- **`get_ssl_certificate`** raises `bad argument #1 to '?' (not a SSL
+  socket)` on a socket that never started a handshake (new, TCP, closed),
+  and returns nil on one that did, the handshake failed included: nsock
+  creates its `SSL` once TCP connects. `ftp.lua`'s `is_ssl` probe relies
+  on the raise. Gated: `contract`.
+- **One time-out** covers the TCP connect and the handshake, and
+  `reconnect_ssl`'s handshake (`starttls-silent`); a socket closed under a
+  waiting handshake, or a thread killed by `--script-timeout`, drops the
+  connection (`silent-closemid`, `silent-killed`).
+- **No session reuse** (7.94's NSE never sets a session) and **no ALPN**.
+- **Closing an SSL socket** sends a `close_notify` if the socket takes it at
+  once, as `nsock_iod_delete`'s `SSL_shutdown` does.
+
+### Differences, open and documented
+
+- [ ] `nse-tls-no-certificate-table` (interim, step f2 retires it) —
+      `get_ssl_certificate` returns nil on an SSL socket, where 7.94 returns
+      the certificate's table: the table is `parse_ssl_certificate`'s, which
+      step f2 joins to the leaf. Nothing in the corpus reads it before step
+      g: sslcert gates on `have_openssl`, and ftp's probe only asks whether
+      the call raises.
+- [ ] `nse-tls-eof-coalesced` — when data and the end of the connection
+      reach 7.94 in one read event, its `receive` returns the data and
+      consumes the end, and the next read is `ERROR` (or `TIMEOUT` after a
+      `close_notify`); when they arrive apart, the next read is `EOF`. Which
+      one happens is timing (two 7.94 runs of the same fixture gave both).
+      The port always answers the second way. The fixtures separate the two
+      by 200 ms, and the rows hold that case.
+- [x] The five entries of step 0 apply, now pinned per fixture:
+      `nse-tls-modern-only` (and `dual-tls12-clientpref`: the same RSA leaf,
+      an ECDHE suite where 7.94 took DHE-RSA-CBC), `nse-tls-handshake-64k`,
+      `nse-tls-sni-rustls-names` (also a target name with a space, a 255-byte
+      label, and a trailing dot, which rustls drops), `nse-tls-alert-numbers`
+      (now two rows: 7.94's 47 is sent where a key does not fit) and
+      `nse-tls-no-reneg-info-accepted`.
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

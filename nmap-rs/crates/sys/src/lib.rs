@@ -32,6 +32,7 @@ pub mod scan;
 pub mod servicescan;
 pub mod sigstore;
 pub mod synscan;
+pub mod tls;
 pub mod udpscan;
 
 pub use scan::{connect_scan, ConnectScanConfig};

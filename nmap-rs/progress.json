@@ -160,6 +160,13 @@
     "options": [
       "target_scope"
     ],
+    "sys::tls": [
+      "nse_tls_server_flight",
+      "nse_tls_verifier"
+    ],
+    "sys::tls::provider": [
+      "nse_tls_server_flight"
+    ],
     "targets": [
       "parse_target",
       "target_scope"
@@ -182,7 +189,7 @@
       "fuzzed": "Binding only: lfs.mkdir hands the path bytes, as luaL_checkstring gives them, to the host's ScriptFs, and get_path_separator returns a constant. It parses nothing; the policy it asks (core::nse::fspolicy) is covered by nse_scriptargs and sys::nsefs's tests. Exercised end to end against nmap 7.94 by nse_cli_differential's lfs and http-fetch scenarios, results and trees byte for byte."
     },
     "core::nse::net": {
-      "fuzzed": "The script-facing half of NSE sockets: it checks a script's arguments (ports, protocols, timeouts, families) as nse_nsock.cc checks them and hands data to the host as opaque bytes. It parses no network data; receive_buf's delimiter search is in the prelude's Lua, on the VM's own pattern matcher, which is fuzzed. Exercised end to end by nse_net_differential (three scenarios against nmap 7.94, every argument error included), and pinned by sabotage."
+      "fuzzed": "The script-facing half of NSE sockets: it checks a script's arguments (ports, protocols, timeouts, families, and since M6.5 step f1 the TLS server name from a target name) as nse_nsock.cc checks them and hands data to the host as opaque bytes. It parses no network data; receive_buf's delimiter search is in the prelude's Lua, on the VM's own pattern matcher, which is fuzzed. Exercised end to end by nse_net_differential, nse_tls and the TLS fixture gate (every argument error included), and pinned by sabotage."
     },
     "core::nse::openssl": {
       "fuzzed": "Binding only: reads Lua arguments through the shared LuaArgs and type_error helpers and hands bytes and integers to core::nse::openssl::bn, ::digest and ::cipher, which nse_openssl_bignum, nse_openssl_digest and nse_openssl_cipher fuzz, and lengths to the randomness seam. Exercised against nmap 7.94 by openssl_bn_differential's 11,171 rows, openssl_digest_differential's 2,322 and openssl_cipher_differential's 12,949, among them every function with every wrong argument type."
@@ -239,7 +246,7 @@
       "fuzzed": "The host side of NSE: nselib/ and script lookup over the data directories, the interface list from sys::netif, random bytes from the OS, and a ScriptNet wrapper that timestamps polls. It parses no network or file data. Pinned by unit tests and exercised end to end by nse_cli_differential against nmap 7.94."
     },
     "sys::nsenet": {
-      "fuzzed": "ScriptNet over tokio: connect, read, write and timers, with every read capped at MAX_READ (4 MiB). It parses nothing; the only logic over received bytes is counting newlines to decide when a read is satisfied, which a unit test pins (Miri clean). Exercised against live fixture services by nse_net_differential."
+      "fuzzed": "ScriptNet over tokio: connect, read, write and timers, with every read capped at MAX_READ (4 MiB), and since M6.5 step f1 TLS sockets through sys::tls (connect_ssl, reconnect_ssl, the end-of-stream model). It parses nothing; the only logic over received bytes is counting newlines to decide when a read is satisfied, which a unit test pins (Miri clean); TLS records go to sys::tls, which nse_tls_server_flight fuzzes. Exercised against live fixture services by nse_net_differential, nse_tls and the TLS fixture gate."
     },
     "sys::osscan": {
       "fuzzed": "OS-detection round driver. Frame parsing is core::osprobe::demux::demux, covered by fuzz target osprobe_demux (added in M7.1); this module does the bookkeeping around it."
@@ -249,6 +256,9 @@
     },
     "sys::sigstore": {
       "fuzzed": "Installs already-verified bytes to disk. The manifest parsing, and the single-path-component invariant install() relies on, are fuzzed in core by sigstore_manifest."
+    },
+    "sys::tls::stream": {
+      "fuzzed": "Drives rustls over a tokio TcpStream: reads and writes bytes and hands them to rustls, parsing none itself. What a peer sends reaches rustls and the provider, which nse_tls_server_flight fuzzes with the shipped client config. Exercised end to end by nse_tls (10 engine-level tests: end of stream, teardown, close_notify) and the 86-row TLS fixture gate against nmap 7.94."
     },
     "timing": {
       "fuzzed": "RTT and timeout arithmetic over our own measurements. No untrusted-input parse path."
@@ -376,6 +386,9 @@
     "sys::servicescan": "unsafe_audited",
     "sys::sigstore": "unsafe_audited",
     "sys::synscan": "unsafe_audited",
+    "sys::tls": "unsafe_audited",
+    "sys::tls::provider": "unsafe_audited",
+    "sys::tls::stream": "unsafe_audited",
     "sys::udpscan": "unsafe_audited",
     "targets": "unsafe_audited",
     "timespec": "unsafe_audited",
@@ -403,7 +416,7 @@
     "core::nse::openssl": {
       "unsafe_audited": {
         "files": 18,
-        "sha256": "5c587620fd3949fcc50f820b410095275423ed3fb7a218dc2d86f762b97e2a29"
+        "sha256": "2ff8cf8e89f2e3de2a012b8254d9ddb3e1926ceaba609cc06e99df5b30d60dee"
       }
     },
     "core::nse::openssl::asn1": {
@@ -637,23 +650,23 @@
     "core::nse::openssl::x509": {
       "differential": {
         "files": 1,
-        "sha256": "bf22140658a114ca051c8e64ae1121c371f9d60a071484a0abf50d4b07dc958f"
+        "sha256": "185f2f54abeef7252239a997edcf8ea42eac28ca9cb443d35f686e4b51114258"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "bf22140658a114ca051c8e64ae1121c371f9d60a071484a0abf50d4b07dc958f"
+        "sha256": "185f2f54abeef7252239a997edcf8ea42eac28ca9cb443d35f686e4b51114258"
       },
       "ported": {
         "files": 1,
-        "sha256": "bf22140658a114ca051c8e64ae1121c371f9d60a071484a0abf50d4b07dc958f"
+        "sha256": "185f2f54abeef7252239a997edcf8ea42eac28ca9cb443d35f686e4b51114258"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "bf22140658a114ca051c8e64ae1121c371f9d60a071484a0abf50d4b07dc958f"
+        "sha256": "185f2f54abeef7252239a997edcf8ea42eac28ca9cb443d35f686e4b51114258"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "bf22140658a114ca051c8e64ae1121c371f9d60a071484a0abf50d4b07dc958f"
+        "sha256": "185f2f54abeef7252239a997edcf8ea42eac28ca9cb443d35f686e4b51114258"
       }
     },
     "core::nse::stdlib::osdate": {
@@ -666,6 +679,72 @@
       "unsafe_audited": {
         "files": 1,
         "sha256": "361971b67b5b9059a8b9960ff6a631e7e20f073e75021d408be09fa1a90f8683"
+      }
+    },
+    "sys::tls": {
+      "differential": {
+        "files": 12,
+        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+      },
+      "fuzzed": {
+        "files": 12,
+        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+      },
+      "ported": {
+        "files": 12,
+        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+      },
+      "sanitized": {
+        "files": 12,
+        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+      },
+      "unsafe_audited": {
+        "files": 12,
+        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+      }
+    },
+    "sys::tls::provider": {
+      "differential": {
+        "files": 1,
+        "sha256": "f36d8cf15e63626423ac13c0a3de4c7ad3b07ea8e9a46b0400b3bc5cac57c3f6"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "f36d8cf15e63626423ac13c0a3de4c7ad3b07ea8e9a46b0400b3bc5cac57c3f6"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "f36d8cf15e63626423ac13c0a3de4c7ad3b07ea8e9a46b0400b3bc5cac57c3f6"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "f36d8cf15e63626423ac13c0a3de4c7ad3b07ea8e9a46b0400b3bc5cac57c3f6"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "f36d8cf15e63626423ac13c0a3de4c7ad3b07ea8e9a46b0400b3bc5cac57c3f6"
+      }
+    },
+    "sys::tls::stream": {
+      "differential": {
+        "files": 1,
+        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
       }
     }
   }

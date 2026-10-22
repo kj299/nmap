@@ -1061,7 +1061,11 @@ changes are in what they print:
 **The fixtures.** Each server listens on 127.0.0.1, on port 47300 plus its row
 number (47301–47386; no other M6 generator uses a 47xxx port). `s_server`
 runs line-buffered (`stdbuf -oL`): it is stopped with SIGTERM, and step f1
-found trace lines lost in stdio's buffer on step a's golden. nmap 7.94 runs
+found trace lines lost in stdio's buffer on step a's golden. Fields that
+timing decides are written `*` for both programs (`TIMING_FIELDS`: on
+`chain-over100k`, the `group` and `sigalg` of a ServerKeyExchange that
+follows a 100 KiB Certificate and may or may not be traced before the
+client's abort). nmap 7.94 runs
 `-Pn -sT -n -p PORT --datadir REPO --script m65_tls/s0probe.nse` once against
 each:
 

@@ -236,6 +236,24 @@ FIXTURES = [
     ("silent-killed", "silent", "", "host", "timeout=60000", ()),
 ]
 
+# SERVER fields that timing decides, written `*` for both programs: on
+# chain-over100k the server writes its ServerKeyExchange after a 100 KiB
+# Certificate, and whether the trace shows it (its group and signature
+# algorithm) before the client's abort reaches the server depends on the
+# scheduling (the port showed both in CI and locally on one commit).
+TIMING_FIELDS = {
+    "chain-over100k": ("group", "sigalg"),
+}
+
+
+def masked(name, server):
+    """SERVER with its TIMING_FIELDS written `*`."""
+    fields = TIMING_FIELDS.get(name)
+    if not fields:
+        return server
+    return re.sub(r"\b(%s)=\S+" % "|".join(fields), lambda m: m.group(1) + "=*", server)
+
+
 # nmap options a fixture adds to the probe's command line (both programs).
 NMAP_ARGS = {
     "silent-killed": ["--script-timeout", "2s"],
@@ -613,7 +631,7 @@ def run_matrix(badserver, logdir):
             out_text = fh.read()
         with open(err_p, errors="replace") as fh:
             err_text = fh.read()
-        rows.append((name, tags, result, observe(kind, out_text, err_text)))
+        rows.append((name, tags, result, masked(name, observe(kind, out_text, err_text))))
         print("%-30s %-60s %s" % (name, result[:60], rows[-1][3][:80]), file=sys.stderr, flush=True)
     return rows
 
@@ -792,7 +810,7 @@ def serve_once(name, kind, args, port, badserver, logdir, tag, client):
         out_text = fh.read()
     with open(err_p, errors="replace") as fh:
         err_text = fh.read()
-    return result, observe(kind, out_text, err_text)
+    return result, masked(name, observe(kind, out_text, err_text))
 
 
 def check_port(golden, probe, nmaprs):

@@ -128,6 +128,33 @@ impl<N: ScriptNet> ScriptNet for ProgressNet<N> {
     ) {
         self.inner.connect(op, sock, proto, local, remote, timeout);
     }
+    fn connect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        local: Option<SocketAddr>,
+        remote: SocketAddr,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    ) {
+        self.inner
+            .connect_ssl(op, sock, local, remote, timeout, sni);
+    }
+    fn reconnect_ssl(
+        &mut self,
+        op: OpId,
+        sock: SockId,
+        timeout: Option<Duration>,
+        sni: Option<Vec<u8>>,
+    ) {
+        self.inner.reconnect_ssl(op, sock, timeout, sni);
+    }
+    fn is_ssl(&self, sock: SockId) -> bool {
+        self.inner.is_ssl(sock)
+    }
+    fn peer_certificate(&self, sock: SockId) -> Option<Vec<u8>> {
+        self.inner.peer_certificate(sock)
+    }
     fn setup_udp(
         &mut self,
         sock: SockId,

@@ -108,6 +108,15 @@ pub struct Cert {
 /// NULL.
 #[must_use]
 pub fn d2i_x509(der: &[u8]) -> Option<Cert> {
+    x509(der).ok().map(|(c, _)| c)
+}
+
+/// `d2i_X509` as the TLS client calls it, with how far it read: OpenSSL's
+/// client refuses a certificate entry the certificate does not fill
+/// (`statem_clnt.c:1813-1816`), where `parse_ssl_certificate` ignores what
+/// follows.
+#[must_use]
+pub fn d2i_x509_len(der: &[u8]) -> Option<(Cert, usize)> {
     x509(der).ok()
 }
 
@@ -319,14 +328,14 @@ fn prim(p: &[u8], utype: u32, opt: bool) -> Res<Option<(Prim, usize)>> {
 
 // ---- the X509 templates ---------------------------------------------------------
 
-fn x509(p: &[u8]) -> Res<Cert> {
+fn x509(p: &[u8]) -> Res<(Cert, usize)> {
     let mut s = Seq::open(p, None, false)?.ok_or(Bad(0))?;
     let (tbs, cinf) = s.req(false, |q, _| {
         x509_cinf(q).map(|(t, c, n)| Some(((t, c), n)))
     })?;
     let sig_alg = s.req(false, algor)?;
     let (sig_unused, sig_data) = s.req(true, |q, opt| bit_string(q, None, opt))?;
-    s.finish()?;
+    let used = s.finish()?;
     let Cinf {
         tbs_sig,
         issuer,
@@ -336,7 +345,7 @@ fn x509(p: &[u8]) -> Res<Cert> {
         spki,
         extensions,
     } = cinf;
-    Ok(Cert {
+    let cert = Cert {
         tbs,
         tbs_sig,
         issuer,
@@ -348,7 +357,8 @@ fn x509(p: &[u8]) -> Res<Cert> {
         sig_alg,
         sig_unused,
         sig_data,
-    })
+    };
+    Ok((cert, used))
 }
 
 struct Cinf {

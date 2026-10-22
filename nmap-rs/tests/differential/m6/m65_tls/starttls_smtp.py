@@ -7,18 +7,22 @@ client negotiated. usage: starttls_smtp.py PORT CERT KEY CIPHERS [tls12]
 One line per connection. A connection that closes or resets before asking for
 STARTTLS (a readiness check, a connect scan) prints a line starting "noise:";
 one that asks prints "tls VERSION CIPHER" or "tls failed: REASON", which is
-what the generator records.
+what the generator records. With a sixth argument `silent`, the server
+answers STARTTLS and then never speaks ("tls silent"): the handshake must
+time out within the socket's time-out (M6.5 step f1).
 
 Copied from spikes/m65-tls-provider/fixtures/starttls_smtp.py (M6.5 step 0)
 for the oracle of step a; only the reporting changed."""
 import socket
 import ssl
 import sys
+import time
 
 port = int(sys.argv[1])
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(sys.argv[2], sys.argv[3])
 ctx.set_ciphers(sys.argv[4])
+silent = len(sys.argv) > 6 and sys.argv[6] == "silent"
 if len(sys.argv) > 5 and sys.argv[5] == "tls12":
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2
@@ -53,6 +57,10 @@ while True:
                     c.sendall(b"250-fixture\r\n250 STARTTLS\r\n")
                 elif u.startswith(b"STARTTLS"):
                     c.sendall(b"220 go ahead\r\n")
+                    if silent:
+                        print("tls silent", flush=True)
+                        time.sleep(10)
+                        raise Done
                     try:
                         t = ctx.wrap_socket(c, server_side=True)
                         print("tls", t.version(), t.cipher()[0], flush=True)

@@ -210,13 +210,20 @@ jobs:
       # "ship no C").
       - run: cargo deny check
       # And no C compiler anywhere in the default build's graph, for any
-      # target: `cargo tree -i cc` must find no `cc` package at all.
+      # target: `cargo tree -i` must print no tree for `cc`, nor for `ring`.
+      # Since M6.5 step f1 both are in Cargo.lock without being in any graph:
+      # rustls names `ring` in its feature table (`ring = ["dep:ring", ...]`),
+      # which nothing turns on, and cargo locks it anyway; cargo tree then
+      # says "nothing to print" where it said "did not match any packages".
+      # Either is a pass; a printed tree fails.
       - run: |
-          if out=$(cargo tree -i cc -e all --target all 2>&1); then
-            echo "$out"; echo "FAIL: the default build depends on cc (M6.5 §6)"; exit 1
-          fi
-          echo "$out" | grep -q "did not match any packages" || { echo "$out"; exit 1; }
-          echo "no cc in the default build"
+          for c in cc ring; do
+            out=$(cargo tree -i "$c" -e all --target all 2>&1) || true
+            if ! echo "$out" | grep -qE "did not match any packages|nothing to print"; then
+              echo "$out"; echo "FAIL: the default build depends on $c (M6.5 §6)"; exit 1
+            fi
+          done
+          echo "no cc and no ring in the default build"
 
   miri:
     name: miri (UB in unsafe)
@@ -512,7 +519,16 @@ jobs:
       # TLS fixtures: 7.94's result on each, run twice, must be the committed
       # golden (the header first: seclevel, OpenSSL, nmap).
       - run: bash tests/differential/m6/regen_m65.sh --check-794
+      # The TLS 1.3 CertificateVerify rows are served by the step-0 spike's
+      # badserver (its own lockfile; no C), so they are recorded live too.
+      - run: cd spikes/m65-tls-provider && cargo build --release --bin badserver
       - run: bash tests/differential/m6/regen_m65_tls.sh --check
+      # M6.5 step f1: the port's TLS client over the same fixtures, through
+      # its NSE path (nmap-rs runs the probe script) and, until step f2 gives
+      # get_ssl_certificate its table, the m65_tlsprobe example for the leaf.
+      # Every row equals 7.94's or is a pin naming its ledger entry; a pin
+      # that no longer differs fails.
+      - run: bash tests/differential/m6/regen_m65_tls.sh --check-port
       # M5: the OS-detection differential. Unlike every earlier M5 gate (static C-oracle
       # vectors, or the real nmap-os-db), this exercises the whole path on the wire —
       # building the 23-probe battery, capturing on a real interface, attributing replies,

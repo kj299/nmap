@@ -7,9 +7,11 @@ gate.
     python3 oracle/gen_m65_tls.py --check-header GOLDEN
         -> compares this machine's environment with the golden's header;
            exit 1 on any difference
-    python3 oracle/gen_m65_tls.py --check GOLDEN --client CMD
-        -> step f1 adds the port's side; today it checks the header, then
-           exits 2
+    python3 oracle/gen_m65_tls.py --check GOLDEN --client PROBE --nmap-rs BIN
+        -> step f1's gate: the port over the same fixtures, compared row by
+           row with the golden, each divergence a pin (PORT_PINS) naming its
+           ledger entry; exit 1 on any difference that is not a pin, and on
+           any pin that no longer differs (see "The port's side" below)
 
 The fixtures are step 0's (spikes/m65-tls-provider/fixtures/run.py, written
 up in docs/M6.5-ANALYSIS.md 14.1), committed in ../m65_tls/: every row of
@@ -74,6 +76,19 @@ libssl nmap links, with nsock's cipher list (CIPHERS_SECURE,
 nsock/src/nsock_ssl.c at 7.94) applied, the configuration file loaded as
 libssl loads it for nmap; seclevel-compiled is the -DOPENSSL_TLS_SECURITY_LEVEL
 of `openssl version -a` (Ubuntu's patch; upstream's default is 1).
+
+The port's side (step f1). Each fixture is served again, and the port's
+CLI (BIN, `nmap-rs`) runs the same probe with the same arguments, so the
+server sees the port's NSE path: its RESULT and SERVER are what that run
+printed and what the server saw. Until step f2, `get_ssl_certificate`
+returns nil on a TLS socket (`nse-tls-no-certificate-table`), so where
+the port's probe prints `ok leaf=none err=nil` the fixture is served once
+more to PROBE (the `m65_tlsprobe` example of nmap-sys: the port's socket
+host, driven as core::nse::net drives it), and its `ok leaf=...` line is
+the port's RESULT. A row agrees when RESULT and SERVER equal the golden's;
+a row listed in PORT_PINS agrees when they equal the pin's, and the pin
+must differ from the golden (a pin that no longer differs is stale and
+fails). `skipped` rows are not run; the bad13 rows need the badserver.
 
 Environment: NMAP (default nmap), BADSERVER, M65_TLS_LOGS (a directory to
 keep each fixture's server and client logs in).
@@ -182,7 +197,70 @@ FIXTURES = [
     # Liveness: a server that never speaks, and no server at all.
     ("silent-server", "silent", "", "host", "timeout=3000", ()),
     ("connection-refused", "none", "", "host", "", ()),
+    # Step f1. The end of a TLS connection as reads meet it (m65_tls/eofsrv.py):
+    # the server closes after the client's trigger, abruptly or with a
+    # close_notify, TCP then closed or left open, with or without data first;
+    # three reads each, `receive` and `receive_bytes`.
+    ("io-abrupt-recv", "eof", "abrupt", "io", "how=recv", ()),
+    ("io-abrupt-bytes", "eof", "abrupt", "io", "how=bytes", ()),
+    ("io-abrupt-data-recv", "eof", "abrupt+data", "io", "how=recv", ()),
+    ("io-abrupt-data-bytes", "eof", "abrupt+data", "io", "how=bytes", ()),
+    ("io-notify-recv", "eof", "notify", "io", "how=recv", ()),
+    ("io-notify-bytes", "eof", "notify", "io", "how=bytes", ()),
+    ("io-notify-data-recv", "eof", "notify+data", "io", "how=recv", ()),
+    ("io-notify-data-bytes", "eof", "notify+data", "io", "how=bytes", ()),
+    ("io-notifyopen-recv", "eof", "notifyopen", "io", "how=recv", ()),
+    ("io-notifyopen-bytes", "eof", "notifyopen", "io", "how=bytes", ()),
+    ("io-notifyopen-data-recv", "eof", "notifyopen+data", "io", "how=recv", ()),
+    ("io-notifyopen-data-bytes", "eof", "notifyopen+data", "io", "how=bytes", ()),
+    # get_ssl_certificate's raise/nil contract, and reconnect_ssl on a closed
+    # socket; the TLS connect here fails (the server closes at once).
+    ("contract", "eof", "closer", "contract", "", ()),
+    # "ssl" from a UDP socket is TLS over TCP; reconnect_ssl on one aborts 7.94.
+    ("udp-ssl", "s_server", "rsa2048 -tls1_3", "udpssl", "", ()),
+    ("udp-reconnect", "s_server", "rsa2048 -tls1_3", "udprecon", "", ()),
+    # The server name from a host table's targetname, in the shapes rustls
+    # cannot send, and the two OpenSSL refuses (7.94 quits the run).
+    ("sni-table-none", "s_server", "rsa2048 -tls1_3", "table", "", ()),
+    ("sni-table-name", "s_server", "rsa2048 -tls1_3", "table", "tn=localhost", ()),
+    ("sni-table-badname", "s_server", "rsa2048 -tls1_3", "table", "tn=bad name x", ()),
+    ("sni-table-upper-dot", "s_server", "rsa2048 -tls1_3", "table", "tn=LocalHost.", ()),
+    ("sni-table-255", "s_server", "rsa2048 -tls1_3", "table", "tn=LONG255", ()),
+    ("sni-table-empty", "s_server", "rsa2048 -tls1_3", "table", "tn=EMPTY", ()),
+    ("sni-table-256", "s_server", "rsa2048 -tls1_3", "table", "tn=LONG256", ()),
+    # One time-out across reconnect_ssl: STARTTLS answered, then silence.
+    ("starttls-silent", "starttls", "ECDHE-RSA-AES128-GCM-SHA256 tls12 silent", "starttls", "timeout=2000", ()),
+    # Teardown mid-handshake (LESSONS #017): the socket closed under a thread
+    # waiting on it, and the thread killed by --script-timeout (NMAP_ARGS).
+    ("silent-closemid", "silent", "", "closemid", "", ()),
+    ("silent-killed", "silent", "", "host", "timeout=60000", ()),
 ]
+
+# SERVER fields that timing decides, written `*` for both programs: on the
+# long-chain rows the server writes its ServerKeyExchange (TLS 1.2) or
+# CertificateVerify (TLS 1.3) after a Certificate of 70 or 100 KiB, and
+# whether the trace shows it (its group and signature algorithm) before a
+# client that refuses the chain aborts depends on the scheduling (the port
+# showed both, in CI and locally, on chain-over100k and chain-over64k).
+TIMING_FIELDS = {
+    "chain-over64k": ("group", "sigalg"),
+    "chain-over100k": ("group", "sigalg"),
+    "chain13-over64k": ("sigalg",),
+}
+
+
+def masked(name, server):
+    """SERVER with its TIMING_FIELDS written `*`."""
+    fields = TIMING_FIELDS.get(name)
+    if not fields:
+        return server
+    return re.sub(r"\b(%s)=\S+" % "|".join(fields), lambda m: m.group(1) + "=*", server)
+
+
+# nmap options a fixture adds to the probe's command line (both programs).
+NMAP_ARGS = {
+    "silent-killed": ["--script-timeout", "2s"],
+}
 
 
 def cert(name):
@@ -349,7 +427,11 @@ def wait_port(port, proc, seconds=10.0):
 def server_cmd(kind, args, port, badserver):
     if kind == "s_server":
         parts = args.replace("CERTS/", CERTS + "/").split()
-        return ["openssl", "s_server", "-accept", str(port), "-trace",
+        # Line-buffered: the server is stopped with SIGTERM, and a trace still
+        # in stdio's block buffer would be lost, more or less of it by how
+        # much the connections happened to print (step f1 found rows whose
+        # ClientHello never reached the log).
+        return ["stdbuf", "-oL", "openssl", "s_server", "-accept", str(port), "-trace",
                 "-cert", cert(parts[0] + ".crt"), "-key", cert(parts[0] + ".key")] + parts[1:]
     if kind == "fake":
         parts = args.split()
@@ -362,6 +444,9 @@ def server_cmd(kind, args, port, badserver):
     if kind == "starttls":
         return [sys.executable, os.path.join(FIXDIR, "starttls_smtp.py"), str(port),
                 cert("rsa2048.crt"), cert("rsa2048.key")] + args.split()
+    if kind == "eof":
+        return [sys.executable, os.path.join(FIXDIR, "eofsrv.py"), str(port),
+                cert("rsa2048.crt"), cert("rsa2048.key"), args]
     raise ValueError(kind)
 
 
@@ -378,16 +463,16 @@ def stop(proc):
 
 # ---------------------------------------------------------------- the oracle
 
-def oracle(port, mode, extra, log):
+def oracle(port, mode, extra, log, more=()):
     sargs = "mode=%s" % mode + ("," + extra if extra else "")
     cmd = [NMAP, "-Pn", "-sT", "-n", "-p", str(port), "127.0.0.1", "--datadir", REPO,
-           "--script", PROBE, "--script-args", sargs]
+           "--script", PROBE, "--script-args", sargs] + list(more)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     except subprocess.TimeoutExpired:
         return "fail nmap-timeout"
     log.write(" ".join(cmd) + "\n" + r.stdout + r.stderr)
-    m = re.search(r"R: (.*)", r.stdout)
+    m = re.search(r"s0probe: R: (.*)", r.stdout)
     if m:
         return m.group(1).strip()
     state = re.search(r"^%d/tcp\s+(\S+)" % port, r.stdout, re.M)
@@ -504,6 +589,10 @@ def observe(kind, out_text, err_text):
         seen = [l for l in lines if l.startswith("client ")]
     elif kind == "starttls":
         seen = [l for l in lines if l.startswith("tls ")]
+    elif kind == "eof":
+        seen = [l for l in lines if l.startswith("done ")]
+    elif kind == "silent":
+        seen = [l for l in lines if l.startswith("client ")]
     elif kind == "bad13":
         seen = [l for l in lines if not l.startswith("listening")
                 and not any(n in l for n in BAD13_NOISE)]
@@ -525,7 +614,7 @@ def run_matrix(badserver, logdir):
             rows.append((name, tags, "skipped", "-"))
             continue
         if listening(port):
-            raise SystemExit("port %d (%s) is in use: free 47301-47361 and re-run" % (port, name))
+            raise SystemExit("port %d (%s) is in use: free 47301-%d and re-run" % (port, name, BASE_PORT + len(FIXTURES)))
         out_p = os.path.join(logdir, name + ".server.out")
         err_p = os.path.join(logdir, name + ".server.err")
         cli_p = os.path.join(logdir, name + ".client.log")
@@ -537,7 +626,7 @@ def run_matrix(badserver, logdir):
                     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
                     if not wait_port(port, proc):
                         raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
-                result = oracle(port, mode, extra, cli)
+                result = oracle(port, mode, extra, cli, NMAP_ARGS.get(name, ()))
                 time.sleep(0.3)  # let the server write what it saw
             finally:
                 stop(proc)
@@ -545,7 +634,7 @@ def run_matrix(badserver, logdir):
             out_text = fh.read()
         with open(err_p, errors="replace") as fh:
             err_text = fh.read()
-        rows.append((name, tags, result, observe(kind, out_text, err_text)))
+        rows.append((name, tags, result, masked(name, observe(kind, out_text, err_text))))
         print("%-30s %-60s %s" % (name, result[:60], rows[-1][3][:80]), file=sys.stderr, flush=True)
     return rows
 
@@ -614,6 +703,191 @@ def generate(outdir, twice, carry):
                                                  time.time() - t0), file=sys.stderr)
 
 
+# ------------------------------------------------------------ the port's side
+
+# Where the port differs from 7.94, by fixture: (ledger id in DIVERGENCES.md,
+# the port's RESULT, the port's SERVER). None keeps the golden's field; a
+# dict for SERVER replaces those `key=value` fields of the golden's.
+_NO_LEGACY = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
+              "error=tls_post_process_client_hello:no_shared_cipher")
+_NO_GROUP = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
+             "error=final_key_share:no_suitable_key_share")
+_SCRIPT_ERROR = "fail no-result port=open"
+PORT_PINS = {
+    # rustls: TLS 1.2 and 1.3, ECDHE, AEAD only. The servers' own refusal.
+    "tls12-rsa-kx-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "tls12-dhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "tls13-x448": ("nse-tls-modern-only",) + _NO_GROUP,
+    "tls13-ffdhe2048": ("nse-tls-modern-only",) + _NO_GROUP,
+    "starttls-legacy": ("nse-tls-modern-only", "fail ERROR", "tls failed: NO_SHARED_CIPHER"),
+    # The same RSA leaf, which is what the suite order is for; 7.94's DHE-RSA
+    # CBC suite is not the port's to offer.
+    "dual-tls12-clientpref": ("nse-tls-modern-only", None,
+                              {"suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+                               "group": "ecdh_x25519"}),
+    # rustls refuses a handshake message over 64 KiB; the server sent it all.
+    "chain-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
+    "chain13-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
+    # rustls sends no server_name for an IP literal or a name it cannot
+    # encode, and drops a trailing dot.
+    "sni-ip-string": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
+    "udp-ssl": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
+    "sni-table-badname": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
+    "sni-table-255": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
+    "sni-table-upper-dot": ("nse-tls-sni-rustls-names", None, {"sni": "LocalHost"}),
+    # Alerts rustls cannot send from a verifier (7.94: 50 and 80).
+    "fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
+    "fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
+    # rustls goes on without renegotiation_info.
+    "fake-noreneg": ("nse-tls-no-reneg-info-accepted", None, "client ClientKeyExchange"),
+    # 7.94 aborts (assert) or quits (fatal); the port raises in the script,
+    # before it connects.
+    "udp-reconnect": ("nse-reconnect-ssl-udp-abort", _SCRIPT_ERROR, None),
+    "sni-table-empty": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
+    "sni-table-256": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
+}
+
+
+def pinned_server(golden_server, pserver):
+    """The SERVER a pin expects: the golden's, replaced or edited."""
+    if pserver is None:
+        return golden_server
+    if isinstance(pserver, str):
+        return pserver
+    # A value may hold spaces (`sni=bad name x`): split before each key.
+    fields = [f.split("=", 1) for f in re.split(r" (?=[a-z]+=)", golden_server)]
+    assert set(pserver) <= {k for k, _ in fields}, pserver
+    return " ".join("%s=%s" % (k, pserver.get(k, v)) for k, v in fields)
+
+
+def port_cli(nmaprs, port, mode, extra, log, more=()):
+    sargs = "mode=%s" % mode + ("," + extra if extra else "")
+    cmd = [nmaprs, "-Pn", "-sT", "-n", "-p", str(port), "127.0.0.1", "--datadir", REPO,
+           "--script", PROBE, "--script-args", sargs] + list(more)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        return "fail nmap-timeout"
+    log.write(" ".join(cmd) + "\n" + r.stdout + r.stderr)
+    m = re.search(r"s0probe: R: (.*)", r.stdout)
+    if m:
+        return m.group(1).strip()
+    state = re.search(r"^%d/tcp\s+(\S+)" % port, r.stdout, re.M)
+    st = state.group(1) if state else "?"
+    return "fail closed" if st == "closed" else "fail no-result port=%s" % st
+
+
+def port_probe(probe, port, mode, extra, log):
+    sargs = "mode=%s" % mode + ("," + extra if extra else "")
+    cmd = [probe, str(port), sargs]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        return "fail probe-timeout"
+    log.write(" ".join(cmd) + "\n" + r.stdout + r.stderr)
+    m = re.search(r"R: (.*)", r.stdout)
+    return m.group(1).strip() if m else "fail probe rc=%d" % r.returncode
+
+
+def serve_once(name, kind, args, port, badserver, logdir, tag, client):
+    """Start the fixture's server, run `client()`, stop it; (result, server)."""
+    if listening(port):
+        raise SystemExit("port %d (%s) is in use: free it and re-run" % (port, name))
+    out_p = os.path.join(logdir, "%s.%s.server.out" % (name, tag))
+    err_p = os.path.join(logdir, "%s.%s.server.err" % (name, tag))
+    proc = None
+    with open(out_p, "w") as out, open(err_p, "w") as err:
+        try:
+            if kind != "none":
+                cmd = server_cmd(kind, args, port, badserver)
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
+                if not wait_port(port, proc):
+                    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+            result = client()
+            time.sleep(0.3)
+        finally:
+            stop(proc)
+    with open(out_p, errors="replace") as fh:
+        out_text = fh.read()
+    with open(err_p, errors="replace") as fh:
+        err_text = fh.read()
+    return result, masked(name, observe(kind, out_text, err_text))
+
+
+def check_port(golden, probe, nmaprs):
+    want = read_rows(golden)
+    badserver = find_badserver()
+    bad = 0
+    seen_pins = set()
+    keep = os.environ.get("M65_TLS_LOGS")
+    tmp = None if keep else tempfile.TemporaryDirectory(prefix="m65-tls-port-")
+    logdir = keep or tmp.name
+    os.makedirs(logdir, exist_ok=True)
+    counts = {"agree": 0, "pinned": 0, "skipped": 0}
+    try:
+        for idx, (name, kind, args, mode, extra, tags) in enumerate(FIXTURES, 1):
+            g = want.get(name)
+            if g is None:
+                print("%s: not in the golden" % name)
+                bad += 1
+                continue
+            if not compared(g):
+                counts["skipped"] += 1
+                continue
+            if kind == "bad13" and badserver is None:
+                print("%s: needs the badserver binary (BADSERVER)" % name)
+                bad += 1
+                continue
+            port = BASE_PORT + idx
+            with open(os.path.join(logdir, name + ".port.log"), "w") as log:
+                result, server = serve_once(
+                    name, kind, args, port, badserver, logdir, "cli",
+                    lambda: port_cli(nmaprs, port, mode, extra, log, NMAP_ARGS.get(name, ())))
+                if result == "ok leaf=none err=nil" and g[2].startswith("ok leaf="):
+                    result, _ = serve_once(
+                        name, kind, args, port, badserver, logdir, "probe",
+                        lambda: port_probe(probe, port, mode, extra, log))
+            pin = PORT_PINS.get(name)
+            if pin is None:
+                if (result, server) == (g[2], g[3]):
+                    counts["agree"] += 1
+                    verdict = "agree"
+                else:
+                    bad += 1
+                    verdict = "DIFFERS\n  7.94:  %s | %s\n  port:  %s | %s" % (g[2], g[3], result, server)
+            else:
+                seen_pins.add(name)
+                ledger, presult, pserver = pin
+                expect = (presult if presult is not None else g[2],
+                          pinned_server(g[3], pserver))
+                if expect == (g[2], g[3]):
+                    bad += 1
+                    verdict = "STALE PIN %s: the pin equals 7.94" % ledger
+                elif (result, server) == expect:
+                    counts["pinned"] += 1
+                    verdict = "pinned %s" % ledger
+                else:
+                    bad += 1
+                    verdict = "DIFFERS from pin %s\n  pin:   %s | %s\n  port:  %s | %s" % (
+                        ledger, expect[0], expect[1], result, server)
+            print("%-28s %s" % (name, verdict), flush=True)
+    finally:
+        if tmp is not None:
+            tmp.cleanup()
+    for name in PORT_PINS:
+        if name not in seen_pins and name in want and compared(want[name]):
+            print("%s: pinned but not run" % name)
+            bad += 1
+        if name not in want:
+            print("%s: pinned but not a fixture" % name)
+            bad += 1
+    print("gen_m65_tls --check: %d agree, %d pinned, %d skipped, %d bad"
+          % (counts["agree"], counts["pinned"], counts["skipped"], bad))
+    return bad
+
+
 def main():
     argv = sys.argv[1:]
     if len(argv) == 2 and argv[0] == "--check-header":
@@ -623,13 +897,13 @@ def main():
             sys.exit(1)
         print("header matches the golden's environment")
         sys.exit(0)
-    if len(argv) == 4 and argv[0] == "--check" and argv[2] == "--client":
+    if (len(argv) == 6 and argv[0] == "--check" and argv[2] == "--client"
+            and argv[4] == "--nmap-rs"):
         if compare_header(argv[1]):
             print("header mismatch: the golden was not made in this environment; "
                   "nothing else is compared")
             sys.exit(1)
-        print("step f1 adds the port's side")
-        sys.exit(2)
+        sys.exit(1 if check_port(argv[1], os.path.abspath(argv[3]), os.path.abspath(argv[5])) else 0)
     twice = True
     carry = None
     rest = []

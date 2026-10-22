@@ -317,15 +317,18 @@ NSOCK_SOCKET.get_info = net.get_info;
 NSOCK_SOCKET.set_timeout = net.set_timeout;
 NSOCK_SOCKET.bind = net.bind;
 
--- What an nmap built without OpenSSL answers.
+-- reconnect_ssl: a handshake over the connection. The socket belongs to the
+-- thread until it completes, and may then be used by another (the C clears
+-- nu->thread after a CONNECT_SSL event, as after a connect).
 function NSOCK_SOCKET.reconnect_ssl (self)
-  net.check(self, true);
-  return false, "sorry, you don't have OpenSSL";
+  local op = net.reconnect_ssl(self);
+  claim(self);
+  local r = pack(wait(op));
+  owner[self] = nil;
+  return unpack(r, 1, r.n);
 end
 
-function NSOCK_SOCKET.get_ssl_certificate (self)
-  error("SSL is not available", 2);
-end
+NSOCK_SOCKET.get_ssl_certificate = net.get_ssl_certificate;
 
 -- Packet capture is not available to scripts yet (nse-no-pcap-sockets).
 function NSOCK_SOCKET.pcap_open (self, device, snaplen, promisc, bpf)

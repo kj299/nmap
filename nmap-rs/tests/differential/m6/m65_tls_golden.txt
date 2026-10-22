@@ -33,7 +33,7 @@ tls12-sig-pss-sha256	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc332
 tls12-sig-pss-sha512	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha512 alerts=- error=-
 tls12-sig-pkcs1-sha256	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pkcs1_sha256 alerts=- error=-
 tls12-sig-pkcs1-sha384	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pkcs1_sha384 alerts=- error=-
-tls12-sig-pkcs1-sha1	-	fail ERROR	hello=1 sni=- serverhello=none alerts=- error=tls1_set_server_sigalgs:no_shared_signature_algorithms
+tls12-sig-pkcs1-sha1	-	fail ERROR	hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) error=tls1_set_server_sigalgs:no_shared_signature_algorithms
 tls13-aes128-x25519	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
 tls13-aes256-p256	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=2 sni=-,- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=secp256r1 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
 tls13-chacha-p384	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=2 sni=-,- version=TLSv1.3 suite=TLS_CHACHA20_POLY1305_SHA256 group=secp384r1 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
@@ -53,15 +53,15 @@ starttls-modern	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f0
 rsa512	-	ok leaf=9d8d41ed54343f4801baddeac5052af57e5e2cd9eb4e0114715f5eb352e90226 len=425 cn=m65-rsa512	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pkcs1_sha256 alerts=- error=-
 rsa2048-md5cert	-	ok leaf=c6ac91a231c36200a1a1b81e59e63e6eecd404120e76e99554cc3ac10820f0f3 len=819 cn=m65-rsamd5	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
 rsa-sha1-signed-cert	-	ok leaf=7db0a7fbd8a80d6e5252d1e0746db0308cc0e42a04af295dd6ea38d2465f64c3 len=821 cn=m65-rsasha1	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
-secp256k1-cert	-	fail ERROR	hello=1 sni=- serverhello=none alerts=- error=tls_post_process_client_hello:no_shared_cipher
+secp256k1-cert	-	fail ERROR	hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) error=tls_post_process_client_hello:no_shared_cipher
 dsa-dhe	-	ok leaf=1d852d4a63f2e7bbedbea0db7cb9461923d5fca4ed0d7007a7ccbcae134a2aba len=1166 cn=m65-dsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_DSS_WITH_AES_128_GCM_SHA256 group=DHE sigalg=dsa_sha224 alerts=- error=-
-chain-over64k	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
-chain-over100k	-	fail ERROR	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=- sigalg=- alerts=- error=-
-chain13-over64k	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+chain-over64k	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=* sigalg=* alerts=- error=-
+chain-over100k	-	fail ERROR	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=* sigalg=* alerts=- error=-
+chain13-over64k	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=* alerts=- error=-
 sni-ip-string	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=127.0.0.1 version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
 sni-name	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=localhost version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
-tls10-only	-	fail ERROR	hello=1 sni=- serverhello=none alerts=- error=tls_early_post_process_client_hello:unsupported_protocol
-tls11-only	-	fail ERROR	hello=1 sni=- serverhello=none alerts=- error=tls_early_post_process_client_hello:unsupported_protocol
+tls10-only	-	fail ERROR	hello=1 sni=- serverhello=none alerts=sent:protocol_version(70) error=tls_early_post_process_client_hello:unsupported_protocol
+tls11-only	-	fail ERROR	hello=1 sni=- serverhello=none alerts=sent:protocol_version(70) error=tls_early_post_process_client_hello:unsupported_protocol
 tls12-rsa-kx-gcm	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_RSA_WITH_AES_128_GCM_SHA256 group=- sigalg=- alerts=- error=-
 tls12-ecdhe-cbc	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
 tls12-dhe2048	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 group=DHE sigalg=rsa_pss_rsae_sha256 alerts=- error=-
@@ -77,5 +77,30 @@ fake-dh-cert	-	fail ERROR	client alert 47
 fake-unknownoid-cert	-	fail ERROR	client alert 80
 bad13-control	needs-badserver	ok leaf=7096d50e4a3296294d4c76d37b3c35e027e3fddfd3e00578146327b68e572e80 len=423 cn=m65-ecp256	handshake completed
 bad13-corrupt-certverify	needs-badserver	fail ERROR	client: received fatal alert: DecryptError
-silent-server	-	fail TIMEOUT	-
+silent-server	-	fail TIMEOUT	client closed | client closed
 connection-refused	-	fail closed	-
+io-abrupt-recv	-	io first=true nil(EOF)fast nil(ERROR)fast nil(ERROR)fast	done abrupt
+io-abrupt-bytes	-	io first=true nil(EOF)fast nil(ERROR)fast nil(ERROR)fast	done abrupt
+io-abrupt-data-recv	-	io first=true ok(tail\x0a)fast nil(EOF)fast nil(ERROR)fast	done abrupt+data
+io-abrupt-data-bytes	-	io first=true ok(tail\x0a)fast nil(ERROR)fast nil(ERROR)fast	done abrupt+data
+io-notify-recv	-	io first=true nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	done notify
+io-notify-bytes	-	io first=true nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	done notify
+io-notify-data-recv	-	io first=true ok(tail\x0a)fast nil(EOF)fast nil(TIMEOUT)slow	done notify+data
+io-notify-data-bytes	-	io first=true ok(tail\x0a)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	done notify+data
+io-notifyopen-recv	-	io first=true nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	none
+io-notifyopen-bytes	-	io first=true nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	none
+io-notifyopen-data-recv	-	io first=true ok(tail\x0a)fast nil(EOF)fast nil(TIMEOUT)slow	none
+io-notifyopen-data-bytes	-	io first=true ok(tail\x0a)fast nil(TIMEOUT)slow nil(TIMEOUT)slow	none
+contract	-	contract new:false,bad argument #1 to '?' (not a SSL socket) | tcp:false,bad argument #1 to '?' (not a SSL socket) | arg:false,bad argument #1 to '?' (nsock expected, got number) | closedrecon:false,socket must be connected | ssl:nil,ERROR | sslcert:true,nil | closedcert:false,bad argument #1 to '?' (not a SSL socket)	none
+udp-ssl	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=127.0.0.1 version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+udp-reconnect	-	fail no-result port=?	hello=0 sni=- serverhello=none alerts=- error=-
+sni-table-none	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+sni-table-name	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=localhost version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+sni-table-badname	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=bad name x version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+sni-table-upper-dot	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=LocalHost. version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+sni-table-255	-	ok leaf=40da55d5076a94a60e7801b9412e30743251ecf8d7d3cc3321b7f09cddbc2009 len=821 cn=m65-rsa2048	hello=1 sni=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+sni-table-empty	-	fail no-result port=?	hello=0 sni=- serverhello=none alerts=- error=ssl3_read_n:unexpected_eof_while_reading
+sni-table-256	-	fail no-result port=?	hello=0 sni=- serverhello=none alerts=- error=ssl3_read_n:unexpected_eof_while_reading
+starttls-silent	-	fail TIMEOUT	tls silent
+silent-closemid	-	closed	client closed | client closed
+silent-killed	-	fail no-result port=open	client closed | client closed

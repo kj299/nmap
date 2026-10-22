@@ -174,7 +174,11 @@ fuzz_target!(|data: &[u8]| {
             let s = a.add(&b).expect("under the cap");
             check_forms(&s);
             if let (Some(p), Some(q)) = (sa, sb) {
-                assert_eq!(small(&s), Some(p + q));
+                // Two 64-bit magnitudes can sum to 65 bits, which `small`
+                // does not model (a CI run found 2^64 - 1 + 12).
+                let sum = p + q;
+                let want = (sum.unsigned_abs() >> 64 == 0).then_some(sum);
+                assert_eq!(small(&s), want);
             }
         }
         1 => {

@@ -236,13 +236,16 @@ FIXTURES = [
     ("silent-killed", "silent", "", "host", "timeout=60000", ()),
 ]
 
-# SERVER fields that timing decides, written `*` for both programs: on
-# chain-over100k the server writes its ServerKeyExchange after a 100 KiB
-# Certificate, and whether the trace shows it (its group and signature
-# algorithm) before the client's abort reaches the server depends on the
-# scheduling (the port showed both in CI and locally on one commit).
+# SERVER fields that timing decides, written `*` for both programs: on the
+# long-chain rows the server writes its ServerKeyExchange (TLS 1.2) or
+# CertificateVerify (TLS 1.3) after a Certificate of 70 or 100 KiB, and
+# whether the trace shows it (its group and signature algorithm) before a
+# client that refuses the chain aborts depends on the scheduling (the port
+# showed both, in CI and locally, on chain-over100k and chain-over64k).
 TIMING_FIELDS = {
+    "chain-over64k": ("group", "sigalg"),
     "chain-over100k": ("group", "sigalg"),
+    "chain13-over64k": ("sigalg",),
 }
 
 

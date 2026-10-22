@@ -6390,11 +6390,12 @@ Found on the way:
   `s_server` with SIGTERM while its trace sat in stdio's block buffer, so
   some rows recorded too little (a ClientHello, a sent alert). The
   generator now runs it line-buffered (`stdbuf -oL`) and 7.94's golden
-  gained what was missing: the alerts on four rows. One field pair stays
-  timing: on `chain-over100k` the server's ServerKeyExchange follows a
-  100 KiB Certificate, and whether its trace precedes the client's abort
-  varies (the port showed both on one commit), so its `group` and `sigalg`
-  are written `*` for both programs (`TIMING_FIELDS`).
+  gained what was missing: the alerts on four rows. Some fields stay
+  timing: on the long-chain rows the server's ServerKeyExchange or
+  CertificateVerify follows a Certificate of 70 or 100 KiB, and whether its
+  trace precedes a refusing client's abort varies (the port showed both on
+  one commit, in CI and locally), so their `group` and `sigalg` are written
+  `*` for both programs (`TIMING_FIELDS`).
 
 ### Security / robustness (divergence from the C, deliberately)
 

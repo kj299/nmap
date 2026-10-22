@@ -39,12 +39,13 @@ pub fn client_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
-            let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider::provider()))
-                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-                .unwrap_or_else(|_| unreachable!("the provider carries TLS 1.2 and 1.3 suites"))
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(verifier::NmapVerifier))
-                .with_no_client_auth();
+            let mut cfg =
+                rustls::ClientConfig::builder_with_provider(Arc::new(provider::provider()))
+                    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                    .unwrap_or_else(|_| unreachable!("the provider carries TLS 1.2 and 1.3 suites"))
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(verifier::NmapVerifier))
+                    .with_no_client_auth();
             cfg.resumption = rustls::client::Resumption::disabled();
             cfg.enable_sni = true;
             Arc::new(cfg)

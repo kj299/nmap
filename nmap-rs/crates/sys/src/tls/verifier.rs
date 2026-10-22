@@ -32,7 +32,9 @@ fn entry(der: &[u8]) -> Result<nmap_core::nse::openssl::x509::Cert, Error> {
         None => Err(Error::InvalidCertificate(CertificateError::BadEncoding)),
         // OpenSSL's alert here is 50, which no certificate error of rustls
         // sends (`nse-tls-alert-numbers`); 42, as for an undecodable one.
-        Some((_, used)) if used != der.len() => Err(Error::InvalidCertificate(CertificateError::BadEncoding)),
+        Some((_, used)) if used != der.len() => {
+            Err(Error::InvalidCertificate(CertificateError::BadEncoding))
+        }
         Some((c, _)) => Ok(c),
     }
 }
@@ -62,7 +64,9 @@ fn key_of(cert: &nmap_core::nse::openssl::x509::Cert) -> Result<PeerKey, Error> 
         KeyRefused::Missing => refused("unable to find public key parameters"),
         // OpenSSL's "unknown certificate type" is alert 47, which rustls
         // sends for a peer that misbehaved.
-        KeyRefused::Type => rustls::Error::PeerMisbehaved(PeerMisbehaved::SignedKxWithWrongAlgorithm),
+        KeyRefused::Type => {
+            rustls::Error::PeerMisbehaved(PeerMisbehaved::SignedKxWithWrongAlgorithm)
+        }
     })
 }
 

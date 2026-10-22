@@ -42,15 +42,23 @@ fn status(c: &Completion) -> String {
 }
 
 /// `smtp_expect`: lines until one with `code` and a space.
-fn smtp_expect(net: &mut TokioNet, op: &mut OpId, t: Option<Duration>, code: &str) -> Result<(), String> {
+fn smtp_expect(
+    net: &mut TokioNet,
+    op: &mut OpId,
+    t: Option<Duration>,
+    code: &str,
+) -> Result<(), String> {
     loop {
-        *op += 1;
+        *op = op.wrapping_add(1);
         net.read(*op, SOCK, ReadMode::Lines(1), t);
         let data = match wait(net, *op) {
             Completion::Data(d) => d,
             c => return Err(format!("smtp: {}", status(&c))),
         };
-        for l in data.split(|&b| b == b'\r' || b == b'\n').filter(|l| !l.is_empty()) {
+        for l in data
+            .split(|&b| b == b'\r' || b == b'\n')
+            .filter(|l| !l.is_empty())
+        {
             if l.starts_with(code.as_bytes()) && l.get(3) == Some(&b' ') {
                 return Ok(());
             }
@@ -62,7 +70,7 @@ fn smtp_expect(net: &mut TokioNet, op: &mut OpId, t: Option<Duration>, code: &st
 }
 
 fn send(net: &mut TokioNet, op: &mut OpId, t: Option<Duration>, data: &[u8]) {
-    *op += 1;
+    *op = op.wrapping_add(1);
     net.write(*op, SOCK, data.to_vec(), t);
     wait(net, *op);
 }
@@ -96,7 +104,9 @@ fn main() {
         .unwrap_or_default();
     let mode = args.get("mode").map_or("host", String::as_str);
     let t = Some(Duration::from_millis(
-        args.get("timeout").and_then(|v| v.parse().ok()).unwrap_or(5000),
+        args.get("timeout")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000),
     ));
     let mut net = TokioNet::new().expect("tokio");
     let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -106,7 +116,10 @@ fn main() {
     let hostname: Option<Vec<u8>> = match mode {
         "ipstr" => Some(b"127.0.0.1".to_vec()),
         "name" => {
-            let n = args.get("name").cloned().unwrap_or_else(|| "localhost".into());
+            let n = args
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| "localhost".into());
             let ip = net
                 .resolve(&n, Family::Inet)
                 .ok()
@@ -137,7 +150,11 @@ fn main() {
             println!("R: fail connect {}", status(&c));
             return;
         }
-        for (send_first, code) in [(None, "220"), (Some(&b"EHLO probe\r\n"[..]), "250"), (Some(b"STARTTLS\r\n"), "220")] {
+        for (send_first, code) in [
+            (None, "220"),
+            (Some(&b"EHLO probe\r\n"[..]), "250"),
+            (Some(b"STARTTLS\r\n"), "220"),
+        ] {
             if let Some(d) = send_first {
                 send(&mut net, &mut op, t, d);
             }
@@ -146,7 +163,7 @@ fn main() {
                 return;
             }
         }
-        op += 1;
+        op = op.wrapping_add(1);
         net.reconnect_ssl(op, SOCK, t, sni);
         wait(&mut net, op)
     } else {

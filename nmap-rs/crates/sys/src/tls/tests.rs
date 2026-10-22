@@ -4,6 +4,9 @@
 //! over the same provider. The fixture gate (`gen_m65_tls.py --check`)
 //! holds the client to nmap 7.94; these hold each rule to itself, and the
 //! cheap ones run under Miri.
+// Offsets into fixed fixtures and the client's own ClientHello: an overflow
+// would only fail the test.
+#![allow(clippy::arithmetic_side_effects)]
 
 use super::*;
 use nmap_core::nse::openssl::x509::d2i_x509;
@@ -79,7 +82,10 @@ fn a_certificate_entry_must_be_exactly_a_certificate() {
     let mut trailing = cert("rsa2048.der");
     trailing.push(0);
     let e = verify_leaf(&trailing, &[]).expect_err("a trailing byte is refused");
-    assert_eq!(e, rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding));
+    assert_eq!(
+        e,
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+    );
     // ... in an intermediate too.
     assert!(verify_leaf(&cert("rsa2048.der"), &[trailing.clone()]).is_err());
     // An undecodable entry.
@@ -97,14 +103,21 @@ fn keys_tls_refuses_are_refused() {
         assert!(matches!(e, rustls::Error::PeerMisbehaved(_)), "{c}: {e}");
     }
     let e = verify_leaf(&cert("unknownoid.der"), &[]).expect_err("no key");
-    assert!(e.to_string().contains("unable to find public key parameters"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("unable to find public key parameters"),
+        "{e}"
+    );
 }
 
 #[test]
 fn peer_keys_are_typed_as_openssl_types_them() {
     let key = |c: &str| PeerKey::from_cert(&d2i_x509(&cert(c)).expect("decodes"));
     assert!(matches!(key("rsa2048.der"), Ok(PeerKey::Rsa(..))));
-    assert!(matches!(key("ecp256.der"), Ok(PeerKey::Ec(sigs::Curve::P256, _))));
+    assert!(matches!(
+        key("ecp256.der"),
+        Ok(PeerKey::Ec(sigs::Curve::P256, _))
+    ));
     assert!(matches!(key("ed25519.der"), Ok(PeerKey::Ed25519(_))));
     assert_eq!(key("x25519.der"), Err(sigs::KeyRefused::Type));
 }
@@ -134,7 +147,14 @@ fn signatures_verify_as_openssl_verifies_them() {
     let mut n = 0;
     for line in vectors.lines().filter(|l| !l.starts_with('#')) {
         let f: Vec<&str> = line.split(' ').collect();
-        let (name, sch, der, msg, sig, expect) = (f[0], scheme(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4]), f[5]);
+        let (name, sch, der, msg, sig, expect) = (
+            f[0],
+            scheme(f[1]),
+            unhex(f[2]),
+            unhex(f[3]),
+            unhex(f[4]),
+            f[5],
+        );
         let key = PeerKey::from_cert(&d2i_x509(&der).expect("decodes")).expect("a TLS key");
         let v12 = verify(sch, &key, &msg, &sig, false).is_ok();
         let v13 = verify(sch, &key, &msg, &sig, true).is_ok();
@@ -150,10 +170,16 @@ fn signatures_verify_as_openssl_verifies_them() {
             let mut s2 = sig.clone();
             let last = s2.len() - 1;
             s2[last] ^= 1;
-            assert!(verify(sch, &key, &msg, &s2, false).is_err(), "{name}: signature bit");
+            assert!(
+                verify(sch, &key, &msg, &s2, false).is_err(),
+                "{name}: signature bit"
+            );
             let mut m2 = msg.clone();
             m2[0] ^= 1;
-            assert!(verify(sch, &key, &m2, &sig, false).is_err(), "{name}: message bit");
+            assert!(
+                verify(sch, &key, &m2, &sig, false).is_err(),
+                "{name}: message bit"
+            );
         }
         n += 1;
     }
@@ -181,14 +207,62 @@ fn a_key_is_held_to_its_family() {
     // An RSA signature presented under an ECDSA key, and the reverse: the
     // key does not fit (alert 47), whatever the signature.
     let mismatch = Err(sigs::SigError::Mismatch);
-    assert_eq!(verify(SignatureScheme::RSA_PKCS1_SHA256, &ec_key, &unhex(&rsa[3]), &unhex(&rsa[4]), false), mismatch);
-    assert_eq!(verify(SignatureScheme::ECDSA_NISTP256_SHA256, &rsa_key, &unhex(&ec[3]), &unhex(&ec[4]), false), mismatch);
-    assert_eq!(verify(SignatureScheme::ED25519, &rsa_key, b"m", &[0; 64], false), mismatch);
-    assert_eq!(verify(SignatureScheme::RSA_PKCS1_SHA256, &PeerKey::Unverifiable, b"m", &[0; 256], false), mismatch);
+    assert_eq!(
+        verify(
+            SignatureScheme::RSA_PKCS1_SHA256,
+            &ec_key,
+            &unhex(&rsa[3]),
+            &unhex(&rsa[4]),
+            false
+        ),
+        mismatch
+    );
+    assert_eq!(
+        verify(
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            &rsa_key,
+            &unhex(&ec[3]),
+            &unhex(&ec[4]),
+            false
+        ),
+        mismatch
+    );
+    assert_eq!(
+        verify(SignatureScheme::ED25519, &rsa_key, b"m", &[0; 64], false),
+        mismatch
+    );
+    assert_eq!(
+        verify(
+            SignatureScheme::RSA_PKCS1_SHA256,
+            &PeerKey::Unverifiable,
+            b"m",
+            &[0; 256],
+            false
+        ),
+        mismatch
+    );
     // A P-256 key under a P-384 scheme: TLS 1.3 binds the curve.
-    assert_eq!(verify(SignatureScheme::ECDSA_NISTP384_SHA384, &ec_key, &unhex(&ec[3]), &unhex(&ec[4]), true), mismatch);
+    assert_eq!(
+        verify(
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            &ec_key,
+            &unhex(&ec[3]),
+            &unhex(&ec[4]),
+            true
+        ),
+        mismatch
+    );
     // A key that fits and a signature that does not.
-    assert_eq!(verify(SignatureScheme::RSA_PKCS1_SHA256, &rsa_key, b"other", &unhex(&rsa[4]), false), Err(sigs::SigError::Bad));
+    assert_eq!(
+        verify(
+            SignatureScheme::RSA_PKCS1_SHA256,
+            &rsa_key,
+            b"other",
+            &unhex(&rsa[4]),
+            false
+        ),
+        Err(sigs::SigError::Bad)
+    );
 }
 
 // ---- the server name -------------------------------------------------------------
@@ -212,8 +286,11 @@ fn the_server_name_is_sent_where_rustls_can_send_it() {
 
 /// The first flight: the ClientHello record.
 fn client_hello() -> Vec<u8> {
-    let mut c = ClientConnection::new(client_config(), ServerName::try_from("x.test").expect("name"))
-        .expect("connection");
+    let mut c = ClientConnection::new(
+        client_config(),
+        ServerName::try_from("x.test").expect("name"),
+    )
+    .expect("connection");
     let mut out = Vec::new();
     c.write_tls(&mut out).expect("hello");
     out
@@ -343,8 +420,11 @@ fn server(version: &'static rustls::SupportedProtocolVersion, corrupt: bool) -> 
 
 /// Shuttle records between the two until the client is done or fails.
 fn handshake(mut s: ServerConnection) -> Result<ClientConnection, rustls::Error> {
-    let mut c = ClientConnection::new(client_config(), ServerName::try_from("x.test").expect("name"))
-        .expect("client");
+    let mut c = ClientConnection::new(
+        client_config(),
+        ServerName::try_from("x.test").expect("name"),
+    )
+    .expect("client");
     for _ in 0..20 {
         let mut buf = Vec::new();
         while c.wants_write() {
@@ -399,19 +479,30 @@ fn a_bad_handshake_signature_fails_the_handshake() {
 
 #[test]
 fn a_record_shorter_than_its_tag_is_a_decrypt_error() {
-    use rustls::crypto::cipher::{AeadKey, InboundOpaqueMessage, Iv, Tls12AeadAlgorithm, Tls13AeadAlgorithm};
+    use rustls::crypto::cipher::{
+        AeadKey, InboundOpaqueMessage, Iv, Tls12AeadAlgorithm, Tls13AeadAlgorithm,
+    };
     use rustls::{ContentType, ProtocolVersion};
     let key = AeadKey::from([7u8; 32]);
-    let mut d13 = aead::Aead13::<chacha20poly1305::ChaCha20Poly1305>::new()
-        .decrypter(key, Iv::new([0; 12]));
-    let mut d12 = aead::Gcm12::<aes_gcm::Aes256Gcm>::new().decrypter(AeadKey::from([7u8; 32]), &[0; 4]);
+    let mut d13 =
+        aead::Aead13::<chacha20poly1305::ChaCha20Poly1305>::new().decrypter(key, Iv::new([0; 12]));
+    let mut d12 =
+        aead::Gcm12::<aes_gcm::Aes256Gcm>::new().decrypter(AeadKey::from([7u8; 32]), &[0; 4]);
     for n in [0usize, 1, 15, 23] {
         let mut p = vec![0u8; n];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut p);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut p,
+        );
         let r13 = d13.decrypt(m, 0);
         assert!(r13.is_err(), "TLS 1.3, {n} bytes");
         let mut p = vec![0u8; n];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut p);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut p,
+        );
         assert!(d12.decrypt(m, 0).is_err(), "TLS 1.2 GCM, {n} bytes");
     }
 }

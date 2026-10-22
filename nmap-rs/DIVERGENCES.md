@@ -6357,7 +6357,27 @@ signatures as known answers, `testdata/vectors.txt`; fresh key shares; the
 ClientHello's suite order; whole handshakes against a rustls server over
 the same provider; record lengths) and `crates/sys/tests/nse_tls.rs` (every
 rule above through the engine, in each `cargo test`, `ftp.auth` and
-`comm.tryssl` included). FUZZ_F1 SABOTAGE_F1
+`comm.tryssl` included). **Fuzz:**
+`nse_tls_server_flight` (arbitrary server bytes after the shipped client's
+ClientHello: key shares, TLS 1.2 Certificate and ServerKeyExchange through
+the verifier and the signature code, HelloRetryRequest, alerts; seeded with
+the flights of 20 fixture servers) and `nse_tls_verifier` (the verifier and
+signature checks on arbitrary certificates, schemes and signatures; an
+accepted entry is exactly one certificate; seeded with every known answer),
+4,952,396 and 3,921,911 runs clean (20 minutes each). **Sabotage**, 8 port
+variants, each caught by a named test: SNI dropped
+(`the_server_name_is_sent_where_rustls_can_send_it`), a strict verifier
+refusing self-signed leaves (`any_decodable_certificate_with_a_tls_key_is_accepted`
+and eight more), signature checks skipped
+(`a_bad_handshake_signature_fails_the_handshake`), a handshake failure
+mapped to `EOF` and one reported as success
+(`get_ssl_certificate_raises_on_a_socket_that_is_not_ssl`), no raise on a
+plain socket (`ftp_auth_upgrades_with_auth_tls`), a failed SSL connect that
+raises, so `comm.tryssl` cannot fall back
+(`tryssl_falls_back_to_plain_text_when_the_handshake_fails`), and a fixed
+ephemeral key (`every_handshake_draws_a_fresh_key_share_and_random`). The
+first `tryssl` variant, a failure reported as success, still fell back
+(`opencon`'s first read fails), so the raising variant was added.
 
 Found on the way:
 - **nmap's connect scan resets its probe connections** (`SO_LINGER` 0,
@@ -6384,6 +6404,22 @@ Found on the way:
       routines::ssl3 ext invalid servername`), before connecting, from
       `connect(..., "ssl")` and from `reconnect_ssl` alike. A 255-byte name
       is taken. Pinned: `sni-table-empty`, `sni-table-256`.
+- [x] `nse-tls-dependency-unsafe` (`sys::tls`, D3) — the TLS client is
+      rustls with RustCrypto primitives, not hand-rolled crypto, as
+      `sigstore-ed25519-dependency` argued for Ed25519: AEADs, ECDH and
+      ECDSA have failure modes a differential from valid traffic never
+      reaches. The cost, measured on the locked versions: 34 crates enter
+      the build (`Cargo.lock` gains 47 entries; 13 are never built, below),
+      with 124 `unsafe` keywords outside comments in their `src/`
+      (`poly1305` 50, `chacha20` 23, `polyval` 23, `zeroize` 17,
+      `base16ct` 4, `crypto-bigint` 4, `rustls` 1, `rustls-pki-types` 1,
+      `universal-hash` 1; the rest, `rustls-webpki`, `x25519-dalek`,
+      `p256`/`p384`/`p521`, `ecdsa` and `elliptic-curve` among them, have
+      none). `sys::tls` itself is `forbid(unsafe_code)`. No C: `ring` and the
+      `windows-*` 0.52 crates it brings are in `Cargo.lock` only because
+      rustls names `ring` in its feature table; nothing turns it on, `cargo
+      tree -i ring` and `-i cc` print no tree, and `cargo deny` (which bans
+      both) passes. Licences: MIT, Apache-2.0, ISC.
 - [x] `nse-reconnect-ssl-udp-abort` — `reconnect_ssl` on a UDP socket
       reaches `assert(nsi->lastproto != IPPROTO_UDP)`
       (`nsock_connect.c:527`) and aborts 7.94 (measured). The port raises

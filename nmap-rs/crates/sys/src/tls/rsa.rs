@@ -130,7 +130,11 @@ impl RsaPublicKey {
     pub(crate) fn verify_pss(&self, hash: HashAlg, message: &[u8], sig: &[u8]) -> bool {
         let h_len = hash.len();
         let s_len = h_len;
-        let Some(em_bits) = self.bits.checked_sub(1).and_then(|b| usize::try_from(b).ok()) else {
+        let Some(em_bits) = self
+            .bits
+            .checked_sub(1)
+            .and_then(|b| usize::try_from(b).ok())
+        else {
             return false;
         };
         let em_len = em_bits.div_ceil(8);
@@ -162,7 +166,9 @@ impl RsaPublicKey {
         let h = &rest[..h_len];
         // 8·emLen − emBits leftmost bits of maskedDB must be zero.
         let top_bits = em_len.saturating_mul(8).saturating_sub(em_bits);
-        let top_mask: u8 = 0xff_u8.checked_shr(u32::try_from(top_bits).unwrap_or(8)).unwrap_or(0);
+        let top_mask: u8 = 0xff_u8
+            .checked_shr(u32::try_from(top_bits).unwrap_or(8))
+            .unwrap_or(0);
         if masked_db.first().is_some_and(|&b| b & !top_mask != 0) {
             return false;
         }

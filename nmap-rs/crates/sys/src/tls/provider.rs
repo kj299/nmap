@@ -172,7 +172,8 @@ pub(crate) static SECP256R1: kx::Secp256r1 = kx::Secp256r1;
 pub(crate) static SECP384R1: kx::Secp384r1 = kx::Secp384r1;
 pub(crate) static SECP521R1: kx::Secp521r1 = kx::Secp521r1;
 
-pub(crate) static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[&X25519, &SECP256R1, &SECP521R1, &SECP384R1];
+pub(crate) static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] =
+    &[&X25519, &SECP256R1, &SECP521R1, &SECP384R1];
 
 /// The provider's table for rustls's own WebPKI verifier, which this client
 /// never uses: its verifier ([`super::verifier::NmapVerifier`]) verifies

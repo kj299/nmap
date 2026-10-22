@@ -367,7 +367,14 @@ pub(crate) fn load_net<'gc>(
     }
     install(ctx, t, &lib, "is_open", "?", l_is_open);
     install(ctx, t, &lib, "reconnect_ssl", "?", l_reconnect_ssl);
-    install(ctx, t, &lib, "get_ssl_certificate", "?", l_get_ssl_certificate);
+    install(
+        ctx,
+        t,
+        &lib,
+        "get_ssl_certificate",
+        "?",
+        l_get_ssl_certificate,
+    );
     install(ctx, t, &lib, "release", "?", l_release);
     install(ctx, nmap, &lib, "resolve", "nmap.resolve", l_resolve);
     t.set_field(ctx, "max_parallelism", Value::Integer(max_parallelism));

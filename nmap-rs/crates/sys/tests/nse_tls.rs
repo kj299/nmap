@@ -31,7 +31,10 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::{CertifiedKey, Signer, SigningKey};
 use rustls::{ServerConfig, ServerConnection, SignatureAlgorithm, SignatureScheme};
 
-const CERTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/differential/m6/m65_tls/certs");
+const CERTS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/differential/m6/m65_tls/certs"
+);
 
 // ---- a TLS server over the client's own provider ----------------------------
 
@@ -72,13 +75,17 @@ impl ResolvesServerCert for Fixed {
 fn server_config() -> Arc<ServerConfig> {
     let hex = std::fs::read_to_string(format!("{CERTS}/ecp256.scalar")).expect("scalar");
     let hex = hex.trim();
-    let scalar: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+    let scalar: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).expect("hex"), 16).expect("hex"))
         .collect();
     let key = P256(p256::ecdsa::SigningKey::from_slice(&scalar).expect("P-256 scalar"));
     let der = std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate");
-    let ck = Arc::new(CertifiedKey::new(vec![CertificateDer::from(der)], Arc::new(key)));
+    let ck = Arc::new(CertifiedKey::new(
+        vec![CertificateDer::from(der)],
+        Arc::new(key),
+    ));
     Arc::new(
         ServerConfig::builder_with_provider(Arc::new(nmap_sys::tls::provider::provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -96,7 +103,10 @@ fn note(log: &Log, s: impl Into<String>) {
 }
 
 /// The handshake, as a server; the name the client sent, `-` for none.
-fn accept_tls(tcp: TcpStream, cfg: &Arc<ServerConfig>) -> Option<(rustls::StreamOwned<ServerConnection, TcpStream>, String)> {
+fn accept_tls(
+    tcp: TcpStream,
+    cfg: &Arc<ServerConfig>,
+) -> Option<(rustls::StreamOwned<ServerConnection, TcpStream>, String)> {
     let mut conn = ServerConnection::new(cfg.clone()).ok()?;
     let mut tcp = tcp;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).ok()?;
@@ -195,7 +205,13 @@ fn run(body: &str) -> String {
     let tmp = std::env::temp_dir().join(format!(
         "m65f1-{}-{}",
         std::process::id(),
-        body.len() ^ (body.as_bytes().iter().map(|&b| usize::from(b)).sum::<usize>() << 8)
+        body.len()
+            ^ (body
+                .as_bytes()
+                .iter()
+                .map(|&b| usize::from(b))
+                .sum::<usize>()
+                << 8)
     ));
     std::fs::create_dir_all(&tmp).expect("tmp");
     let script = tmp.join("t.nse");
@@ -223,7 +239,9 @@ fn run(body: &str) -> String {
         os: Rc::new(nse_host::os_env()),
         memory_limit: Some(256 << 20),
         engine: Default::default(),
-        net: Rc::new(RefCell::new(nmap_sys::nsenet::TokioNet::new().expect("tokio"))),
+        net: Rc::new(RefCell::new(
+            nmap_sys::nsenet::TokioNet::new().expect("tokio"),
+        )),
     })
     .expect("state");
     st.load_scripts(
@@ -246,7 +264,9 @@ fn run(body: &str) -> String {
 }
 
 fn wait_for(log: &Log, n: usize) -> Vec<String> {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("a deadline");
     loop {
         let l = log.lock().expect("log").clone();
         if l.len() >= n || Instant::now() > end {
@@ -286,7 +306,14 @@ fn the_server_name_is_the_targetname_where_rustls_can_send_it() {
     // sent (nse-tls-sni-rustls-names); a name is cut at its NUL (strdup).
     assert_eq!(
         seen,
-        ["sni=-", "sni=example.test", "sni=localhost", "sni=-", "sni=a.test", "sni=later.test"]
+        [
+            "sni=-",
+            "sni=example.test",
+            "sni=localhost",
+            "sni=-",
+            "sni=a.test",
+            "sni=later.test"
+        ]
     );
 }
 
@@ -321,7 +348,9 @@ fn a_name_openssl_refuses_is_a_lua_error_not_a_fatal_one() {
     // send (nse-tls-sni-rustls-names).
     let seen = wait_for(&log, 3);
     assert_eq!(
-        seen.iter().filter(|l| l.starts_with("sni=")).collect::<Vec<_>>(),
+        seen.iter()
+            .filter(|l| l.starts_with("sni="))
+            .collect::<Vec<_>>(),
         ["sni=-"],
         "{seen:?}"
     );
@@ -462,10 +491,26 @@ fn reads(port: u16, how: &str) -> String {
 fn the_end_of_a_connection_reads_as_7_94_reads_it() {
     // The m65_tls golden's io-* rows, measured on nmap 7.94.
     for (how, recv, bytes) in [
-        ("abrupt", "nil(EOF)fast nil(ERROR)fast nil(ERROR)fast", "nil(EOF)fast nil(ERROR)fast nil(ERROR)fast"),
-        ("abrupt+data", "ok(tail|)fast nil(EOF)fast nil(ERROR)fast", "ok(tail|)fast nil(ERROR)fast nil(ERROR)fast"),
-        ("notify", "nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow", "nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow"),
-        ("notify+data", "ok(tail|)fast nil(EOF)fast nil(TIMEOUT)slow", "ok(tail|)fast nil(TIMEOUT)slow nil(TIMEOUT)slow"),
+        (
+            "abrupt",
+            "nil(EOF)fast nil(ERROR)fast nil(ERROR)fast",
+            "nil(EOF)fast nil(ERROR)fast nil(ERROR)fast",
+        ),
+        (
+            "abrupt+data",
+            "ok(tail|)fast nil(EOF)fast nil(ERROR)fast",
+            "ok(tail|)fast nil(ERROR)fast nil(ERROR)fast",
+        ),
+        (
+            "notify",
+            "nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow",
+            "nil(EOF)fast nil(TIMEOUT)slow nil(TIMEOUT)slow",
+        ),
+        (
+            "notify+data",
+            "ok(tail|)fast nil(EOF)fast nil(TIMEOUT)slow",
+            "ok(tail|)fast nil(TIMEOUT)slow nil(TIMEOUT)slow",
+        ),
     ] {
         let port = ending_server(how);
         assert_eq!(reads(port, "recv"), recv, "{how}, receive");

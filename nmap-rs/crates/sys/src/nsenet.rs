@@ -241,7 +241,11 @@ async fn read_tls(s: Arc<TlsSock>, mode: ReadMode, t: Option<Duration>) -> Compl
                 }
                 ReadEvent::Closed { notify } => {
                     if let Ok(mut e) = s.ended.lock() {
-                        *e = Some(if notify { TlsEnd::Notify } else { TlsEnd::Abrupt });
+                        *e = Some(if notify {
+                            TlsEnd::Notify
+                        } else {
+                            TlsEnd::Abrupt
+                        });
                     }
                     return Some(NetStatus::Eof);
                 }
@@ -430,7 +434,9 @@ impl ScriptNet for TokioNet {
                     .await
                 }
                 Some(Sock::Udp(u)) => within(timeout, async { u.send(&data).await.is_ok() }).await,
-                Some(Sock::Tls(t)) => within(timeout, async { t.stream.write(&data).await.is_ok() }).await,
+                Some(Sock::Tls(t)) => {
+                    within(timeout, async { t.stream.write(&data).await.is_ok() }).await
+                }
                 Some(Sock::TlsDown(_)) | None => Some(false),
             };
             match sent {
@@ -483,7 +489,8 @@ impl ScriptNet for TokioNet {
             // A writable socket is so at once; a full one gets no
             // close_notify, as SSL_shutdown's one non-blocking write gives none.
             self.rt.block_on(async {
-                let _ = tokio::time::timeout(Duration::from_millis(50), t.stream.close_notify()).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(50), t.stream.close_notify()).await;
             });
         }
         let on: Vec<OpId> = self

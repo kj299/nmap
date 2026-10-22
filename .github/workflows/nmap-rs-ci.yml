@@ -210,13 +210,20 @@ jobs:
       # "ship no C").
       - run: cargo deny check
       # And no C compiler anywhere in the default build's graph, for any
-      # target: `cargo tree -i cc` must find no `cc` package at all.
+      # target: `cargo tree -i` must print no tree for `cc`, nor for `ring`.
+      # Since M6.5 step f1 both are in Cargo.lock without being in any graph:
+      # rustls names `ring` in its feature table (`ring = ["dep:ring", ...]`),
+      # which nothing turns on, and cargo locks it anyway; cargo tree then
+      # says "nothing to print" where it said "did not match any packages".
+      # Either is a pass; a printed tree fails.
       - run: |
-          if out=$(cargo tree -i cc -e all --target all 2>&1); then
-            echo "$out"; echo "FAIL: the default build depends on cc (M6.5 §6)"; exit 1
-          fi
-          echo "$out" | grep -q "did not match any packages" || { echo "$out"; exit 1; }
-          echo "no cc in the default build"
+          for c in cc ring; do
+            out=$(cargo tree -i "$c" -e all --target all 2>&1) || true
+            if ! echo "$out" | grep -qE "did not match any packages|nothing to print"; then
+              echo "$out"; echo "FAIL: the default build depends on $c (M6.5 §6)"; exit 1
+            fi
+          done
+          echo "no cc and no ring in the default build"
 
   miri:
     name: miri (UB in unsafe)

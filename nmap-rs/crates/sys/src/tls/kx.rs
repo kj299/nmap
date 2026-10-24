@@ -62,7 +62,8 @@ macro_rules! nist_group {
         pub(crate) use $modname::$name;
         mod $modname {
             use super::*;
-            use $curve::elliptic_curve::sec1::ToEncodedPoint;
+            use $curve::elliptic_curve::sec1::ToSec1Point;
+            use $curve::elliptic_curve::Generate;
 
             #[derive(Debug)]
             pub(crate) struct $name;
@@ -70,12 +71,11 @@ macro_rules! nist_group {
             impl SupportedKxGroup for $name {
                 fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
                     source()?;
-                    let secret = $curve::ecdh::EphemeralSecret::random(&mut crate::tls::rand::Rng);
-                    let public = secret
-                        .public_key()
-                        .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec();
+                    let secret = $curve::ecdh::EphemeralSecret::try_generate_from_rng(
+                        &mut crate::tls::rand::Rng,
+                    )
+                    .map_err(|_| Error::from(GetRandomFailed))?;
+                    let public = secret.public_key().to_sec1_point(false).as_bytes().to_vec();
                     Ok(Box::new(Active { secret, public }))
                 }
                 fn name(&self) -> NamedGroup {

@@ -55,7 +55,7 @@ fn verify_leaf(der: &[u8], intermediates: &[Vec<u8>]) -> Result<(), rustls::Erro
         .iter()
         .map(|c| CertificateDer::from(c.as_slice()))
         .collect();
-    NmapVerifier
+    NmapVerifier::default()
         .verify_server_cert(
             &CertificateDer::from(der),
             &mids,
@@ -108,6 +108,65 @@ fn keys_tls_refuses_are_refused() {
             .contains("unable to find public key parameters"),
         "{e}"
     );
+}
+
+/// OpenSSL keeps the leaf as the peer's certificate once its checks pass
+/// (`tls_post_process_server_certificate`), before any signature is looked
+/// at, and `get_ssl_certificate` returns it after a handshake that fails
+/// later (measured: `cert-fake-badsig`, `cert-bad13-corrupt`). A TLS 1.2 key
+/// that does not fit the suite is refused before it is kept.
+#[test]
+fn the_leaf_is_kept_once_its_checks_pass() {
+    let v = NmapVerifier::default();
+    let name = ServerName::try_from("x.test").expect("name");
+    let at = |v: &NmapVerifier, der: &[u8]| {
+        v.verify_server_cert(
+            &CertificateDer::from(der),
+            &[],
+            &name,
+            &[],
+            UnixTime::since_unix_epoch(std::time::Duration::ZERO),
+        )
+        .map(|_| ())
+    };
+    let mut trailing = cert("ecp256.der");
+    trailing.push(0);
+    for refused in [trailing, cert("x25519.der"), cert("unknownoid.der")] {
+        assert!(at(&v, &refused).is_err());
+        assert_eq!(v.leaf.get(), None);
+    }
+    let ec = cert("ecp256.der");
+    let leaf = CertificateDer::from(ec.as_slice());
+    at(&v, &ec).expect("accepted");
+    assert_eq!(v.leaf.get().as_deref(), Some(ec.as_slice()));
+    // "bad signature": kept, in either version.
+    for tls13 in [false, true] {
+        let e = v
+            .check(
+                b"m",
+                &leaf,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                b"\x30\x00",
+                tls13,
+            )
+            .expect_err("bad signature");
+        assert_eq!(
+            e,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+        );
+        assert_eq!(v.leaf.get().as_deref(), Some(ec.as_slice()));
+    }
+    // TLS 1.3, a scheme of another key type: "wrong signature type", kept.
+    assert!(v
+        .check(b"m", &leaf, SignatureScheme::RSA_PSS_SHA256, b"x", true)
+        .is_err());
+    assert_eq!(v.leaf.get().as_deref(), Some(ec.as_slice()));
+    // TLS 1.2: the scheme is the suite's, so the key does not fit the suite,
+    // "wrong certificate type": dropped.
+    assert!(v
+        .check(b"m", &leaf, SignatureScheme::RSA_PSS_SHA256, b"x", false)
+        .is_err());
+    assert_eq!(v.leaf.get(), None);
 }
 
 #[test]

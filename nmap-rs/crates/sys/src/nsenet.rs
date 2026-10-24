@@ -38,7 +38,7 @@ use nmap_core::nse::net::{
 };
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::tls::{client_config, server_name, ReadEvent, TlsStream};
+use crate::tls::{server_name, PeerLeaf, ReadEvent, TlsStream};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -50,8 +50,9 @@ enum Sock {
     Tls(Arc<TlsSock>),
     /// A TCP connection whose handshake failed or is under way: an SSL
     /// socket to `get_ssl_certificate` (nsock created its `SSL` once TCP
-    /// connected), unusable for I/O.
-    TlsDown(Arc<TcpStream>),
+    /// connected), with the leaf if the handshake got as far as accepting
+    /// it, unusable for I/O.
+    TlsDown(Arc<TcpStream>, PeerLeaf),
 }
 
 /// How a TLS connection's end was seen by a read.
@@ -271,15 +272,17 @@ async fn handshake(
     tcp: Arc<TcpStream>,
     sni: Option<Vec<u8>>,
 ) -> Completion {
+    // The slot outlives the handshake, which a time-out drops.
+    let leaf = PeerLeaf::default();
     if let Ok(mut m) = socks.lock() {
-        m.insert(sock, Sock::TlsDown(tcp.clone()));
+        m.insert(sock, Sock::TlsDown(tcp.clone(), leaf.clone()));
     }
     let peer = match tcp.peer_addr() {
         Ok(a) => a.ip(),
         Err(_) => return Completion::Failed(NetStatus::Error),
     };
     let name = server_name(sni.as_deref(), peer);
-    match TlsStream::handshake(tcp, client_config(), name).await {
+    match TlsStream::handshake(tcp, name, leaf).await {
         Ok(stream) => {
             if let Ok(mut m) = socks.lock() {
                 m.insert(
@@ -385,12 +388,13 @@ impl ScriptNet for TokioNet {
     }
 
     fn is_ssl(&self, sock: SockId) -> bool {
-        matches!(self.sock(sock), Some(Sock::Tls(_) | Sock::TlsDown(_)))
+        matches!(self.sock(sock), Some(Sock::Tls(_) | Sock::TlsDown(..)))
     }
 
     fn peer_certificate(&self, sock: SockId) -> Option<Vec<u8>> {
         match self.sock(sock)? {
             Sock::Tls(t) => t.stream.leaf(),
+            Sock::TlsDown(_, leaf) => leaf.get(),
             _ => None,
         }
     }
@@ -437,7 +441,7 @@ impl ScriptNet for TokioNet {
                 Some(Sock::Tls(t)) => {
                     within(timeout, async { t.stream.write(&data).await.is_ok() }).await
                 }
-                Some(Sock::TlsDown(_)) | None => Some(false),
+                Some(Sock::TlsDown(..)) | None => Some(false),
             };
             match sent {
                 Some(true) => Completion::Done,
@@ -478,7 +482,7 @@ impl ScriptNet for TokioNet {
                 Some(Sock::Tcp(t)) => read_tcp(t, mode, timeout).await,
                 Some(Sock::Udp(u)) => read_udp(u, timeout).await,
                 Some(Sock::Tls(t)) => read_tls(t, mode, timeout).await,
-                Some(Sock::TlsDown(_)) | None => Completion::Failed(NetStatus::Error),
+                Some(Sock::TlsDown(..)) | None => Completion::Failed(NetStatus::Error),
             }
         });
     }
@@ -519,7 +523,7 @@ impl ScriptNet for TokioNet {
 
     fn info(&self, sock: SockId) -> Option<(SocketAddr, SocketAddr)> {
         match self.sock(sock)? {
-            Sock::Tcp(t) | Sock::TlsDown(t) => Some((t.local_addr().ok()?, t.peer_addr().ok()?)),
+            Sock::Tcp(t) | Sock::TlsDown(t, _) => Some((t.local_addr().ok()?, t.peer_addr().ok()?)),
             Sock::Tls(t) => {
                 let tcp = t.stream.tcp();
                 Some((tcp.local_addr().ok()?, tcp.peer_addr().ok()?))

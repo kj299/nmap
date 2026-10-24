@@ -7,8 +7,8 @@ gate.
     python3 oracle/gen_m65_tls.py --check-header GOLDEN
         -> compares this machine's environment with the golden's header;
            exit 1 on any difference
-    python3 oracle/gen_m65_tls.py --check GOLDEN --client PROBE --nmap-rs BIN
-        -> step f1's gate: the port over the same fixtures, compared row by
+    python3 oracle/gen_m65_tls.py --check GOLDEN --nmap-rs BIN
+        -> steps f1 and f2's gate: the port over the same fixtures, compared row by
            row with the golden, each divergence a pin (PORT_PINS) naming its
            ledger entry; exit 1 on any difference that is not a pin, and on
            any pin that no longer differs (see "The port's side" below)
@@ -80,12 +80,9 @@ of `openssl version -a` (Ubuntu's patch; upstream's default is 1).
 The port's side (step f1). Each fixture is served again, and the port's
 CLI (BIN, `nmap-rs`) runs the same probe with the same arguments, so the
 server sees the port's NSE path: its RESULT and SERVER are what that run
-printed and what the server saw. Until step f2, `get_ssl_certificate`
-returns nil on a TLS socket (`nse-tls-no-certificate-table`), so where
-the port's probe prints `ok leaf=none err=nil` the fixture is served once
-more to PROBE (the `m65_tlsprobe` example of nmap-sys: the port's socket
-host, driven as core::nse::net drives it), and its `ok leaf=...` line is
-the port's RESULT. A row agrees when RESULT and SERVER equal the golden's;
+printed and what the server saw. The probe reads the certificate's table
+without `openssl`, which the port registers only at step g (the leaf's
+hash is the table's own `digest`). A row agrees when RESULT and SERVER equal the golden's;
 a row listed in PORT_PINS agrees when they equal the pin's, and the pin
 must differ from the golden (a pin that no longer differs is stale and
 fails). `skipped` rows are not run; the bad13 rows need the badserver.
@@ -234,6 +231,36 @@ FIXTURES = [
     # waiting on it, and the thread killed by --script-timeout (NMAP_ARGS).
     ("silent-closemid", "silent", "", "closemid", "", ()),
     ("silent-killed", "silent", "", "host", "timeout=60000", ()),
+    # Step f2. get_ssl_certificate's whole table (every field, `digest`),
+    # rendered: for each key type and curve the handshake carries,
+    ("cert-rsa2048-tls13", "s_server", "rsa2048 -tls1_3", "cert", "", ()),
+    ("cert-ecp256-tls12", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256", "cert", "", ()),
+    ("cert-ecp384-tls13", "s_server", "ecp384 -tls1_3", "cert", "", ()),
+    ("cert-ecp521-tls13", "s_server", "ecp521 -tls1_3", "cert", "", ()),
+    ("cert-ed25519-tls13", "s_server", "ed25519 -tls1_3", "cert", "", ()),
+    ("cert-rsa512", "s_server", "rsa512 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0", "cert", "", ()),
+    # (the leaf, not the chain after it),
+    ("cert-chain-small", "s_server", "rsa2048 -cert_chain CERTS/ecp384.crt -tls1_3", "cert", "", ()),
+    ("cert-md5cert", "s_server", "rsamd5 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0", "cert", "", ()),
+    # after handshakes that fail: past the certificate's checks OpenSSL has
+    # kept the leaf (a server that goes quiet after its flight, a bad
+    # signature in either version); before them, or where the key does not
+    # fit the suite, it has none,
+    ("cert-fake-ok", "fake", "ok rsa2048.der rsa2048.key", "cert", "", ()),
+    ("cert-fake-badsig", "fake", "badsig rsa2048.der rsa2048.key", "cert", "", ()),
+    ("cert-bad13-corrupt", "bad13", "--corrupt", "cert", "", ("needs-badserver",)),
+    ("cert-fake-garbage", "fake", "garbage rsa2048.der rsa2048.key", "cert", "", ()),
+    ("cert-fake-ecdsa-cert-rsa-suite", "fake", "subst rsa2048.der rsa2048.key ecp256.der", "cert", "", ()),
+    ("cert-fake-ed25519-cert-rsa-suite", "fake", "subst rsa2048.der rsa2048.key ed25519.der", "cert", "", ()),
+    ("cert-fake-dh-cert", "fake", "subst rsa2048.der rsa2048.key dh.der", "cert", "", ()),
+    ("cert-fake-unknownoid-cert", "fake", "subst rsa2048.der rsa2048.key unknownoid.der", "cert", "", ()),
+    ("cert-fake-noreneg", "fake", "noreneg rsa2048.der rsa2048.key", "cert", "", ()),
+    ("cert-tls12-rsa-kx", "s_server", "rsa2048 -tls1_2 -cipher AES128-GCM-SHA256:@SECLEVEL=0", "cert", "", ()),
+    ("cert-chain-over64k", "s_server", "rsa2048 -cert_chain CERTS/chain_over64k.pem -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256", "cert", "", ()),
+    # and the leniency gap: trailing bytes after the leaf, which the
+    # handshake refuses and parse_ssl_certificate takes.
+    ("cert-fake-trail", "fake", "trail rsa2048.der rsa2048.key", "cert", "", ()),
+    ("cert-trail-parse", "s_server", "rsa2048 -tls1_3", "trail", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -244,6 +271,7 @@ FIXTURES = [
 # showed both, in CI and locally, on chain-over100k and chain-over64k).
 TIMING_FIELDS = {
     "chain-over64k": ("group", "sigalg"),
+    "cert-chain-over64k": ("group", "sigalg"),
     "chain-over100k": ("group", "sigalg"),
     "chain13-over64k": ("sigalg",),
 }
@@ -422,6 +450,32 @@ def wait_port(port, proc, seconds=10.0):
             return True
         time.sleep(0.05)
     return False
+
+
+# How often a server that exits before it listens is started again.
+START_TRIES = 5
+
+
+def start_server(name, cmd, port, out, err):
+    """Start a fixture server and wait until it listens. The fixture ports
+    lie inside Linux's ephemeral range (32768-60999), so an outgoing
+    connection of some other process can hold one as its local port for a
+    while, and the server's bind fails (CI saw it twice, on 46032 and
+    47380). A server that exits before listening is started again after a
+    pause, its log emptied first, up to START_TRIES times."""
+    for attempt in range(START_TRIES):
+        if attempt:
+            time.sleep(2.0)
+            for fh in (out, err):
+                fh.seek(0)
+                fh.truncate()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
+        if wait_port(port, proc):
+            return proc
+        stop(proc)
+        print("%s: the server did not come up (try %d of %d)" % (name, attempt + 1, START_TRIES),
+              file=sys.stderr, flush=True)
+    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
 
 
 def server_cmd(kind, args, port, badserver):
@@ -622,10 +676,7 @@ def run_matrix(badserver, logdir):
         with open(out_p, "w") as out, open(err_p, "w") as err, open(cli_p, "w") as cli:
             try:
                 if kind != "none":
-                    cmd = server_cmd(kind, args, port, badserver)
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
-                    if not wait_port(port, proc):
-                        raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+                    proc = start_server(name, server_cmd(kind, args, port, badserver), port, out, err)
                 result = oracle(port, mode, extra, cli, NMAP_ARGS.get(name, ()))
                 time.sleep(0.3)  # let the server write what it saw
             finally:
@@ -747,6 +798,17 @@ PORT_PINS = {
     "udp-reconnect": ("nse-reconnect-ssl-udp-abort", _SCRIPT_ERROR, None),
     "sni-table-empty": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
     "sni-table-256": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
+    # Step f2's rows on the same servers: no handshake, no table; the same
+    # alerts; and where rustls goes on without renegotiation_info, the leaf.
+    "cert-tls12-rsa-kx": ("nse-tls-modern-only", "cert ssl=nil,ERROR table=nil", _NO_LEGACY[1]),
+    "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
+    "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
+    "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
+    "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
+                          "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
+                          "client ClientKeyExchange"),
+    # parse_ssl_certificate comes with the module (step g).
+    "cert-trail-parse": ("nse-no-ssl", 'trail parse=raise:"SSL is not available"', None),
 }
 
 
@@ -779,18 +841,6 @@ def port_cli(nmaprs, port, mode, extra, log, more=()):
     return "fail closed" if st == "closed" else "fail no-result port=%s" % st
 
 
-def port_probe(probe, port, mode, extra, log):
-    sargs = "mode=%s" % mode + ("," + extra if extra else "")
-    cmd = [probe, str(port), sargs]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-    except subprocess.TimeoutExpired:
-        return "fail probe-timeout"
-    log.write(" ".join(cmd) + "\n" + r.stdout + r.stderr)
-    m = re.search(r"R: (.*)", r.stdout)
-    return m.group(1).strip() if m else "fail probe rc=%d" % r.returncode
-
-
 def serve_once(name, kind, args, port, badserver, logdir, tag, client):
     """Start the fixture's server, run `client()`, stop it; (result, server)."""
     if listening(port):
@@ -801,10 +851,7 @@ def serve_once(name, kind, args, port, badserver, logdir, tag, client):
     with open(out_p, "w") as out, open(err_p, "w") as err:
         try:
             if kind != "none":
-                cmd = server_cmd(kind, args, port, badserver)
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
-                if not wait_port(port, proc):
-                    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+                proc = start_server(name, server_cmd(kind, args, port, badserver), port, out, err)
             result = client()
             time.sleep(0.3)
         finally:
@@ -816,7 +863,7 @@ def serve_once(name, kind, args, port, badserver, logdir, tag, client):
     return result, masked(name, observe(kind, out_text, err_text))
 
 
-def check_port(golden, probe, nmaprs):
+def check_port(golden, nmaprs):
     want = read_rows(golden)
     badserver = find_badserver()
     bad = 0
@@ -845,10 +892,6 @@ def check_port(golden, probe, nmaprs):
                 result, server = serve_once(
                     name, kind, args, port, badserver, logdir, "cli",
                     lambda: port_cli(nmaprs, port, mode, extra, log, NMAP_ARGS.get(name, ())))
-                if result == "ok leaf=none err=nil" and g[2].startswith("ok leaf="):
-                    result, _ = serve_once(
-                        name, kind, args, port, badserver, logdir, "probe",
-                        lambda: port_probe(probe, port, mode, extra, log))
             pin = PORT_PINS.get(name)
             if pin is None:
                 if (result, server) == (g[2], g[3]):
@@ -897,13 +940,12 @@ def main():
             sys.exit(1)
         print("header matches the golden's environment")
         sys.exit(0)
-    if (len(argv) == 6 and argv[0] == "--check" and argv[2] == "--client"
-            and argv[4] == "--nmap-rs"):
+    if len(argv) == 4 and argv[0] == "--check" and argv[2] == "--nmap-rs":
         if compare_header(argv[1]):
             print("header mismatch: the golden was not made in this environment; "
                   "nothing else is compared")
             sys.exit(1)
-        sys.exit(1 if check_port(argv[1], os.path.abspath(argv[3]), os.path.abspath(argv[5])) else 0)
+        sys.exit(1 if check_port(argv[1], os.path.abspath(argv[3])) else 0)
     twice = True
     carry = None
     rest = []

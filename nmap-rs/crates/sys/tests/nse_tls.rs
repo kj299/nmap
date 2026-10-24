@@ -38,8 +38,9 @@ const CERTS: &str = concat!(
 
 // ---- a TLS server over the client's own provider ----------------------------
 
+/// A P-256 key; `corrupt` spoils every signature it makes.
 #[derive(Debug, Clone)]
-struct P256(p256::ecdsa::SigningKey);
+struct P256(p256::ecdsa::SigningKey, bool);
 
 impl SigningKey for P256 {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
@@ -56,7 +57,13 @@ impl Signer for P256 {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
         use p256::ecdsa::signature::Signer as _;
         let sig: p256::ecdsa::Signature = self.0.sign(message);
-        Ok(sig.to_der().as_bytes().to_vec())
+        let mut der = sig.to_der().as_bytes().to_vec();
+        if self.1 {
+            if let Some(b) = der.last_mut() {
+                *b ^= 1;
+            }
+        }
+        Ok(der)
     }
     fn scheme(&self) -> SignatureScheme {
         SignatureScheme::ECDSA_NISTP256_SHA256
@@ -73,6 +80,12 @@ impl ResolvesServerCert for Fixed {
 }
 
 fn server_config() -> Arc<ServerConfig> {
+    server_config_with(false, &[])
+}
+
+/// The server's configuration, its signatures spoiled if `corrupt`, the
+/// certificates of `chain` sent after its own.
+fn server_config_with(corrupt: bool, chain: &[&str]) -> Arc<ServerConfig> {
     let hex = std::fs::read_to_string(format!("{CERTS}/ecp256.scalar")).expect("scalar");
     let hex = hex.trim();
     let scalar: Vec<u8> = hex
@@ -80,12 +93,19 @@ fn server_config() -> Arc<ServerConfig> {
         .chunks(2)
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).expect("hex"), 16).expect("hex"))
         .collect();
-    let key = P256(p256::ecdsa::SigningKey::from_slice(&scalar).expect("P-256 scalar"));
-    let der = std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate");
-    let ck = Arc::new(CertifiedKey::new(
-        vec![CertificateDer::from(der)],
-        Arc::new(key),
-    ));
+    let key = P256(
+        p256::ecdsa::SigningKey::from_slice(&scalar).expect("P-256 scalar"),
+        corrupt,
+    );
+    let mut certs = vec![CertificateDer::from(
+        std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate"),
+    )];
+    for c in chain {
+        certs.push(CertificateDer::from(
+            std::fs::read(format!("{CERTS}/{c}")).expect("certificate"),
+        ));
+    }
+    let ck = Arc::new(CertifiedKey::new(certs, Arc::new(key)));
     Arc::new(
         ServerConfig::builder_with_provider(Arc::new(nmap_sys::tls::provider::provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -244,6 +264,14 @@ fn run(body: &str) -> String {
         )),
     })
     .expect("state");
+    // `parse_ssl_certificate` itself, which the `nmap` module holds only
+    // from step g: the scripts compare the socket's table with it.
+    st.lua.enter(|ctx| {
+        ctx.set_global(
+            "test_parse",
+            nmap_core::nse::openssl::cert::parse_for_tests(ctx),
+        );
+    });
     st.load_scripts(
         &[ChosenScript {
             path: script.display().to_string().into_bytes(),
@@ -391,12 +419,137 @@ fn get_ssl_certificate_raises_on_a_socket_that_is_not_ssl() {
         out,
         "new:false,bad argument #1 to '?' (not a SSL socket) | \
          tcp:false,bad argument #1 to '?' (not a SSL socket) | \
-         ssl:true,nil | \
+         ssl:true,userdata | \
          closed:false,bad argument #1 to '?' (not a SSL socket) | \
          arg:false,bad argument #1 to '?' (nsock expected, got number) | \
          failed:nil,ERROR | \
          failedcert:true,nil"
     );
+}
+
+/// Renders a value as `oracle/m65_core.lua` does a parsed certificate: every
+/// field, then `digest` over several names; tables with their keys sorted,
+/// bignums through their methods.
+const RENDER: &str = "\
+local render
+local FIELDS = {'subject', 'issuer', 'version', 'serial', 'sig_algorithm',
+  'validity', 'pubkey', 'extensions', 'pem', 'nosuchfield'}
+render = function(v)
+  local t = type(v)
+  if t == 'string' then return string.format('%q', v) end
+  if t ~= 'table' and t ~= 'userdata' then return t .. ':' .. tostring(v) end
+  local mt = getmetatable(v)
+  local name = type(mt) == 'table' and mt.__name or nil
+  if name == 'BIGNUM' then return 'bn<' .. v:tohex() .. '>' end
+  if name == 'SSL_CERT' then
+    local parts = {}
+    for _, f in ipairs(FIELDS) do parts[#parts + 1] = f .. '=' .. render(v[f]) end
+    for _, d in ipairs({'md5', 'sha1', 'sha256', 'bogus'}) do
+      parts[#parts + 1] = d .. '=' .. render(v:digest(d))
+    end
+    return 'cert<' .. table.concat(parts, ' ') .. '>'
+  end
+  local parts = {}
+  for k, x in pairs(v) do parts[#parts + 1] = render(k) .. '=' .. render(x) end
+  table.sort(parts)
+  return '{' .. table.concat(parts, ',') .. '}'
+end
+";
+
+/// The leaf's DER, from a table's `pem`.
+const DER_OF: &str = "\
+local base64 = require 'base64'
+local function der_of(c)
+  return base64.dec((c.pem:gsub('%-%-%-%-%-[^\\n]*%-%-%-%-%-', ''):gsub('%s', '')))
+end
+";
+
+fn sha256_hex(der: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Step f2: the table is `parse_ssl_certificate`'s of the leaf the server
+/// sent, and `parse_ssl_certificate` takes the trailing bytes the handshake
+/// refuses (`a_certificate_entry_must_be_exactly_a_certificate`).
+#[test]
+fn get_ssl_certificate_is_the_parsed_table_of_the_leaf() {
+    let (port, _log) = tls_hello_server();
+    let out = run(&format!(
+        "{RENDER}{DER_OF}\
+         local s = nmap.new_socket()\n\
+         assert(s:connect('127.0.0.1', {port}, 'ssl'))\n\
+         local c = s:get_ssl_certificate()\n\
+         s:close()\n\
+         local der = der_of(c)\n\
+         local mine = render(c)\n\
+         return table.concat({{\n\
+           stdnse.tohex(c:digest('sha256')),\n\
+           tostring(mine == render(test_parse(der))),\n\
+           tostring(mine == render(test_parse(der .. '\\0trailing'))),\n\
+           c.subject.commonName, c.pubkey.type, tostring(c.pubkey.bits),\n\
+         }}, ' ')"
+    ));
+    let der = std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate");
+    assert_eq!(
+        out,
+        format!("{} true true m65-ecp256 ec 256", sha256_hex(&der))
+    );
+}
+
+/// The table is the leaf's, the first certificate of the chain.
+#[test]
+fn the_table_is_the_leafs_not_the_chains() {
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = l.local_addr().expect("addr").port();
+    let cfg = server_config_with(false, &["rsa2048.der", "ed25519.der"]);
+    thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let cfg = cfg.clone();
+            thread::spawn(move || {
+                if let Some((mut s, _)) = accept_tls(c, &cfg) {
+                    drain(&mut s);
+                }
+            });
+        }
+    });
+    let out = run(&format!(
+        "local s = nmap.new_socket()\n\
+         assert(s:connect('127.0.0.1', {port}, 'ssl'))\n\
+         local c = s:get_ssl_certificate()\n\
+         s:close()\n\
+         return c.subject.commonName .. ' ' .. stdnse.tohex(c:digest('sha256'))"
+    ));
+    let der = std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate");
+    assert_eq!(out, format!("m65-ecp256 {}", sha256_hex(&der)));
+}
+
+/// OpenSSL keeps the leaf once its checks pass, and the handshake failing
+/// later on a bad signature leaves it to `get_ssl_certificate` (7.94:
+/// `cert-fake-badsig`, `cert-bad13-corrupt`).
+#[test]
+fn a_handshake_that_fails_after_the_certificate_keeps_the_leaf() {
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = l.local_addr().expect("addr").port();
+    let cfg = server_config_with(true, &[]);
+    thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            let cfg = cfg.clone();
+            thread::spawn(move || drop(accept_tls(c, &cfg)));
+        }
+    });
+    let der = std::fs::read(format!("{CERTS}/ecp256.der")).expect("certificate");
+    let out = run(&format!(
+        "local s = nmap.new_socket()\n\
+         s:set_timeout(3000)\n\
+         local st, e = s:connect('127.0.0.1', {port}, 'ssl')\n\
+         local c = s:get_ssl_certificate()\n\
+         return tostring(st) .. ',' .. tostring(e) .. ' ' .. stdnse.tohex(c:digest('sha256'))"
+    ));
+    assert_eq!(out, format!("nil,ERROR {}", sha256_hex(&der)));
 }
 
 #[test]

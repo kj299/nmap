@@ -258,7 +258,7 @@
       "fuzzed": "Installs already-verified bytes to disk. The manifest parsing, and the single-path-component invariant install() relies on, are fuzzed in core by sigstore_manifest."
     },
     "sys::tls::stream": {
-      "fuzzed": "Drives rustls over a tokio TcpStream: reads and writes bytes and hands them to rustls, parsing none itself. What a peer sends reaches rustls and the provider, which nse_tls_server_flight fuzzes with the shipped client config. Exercised end to end by nse_tls (10 engine-level tests: end of stream, teardown, close_notify) and the 86-row TLS fixture gate against nmap 7.94."
+      "fuzzed": "Drives rustls over a tokio TcpStream: reads and writes bytes and hands them to rustls, parsing none itself. What a peer sends reaches rustls and the provider, which nse_tls_server_flight fuzzes with the shipped client config. Exercised end to end by nse_tls (13 engine-level tests: end of stream, teardown, close_notify, the certificate kept after a failed handshake) and the 107-row TLS fixture gate against nmap 7.94."
     },
     "timing": {
       "fuzzed": "RTT and timeout arithmetic over our own measurements. No untrusted-input parse path."
@@ -416,7 +416,7 @@
     "core::nse::openssl": {
       "unsafe_audited": {
         "files": 18,
-        "sha256": "2ff8cf8e89f2e3de2a012b8254d9ddb3e1926ceaba609cc06e99df5b30d60dee"
+        "sha256": "357aba0eb742b6e13e2689eb97d1ece3ce1873bce3091de78df7d8976d92205c"
       }
     },
     "core::nse::openssl::asn1": {
@@ -450,19 +450,19 @@
     "core::nse::openssl::cert": {
       "differential": {
         "files": 1,
-        "sha256": "146d2771833f0bde4e4357abaf0ef4b611be0a69705ea3ddc2e09194dcf7af8b"
+        "sha256": "4acb6ccffdca501006e953ab630b0aa1ce395fa2e36b98cbb4848e3763b6a0d9"
       },
       "ported": {
         "files": 1,
-        "sha256": "146d2771833f0bde4e4357abaf0ef4b611be0a69705ea3ddc2e09194dcf7af8b"
+        "sha256": "4acb6ccffdca501006e953ab630b0aa1ce395fa2e36b98cbb4848e3763b6a0d9"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "146d2771833f0bde4e4357abaf0ef4b611be0a69705ea3ddc2e09194dcf7af8b"
+        "sha256": "4acb6ccffdca501006e953ab630b0aa1ce395fa2e36b98cbb4848e3763b6a0d9"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "146d2771833f0bde4e4357abaf0ef4b611be0a69705ea3ddc2e09194dcf7af8b"
+        "sha256": "4acb6ccffdca501006e953ab630b0aa1ce395fa2e36b98cbb4848e3763b6a0d9"
       }
     },
     "core::nse::openssl::cipher": {
@@ -684,23 +684,23 @@
     "sys::tls": {
       "differential": {
         "files": 12,
-        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+        "sha256": "3bd16e265221fa01b8945ed3c9ad7122104edd5f203863dd80836446943b7c1a"
       },
       "fuzzed": {
         "files": 12,
-        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+        "sha256": "3bd16e265221fa01b8945ed3c9ad7122104edd5f203863dd80836446943b7c1a"
       },
       "ported": {
         "files": 12,
-        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+        "sha256": "3bd16e265221fa01b8945ed3c9ad7122104edd5f203863dd80836446943b7c1a"
       },
       "sanitized": {
         "files": 12,
-        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+        "sha256": "3bd16e265221fa01b8945ed3c9ad7122104edd5f203863dd80836446943b7c1a"
       },
       "unsafe_audited": {
         "files": 12,
-        "sha256": "08635243c97aeee9bcc5d0262d886b25957e8051a6eae78d0c93c82d51c13ca5"
+        "sha256": "3bd16e265221fa01b8945ed3c9ad7122104edd5f203863dd80836446943b7c1a"
       }
     },
     "sys::tls::provider": {
@@ -728,23 +728,23 @@
     "sys::tls::stream": {
       "differential": {
         "files": 1,
-        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
       },
       "ported": {
         "files": 1,
-        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "b98f2a86e3be7f3c0ec59926ce435172b739cd1c220a0973b3833dea6cbbf3bd"
+        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
       }
     }
   }

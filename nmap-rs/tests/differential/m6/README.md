@@ -38,7 +38,7 @@ any difference.
 | `m6_base_golden.txt` | the base and coroutine libraries as an NSE script meets them (`oracle/m6_base_probe.nse`): argument checks and results, coroutines inside a script's own, the collector as nmap starts it, `warn`'s output, vs nmap 7.94 | `regen_m6_base.sh`, `oracle/gen_m6_base.py` (live in CI) | `base_differential` | 67 rows + 5 warning lines; 7 pinned |
 | `m66_exit_golden.txt` | M6.6's exit criterion (step e): what `-sC`, `--script default`, `--script version` and `-A` select, load and drop on `--datadir REPO`; the categories that still stop at start-up; address-info, riak-http-info, bitcoinrpc-info and http-affiliate-id run, vs nmap 7.94 | `regen_m66_exit.sh`, `oracle/gen_m66_exit.py` (live in CI) | `nse_exit_differential` (in `nmap-cli`) | 18 scenarios |
 | `m65_cases.txt`, `m65_golden.txt`, `m65_drift.txt`, `m65_screen.txt`, `m65_census.txt`, `m65_sabotage.txt` (with `m65_algs.txt`, `m65_certs.txt`) | the C module `openssl` and `parse_ssl_certificate` (M6.5 step a): digests, HMAC, ciphers, bignums, randomness, argument checks and 3,638 certificates, vs nmap 7.94; this tree's C, built standalone, differs only in pinned drift rows | `regen_m65.sh` (`--check`; `--check-794` live in CI) | `openssl_bn_differential` (step b: the 11,170 `b` rows and `bnmeta`, all agreeing); `openssl_digest_differential` (step c: the 2,322 `c` rows, all agreeing, 740 pinned to `openssl-algorithm-subset`); `openssl_cipher_differential` (step d: the 12,949 `d` rows, all agreeing, 11,749 pinned, the `ivnul` drift rows held to `m65_drift_tree.txt`); `openssl_cert_differential` (step e: the 3,648 `e` rows, all agreeing, no exemption) | 30,094 rows; 1,690 `ub:` (no C run), 447 `nondet:`, 3,686 drift |
-| `m65_tls_golden.txt` | nmap 7.94's TLS client on 86 fixture servers (M6.5 steps a and f1) | `regen_m65_tls.sh` (`--check` live in CI) | `regen_m65_tls.sh --check-port` (the port's CLI and `m65_tlsprobe`; CI's differential job) | 86 fixtures: 65 agree, 21 pinned |
+| `m65_tls_golden.txt` | nmap 7.94's TLS client on 107 fixture servers (M6.5 steps a, f1 and f2) | `regen_m65_tls.sh` (`--check` live in CI) | `regen_m65_tls.sh --check-port` (the port's CLI; CI's differential job) | 107 fixtures: 80 agree, 27 pinned |
 
 Pinned exceptions are named in each Rust test and ledgered in `DIVERGENCES.md`.
 The sections below explain the corpora that need it.
@@ -1027,24 +1027,28 @@ lands.
 
 ## M6.5 step a — the TLS fixtures
 
-Step f1's gate (`docs/M6.5-ANALYSIS.md` §11 rows a and f1, §14.1, §14.5).
+Steps f1 and f2's gate (`docs/M6.5-ANALYSIS.md` §11 rows a, f1 and f2,
+§14.1, §14.5).
 Step 0's spike ran 61 TLS fixtures against nmap 7.94 and against its rustls
 client; step a committed the fixtures in `m65_tls/` and recorded 7.94's
 result on each in `m65_tls_golden.txt`; step f1 added 25 rows and the port's
 side: the port's client over the same servers, compared row by row, each
-divergence pinned to its ledger entry (`PORT_PINS`).
+divergence pinned to its ledger entry (`PORT_PINS`). Step f2 added 21 rows
+(`cert-*`) that render the whole table `get_ssl_certificate` returns, after
+handshakes that succeed and fail, and `parse_ssl_certificate` of the leaf
+with bytes after it.
 
 ```sh
 ./regen_m65_tls.sh                  # regenerate in place (needs nmap, openssl; about a minute)
 ./regen_m65_tls.sh --check          # regenerate and FAIL if the committed golden differs
 ./regen_m65_tls.sh --check-header   # FAIL if this machine is not the pinned environment
-./regen_m65_tls.sh --check-port     # the port over the same fixtures (builds nmap-rs and m65_tlsprobe)
+./regen_m65_tls.sh --check-port     # the port over the same fixtures (builds nmap-rs)
 ```
 
 | file | what it is |
 |---|---|
 | `oracle/gen_m65_tls.py` | the generator: the fixture table (`FIXTURES`, the rows and names of the spike's `run.py`), the servers, the parsing of what each saw, the header |
-| `m65_tls/s0probe.nse` | the probe 7.94 runs: `connect(...,"ssl")` with a host table, an IP string or a name, or SMTP then `reconnect_ssl`; prints the leaf's SHA-256, length and CN, or the error |
+| `m65_tls/s0probe.nse` | the probe both programs run: `connect(...,"ssl")` with a host table, an IP string or a name, or SMTP then `reconnect_ssl`; prints the leaf's SHA-256 (the table's own `digest`, no `openssl`), length and CN, or the error; and the modes of steps f1 (reads, the contract, UDP, teardown) and f2 (`cert`: the whole table rendered; `trail`) |
 | `m65_tls/fakesrv.py` | a TLS 1.2 server flight (ServerHello, Certificate, ServerKeyExchange, ServerHelloDone, suite `0xc02f`) with one thing mutated per mode, recording the client's next record |
 | `m65_tls/starttls_smtp.py` | SMTP with STARTTLS, then TLS over Python's `ssl` (OpenSSL 3's `s_server` has no `-starttls`) |
 | `m65_tls/silent.py` | accepts and never speaks; prints `client closed` when the client ends a connection |
@@ -1165,12 +1169,9 @@ end, and two runs agree.
 **The port's side** (`--check-port`, step f1). Each fixture is served again,
 and the port's `nmap-rs` runs the same probe with the same arguments, so the
 server sees the port's NSE path; RESULT and SERVER are compared with the
-golden's. Until step f2, `get_ssl_certificate` returns nil on an SSL socket
-(`nse-tls-no-certificate-table`), so where the port's probe prints
-`ok leaf=none err=nil` the fixture is served once more to the
-`m65_tlsprobe` example of `nmap-sys` (the port's socket host, driven as
-`core::nse::net` drives it), whose `ok leaf=...` line must be 7.94's. A row
-that differs must be in `PORT_PINS`, which names its ledger entry and the
+golden's. (Step f1 took the leaf from an `m65_tlsprobe` example while
+`get_ssl_certificate` returned nil; since step f2 the probe reads it from
+the table.) A row that differs must be in `PORT_PINS`, which names its ledger entry and the
 port's exact RESULT and SERVER; a pin that equals 7.94 fails as stale.
 
 A row that later proves nondeterministic goes into `NONDET` with a reason. It

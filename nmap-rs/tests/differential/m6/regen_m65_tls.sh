@@ -6,23 +6,25 @@
 #   ./regen_m65_tls.sh --check         FAIL if it differs
 #   ./regen_m65_tls.sh --check-header  FAIL if this machine's environment is
 #                                      not the one the golden pins
-#   ./regen_m65_tls.sh --check-port    the port over the same fixtures (step
-#                                      f1's gate): builds nmap-rs and the
-#                                      m65_tlsprobe example in release, and
-#                                      FAILs on any row neither equal to the
-#                                      golden nor pinned (PORT_PINS)
+#   ./regen_m65_tls.sh --check-port    the port over the same fixtures (steps
+#                                      f1 and f2's gate): builds nmap-rs in
+#                                      release, and FAILs on any row neither
+#                                      equal to the golden nor pinned
+#                                      (PORT_PINS)
 #
 # The oracle is the installed nmap 7.94 with --datadir set to this repository,
-# connecting through m65_tls/s0probe.nse to each of the 86 fixture servers of
-# m65_tls/ on 127.0.0.1:47301-47386 (oracle/gen_m65_tls.py): s_server with each
+# connecting through m65_tls/s0probe.nse to each of the 107 fixture servers of
+# m65_tls/ on 127.0.0.1:47301-47407 (oracle/gen_m65_tls.py): s_server with each
 # suite, group and signature scheme forced, STARTTLS, odd certificates and
 # chains, SNI, legacy versions, the fake TLS 1.2 server's negative fixtures, the
 # corrupt TLS 1.3 CertificateVerify, a silent server and a closed port; and
 # step f1's rows: how reads meet the end of a TLS connection, the
 # get_ssl_certificate contract, UDP sockets, server names from a target name,
-# and teardown mid-handshake. The
+# and teardown mid-handshake; and step f2's: get_ssl_certificate's whole table,
+# after handshakes that succeed and fail, and parse_ssl_certificate of the leaf
+# with bytes after it. The
 # generator runs the matrix twice and refuses to write a golden if an untagged
-# row differs. The two needs-badserver rows are recorded only when the spike's
+# row differs. The three needs-badserver rows are recorded only when the spike's
 # badserver binary is found (BADSERVER, $CARGO_TARGET_DIR/release/badserver,
 # spikes/m65-tls-provider/target/release/badserver); without it they are
 # carried over from the committed golden. The golden's header pins nmap,
@@ -40,9 +42,9 @@ fi
 
 if [[ "${1:-}" == "--check-port" ]]; then
   ROOT="$(cd "$HERE/../../.." && pwd)"
-  (cd "$ROOT" && cargo build --release -p nmap-cli -p nmap-sys --bins --examples)
+  (cd "$ROOT" && cargo build --release -p nmap-cli --bins)
   T="${CARGO_TARGET_DIR:-$ROOT/target}/release"
-  exec python3 -B oracle/gen_m65_tls.py --check "$N" --client "$T/examples/m65_tlsprobe" --nmap-rs "$T/nmap-rs"
+  exec python3 -B oracle/gen_m65_tls.py --check "$N" --nmap-rs "$T/nmap-rs"
 fi
 
 CHECK=0

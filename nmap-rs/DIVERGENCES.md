@@ -6539,9 +6539,19 @@ above (the last only once `the_table_is_the_leafs_not_the_chains` was
 added: no test server had sent a chain). The sixth, the stream's leaf taken
 from rustls's `peer_certificates`, is equivalent: the stream exists only
 after a successful handshake, when the two agree, and a failed one reads
-the socket's slot.
+the socket's slot. **Fuzz**, re-run on the changed verifier:
+`nse_tls_verifier` and `nse_tls_server_flight`, 68,452,470 and 3,219,832
+runs clean (10 minutes each).
 
 Found on the way:
+- **A fixture port held by someone else's connection.** The fixture ports
+  (47301-47407) lie inside Linux's ephemeral range, so an outgoing
+  connection elsewhere on the machine can hold one as its local port, and
+  the fixture server's bind fails: CI's 7.94 regeneration hit it on 47380
+  (and step f1's on 46032, in another generator). `gen_m65_tls.py` now starts
+  a server that exits before listening again after a pause, up to five
+  times, with its log emptied first; reproduced by holding 47380 for three
+  seconds.
 - **RUSTSEC-2026-0386** (tokio's `AsyncFd` constructors, published after
   step f1) failed `cargo deny`; tokio is updated to 1.53.3. Nothing here
   uses `AsyncFd`.

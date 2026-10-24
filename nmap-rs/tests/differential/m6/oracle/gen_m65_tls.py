@@ -452,6 +452,32 @@ def wait_port(port, proc, seconds=10.0):
     return False
 
 
+# How often a server that exits before it listens is started again.
+START_TRIES = 5
+
+
+def start_server(name, cmd, port, out, err):
+    """Start a fixture server and wait until it listens. The fixture ports
+    lie inside Linux's ephemeral range (32768-60999), so an outgoing
+    connection of some other process can hold one as its local port for a
+    while, and the server's bind fails (CI saw it twice, on 46032 and
+    47380). A server that exits before listening is started again after a
+    pause, its log emptied first, up to START_TRIES times."""
+    for attempt in range(START_TRIES):
+        if attempt:
+            time.sleep(2.0)
+            for fh in (out, err):
+                fh.seek(0)
+                fh.truncate()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
+        if wait_port(port, proc):
+            return proc
+        stop(proc)
+        print("%s: the server did not come up (try %d of %d)" % (name, attempt + 1, START_TRIES),
+              file=sys.stderr, flush=True)
+    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+
+
 def server_cmd(kind, args, port, badserver):
     if kind == "s_server":
         parts = args.replace("CERTS/", CERTS + "/").split()
@@ -650,10 +676,7 @@ def run_matrix(badserver, logdir):
         with open(out_p, "w") as out, open(err_p, "w") as err, open(cli_p, "w") as cli:
             try:
                 if kind != "none":
-                    cmd = server_cmd(kind, args, port, badserver)
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
-                    if not wait_port(port, proc):
-                        raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+                    proc = start_server(name, server_cmd(kind, args, port, badserver), port, out, err)
                 result = oracle(port, mode, extra, cli, NMAP_ARGS.get(name, ()))
                 time.sleep(0.3)  # let the server write what it saw
             finally:
@@ -828,10 +851,7 @@ def serve_once(name, kind, args, port, badserver, logdir, tag, client):
     with open(out_p, "w") as out, open(err_p, "w") as err:
         try:
             if kind != "none":
-                cmd = server_cmd(kind, args, port, badserver)
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err)
-                if not wait_port(port, proc):
-                    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+                proc = start_server(name, server_cmd(kind, args, port, badserver), port, out, err)
             result = client()
             time.sleep(0.3)
         finally:

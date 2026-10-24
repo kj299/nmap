@@ -104,3 +104,24 @@ sni-table-256	-	fail no-result port=?	hello=0 sni=- serverhello=none alerts=- er
 starttls-silent	-	fail TIMEOUT	tls silent
 silent-closemid	-	closed	client closed | client closed
 silent-killed	-	fail no-result port=open	client closed | client closed
+cert-rsa2048-tls13	-	cert ssl=true,nil table=2506:143fd02de66aed6d cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+cert-ecp256-tls12	-	cert ssl=true,nil table=1295:dd71002fb7b88273 cn=m65-ecp256	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=ecdsa_secp256r1_sha256 alerts=- error=-
+cert-ecp384-tls13	-	cert ssl=true,nil table=1238:f100d9f66c9b50c7 cn=ec384.example.test	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=ecdsa_secp384r1_sha384 alerts=- error=-
+cert-ecp521-tls13	-	cert ssl=true,nil table=1262:fe391dba9bf30081 cn=ec521.example.test	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=ecdsa_secp521r1_sha512 alerts=- error=-
+cert-ed25519-tls13	-	cert ssl=true,nil table=1158:95e12aeff7d70909 cn=m65-ed25519	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=ed25519 alerts=- error=-
+cert-rsa512	-	cert ssl=true,nil table=1808:8ee63e25b948a6ed cn=m65-rsa512	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pkcs1_sha256 alerts=- error=-
+cert-chain-small	-	cert ssl=true,nil table=2506:143fd02de66aed6d cn=m65-rsa2048	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+cert-md5cert	-	cert ssl=true,nil table=2480:1ddf047520950ea2 cn=m65-rsamd5	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-
+cert-fake-ok	-	cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048	client ClientKeyExchange
+cert-fake-badsig	-	cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048	client alert 51
+cert-bad13-corrupt	needs-badserver	cert ssl=nil,ERROR table=1295:dd71002fb7b88273 cn=m65-ecp256	client: received fatal alert: DecryptError
+cert-fake-garbage	-	cert ssl=nil,ERROR table=nil	client alert 42
+cert-fake-ecdsa-cert-rsa-suite	-	cert ssl=nil,ERROR table=nil	client alert 47
+cert-fake-ed25519-cert-rsa-suite	-	cert ssl=nil,ERROR table=nil	client alert 47
+cert-fake-dh-cert	-	cert ssl=nil,ERROR table=nil	client alert 47
+cert-fake-unknownoid-cert	-	cert ssl=nil,ERROR table=nil	client alert 80
+cert-fake-noreneg	-	cert ssl=nil,ERROR table=nil	client alert 40
+cert-tls12-rsa-kx	-	cert ssl=true,nil table=2506:143fd02de66aed6d cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_RSA_WITH_AES_128_GCM_SHA256 group=- sigalg=- alerts=- error=-
+cert-chain-over64k	-	cert ssl=true,nil table=2506:143fd02de66aed6d cn=m65-rsa2048	hello=1 sni=- version=TLSv1.2 suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 group=* sigalg=* alerts=- error=-
+cert-fake-trail	-	cert ssl=nil,ERROR table=nil	client alert 50
+cert-trail-parse	-	trail parse=same	hello=1 sni=- version=TLSv1.3 suite=TLS_AES_256_GCM_SHA384 group=ecdh_x25519 sigalg=rsa_pss_rsae_sha256 alerts=- error=-

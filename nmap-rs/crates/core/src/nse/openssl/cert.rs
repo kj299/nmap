@@ -232,6 +232,20 @@ fn check<'gc>(args: &LuaArgs<'_, 'gc, '_>, arg: usize) -> Result<&'gc SslCert<'g
         .ok_or_else(|| type_error(args.ctx, v, arg, SSL_CERT_T).into())
 }
 
+/// `l_get_ssl_certificate`'s `parse_ssl_cert` of the leaf a handshake
+/// accepted (`der`, decoded by the same reader and filling its entry, so
+/// parsing it again gives the `X509` the handshake had): the values it
+/// returns.
+pub(crate) fn peer_certificate<'gc>(
+    ctx: Context<'gc>,
+    der: &[u8],
+) -> Result<Vec<Value<'gc>>, Fail> {
+    parse(ctx, der).map_err(|e| match e {
+        Failure::Lua(f) => f,
+        Failure::Refused | Failure::Random => Fail::err(super::REFUSED),
+    })
+}
+
 /// `l_parse_ssl_certificate` then `parse_ssl_cert`: the values it returns.
 fn parse<'gc>(ctx: Context<'gc>, der: &[u8]) -> Result<Vec<Value<'gc>>, Failure> {
     let Some(cert) = x509::d2i_x509(der) else {

@@ -144,7 +144,9 @@ pub trait ScriptNet {
     );
     /// `nsock_iod_check_ssl`: whether `sock` has started a handshake.
     fn is_ssl(&self, sock: SockId) -> bool;
-    /// The certificate the server sent first, once the handshake is done.
+    /// The certificate the server sent first, once the handshake has
+    /// accepted it (OpenSSL's `SSL_get_peer_certificate`): kept if the
+    /// handshake fails afterwards.
     fn peer_certificate(&self, sock: SockId) -> Option<Vec<u8>>;
     /// `nsock_setup_udp`: an unconnected UDP socket for `sendto` and
     /// `receive`; the OS's error text when it cannot be made.
@@ -759,8 +761,9 @@ pub const RECONNECT_UDP: &str = "reconnect_ssl: not supported on a UDP socket";
 
 /// `get_ssl_certificate(sock)`: `nse_nsock_get_ssl`'s check, then the
 /// certificate. A socket that never started a handshake raises; one that
-/// did returns nil until step f2 parses its certificate
-/// (`nse-tls-no-certificate-table`).
+/// did returns the leaf's table, as `parse_ssl_certificate` gives it, once
+/// the handshake has accepted the leaf, and nil before (or if it never
+/// did).
 fn l_get_ssl_certificate<'gc>(
     lib: &Rc<RefCell<NetLib>>,
     ctx: Context<'gc>,
@@ -773,7 +776,15 @@ fn l_get_ssl_certificate<'gc>(
     if !ssl {
         return Err(Fail::arg(1, "not a SSL socket"));
     }
-    s.replace(ctx, Value::Nil);
+    let leaf = host.borrow().peer_certificate(sock.id);
+    match leaf {
+        Some(der) => {
+            let out = super::openssl::cert::peer_certificate(ctx, &der)?;
+            s.clear();
+            s.extend(out);
+        }
+        None => s.replace(ctx, Value::Nil),
+    }
     Ok(())
 }
 

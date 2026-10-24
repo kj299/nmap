@@ -4050,9 +4050,8 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
       not available", as in an nmap built without OpenSSL, until the
       `openssl` module is registered (M6.5 step g; `nse-c-modules-pending`).
       Since M6.5 step f1, `connect(..., "ssl")` and `reconnect_ssl` make TLS
-      connections, and `get_ssl_certificate` raises on a socket that is not
-      SSL and returns nil on one that is (`nse-tls-no-certificate-table`,
-      until step f2).
+      connections, and since step f2 `get_ssl_certificate` returns the
+      leaf's table, as 7.94 does. Pinned: `cert-trail-parse`.
 - [ ] `nse-no-pcap-sockets` — `pcap_open` raises `can't open pcap reader on
       <device>`, as nmap does when it cannot open the device, and
       `pcap_receive` raises `not a pcap socket`. Scripts that sniff
@@ -6336,18 +6335,17 @@ absent, `nselib_differential`, `scripts_differential`, `nse_cli_differential`
 and every other gate of the workspace pass unchanged.
 
 **Gated** by the step-a fixtures, now 86 (`tests/differential/m6/m65_tls/`,
-`oracle/gen_m65_tls.py --check ... --client ... --nmap-rs ...`, CI's
+`oracle/gen_m65_tls.py --check ... --nmap-rs ...`, CI's
 differential job): each fixture server is run for 7.94 and again for the
 port, whose CLI runs the same probe script, so the server sees the port's
 whole NSE path; the golden records 7.94's result and what the server saw of
 it (the server name, version, suite, group, signature algorithm, alerts, the
 server's error). **65 rows equal 7.94's, and 21 differ, each pinned to the
 entry below that explains it** (`PORT_PINS`; a pin that stops differing
-fails). The leaf is compared too: until step f2, `get_ssl_certificate`
-returns nil, so where the port's probe reaches `ok leaf=none` the
-`m65_tlsprobe` example of `nmap-sys` (the port's socket host, driven as
-`core::nse::net` drives it) gives the leaf's SHA-256, length and CN, which
-must be 7.94's. Step f1 added 25 rows, recorded on 7.94 twice: how reads
+fails). The leaf is compared too (its SHA-256, length and CN): at step f1,
+while `get_ssl_certificate` returned nil, from an `m65_tlsprobe` example of
+`nmap-sys` driving the port's socket host; since step f2, from the table
+the probe script gets (below). Step f1 added 25 rows, recorded on 7.94 twice: how reads
 meet the end of a TLS connection (12), the `get_ssl_certificate` contract,
 UDP sockets (2), server names from a target name (7), a silent STARTTLS
 server, and teardown mid-handshake (2).
@@ -6444,9 +6442,9 @@ Found on the way:
   7.94 (`nse_nsock.cc:564-567`; DTLS came later). Gated: `udp-ssl`.
 - **`get_ssl_certificate`** raises `bad argument #1 to '?' (not a SSL
   socket)` on a socket that never started a handshake (new, TCP, closed),
-  and returns nil on one that did, the handshake failed included: nsock
+  and does not raise on one that did, the handshake failed included: nsock
   creates its `SSL` once TCP connects. `ftp.lua`'s `is_ssl` probe relies
-  on the raise. Gated: `contract`.
+  on the raise. Gated: `contract`. What it returns is step f2's (below).
 - **One time-out** covers the TCP connect and the handshake, and
   `reconnect_ssl`'s handshake (`starttls-silent`); a socket closed under a
   waiting handshake, or a thread killed by `--script-timeout`, drops the
@@ -6457,12 +6455,9 @@ Found on the way:
 
 ### Differences, open and documented
 
-- [ ] `nse-tls-no-certificate-table` (interim, step f2 retires it) —
-      `get_ssl_certificate` returns nil on an SSL socket, where 7.94 returns
-      the certificate's table: the table is `parse_ssl_certificate`'s, which
-      step f2 joins to the leaf. Nothing in the corpus reads it before step
-      g: sslcert gates on `have_openssl`, and ftp's probe only asks whether
-      the call raises.
+- [x] `nse-tls-no-certificate-table` (interim; retired by step f2) —
+      `get_ssl_certificate` returned nil on an SSL socket, where 7.94 returns
+      the certificate's table. Step f2 returns it.
 - [ ] `nse-tls-eof-coalesced` — when data and the end of the connection
       reach 7.94 in one read event, its `receive` returns the data and
       consumes the end, and the next read is `ERROR` (or `TIMEOUT` after a
@@ -6477,6 +6472,79 @@ Found on the way:
       label, and a trailing dot, which rustls drops), `nse-tls-alert-numbers`
       (now two rows: 7.94's 47 is sent where a key does not fit) and
       `nse-tls-no-reneg-info-accepted`.
+
+## Milestone 6.5 step f2 — the certificate on TLS sockets (`core::nse::net`, `sys::tls`, `sys::nsenet`; `openssl` not registered)
+
+`get_ssl_certificate` returns what 7.94's does: `parse_ssl_cert` of the
+peer's certificate (`nse_ssl_cert.cc:546-558`), here
+`core::nse::openssl::cert`'s parse of the leaf's DER. The handshake decoded
+that DER with the same reader and refused any entry it did not fill exactly,
+so parsing it again gives the `X509` the handshake had. Which handshakes
+leave a certificate is OpenSSL's rule, measured on 7.94:
+`SSL_get_peer_certificate` has the leaf once its checks pass
+(`tls_post_process_server_certificate`: it decodes, and its key is of a type
+TLS takes and, in TLS 1.2, fits the suite), whatever happens to the
+handshake afterwards. 7.94 returns the table after a bad ServerKeyExchange
+signature, a bad TLS 1.3 CertificateVerify, or a server that goes away after
+its flight, and nil when the certificate itself was refused. rustls keeps
+the peer's certificates only once the signature verifies, so each
+connection's verifier records the leaf itself (`sys::tls::PeerLeaf`): set
+when the chain passes, cleared when a TLS 1.2 signature's scheme does not
+fit the key (in TLS 1.2 rustls holds the scheme to the suite, so that is
+OpenSSL's "wrong certificate type"). The socket keeps the slot through a
+failed or timed-out handshake. `nmap.socket.parse_ssl_certificate` stays
+"SSL is not available" until step g (`nse-no-ssl`).
+
+The probe script now reads the table without `openssl`, which the port's
+CLI has only from step g: the leaf's hash is the table's own `digest`. On
+7.94 that equals `openssl.digest` of the DER on every row (the 86 rows
+recorded before are unchanged), and the `m65_tlsprobe` example is gone.
+
+**Gated** by the fixture gate, now 107 rows (`oracle/gen_m65_tls.py --check
+... --nmap-rs ...`, CI's differential job; recorded on 7.94 twice): **80
+equal 7.94's, 27 pinned**. Step f2's 21 rows render the whole table that
+`get_ssl_certificate` returns, every field and `digest` result as
+`oracle/m65_core.lua` renders a parsed certificate (the row holds its size
+and FNV-1a 64; the probe prints the rendering for the logs):
+- RSA-2048, P-256, P-384, P-521, Ed25519, RSA-512 and an MD5-signed
+  certificate, and a chain whose table is its leaf's: equal;
+- handshakes that fail after the certificate (`cert-fake-ok`,
+  `cert-fake-badsig`, `cert-bad13-corrupt`): the table, equal;
+- certificates refused (garbage, a key that does not fit the suite in TLS
+  1.2, ECDSA and Ed25519; DH; no key): nil, equal;
+- the leniency gap: trailing bytes after the leaf, which the handshake
+  refuses (`cert-fake-trail`, nil; its alert pinned to
+  `nse-tls-alert-numbers`) and `parse_ssl_certificate` takes
+  (`cert-trail-parse`: 7.94's table renders as the socket's; pinned to
+  `nse-no-ssl` until step g);
+- the step-0 entries on the same servers: `cert-tls12-rsa-kx` (7.94's table
+  after an RSA key exchange; `nse-tls-modern-only`), `cert-chain-over64k`
+  (`nse-tls-handshake-64k`), `cert-fake-noreneg` (the port goes on and has
+  the leaf; `nse-tls-no-reneg-info-accepted`),
+  `cert-fake-unknownoid-cert` (`nse-tls-alert-numbers`).
+
+Also gated: `crates/sys/tests/nse_tls.rs`
+(`get_ssl_certificate_is_the_parsed_table_of_the_leaf`: the socket's table
+renders as `parse_ssl_certificate`'s of the same leaf, and of the leaf with
+bytes after it; `the_table_is_the_leafs_not_the_chains`;
+`a_handshake_that_fails_after_the_certificate_keeps_the_leaf`;
+`ftp_auth_upgrades_with_auth_tls` still upgrades) and `sys::tls`'s
+`the_leaf_is_kept_once_its_checks_pass` (refused leaves are never kept; a
+bad signature keeps it in either version; TLS 1.3's wrong signature type
+keeps it; TLS 1.2's wrong certificate type drops it). **Sabotage**, 6 port
+variants: the table never returned, a failed handshake giving no table, the
+leaf kept before its checks, a TLS 1.2 key that does not fit the suite kept,
+and an intermediate given as the table were each caught by a named test
+above (the last only once `the_table_is_the_leafs_not_the_chains` was
+added: no test server had sent a chain). The sixth, the stream's leaf taken
+from rustls's `peer_certificates`, is equivalent: the stream exists only
+after a successful handshake, when the two agree, and a failed one reads
+the socket's slot.
+
+Found on the way:
+- **RUSTSEC-2026-0386** (tokio's `AsyncFd` constructors, published after
+  step f1) failed `cargo deny`; tokio is updated to 1.53.3. Nothing here
+  uses `AsyncFd`.
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

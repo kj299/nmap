@@ -15,6 +15,8 @@ use rustls::pki_types::ServerName;
 use rustls::ClientConnection;
 use tokio::net::TcpStream;
 
+use super::{connection_config, PeerLeaf};
+
 /// What a read of the connection came to.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReadEvent {
@@ -41,6 +43,7 @@ struct Inner {
 pub struct TlsStream {
     tcp: Arc<TcpStream>,
     inner: Mutex<Inner>,
+    leaf: PeerLeaf,
 }
 
 /// How much is read from the socket at once.
@@ -114,15 +117,17 @@ impl Inner {
 
 impl TlsStream {
     /// The handshake, over `tcp`. On failure, the alert rustls queued is
-    /// sent first (best effort), as OpenSSL sends its own.
+    /// sent first (best effort), as OpenSSL sends its own. The leaf goes in
+    /// `leaf` once its checks pass, whatever happens to the handshake after.
     pub async fn handshake(
         tcp: Arc<TcpStream>,
-        config: Arc<rustls::ClientConfig>,
         name: ServerName<'static>,
+        leaf: PeerLeaf,
     ) -> Result<Self, ()> {
-        let conn = ClientConnection::new(config, name).map_err(|_| ())?;
+        let conn = ClientConnection::new(connection_config(&leaf), name).map_err(|_| ())?;
         let s = Self {
             tcp,
+            leaf,
             inner: Mutex::new(Inner {
                 conn,
                 pending: Vec::new(),
@@ -289,11 +294,7 @@ impl TlsStream {
     /// The certificate the server sent first: the leaf.
     #[must_use]
     pub fn leaf(&self) -> Option<Vec<u8>> {
-        let i = lock(&self.inner);
-        i.conn
-            .peer_certificates()
-            .and_then(|c| c.first())
-            .map(|c| c.as_ref().to_vec())
+        self.leaf.get()
     }
 
     /// The negotiated version and suite, as rustls names them.

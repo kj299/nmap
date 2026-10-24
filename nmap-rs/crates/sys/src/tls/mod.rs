@@ -32,8 +32,10 @@ mod verifier;
 use std::sync::{Arc, OnceLock};
 
 pub use stream::{server_name, ReadEvent, TlsStream};
+pub use verifier::PeerLeaf;
 
-/// The client configuration every connection shares.
+/// The client configuration every connection shares, but for its verifier
+/// ([`connection_config`]).
 #[must_use]
 pub fn client_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
@@ -44,13 +46,23 @@ pub fn client_config() -> Arc<rustls::ClientConfig> {
                     .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
                     .unwrap_or_else(|_| unreachable!("the provider carries TLS 1.2 and 1.3 suites"))
                     .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(verifier::NmapVerifier))
+                    .with_custom_certificate_verifier(Arc::new(verifier::NmapVerifier::default()))
                     .with_no_client_auth();
             cfg.resumption = rustls::client::Resumption::disabled();
             cfg.enable_sni = true;
             Arc::new(cfg)
         })
         .clone()
+}
+
+/// One connection's configuration: [`client_config`] with a verifier that
+/// records the leaf it accepts in `leaf`.
+#[must_use]
+pub fn connection_config(leaf: &PeerLeaf) -> Arc<rustls::ClientConfig> {
+    let mut cfg = (*client_config()).clone();
+    cfg.dangerous()
+        .set_certificate_verifier(Arc::new(verifier::NmapVerifier { leaf: leaf.clone() }));
+    Arc::new(cfg)
 }
 
 /// The verifier's rules on bytes from anywhere, for the fuzz targets
@@ -73,7 +85,7 @@ pub mod fuzzing {
         let Ok(name) = ServerName::try_from("fuzz.test") else {
             return false;
         };
-        NmapVerifier
+        NmapVerifier::default()
             .verify_server_cert(
                 &CertificateDer::from(*leaf),
                 &mids,

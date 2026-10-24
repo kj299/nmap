@@ -63,3 +63,47 @@ impl rand_core::RngCore for Rng {
 }
 
 impl rand_core::CryptoRng for Rng {}
+
+/// The seam's failure, for the curve crates' fallible `rand_core` 0.10
+/// interface. The OS source gives no reason, so neither does this.
+#[derive(Debug)]
+pub(crate) struct RandFailed;
+
+impl core::fmt::Display for RandFailed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("the OS random source failed")
+    }
+}
+
+impl core::error::Error for RandFailed {}
+
+// The P-256/P-384/P-521 crates (elliptic-curve 0.14) take `rand_core` 0.10,
+// which x25519-dalek does not, so the seam speaks both. Through the curve
+// crates' own re-export, so the tree gains no dependency. Unlike 0.6's
+// `fill_bytes`, 0.10's `TryRng` can report a failure, so an ephemeral secret
+// drawn through it refuses the handshake rather than panicking.
+impl p256::elliptic_curve::rand_core::TryRng for Rng {
+    type Error = RandFailed;
+
+    fn try_next_u32(&mut self) -> Result<u32, RandFailed> {
+        let mut b = [0u8; 4];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, RandFailed> {
+        let mut b = [0u8; 8];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), RandFailed> {
+        if fill(dst) {
+            Ok(())
+        } else {
+            Err(RandFailed)
+        }
+    }
+}
+
+impl p256::elliptic_curve::rand_core::TryCryptoRng for Rng {}

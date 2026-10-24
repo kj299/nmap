@@ -40,14 +40,22 @@ socket2 = "0.6.5"
 # P-256/P-384/P-521, X25519. RSA verification is first-party over
 # num-bigint (the `rsa` crate carries RUSTSEC-2023-0071). Randomness is the
 # one seam of `core::nse::openssl::rand` (E3); rand_core only adapts it.
+#
+# Except the NIST curves: p256/p384/p521 are on 0.14, the digest-0.11 /
+# rand_core-0.10 generation, because 0.13 pulls crypto-bigint 0.5, which
+# carries RUSTSEC-2026-0387 (timing variability in its constant-time
+# operations; fixed in 0.7.6). Until sha2, hmac, the AEADs and the dalek
+# crates follow, the lock holds both generations of their support crates
+# (digest, sha2, hmac, signature, rand_core, ...), which deny.toml reports as
+# duplicate warnings; the TLS seam implements both rand_core versions.
 rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
-p384 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
-p521 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+p521 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 x25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
 ed25519-dalek = { version = "2.1.1", default-features = false }
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }

@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nmap_core::nse::openssl::cert::parse_for_tests;
+use nmap_core::nse::openssl::cert::parse_ssl_certificate;
 use nmap_core::nse::openssl::register_for_tests;
 use nmap_core::nse::stdlib::{load_format, load_patterns, load_strpack, load_tail};
 use piccolo::{
@@ -101,7 +101,7 @@ pub fn runner_with(certs: bool) -> (Lua, StashedFunction) {
         env.set_field(ctx, "openssl", register_for_tests(ctx, None));
         env.set_field(ctx, "drain", false);
         if certs {
-            env.set_field(ctx, "parse", parse_for_tests(ctx));
+            env.set_field(ctx, "parse", parse_ssl_certificate(ctx));
             env.set_field(ctx, "certs", "m65_certs.txt");
         }
         ctx.stash(Executor::start(ctx, runner, env))

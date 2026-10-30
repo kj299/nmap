@@ -102,7 +102,7 @@ jobs:
           -D warnings
           -D clippy::missing_safety_doc
           -D clippy::undocumented_unsafe_blocks
-      # The exit scenarios' load and abort blocks (`--script safe` runs its
+      # The exit scenarios' load blocks (`--script safe` and `all` run their
       # broadcast scripts) run in a network namespace holding only loopback
       # (`unshare -rn`, gen_m66_exit.py `isolated`), so nothing leaves the
       # runner. Ubuntu 24.04 forbids unprivileged user namespaces through
@@ -400,7 +400,7 @@ jobs:
       # result (host status + open-port state/reason + closed counts), so the
       # exact nmap version's decorative output does not affect the verdict.
       - run: sudo apt-get update && sudo apt-get install -y nmap
-      # The exit scenarios' load and abort blocks (`--script safe` runs its
+      # The exit scenarios' load blocks (`--script safe` and `all` run their
       # broadcast scripts) run in a network namespace holding only loopback
       # (`unshare -rn`, gen_m66_exit.py `isolated`), so nothing leaves the
       # runner. Ubuntu 24.04 forbids unprivileged user namespaces through
@@ -470,10 +470,10 @@ jobs:
       - run: M66_SCRIPTLOAD_GOLDEN="$RUNNER_TEMP/m66_scriptload_golden.txt" cargo test -p nmap-core --test scriptload_differential
       # M6.6 step e: the exit criterion. nmap on this repository's own data
       # directory: what -sC, --script default, --script version, -A (as
-      # -sC -sV) and, since the lfs step, --script safe (in a loopback-only
-      # network namespace, see above) select, load and drop, with the port's missing C modules
-      # removed for the loaded and quiet lists; the categories that still stop
-      # at start-up, and on which file:line; and address-info, riak-http-info,
+      # -sC -sV), --script safe (since the lfs step) and vuln, exploit,
+      # intrusive and all (since M6.5 step g; in a loopback-only network
+      # namespace, see above) select, load and drop, with the port's missing C
+      # modules removed for the loaded and quiet lists; and address-info, riak-http-info,
       # bitcoinrpc-info and http-affiliate-id run against loopback listeners
       # (8098, 8332, 8180). The port's binary must print the same, through the
       # same parser (oracle/gen_m66_exit.py --check), with the two tolerances
@@ -523,9 +523,9 @@ jobs:
       # badserver (its own lockfile; no C), so they are recorded live too.
       - run: cd spikes/m65-tls-provider && cargo build --release --bin badserver
       - run: bash tests/differential/m6/regen_m65_tls.sh --check
-      # M6.5 step f1: the port's TLS client over the same fixtures, through
-      # its NSE path (nmap-rs runs the probe script) and, until step f2 gives
-      # get_ssl_certificate its table, the m65_tlsprobe example for the leaf.
+      # M6.5 steps f1, f2 and g: the port's TLS client over the same fixtures,
+      # through its NSE path (nmap-rs runs the probe script; the leaf and the
+      # whole certificate table come from get_ssl_certificate).
       # Every row equals 7.94's or is a pin naming its ledger entry; a pin
       # that no longer differs fails.
       - run: bash tests/differential/m6/regen_m65_tls.sh --check-port

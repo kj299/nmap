@@ -83,15 +83,17 @@ fn the_metatable_is_luaopen_openssls() {
     );
 }
 
+/// `openssllib`'s 32 entries (`nse_openssl.cc:568-603`), no more and no
+/// fewer, now that step g added `supported_digests` and `supported_ciphers`.
 #[test]
-fn the_library_has_steps_b_to_d_and_nothing_else_yet() {
+fn the_library_is_openssllib() {
     let out = run(
         "local k = {} for name, v in pairs(openssl) do k[#k + 1] = name .. ':' .. type(v) end \
          table.sort(k) return #k .. ' ' .. table.concat(k, ',')",
     );
     assert_eq!(
         out,
-        "30 DES_string_to_key:function,bignum_add:function,bignum_bin2bn:function,\
+        "32 DES_string_to_key:function,bignum_add:function,bignum_bin2bn:function,\
          bignum_bn2bin:function,\
          bignum_bn2dec:function,bignum_bn2hex:function,bignum_bn2mpi:function,\
          bignum_clear_bit:function,bignum_dec2bn:function,bignum_div:function,\
@@ -100,7 +102,8 @@ fn the_library_has_steps_b_to_d_and_nothing_else_yet() {
          bignum_num_bytes:function,bignum_pseudo_rand:function,bignum_rand:function,\
          bignum_set_bit:function,decrypt:function,digest:function,encrypt:function,\
          hmac:function,md4:function,md5:function,\
-         rand_bytes:function,rand_pseudo_bytes:function,ripemd160:function,sha1:function"
+         rand_bytes:function,rand_pseudo_bytes:function,ripemd160:function,sha1:function,\
+         supported_ciphers:function,supported_digests:function"
     );
 }
 
@@ -624,7 +627,7 @@ fn certificates_are_accounted_to_the_heap() {
     const N: usize = 64 << 10;
     let mut lua = state();
     lua.enter(|ctx| {
-        ctx.set_global("parse", cert::parse_for_tests(ctx));
+        ctx.set_global("parse", cert::parse_ssl_certificate(ctx));
         let d = cert_with_extension(N);
         ctx.set_global("der", piccolo::String::from_slice(&ctx, d));
     });
@@ -656,7 +659,7 @@ fn certificates_are_accounted_to_the_heap() {
 fn an_unrenderable_subject_oid_is_not_enough_memory() {
     let mut lua = state();
     lua.enter(|ctx| {
-        ctx.set_global("parse", cert::parse_for_tests(ctx));
+        ctx.set_global("parse", cert::parse_ssl_certificate(ctx));
         let mut long = vec![0x2a];
         long.resize(587, 0x01);
         ctx.set_global(

@@ -11,12 +11,12 @@ module, nmap and nmap-rs compared by one parser.
 **Selection and load** (`load` blocks). Each runs
 `BIN --datadir REPO -d2 -Pn -n -p 1 SEL 127.0.0.1` on this repository's own
 data directory, never a fixture one, with SEL `-sC`, `--script default`,
-`--script version`, `-A` or `--script safe`. `safe` runs its 334 scripts,
-broadcast ones among them, so every load and abort block runs, for both
-programs, in a network namespace of its own holding only loopback
-(`unshare -rn`, `isolated`), which is checked before the program starts:
-nothing it sends leaves the host, even if a category that should stop at
-start-up ran. Without user namespaces the blocks fail; they are never
+`--script version`, `-A`, `--script safe`, and since M6.5 step g registered
+`openssl`, `--script vuln`, `exploit`, `intrusive` and `all`. `safe` and
+`all` run their scripts, broadcast ones among them, so every load block
+runs, for both programs, in a network namespace of its own holding only
+loopback (`unshare -rn`, `isolated`), which is checked before the program
+starts: nothing it sends leaves the host. Without user namespaces the blocks fail; they are never
 skipped. (The `run` blocks talk to this process's listeners, so they run
 on the host's loopback.) nmap 7.94 cannot run `-A` with this repository's
 nmap-os-db (written for 7.94.2 and later: an assertion abort in
@@ -41,15 +41,17 @@ The golden holds, per selection, 7.94's `selected` list and the `loaded` and
 `quiet` lists nmap 7.94 gives with the C modules the port does not have yet
 removed (gen_m66_scriptload.py's emulation, PORT_MISSING), which is what the
 port must print. Generation checks that emulation against the real 7.94 run:
-the same selection, its `loaded` list the real one less OPENSSL_QUIET[mode],
-and its `quiet` list exactly OPENSSL_QUIET[mode]; and the selection counts
+the same selection, its `loaded` list the real one less MISSING_QUIET[mode],
+and its `quiet` list exactly MISSING_QUIET[mode]; and the selection counts
 SELECTED. Two harness tolerances, each part of a ledger entry
 (LESSONS #031), and nothing else:
 
-    OPENSSL_QUIET   `nse-sc-openssl-quiet-drops` (expires with M6.5): per
-                    selection, the scripts that reach `openssl` through
-                    silent_require, dropped quietly by the port and loaded by
-                    7.94: six of `default`, none of `version`, 18 of `safe`.
+    MISSING_QUIET   `nse-c-modules-pending`: per selection, the scripts that
+                    reach `libssh2` through silent_require, dropped quietly
+                    by the port and loaded by 7.94: the four ssh scripts of
+                    `intrusive` and `all`, none elsewhere. (Until M6.5 step g
+                    this was OPENSSL_QUIET, `nse-sc-openssl-quiet-drops`: six
+                    of `default`, 18 of `safe`.)
     SV_VERSION_ONLY `nse-sv-version-scripts-pending`: the port's -sV runs no
                     scripts yet, so its -A selects `default` alone. While
                     SV_PENDING, the port's -A is held to the `-sC` block and
@@ -57,17 +59,10 @@ SELECTED. Two harness tolerances, each part of a ledger entry
 
 The port's run must also end with rc 0 and print no loud, init or quit line.
 
-**Categories that still stop at start-up** (`abort` blocks,
-`nse-categories-abort-on-unported-modules`): `--script vuln`, `intrusive`,
-`exploit` and `all`, with the same command line (`safe` stopped on `lfs`
-until the lfs step, and is a `load` block since). The oracle is
-nmap 7.94 without the port's missing modules alone (real 7.94 would run them
-all): it quits at load, so nothing runs. The port must print the same
-`selected`, `loaded` and `quiet` lists up to the script that stops it, that
-script's `Failed to load` line and the same `file:line: module 'X' not found`,
-and end with `QUITTING!` and rc 1. A category whose module has left
-PORT_MISSING (ported) is not run — it would scan — and fails: the ledger entry
-and this block must change with the module.
+No category stops at start-up any more (`nse-categories-abort-on-unported-
+modules`, retired by M6.5 step g): `vuln`, `intrusive`, `exploit` and `all`
+stopped on `http-vuln-cve2014-3704.nse:8: module 'openssl' not found` and were
+`abort` blocks until then, as `safe` (on `lfs`) was until the lfs step.
 
 **Executed scripts** (`run` blocks), each one nmap run whose script results
 are parsed from -oN and -oX by gen_m64_cli.py's parsers (`row`, `xml`), plus
@@ -108,22 +103,14 @@ import gen_m66_scriptload as scriptload  # noqa: E402
 
 REPO = scriptload.REPO
 
-# `nse-sc-openssl-quiet-drops` (DIVERGENCES.md), expiring with M6.5: per
-# selection, the scripts that reach `openssl` through stdnse.silent_require
-# (measured, each module removed alone: all 18 of `safe`'s are `openssl`'s).
-DEFAULT_QUIET = ["http-favicon.nse", "iscsi-info.nse", "mongodb-databases.nse",
-                 "mongodb-info.nse", "sip-methods.nse", "ssh-hostkey.nse"]
-OPENSSL_QUIET = {
-    "sC": DEFAULT_QUIET,
-    "default": DEFAULT_QUIET,
-    "version": [],
-    "A": DEFAULT_QUIET,
-    "safe": ["bitcoin-getaddr.nse", "bitcoin-info.nse", "bittorrent-discovery.nse",
-             "duplicates.nse", "http-cakephp-version.nse", "http-favicon.nse",
-             "http-php-version.nse", "http-virustotal.nse", "iscsi-info.nse",
-             "mongodb-databases.nse", "mongodb-info.nse", "rsa-vuln-roca.nse",
-             "rsync-list-modules.nse", "shodan-api.nse", "sip-methods.nse", "smb-ls.nse",
-             "ssh-hostkey.nse", "ssh2-enum-algos.nse"],
+# `nse-c-modules-pending` (DIVERGENCES.md): per selection, the scripts that
+# reach `libssh2` through stdnse.silent_require, which the port drops quietly
+# and 7.94 loads (measured: none but these four of `intrusive` and `all`).
+SSH_QUIET = ["ssh-auth-methods.nse", "ssh-brute.nse", "ssh-publickey-acceptance.nse",
+             "ssh-run.nse"]
+MISSING_QUIET = {
+    "sC": [], "default": [], "version": [], "A": [], "safe": [],
+    "vuln": [], "exploit": [], "intrusive": SSH_QUIET, "all": SSH_QUIET,
 }
 
 # `nse-sv-version-scripts-pending` (DIVERGENCES.md): while it is open, the
@@ -149,16 +136,18 @@ LOADS = [
     ("version", ["--script", "version"], ["--script", "version"]),
     ("A", ["-A"], ["-sC", "-sV"]),
     ("safe", ["--script", "safe"], ["--script", "safe"]),
+    ("vuln", ["--script", "vuln"], ["--script", "vuln"]),
+    ("exploit", ["--script", "exploit"], ["--script", "exploit"]),
+    ("intrusive", ["--script", "intrusive"], ["--script", "intrusive"]),
+    ("all", ["--script", "all"], ["--script", "all"]),
 ]
-
-# `nse-categories-abort-on-unported-modules`: the categories that stop at
-# start-up for want of `openssl`.
-ABORTS = ["vuln", "intrusive", "exploit", "all"]
 
 # How many scripts each selects on this tree's scripts/ (the `selected` lines
 # alone, as well as the lists, so a golden from a fixture data directory
-# cannot pass): 127 `default`, 48 `version`, 158 for both, 352 `safe`.
-SELECTED = {"sC": 127, "default": 127, "version": 48, "A": 158, "safe": 352}
+# cannot pass): 127 `default`, 48 `version`, 158 for both, 352 `safe`, 105
+# `vuln`, 45 `exploit`, 217 `intrusive`, 611 `all`.
+SELECTED = {"sC": 127, "default": 127, "version": 48, "A": 158, "safe": 352,
+            "vuln": 105, "exploit": 45, "intrusive": 217, "all": 611}
 
 # Run a command in a new user and network namespace with loopback up, after
 # checking that loopback is the namespace's only interface: nothing can leave
@@ -504,32 +493,18 @@ def write_golden(outdir):
                 bad.append("%s: the emulation selected otherwise" % mode)
             if real["loaded"] != names or real["quiet"]:
                 bad.append("%s: 7.94 did not load what it selected" % mode)
-            quiet = OPENSSL_QUIET[mode]
+            quiet = MISSING_QUIET[mode]
             if emu["quiet"] != quiet:
-                bad.append("%s: without the modules 7.94 drops %s, OPENSSL_QUIET says %s"
+                bad.append("%s: without the modules 7.94 drops %s, MISSING_QUIET says %s"
                            % (mode, emu["quiet"], quiet))
             if emu["loaded"] != [n for n in names if n not in quiet]:
-                bad.append("%s: without the modules 7.94 loads other than all less OPENSSL_QUIET"
+                bad.append("%s: without the modules 7.94 loads other than all less MISSING_QUIET"
                            % mode)
             lists[mode] = names
             lines.append("load %s" % mode)
             lines += ["selected %s %s %s" % s for s in real["selected"]]
             lines += ["loaded %s" % n for n in emu["loaded"]]
             lines += ["quiet %s" % n for n in emu["quiet"]]
-        for cat in ABORTS:
-            emu = load_run("nmap", dd, ["--script", cat])
-            if not (emu["rc"] == 1 and emu["quit"] and emu["init"] and len(emu["loud"]) == 1
-                    and len(emu["notfound"]) == 1 and not emu["outside"]):
-                bad.append("--script %s: 7.94 without the modules does not stop at load: %s"
-                           % (cat, {k: emu[k] for k in ("rc", "loud", "notfound", "quit")}))
-                continue
-            lines.append("abort %s" % cat)
-            lines += ["selected %s %s %s" % s for s in emu["selected"]]
-            lines += ["loaded %s" % n for n in emu["loaded"]]
-            lines += ["quiet %s" % n for n in emu["quiet"]]
-            lines.append("loud %s" % emu["loud"][0])
-            lines.append("notfound %s %s" % (emu["notfound"][0][1],
-                                             hexs(emu["notfound"][0][0])))
     if lists.get("default") != lists.get("sC"):
         bad.append("--script default and -sC select differently")
     only = [n for n in lists.get("A", []) if n not in lists.get("sC", [])]
@@ -547,7 +522,7 @@ def write_golden(outdir):
 
 
 def read_golden(path):
-    loads, runs, order, aborts = {}, {}, [], {}
+    loads, runs, order = {}, {}, []
     cur = None
     with open(path, encoding="latin-1") as fh:
         for line in fh:
@@ -556,13 +531,6 @@ def read_golden(path):
                 continue
             if f[0] == "load":
                 cur = loads.setdefault(f[1], {"selected": [], "loaded": [], "quiet": []})
-            elif f[0] == "abort":
-                cur = aborts.setdefault(f[1], {"selected": [], "loaded": [], "quiet": [],
-                                               "loud": [], "notfound": []})
-            elif f[0] == "loud":
-                cur["loud"].append(f[1])
-            elif f[0] == "notfound":
-                cur["notfound"].append((unhex(f[2]), f[1]))
             elif f[0] == "run":
                 cur = runs.setdefault(f[1], [])
                 order.append(f[1])
@@ -574,11 +542,11 @@ def read_golden(path):
                 continue
             else:
                 cur.append((f[0], f[1], unhex(f[2])))
-    return loads, runs, order, aborts
+    return loads, runs, order
 
 
 def check(golden, binary):
-    loads, runs, order, aborts = read_golden(golden)
+    loads, runs, order = read_golden(golden)
     bad = 0
     total = 0
     for mode, port_sel, _oracle_sel in LOADS:
@@ -610,36 +578,6 @@ def check(golden, binary):
         else:
             print("load %s: %d selected, %d loaded, %d quiet" % (
                 mode, len(got["selected"]), len(got["loaded"]), len(got["quiet"])))
-    missing = set(m for m in scriptload.PORT_MISSING.split(",") if m)
-    if sorted(aborts) != sorted(ABORTS):
-        bad += 1
-        print("the golden's abort blocks are %s, not ABORTS" % sorted(aborts))
-    for cat in ABORTS:
-        want = aborts.get(cat)
-        if want is None:
-            continue
-        total += 1
-        module = want["notfound"][0][1] if want["notfound"] else "?"
-        if module not in missing:
-            # Ported: the category would now load, and run, every script.
-            bad += 1
-            print("abort %s: `%s` is ported (not in PORT_MISSING): retire this block and "
-                  "nse-categories-abort-on-unported-modules for it" % (cat, module))
-            continue
-        got = load_run(binary, REPO, ["--script", cat])
-        problems = []
-        if got["rc"] != 1 or not got["quit"] or not got["init"] or got["outside"]:
-            problems.append("rc %d, quit %s, init %s, outside %s"
-                            % (got["rc"], got["quit"], got["init"], got["outside"]))
-        for k in ("selected", "loaded", "quiet", "loud", "notfound"):
-            if got[k] != want[k]:
-                problems.append("%s differs:\n      nmap %s\n      port %s" % (k, want[k], got[k]))
-        if problems:
-            bad += 1
-            print("abort %s differs:\n  %s" % (cat, "\n  ".join(problems)))
-        else:
-            print("abort %s: %d selected, %d loaded, stops on %s" % (
-                cat, len(got["selected"]), len(got["loaded"]), got["notfound"][0][0]))
     for name, _args, got in all_runs(binary):
         total += 1
         want = runs.get(name)

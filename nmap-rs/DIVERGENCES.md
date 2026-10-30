@@ -3505,10 +3505,11 @@ Gated by three things:
   fresh state, and how each one ends, ok or the error, must match nmap 7.94
   run against this tree's `nselib/` (`m64_nselib_golden.txt`, regenerated
   live in CI).
-  - 121 load as they do under nmap (116 before M6.6 step e, 114 before step
-    a).
-  - 12 are pinned to fail, each only because a C module it requires is not
-    ported yet: `openssl` (11) or `libssh2` (1). A pin holds only
+  - 132 load as they do under nmap (121 before M6.5 step g, 116 before M6.6
+    step e, 114 before step a).
+  - 1 is pinned to fail, only because a C module it requires is not ported
+    yet: `libssh2-utility`, on `libssh2` (11 more were pinned to `openssl`
+    until M6.5 step g). A pin holds only
     if the module its library failed on, the last one no searcher found while
     it loaded, is the pinned one, and the error is what that module's absence
     causes (`missing()`).
@@ -3520,18 +3521,22 @@ Gated by three things:
     found ["libssh2"]`, and it is re-pinned to `libssh2`.
   - **Changed in M6.6 step e.** `coap`, `json`, `lpeg-utility`, `mobileme`
     and `re`, pinned to `lpeg`, load now that it is registered.
+  - **Changed in M6.5 step g.** `bitcoin`, `bittorrent`, `iax2`, `iscsi`,
+    `mongodb`, `pgsql`, `rsync`, `sip`, `ssh1`, `ssh2` and `tns`, pinned to
+    `openssl`, load now that it is registered.
 - **Every unit-test suite passes.** Each library's `test_suite` runs as
   nmap's `--script-args=unittest` runs it.
-  - 24 of 26 suites pass. Since M6.6 step e each passes by its count: as many
-    tests as nmap runs without the port's missing C modules (the golden's
-    `unittest-emu` rows), which is nmap's own count for all but four
-    (`nse-c-modules-pending`). `json` runs 69 and `coap` 1,060.
-  - `mongodb` and `ssh2` are pinned to the same missing modules (`coap` and
-    `json` were too, until step e).
+  - All 26 suites pass (24 before M6.5 step g). Since M6.6 step e each passes
+    by its count: as many tests as nmap runs without the port's missing C
+    modules (the golden's `unittest-emu` rows), which is nmap's own count for
+    all but `http`, 75 of 105 (`nse-c-modules-pending`). `json` runs 69,
+    `coap` 1,060, `mongodb` 160.
+  - `mongodb` and `ssh2` were pinned to `openssl` until M6.5 step g (`coap`
+    and `json` to `lpeg` until M6.6 step e).
   - `unittest.run_tests()` over every library `unittest.lua` lists, as the
-    shipped `unittest.nse` runs it, fails on exactly the 16 libraries nmap
-    fails on without those modules, each on the same module (22 before step
-    e).
+    shipped `unittest.nse` runs it, fails on exactly the 3 libraries nmap
+    fails on without those modules (`libssh2`, `libssh2-utility`, `zlib`),
+    each on the same module (15 before M6.5 step g, 22 before M6.6 step e).
 - **A stdlib corpus** (`m64_stdlib_cases.txt`): 2,012 chunks against nmap's
   own `liblua/` under `TZ=UTC`, covering all of `utf8`, `os.date`/`time`/
   `difftime`/`clock`, `io` over fixture files, and `debug.getinfo`/
@@ -3650,23 +3655,29 @@ Gated by three things:
       and 100 userdata with a `__gc`, collected in full collections, are never
       finalized, and the review's repro, with a full collection after every
       slice, sees no finalizer call and no match past the ceiling.
-- [ ] `nse-c-modules-pending` — `openssl`, `libssh2` and `zlib` are
-      not preloaded yet. The 12 libraries and 2 suites above fail to load
-      where they need them, and are pinned so that each failure must be
-      exactly the absence of its module. `nmapdb` was ported in M6.6 step a,
-      `lpeg` (with `re`, `lpeg-utility`, `json`, `coap` and `mobileme` on
-      it) registered in step e, and a minimal `lfs` in the lfs step
-      (`lfs-minimal`). Four suites that load run only their tests
-      that need no `openssl`, which they add only when `pcall(require,
-      'openssl')` succeeds: http 75 of nmap's 105, sasl 0 of 3, smbauth 0 of
-      4 and vnc 0 of 4. The suite gate holds each to the count nmap gives
-      without the port's missing modules (`unittest-emu`), so it passes by
-      that count now and must reach nmap's own when `openssl` lands.
-      `unittest.run_tests()` over all of `unittest.lua`'s libraries fails on
-      15 (`bitcoin`, `bittorrent`, `iax2`, `iscsi`, `libssh2`,
-      `libssh2-utility`, `mongodb`, `openssl`, `pgsql`, `rsync`, `sip`,
-      `ssh1`, `ssh2`, `tns`, `zlib`), each on the same module as under nmap
-      without them (16, with `lfs`, before the lfs step).
+- [ ] `nse-c-modules-pending` — `libssh2` and `zlib` are not preloaded
+      yet. The library above that needs one (`libssh2-utility`) fails to
+      load, pinned so that its failure must be exactly the absence of its
+      module. `nmapdb` was ported in M6.6 step a, `lpeg` (with `re`,
+      `lpeg-utility`, `json`, `coap` and `mobileme` on it) registered in step
+      e, a minimal `lfs` in the lfs step (`lfs-minimal`), and `openssl` in
+      M6.5 step g. The http suite runs 75 of nmap's 105 tests: the 30 it adds
+      only when it can require `zlib` (this entry said `openssl` until step g
+      measured otherwise: with `openssl` registered it still runs 75). The
+      suite gate holds it to the count nmap gives without the port's missing
+      modules (`unittest-emu`). `unittest.run_tests()` over all of
+      `unittest.lua`'s libraries fails on 3 (`libssh2`, `libssh2-utility`,
+      `zlib`), each on the same module as under nmap without them (15 before
+      step g, 16 with `lfs` before the lfs step).
+
+      **Scripts:** the four ssh scripts that reach `libssh2` through
+      `stdnse.silent_require` (`ssh-auth-methods`, `ssh-brute`,
+      `ssh-publickey-acceptance`, `ssh-run`, in `intrusive` and `all`) are
+      dropped quietly, where 7.94 loads them. The exit scenarios accept
+      exactly these as the difference (`gen_m66_exit.py`, `MISSING_QUIET`,
+      checked against 7.94 without the modules at generation), and
+      `scriptload_differential` holds every script's load to 7.94's without
+      them: 607 load, 4 quiet, none stops the run.
 
       Two C modules carry the unterminated option list behind
       `nse-condvar-option-overread` and
@@ -3688,7 +3699,12 @@ Gated by three things:
       Found in M6.5 Phase 0 (`docs/M6.5-ANALYSIS.md` §1.4). Whether the
       command line should set a default budget is a user-visible change,
       left to M7.
-- [ ] `nse-categories-abort-on-unported-modules` — on the shipped
+- [x] `nse-categories-abort-on-unported-modules` — **closed by M6.5 step g**
+      (`openssl` registered): `vuln` (105), `exploit` (45), `intrusive` (217
+      selected, 213 load, 4 quiet on `libssh2`) and `all` (611, 607, 4) load
+      as 7.94 does without `libssh2` and `zlib`, rc 0, as exit `load` blocks
+      run in a loopback-only namespace (`nse_exit_differential`). What this
+      entry said until then: on the shipped
       `scripts/`, these categories stop at start-up with `could not load
       script` and `QUITTING!` (rc 1), before any scan: `vuln`, `intrusive`,
       `exploit` and `all`, each on
@@ -3720,7 +3736,11 @@ Gated by three things:
       `file:line`, and refuses to run a category whose module has left the
       port's missing set (it would scan): either way it fails, and this
       entry must change, when either module lands.
-- [ ] `nse-sc-openssl-quiet-drops` — six `default` scripts reach `openssl`
+- [x] `nse-sc-openssl-quiet-drops` — **closed by M6.5 step g**: `-sC`,
+      `default`, `-A` and `safe` load every script they select (127, 127,
+      127 while `nse-sv-version-scripts-pending`, 352), and the tolerance went
+      with this entry (`OPENSSL_QUIET`, now `MISSING_QUIET`, empty for them).
+      What it said until then: six `default` scripts reach `openssl`
       through `stdnse.silent_require` and are dropped quietly, where 7.94,
       built with OpenSSL, loads them:
       - http-favicon (`http-favicon.nse:9`);
@@ -4046,12 +4066,13 @@ order, close's reset, the read cap and `receive_buf`'s clamps is caught.
 
 ### Differences, open and documented
 
-- [ ] `nse-no-ssl` — `nmap.socket.parse_ssl_certificate` raises "SSL is
-      not available", as in an nmap built without OpenSSL, until the
-      `openssl` module is registered (M6.5 step g; `nse-c-modules-pending`).
-      Since M6.5 step f1, `connect(..., "ssl")` and `reconnect_ssl` make TLS
-      connections, and since step f2 `get_ssl_certificate` returns the
-      leaf's table, as 7.94 does. Pinned: `cert-trail-parse`.
+- [x] `nse-no-ssl` — **closed by M6.5 step g.** Until then
+      `nmap.socket.parse_ssl_certificate` raised "SSL is not available" and
+      `nmap.have_ssl()` was false, as in an nmap built without OpenSSL. Step
+      f1 made TLS connections and step f2 gave `get_ssl_certificate` its
+      table; step g puts `l_parse_ssl_certificate` in `nmap.socket` and makes
+      `have_ssl` true. Gated: `cert-trail-parse` (now equal to 7.94) and the
+      CLI scenario `auth` (`have_ssl: true`).
 - [ ] `nse-no-pcap-sockets` — `pcap_open` raises `can't open pcap reader on
       <device>`, as nmap does when it cannot open the device, and
       `pcap_receive` raises `not a pcap socket`. Scripts that sniff
@@ -5645,6 +5666,13 @@ so they are opened now and land, pinned per fixture, with step f1
       `tls13-ffdhe2048`, `starttls-legacy`, and `dual-tls12-clientpref` (the
       same RSA leaf as 7.94, over an ECDHE suite where 7.94 took DHE-RSA
       with CBC).
+      - **Since step g, a regression for legacy STARTTLS.** With `openssl`
+        registered, sslcert retrieves a STARTTLS certificate as 7.94 does,
+        by STARTTLS then `reconnect_ssl`, and the port's client cannot
+        reach a server with only legacy suites: ssl-cert prints nothing
+        where, before step g, it printed the certificate read by tls.lua's
+        own handshake (PEM only). Pinned by the CLI scenario
+        `starttls-legacy` (`gen_m64_cli.py`, `PORT_PINS`).
 - [x] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
       40) when the server sends no `renegotiation_info` extension (RFC 5746,
       OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates
@@ -5950,6 +5978,11 @@ registry ledger records for `aes` and `ed25519-dalek`.
         CWE-457). 7.94 returned `""` on all 18 such rows.
       - **Pinned by** the gate's 740 rewritten rows and by
         `names_resolve_case_insensitively_up_to_a_nul`.
+      - **`supported_digests` and `supported_ciphers`** (step g) list what
+        is accepted, as D4 decided: 7.94's names (56 digests, 170 ciphers,
+        measured, in `OBJ_NAME_do_all_sorted`'s `strcmp` order and spelling)
+        kept where the port resolves them, 35 and 16
+        (`the_supported_list_is_sorted_and_accepted`).
 - [x] `openssl-rand-length-over-int` — `RAND_bytes` and nbase's
       `get_random_bytes` take the length as an `int`, while the buffer is
       `malloc(len)` and the C pushes all `len` bytes
@@ -6555,6 +6588,90 @@ Found on the way:
 - **RUSTSEC-2026-0386** (tokio's `AsyncFd` constructors, published after
   step f1) failed `cargo deny`; tokio is updated to 1.53.3. Nothing here
   uses `AsyncFd`.
+
+## Milestone 6.5 step g — registration (`core::nse::runtime`, `core::nse::openssl`, `core::nse::nmaplib`, `cli`)
+
+`openssl` is registered as `set_nmap_libraries` registers it
+(`nse_main.cc:569-571,581`): `luaL_requiref(L, "openssl", luaopen_openssl,
+1)`, a global and in `package.loaded`, after `lpeg`, through
+`openssl::load_openssl` (D2(D): last, once its every part and TLS were in).
+With it:
+- `supported_digests` and `supported_ciphers`, the two functions of
+  `openssllib` steps c and d left out: what is accepted, as D4 decided
+  (`openssl-algorithm-subset`);
+- `nmap.socket.parse_ssl_certificate` is `l_parse_ssl_certificate`, no
+  longer the "SSL is not available" of an nmap built without OpenSSL;
+- `nmap.have_ssl()` is true on the command line;
+- the libraries and scripts that wait for it load: 11 libraries, every
+  suite to nmap's count but `http`'s 30 `zlib` tests, and all of `vuln`,
+  `exploit`, `intrusive` and `all` but the four ssh scripts on `libssh2`.
+
+Retired: `nse-no-ssl`, `nse-sc-openssl-quiet-drops`,
+`nse-categories-abort-on-unported-modules`; narrowed: `nse-c-modules-pending`
+(`libssh2`, `zlib`). E7's test that `openssl` cannot be required became the
+registration test (`openssl_is_registered_as_nmap_registers_it`).
+
+**Gated by:**
+- `nselib_differential`: the 11 `openssl` pins removed, `libssh2-utility`
+  still on `libssh2`, every suite by its test count;
+  `unittest.run_tests()` fails on 3 libraries, as 7.94 without `libssh2`
+  and `zlib` does (15 before);
+- `scriptload_differential`, the per-script load differential: 7.94 loads
+  all 611 scripts; without the port's missing modules, 607 load and 4 are
+  dropped quietly (`ssh-auth-methods`, `ssh-brute`,
+  `ssh-publickey-acceptance`, `ssh-run`), none stops the run, and the port
+  loads each as that does (560 / 2 / 49 before);
+- the exit scenarios (`nse_exit_differential`): `vuln`, `exploit`,
+  `intrusive` and `all` are `load` blocks now, 105 / 45 / 217 / 611
+  selected, rc 0, in a loopback-only namespace; `default`, `-sC`, `-A` and
+  `safe` load all they select; the one tolerance left is the four ssh
+  scripts (`MISSING_QUIET`, `nse-c-modules-pending`);
+- the CLI scenarios (`nse_cli_differential`, against 7.94, 24): ssl-cert
+  and http-title over HTTPS (`tls`); ssl-cert through SMTP STARTTLS, by
+  STARTTLS and `reconnect_ssl` as 7.94 takes it with `openssl` loaded
+  (`starttls`); the same against a server with only AES128-SHA, pinned
+  (`starttls-legacy`, `nse-tls-modern-only`: the regression row g
+  predicted); and `g-auth`, with the right password and a wrong one,
+  through http.lua's digest authentication, pop3.lua's APOP and mysql.lua's
+  `loginRequest`, and `nmap.have_ssl()` (`auth`). The fixture servers are
+  `gen_m64_cli.py`'s (an HTTPS server, two STARTTLS servers on ports the
+  data directory's `nmap-services` calls `smtp`, an RFC 2617 digest server,
+  an APOP server, a MySQL server checking `mysql_native_password`);
+- the TLS fixture gate: `cert-trail-parse` equals 7.94 now that
+  `parse_ssl_certificate` is there (107 rows: 81 agree, 26 pinned);
+- unit tests: `the_library_is_openssllib` (all 32 of `openssllib`),
+  `the_supported_list_is_sorted_and_accepted` (both lists),
+  `openssl_is_registered_as_nmap_registers_it`,
+  `the_registered_c_modules_are_exactly_the_ported_ones`,
+  `a_script_selected_by_name_is_told_one_more_verbosity`.
+
+**Sabotage**, 8 port variants, each caught by a named test: `openssl` in
+`package.loaded` only, `openssl` not registered, a listed digest the port
+refuses, the cipher list out of `strcmp` order, `parse_ssl_certificate` left
+the stub (the registration tests); the by-name hook ignored, one more
+verbosity whatever the selection
+(`a_script_selected_by_name_is_told_one_more_verbosity`); `have_ssl` left
+false (the CLI scenario `auth`).
+
+Found on the way:
+- **`nmap.verbosity()` and `nmap.version_intensity()` ignored selection by
+  name.** Both ask `nse_selectedbyname`, which calls the engine's
+  `_R[SELECTED_BY_NAME]` for the running thread (`nse_main.cc:775-785`);
+  the port read a flag that only its tests set, so a script named on the
+  command line was told 7.94's verbosity less one and the default version
+  intensity. ssl-cert over TLS showed it: the port printed the subject and
+  validity only, where 7.94 printed the issuer, key and fingerprints too.
+  The prelude now hands the runtime a function that calls that hook, and
+  both ask it; the flag remains for the bare states the tests build. No
+  ledger entry: the port now does what nmap does.
+- **http's 30 conditional tests need `zlib`, not `openssl`** (measured:
+  with `openssl` registered the suite still runs 75 of 105 without `zlib`).
+  `nse-c-modules-pending` said `openssl`; it is corrected.
+- **A fixture port held by this session's own connection.** Locally, an
+  outgoing HTTPS connection of the environment held 47302 as its local port
+  for the whole session, so the TLS gate could not serve its second row;
+  `gen_m65_tls.py` takes `M65_TLS_BASE_PORT` to move the range (the golden
+  records no port).
 
 ## The lfs step — a minimal `lfs` (`core::nse::lfs`, `core::nse::fspolicy`, `sys::nsefs`, `cli`)
 

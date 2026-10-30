@@ -21,6 +21,7 @@ use super::lfs::load_lfs;
 use super::lpeg::load_lpeg;
 use super::nmapdb::load_nmapdb;
 use super::nmaplib::{load_nmap, Shared};
+use super::openssl::load_openssl;
 use super::package::{load_package, preload_module, LibrarySource};
 use super::scriptargs::ArgTable;
 use super::stdlib::debuglib::load_debug;
@@ -113,6 +114,13 @@ pub fn new_state(config: &StateConfig) -> Result<NseState, String> {
         })
         .map_err(|e| format!("{e:#}"))
     })?;
+    // `nse_selectedbyname`'s registry lookup, for `nmap.verbosity` and
+    // `nmap.version_intensity`.
+    lua.enter(|ctx| {
+        if let Value::Function(f) = ctx.fetch(&engine).get_value(ctx, "selected_by_name") {
+            config.lib.borrow_mut().by_name_hook = Some(ctx.stash(f));
+        }
+    });
     Ok(NseState {
         lua,
         engine,
@@ -182,6 +190,11 @@ fn build(config: &StateConfig) -> Lua {
         // (`nse-lpeg-utility-not-preloaded`).
         let lpeg = load_lpeg(ctx);
         preload_module(ctx, loaded, "lpeg", Value::Table(lpeg), true);
+        // `libssh2` would come next (`nse-c-modules-pending`), then `openssl`
+        // (`nse_main.cc:569-571`), a global and in `package.loaded`: M6.5
+        // step g, last of its parts (D2(D)).
+        let openssl = load_openssl(ctx);
+        preload_module(ctx, loaded, "openssl", Value::Table(openssl), true);
     });
     lua
 }
@@ -295,7 +308,8 @@ mod tests {
     /// `set_nmap_libraries` (`nse_main.cc:556-579`) — `nmap`, `nmapdb`,
     /// `lfs`, `lpeg`, `libssh2`, `openssl`, `zlib` — with `nmap.socket` and
     /// `nmap.dnet` from `luaopen_nmap`. This port has `nmap`, `nmapdb`,
-    /// `lpeg` (M6.6 step e), `lfs` (the lfs step) and the sub-modules, and
+    /// `lpeg` (M6.6 step e), `lfs` (the lfs step), `openssl` (M6.5 step g)
+    /// and the sub-modules, and
     /// the scriptload golden is generated with the rest removed
     /// (`oracle/gen_m66_scriptload.py`, `PORT_MISSING`). Porting a
     /// module, or stubbing one, means changing this list as well as that one
@@ -406,11 +420,12 @@ mod tests {
         assert_eq!(
             out,
             ChunkOutcome::Returned(vec![
-                "lfs=global,lpeg=global,nmap.dnet,nmap.socket,nmap=global,nmapdb=global"
+                "lfs=global,lpeg=global,nmap.dnet,nmap.socket,nmap=global,nmapdb=global,\
+                 openssl=global"
                     .to_string()
             ])
         );
-        for missing in ["libssh2", "openssl", "zlib"] {
+        for missing in ["libssh2", "zlib"] {
             let out = run_chunk(
                 &mut lua,
                 "=t",
@@ -476,8 +491,8 @@ mod tests {
     /// integration tests and the fuzz targets: a search of every crate's
     /// sources, so a caller anywhere else — the engine, the command line —
     /// fails here, not only one in this file. The runtime registers `lpeg`
-    /// through `lpeg::load_lpeg` alone, and `openssl` not at all before step
-    /// g ([`openssl_is_not_registered`]).
+    /// through `lpeg::load_lpeg` alone, and `openssl` through
+    /// `openssl::load_openssl` alone ([`openssl_is_registered_as_nmap_registers_it`]).
     #[test]
     #[cfg_attr(miri, ignore = "reads the source tree")]
     fn only_tests_register_lpeg_and_openssl() {
@@ -511,29 +526,71 @@ mod tests {
         );
     }
 
-    /// `openssl` is not registered (`docs/M6.5-ANALYSIS.md` D2(D), E7): its
-    /// parts land step by step and the module only at step g, once TLS
-    /// works. Until then `require "openssl"` fails in the NSE state, as it
-    /// does in an nmap built without OpenSSL, and nothing names it in
-    /// `package.loaded` or the globals. Step g turns this into the
-    /// registration test.
+    /// `openssl` is registered as `luaL_requiref(L, "openssl",
+    /// luaopen_openssl, 1)` leaves it (`nse_main.cc:569-571,581`; M6.5 step
+    /// g, which retires E7's "not registered" test): one table, in
+    /// `package.loaded` and the global `openssl`, which `require` returns;
+    /// every function of `openssllib`; the `BIGNUM` metatable on its numbers;
+    /// the lists of what is accepted; and `nmap.socket.parse_ssl_certificate`
+    /// a function, as in an nmap built with OpenSSL. The runtime opens it
+    /// through `openssl::load_openssl`, never the test-only path.
     #[test]
-    fn openssl_is_not_registered() {
+    fn openssl_is_registered_as_nmap_registers_it() {
         use super::*;
         let mut lua = bare_state();
         let out = run_chunk(
             &mut lua,
             "=t",
-            b"local ok = pcall(require, 'openssl') \
-              return ok, rawget(_G, 'openssl'), package.loaded.openssl, \
-                     package.preload and package.preload.openssl",
-            1_000_000,
+            b"local ok, o = pcall(require, 'openssl') \
+              local names = {} \
+              for k, v in pairs(o) do names[#names + 1] = k .. ':' .. type(v) end \
+              table.sort(names) \
+              local d, c = o.supported_digests(), o.supported_ciphers() \
+              return ok, rawequal(o, rawget(_G, 'openssl')), rawequal(o, package.loaded.openssl), \
+                     #names, table.concat(names, ','), \
+                     getmetatable(o.bignum_dec2bn('7')).__name, tostring(o.bignum_dec2bn('255')), \
+                     #d, d[1], d[#d], #c, c[1], c[#c], \
+                     type(package.loaded['nmap.socket'].parse_ssl_certificate), \
+                     package.loaded['nmap.socket'].parse_ssl_certificate('x') == nil",
+            10_000_000,
         );
+        let fns = "DES_string_to_key:function,bignum_add:function,bignum_bin2bn:function,\
+                   bignum_bn2bin:function,bignum_bn2dec:function,bignum_bn2hex:function,\
+                   bignum_bn2mpi:function,bignum_clear_bit:function,bignum_dec2bn:function,\
+                   bignum_div:function,bignum_hex2bn:function,bignum_is_bit_set:function,\
+                   bignum_is_prime:function,bignum_is_safe_prime:function,\
+                   bignum_mod_exp:function,bignum_num_bits:function,bignum_num_bytes:function,\
+                   bignum_pseudo_rand:function,bignum_rand:function,bignum_set_bit:function,\
+                   decrypt:function,digest:function,encrypt:function,hmac:function,\
+                   md4:function,md5:function,rand_bytes:function,rand_pseudo_bytes:function,\
+                   ripemd160:function,sha1:function,supported_ciphers:function,\
+                   supported_digests:function";
         assert_eq!(
             out,
-            ChunkOutcome::Returned(["false", "nil", "nil", "nil"].map(str::to_string).to_vec())
+            ChunkOutcome::Returned(
+                [
+                    "true",
+                    "true",
+                    "true",
+                    "32",
+                    fns,
+                    "BIGNUM",
+                    "FF",
+                    "35",
+                    "RSA-MD4",
+                    "ssl3-sha1",
+                    "16",
+                    "aes-128-cbc",
+                    "des-ecb",
+                    "function",
+                    "true",
+                ]
+                .map(str::to_string)
+                .to_vec()
+            )
         );
         let src = include_str!("runtime.rs");
-        assert!(!src.contains(&["openssl", "::load"].concat()));
+        let call = ["register", "_for_tests"].concat();
+        assert!(!src.contains(&format!("{call}(")));
     }
 }

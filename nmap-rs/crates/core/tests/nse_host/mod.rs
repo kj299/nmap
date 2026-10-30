@@ -161,7 +161,7 @@ pub fn env(dir: PathBuf) -> NmapEnv {
         version_intensity: 7,
         ttl: -1,
         data_length: -1,
-        have_ssl: false,
+        have_ssl: true,
         privileged: false,
         ipv6: false,
         interface: None,

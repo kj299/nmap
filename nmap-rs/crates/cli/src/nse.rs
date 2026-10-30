@@ -233,7 +233,7 @@ fn open(setup: Setup) -> Result<Running, String> {
         version_intensity: setup.version_intensity,
         ttl: setup.ttl,
         data_length: -1,
-        have_ssl: false,
+        have_ssl: true,
         privileged: false,
         ipv6: setup.ipv6,
         interface: None,

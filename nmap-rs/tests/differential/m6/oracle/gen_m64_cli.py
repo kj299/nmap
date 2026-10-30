@@ -62,6 +62,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -76,7 +77,7 @@ import gen_m64_scripts as scripts_gen  # noqa: E402
 import gen_m64_net as net_gen  # noqa: E402
 
 REPO = scripts_gen.REPO
-SHIPPED = ["http-title.nse", "http-headers.nse", "http-fetch.nse"]
+SHIPPED = ["http-title.nse", "http-headers.nse", "http-fetch.nse", "ssl-cert.nse"]
 FIX = "46020,46021,46022"
 
 SCENARIOS = [
@@ -108,6 +109,17 @@ SCENARIOS = [
     # and all, under 7.94, and the port lets it (D2).
     ("fetch-new", ["-p", "7080", "--script", "http-fetch", "--script-args",
                    "http-fetch.destination=@DEST/new/deeper/dest"]),
+    # M6.5 step g (`openssl` registered): ssl-cert and http-title over TLS on
+    # 8443 (shortport.ssl's https-alt); ssl-cert through SMTP STARTTLS
+    # (sslcert's smtp_prepare_tls, then reconnect_ssl) on 46025, which the
+    # data directory's nmap-services calls smtp (TLS_SERVICES); the same on
+    # 46026, a server that speaks only AES128-SHA, which the port's client
+    # does not (`nse-tls-modern-only`, PORT_PINS); and g-auth's digest, APOP
+    # and MySQL logins.
+    ("tls", ["-p", "8443", "--script", "ssl-cert,http-title"]),
+    ("starttls", ["-p", "46025", "--script", "ssl-cert"]),
+    ("starttls-legacy", ["-p", "46026", "--script", "ssl-cert"]),
+    ("auth", ["-p", "46040,46041,46042", "--script", "g-auth"]),
 ]
 
 # Per scenario, the (script id, table key) whose <elem>s are compared sorted.
@@ -119,6 +131,18 @@ UNORDERED = {
     "fetch": FETCH_TABLES,
     "fetch-short": FETCH_TABLES,
     "fetch-new": FETCH_TABLES,
+}
+
+# Where the port differs from 7.94, by scenario: (ledger id in DIVERGENCES.md,
+# the port's rows). A pinned scenario agrees when the port gives exactly these
+# rows, and the pin must differ from the golden (a pin that no longer differs
+# is stale and fails).
+PORT_PINS = {
+    # The port's TLS client speaks no AES128-SHA: no handshake, so ssl-cert,
+    # which since step g takes the STARTTLS-and-reconnect_ssl path as 7.94
+    # does, has nothing to print. (Before step g it read the certificate,
+    # PEM only, through tls.lua's own handshake.)
+    "starttls-legacy": ("nse-tls-modern-only", [("xml", "port:tcp/46026", "state open")]),
 }
 
 # Symbolic links made in @DEST before a scenario runs, (name, target).
@@ -191,6 +215,200 @@ def serve_site(stop):
     return s
 
 
+CERTS = os.path.join(M6, "m65_tls", "certs")
+TLS_PORT, SMTP_PORT, SMTP_LEGACY_PORT = 8443, 46025, 46026
+DIGEST_PORT, POP3_PORT, MYSQL_PORT = 46040, 46041, 46042
+# Entries added to the data directory's nmap-services, so that both programs
+# name these ports as sslcert's STARTTLS table keys them (port.service).
+TLS_SERVICES = ["smtp\t%d/tcp\t0.000001\t# M6.5 step g fixture" % p
+                for p in (SMTP_PORT, SMTP_LEGACY_PORT)]
+USER, PASSWORD = b"alice", b"wonderland"
+
+
+def tls_context(ciphers=None):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(os.path.join(CERTS, "rsa2048.crt"), os.path.join(CERTS, "rsa2048.key"))
+    if ciphers:
+        ctx.set_ciphers(ciphers)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+def serve_tcp(stop, port, handle):
+    """`handle(conn)` per connection on 127.0.0.1:port, one thread each."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(64)
+    s.settimeout(0.2)
+
+    def guarded(c):
+        c.settimeout(5)
+        try:
+            handle(c)
+        except (OSError, ValueError, ssl.SSLError):
+            pass
+        finally:
+            c.close()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                c, _ = s.accept()
+            except OSError:
+                continue
+            threading.Thread(target=guarded, args=(c,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    return s
+
+
+def read_request(c):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        d = c.recv(4096)
+        if not d:
+            return None
+        data += d
+    return data
+
+
+def lines(c):
+    """The CRLF lines a client sends, until it closes."""
+    buf = b""
+    while True:
+        while b"\r\n" not in buf:
+            d = c.recv(1024)
+            if not d:
+                return
+            buf += d
+        line, buf = buf.split(b"\r\n", 1)
+        yield line
+
+
+def https(c):
+    t = tls_context().wrap_socket(c, server_side=True)
+    if read_request(t) is None:
+        return
+    body = b"<html><head><title>Fixture over TLS</title></head><body>ok</body></html>"
+    t.sendall(b"HTTP/1.1 200 OK\r\nServer: fixture/1.0\r\nContent-Type: text/html\r\n"
+              b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+    t.close()
+
+
+def smtp(ciphers):
+    def handle(c):
+        c.sendall(b"220 fixture ESMTP\r\n")
+        for line in lines(c):
+            u = line.upper()
+            if u.startswith(b"EHLO") or u.startswith(b"HELO"):
+                c.sendall(b"250-fixture\r\n250 STARTTLS\r\n")
+            elif u.startswith(b"STARTTLS"):
+                c.sendall(b"220 go ahead\r\n")
+                t = tls_context(ciphers).wrap_socket(c, server_side=True)
+                while t.recv(1024):
+                    pass
+                return
+            elif u.startswith(b"QUIT"):
+                c.sendall(b"221 bye\r\n")
+                return
+            else:
+                c.sendall(b"250 ok\r\n")
+    return handle
+
+
+NONCE = "dcd98b7102dd2f0e8b11d0f600bfb0c093"
+
+
+def md5hex(*parts):
+    return hashlib.md5(":".join(parts).encode()).hexdigest()
+
+
+def digest(c):
+    """RFC 2617 digest authentication, qop=auth, for /secret."""
+    req = read_request(c)
+    if req is None:
+        return
+    head = req.decode("latin-1")
+    m = re.search(r"(?im)^Authorization: Digest (.*)$", head)
+    ok = False
+    if m:
+        f = {k: a or b for k, a, b in re.findall(r'(\w+)=(?:"([^"]*)"|([^,\s]*))', m.group(1))}
+        ha1 = md5hex(f.get("username", ""), "fixture", PASSWORD.decode())
+        ha2 = md5hex("GET", f.get("uri", ""))
+        want = md5hex(ha1, f.get("nonce", ""), f.get("nc", ""), f.get("cnonce", ""),
+                      f.get("qop", ""), ha2)
+        ok = (f.get("username") == USER.decode() and f.get("nonce") == NONCE
+              and f.get("response") == want)
+    if ok:
+        body, head = b"secret page", b"HTTP/1.1 200 OK\r\n"
+    else:
+        body = b"authorization required"
+        head = (b'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm="fixture", '
+                b'nonce="%s", qop="auth", algorithm=MD5\r\n' % NONCE.encode())
+    c.sendall(head + b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+
+
+CHALLENGE = b"<1896.697170952@fixture>"
+
+
+def pop3(c):
+    c.sendall(b"+OK fixture POP3 ready " + CHALLENGE + b"\r\n")
+    for line in lines(c):
+        f = line.split(b" ")
+        if f[0].upper() == b"APOP" and len(f) == 3:
+            good = (f[1] == USER and
+                    f[2] == hashlib.md5(CHALLENGE + PASSWORD).hexdigest().encode())
+            c.sendall(b"+OK maildrop ready\r\n" if good else b"-ERR authentication failed\r\n")
+        elif f[0].upper() == b"QUIT":
+            c.sendall(b"+OK bye\r\n")
+            return
+        else:
+            c.sendall(b"-ERR unknown\r\n")
+
+
+SALT = bytes(range(0x21, 0x21 + 20))
+
+
+def mysql_packet(seq, body):
+    return len(body).to_bytes(3, "little") + bytes([seq]) + body
+
+
+def mysql(c):
+    """A protocol-10 greeting with mysql_native_password, then one login."""
+    caps = 0x8000 | 0x0200 | 0x0001  # Support41Auth, Speaks41ProtocolNew, LongPassword
+    greeting = (b"\x0a" + b"5.7.0-fixture\x00" + (1).to_bytes(4, "little") + SALT[:8] + b"\x00"
+                + caps.to_bytes(2, "little") + b"\x08" + (2).to_bytes(2, "little")
+                + (0x0008).to_bytes(2, "little") + bytes([21]) + bytes(10)
+                + SALT[8:] + b"\x00" + b"mysql_native_password\x00")
+    c.sendall(mysql_packet(0, greeting))
+    data = b""
+    while len(data) < 4 or len(data) < 4 + int.from_bytes(data[:3], "little"):
+        d = c.recv(4096)
+        if not d:
+            return
+        data += d
+    body = data[4:4 + int.from_bytes(data[:3], "little")]
+    user, rest = body[32:].split(b"\x00", 1)
+    given = rest[1:1 + rest[0]] if rest else b""
+    s1 = hashlib.sha1(PASSWORD).digest()
+    want = bytes(a ^ b for a, b in zip(s1, hashlib.sha1(SALT + hashlib.sha1(s1).digest()).digest()))
+    if user == USER and given == want:
+        c.sendall(mysql_packet(2, b"\x00\x00\x00\x02\x00\x00\x00"))
+    else:
+        msg = b"Access denied for user '%s'@'localhost'" % user
+        c.sendall(mysql_packet(2, b"\xff" + (1045).to_bytes(2, "little") + b"#28000" + msg))
+
+
+def serve_tls_and_auth(stop):
+    return [serve_tcp(stop, TLS_PORT, https),
+            serve_tcp(stop, SMTP_PORT, smtp(None)),
+            serve_tcp(stop, SMTP_LEGACY_PORT, smtp("AES128-SHA:@SECLEVEL=0")),
+            serve_tcp(stop, DIGEST_PORT, digest),
+            serve_tcp(stop, POP3_PORT, pop3),
+            serve_tcp(stop, MYSQL_PORT, mysql)]
+
+
 def tree(root):
     """What is beneath root, one line per entry: a directory's mode, a file's
     mode, size and digest, a link's target. Links are not followed."""
@@ -222,7 +440,12 @@ def datadir(tmp):
     d = os.path.join(tmp, "data")
     os.mkdir(d)
     for name in os.listdir(REPO):
-        if name == "nselib" or name == "nse_main.lua" or name.startswith("nmap-"):
+        if name == "nmap-services":
+            with open(os.path.join(REPO, name)) as fh:
+                text = fh.read()
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(text + "\n".join(TLS_SERVICES) + "\n")
+        elif name == "nselib" or name == "nse_main.lua" or name.startswith("nmap-"):
             os.symlink(os.path.join(REPO, name), os.path.join(d, name))
     sd = os.path.join(d, "scripts")
     os.mkdir(sd)
@@ -382,7 +605,8 @@ def all_rows(binary):
     out = []
     tmp = tempfile.mkdtemp(prefix="m64-cli-")
     stop = threading.Event()
-    socks = scripts_gen.listeners(stop) + net_gen.serve(stop) + [serve_site(stop)]
+    socks = (scripts_gen.listeners(stop) + net_gen.serve(stop) + [serve_site(stop)]
+             + serve_tls_and_auth(stop))
     try:
         data = datadir(tmp)
         for name, extra in SCENARIOS:
@@ -440,16 +664,30 @@ def check(golden, binary):
     got = {name: rows for name, _extra, rows in all_rows(binary)}
     bad = 0
     for name in order:
-        if got.get(name) == want[name]:
+        expect = want[name]
+        pin = PORT_PINS.get(name)
+        if pin is not None:
+            expect = sorted(pin[1])
+            if expect == want[name]:
+                bad += 1
+                print("scenario %s: STALE PIN %s: the pin equals 7.94" % (name, pin[0]))
+                continue
+        if got.get(name) == expect:
+            if pin is not None:
+                print("scenario %s: pinned %s" % (name, pin[0]))
             continue
         bad += 1
-        print("scenario %s differs:" % name)
-        for r in want[name]:
+        print("scenario %s differs%s:" % (name, " from pin %s" % pin[0] if pin else ""))
+        for r in expect:
             if r not in got.get(name, []):
-                print("  nmap  %s %s %r" % r)
+                print("  %s  %s %s %r" % ((("pin " if pin else "nmap"),) + r))
         for r in got.get(name, []):
-            if r not in want[name]:
+            if r not in expect:
                 print("  port  %s %s %r" % r)
+    for name in PORT_PINS:
+        if name not in order:
+            bad += 1
+            print("%s: pinned but not a scenario" % name)
     print("%d of %d scenarios differ" % (bad, len(order)))
     return 1 if bad else 0
 

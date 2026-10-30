@@ -1,5 +1,5 @@
 # kind	library	outcome	[detail]
-# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir); unittest-all without openssl,libssh2,zlib.
+# Nmap version 7.94SVN ( https://nmap.org ) over this repository's nselib/ (--datadir); unittest-all without libssh2,zlib.
 # Regenerate with
 # python3 oracle/gen_m64_nselib.py tests/differential/m6
 require	afp	ok
@@ -174,31 +174,19 @@ unittest-emu	http	pass	75
 unittest-emu	idna	pass	43
 unittest-emu	ipOps	pass	81
 unittest-emu	json	pass	69
-unittest-emu	mongodb	fail	Failed to load: table: 0x?
+unittest-emu	mongodb	pass	160
 unittest-emu	mqtt	pass	67
 unittest-emu	mssql	pass	2
 unittest-emu	packet	pass	7
 unittest-emu	punycode	pass	10
-unittest-emu	sasl	pass	0
-unittest-emu	smbauth	pass	0
-unittest-emu	ssh2	fail	Failed to load: table: 0x?
+unittest-emu	sasl	pass	3
+unittest-emu	smbauth	pass	4
+unittest-emu	ssh2	pass	3
 unittest-emu	tls	pass	399
 unittest-emu	unicode	pass	16
 unittest-emu	unittest	pass	0
 unittest-emu	url	pass	84
-unittest-emu	vnc	pass	0
-unittest-all	bitcoin	silent_require
-unittest-all	bittorrent	openssl
-unittest-all	iax2	silent_require
-unittest-all	iscsi	silent_require
+unittest-emu	vnc	pass	4
 unittest-all	libssh2	libssh2
 unittest-all	libssh2-utility	silent_require
-unittest-all	mongodb	silent_require
-unittest-all	openssl	openssl
-unittest-all	pgsql	silent_require
-unittest-all	rsync	silent_require
-unittest-all	sip	silent_require
-unittest-all	ssh1	silent_require
-unittest-all	ssh2	silent_require
-unittest-all	tns	silent_require
 unittest-all	zlib	zlib

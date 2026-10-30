@@ -3,23 +3,23 @@
 //!
 //! **Exit scenarios, against nmap 7.94.** `oracle/gen_m66_exit.py` recorded,
 //! on this repository's own data directory, what nmap selects and loads for
-//! `-sC`, `--script default`, `--script version`, `-A` and `--script safe`
-//! (`-d2`'s `selected`, `Loaded` and `Failed to load` lines, 127 / 127 / 48 /
-//! 158 / 352 selected; `safe` runs its scripts in a loopback-only network
-//! namespace, `unshare -rn`), with the loaded and quiet lists nmap gives
-//! without the C modules the port lacks; and the results of one executed script per
-//! module: address-info for `nmapdb`, riak-http-info and bitcoinrpc-info for
-//! `lpeg` (through `json.lua`, with `\uXXXX` escapes and the JSON nesting
-//! ceiling, 29 / 30 and 28 / 29, D2 end to end), and http-affiliate-id for
-//! `re`; and, for the categories that still stop at start-up (`vuln`,
-//! `intrusive`, `exploit` and `all`, on `openssl`,
-//! `nse-categories-abort-on-unported-modules`), the script and `file:line`
-//! nmap stops on without those modules. [`the_exit_scenarios_run_as_under_nmap`]
-//! runs the same script in `--check` mode against this crate's binary: one
-//! parser for both, 18 scenarios. Its two
-//! tolerances are ledger entries (LESSONS #031): `nse-sc-openssl-quiet-drops`
-//! (the `openssl` scripts dropped quietly: six of `default`, 18 of `safe`) and
-//! `nse-sv-version-scripts-pending` (the port's `-A` selects `default` only).
+//! `-sC`, `--script default`, `--script version`, `-A`, `--script safe` and,
+//! since M6.5 step g registered `openssl`, `vuln`, `exploit`, `intrusive` and
+//! `all` (`-d2`'s `selected`, `Loaded` and `Failed to load` lines, 127 / 127 /
+//! 48 / 158 / 352 / 105 / 45 / 217 / 611 selected; `safe` and `all` run their
+//! scripts in a loopback-only network namespace, `unshare -rn`), with the
+//! loaded and quiet lists nmap gives without the C modules the port lacks;
+//! and the results of one executed script per module: address-info for
+//! `nmapdb`, riak-http-info and bitcoinrpc-info for `lpeg` (through
+//! `json.lua`, with `\uXXXX` escapes and the JSON nesting ceiling, 29 / 30 and
+//! 28 / 29, D2 end to end), and http-affiliate-id for `re`.
+//! [`the_exit_scenarios_run_as_under_nmap`] runs the same script in `--check`
+//! mode against this crate's binary: one parser for both, 18 scenarios. Its
+//! two tolerances are ledger entries (LESSONS #031): `nse-c-modules-pending`
+//! (the four ssh scripts of `intrusive` and `all` dropped quietly for want of
+//! `libssh2`; until step g, `nse-sc-openssl-quiet-drops`: six of `default`,
+//! 18 of `safe`) and `nse-sv-version-scripts-pending` (the port's `-A`
+//! selects `default` only).
 //! `M66_EXIT_GOLDEN` names a golden to use instead of the committed one; CI's
 //! differential job regenerates it live.
 //!

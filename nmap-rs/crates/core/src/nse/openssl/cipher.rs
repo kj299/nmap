@@ -70,6 +70,30 @@ pub const NAMES: &[(&str, Cipher)] = &[
     ("1.2.840.113533.7.66.10", Cipher::Cast5Cbc),
 ];
 
+/// `supported_ciphers()`'s list: the names OpenSSL 3.0.13's `OBJ_NAME_do_all_sorted`
+/// enumerates for ciphers (measured on nmap 7.94: 56 digests, 170 ciphers),
+/// as they are spelled there and in its `strcmp` order, kept where
+/// [`resolve`] accepts them: D4(b), "exactly what is accepted"
+/// (`openssl-algorithm-subset`).
+pub const SUPPORTED: &[&str] = &[
+    "aes-128-cbc",
+    "aes-128-ecb",
+    "aes-192-cbc",
+    "aes-192-ecb",
+    "aes-256-cbc",
+    "aes-256-ecb",
+    "aes128",
+    "aes192",
+    "aes256",
+    "cast",
+    "cast-cbc",
+    "cast5-cbc",
+    "cast5-ecb",
+    "des",
+    "des-cbc",
+    "des-ecb",
+];
+
 /// `EVP_get_cipherbyname(name)` over [`NAMES`]: the name up to its first
 /// NUL, compared ignoring ASCII case.
 #[must_use]
@@ -626,6 +650,37 @@ mod tests {
         assert_eq!(k, [0, 0, 0, 0, 0, 0, 0x02, 0]);
         let k = des_string_to_key(&[0, 0, 0, 0, 0, 0x01, 0x80]);
         assert_eq!(k, [0, 0, 0, 0, 0, 0, 0x06, 0]);
+    }
+
+    /// `supported_*`'s list is in `OBJ_NAME_do_all_sorted`'s `strcmp`
+    /// order, each name once, each accepted, and every algorithm offered is
+    /// listed (the names themselves are 7.94's, compared with its list by the
+    /// CLI gate).
+    #[test]
+    fn the_supported_list_is_sorted_and_accepted() {
+        assert!(SUPPORTED
+            .windows(2)
+            .all(|w| w[0].as_bytes() < w[1].as_bytes()));
+        for n in SUPPORTED {
+            assert!(resolve(n.as_bytes()).is_some(), "{n}");
+        }
+        for a in [
+            Cipher::DesEcb,
+            Cipher::DesCbc,
+            Cipher::Aes128Ecb,
+            Cipher::Aes128Cbc,
+            Cipher::Aes192Ecb,
+            Cipher::Aes192Cbc,
+            Cipher::Aes256Ecb,
+            Cipher::Aes256Cbc,
+            Cipher::Cast5Ecb,
+            Cipher::Cast5Cbc,
+        ] {
+            assert!(
+                SUPPORTED.iter().any(|n| resolve(n.as_bytes()) == Some(a)),
+                "{a:?} is not listed"
+            );
+        }
     }
 
     #[test]

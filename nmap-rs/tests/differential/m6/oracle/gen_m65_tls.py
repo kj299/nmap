@@ -16,8 +16,8 @@ gate.
 The fixtures are step 0's (spikes/m65-tls-provider/fixtures/run.py, written
 up in docs/M6.5-ANALYSIS.md 14.1), committed in ../m65_tls/: every row of
 run.py is here, with the same name. Each fixture server is started on
-127.0.0.1, port BASE_PORT + its row number (47301-47361; nothing else in the
-M6 generators uses 47xxx), and nmap 7.94 connects to it once, through
+127.0.0.1, port BASE_PORT + its row number (29301 on; nothing else in the
+M6 generators uses 29xxx), and nmap 7.94 connects to it once, through
 m65_tls/s0probe.nse, with --datadir set to this repository (located from
 this file, as every M6 generator does):
 
@@ -89,7 +89,7 @@ fails). `skipped` rows are not run; the bad13 rows need the badserver.
 
 Environment: NMAP (default nmap), BADSERVER, M65_TLS_LOGS (a directory to
 keep each fixture's server and client logs in), M65_TLS_BASE_PORT (the port
-below the first fixture's, 47300 by default).
+below the first fixture's, 29300 by default).
 """
 
 import os
@@ -109,10 +109,13 @@ CERTS = os.path.join(FIXDIR, "certs")
 PROBE = os.path.join(FIXDIR, "s0probe.nse")
 NMAP = os.environ.get("NMAP", "nmap")
 GOLDEN_NAME = "m65_tls_golden.txt"
-# Each fixture's port is BASE_PORT + its row number. The golden records no
-# port, so M65_TLS_BASE_PORT may move the range, for a machine where some
-# long-lived outgoing connection holds one of 47301-47407 as its local port.
-BASE_PORT = int(os.environ.get("M65_TLS_BASE_PORT", "47300"))
+# Each fixture's port is BASE_PORT + its row number. The default range sits
+# below Linux's ephemeral range (32768-60999), so no outgoing connection on
+# the machine can hold one as its local port: the old 47301-47425 lost a
+# server to that on CI twice (47380, 47422), and another generator once
+# (46032). The golden records no port, so M65_TLS_BASE_PORT may move the
+# range.
+BASE_PORT = int(os.environ.get("M65_TLS_BASE_PORT", "29300"))
 
 # nsock's cipher list for an ordinary (not max-speed) pool, 7.94.
 CIPHERS_SECURE = "ALL:!aNULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH"
@@ -265,6 +268,35 @@ FIXTURES = [
     # handshake refuses and parse_ssl_certificate takes.
     ("cert-fake-trail", "fake", "trail rsa2048.der rsa2048.key", "cert", "", ()),
     ("cert-trail-parse", "s_server", "rsa2048 -tls1_3", "trail", "", ()),
+    # M6.7 step 0 (docs/M6.7-ANALYSIS.md §1): the legacy families 7.94 reaches and the port
+    # does not yet, beside step a's tls12-rsa-kx-gcm, tls12-ecdhe-cbc, tls12-dhe2048,
+    # tls13-x448 and tls13-ffdhe2048. RSA key exchange with each record protection:
+    ("legacy-rsa-kx-aes128-cbc-sha", "s_server", "rsa2048 -tls1_2 -cipher AES128-SHA:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aes256-cbc-sha256", "s_server", "rsa2048 -tls1_2 -cipher AES256-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aes128-ccm", "s_server", "rsa2048 -tls1_2 -cipher AES128-CCM:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aria128-gcm", "s_server", "rsa2048 -tls1_2 -cipher ARIA128-GCM-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-camellia128-sha", "s_server", "rsa2048 -tls1_2 -cipher CAMELLIA128-SHA:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-seed-sha", "s_server", "rsa2048 -tls1_2 -cipher SEED-SHA:@SECLEVEL=0 -provider legacy -provider default", "host", "", ()),
+    # ECDHE with CBC, ARIA and CCM:
+    ("legacy-ecdhe-rsa-aes256-cbc-sha384", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-RSA-AES256-SHA384:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-rsa-camellia128-sha256", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-RSA-CAMELLIA128-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-rsa-aria128-gcm", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-ARIA128-GCM-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-ecdsa-aes128-ccm", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-CCM:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-ecdsa-aes128-ccm8", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-CCM8:@SECLEVEL=0", "host", "", ()),
+    # DHE with the RFC 7919 groups, and with a 1,024-bit group of the server's own, which
+    # security level 2 refuses (both programs must fail):
+    ("legacy-dhe-rsa-gcm-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-gcm-ffdhe3072", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe3072.pem", "host", "", ()),
+    ("legacy-dhe-rsa-cbc-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-SHA:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-chacha-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-CHACHA20-POLY1305:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-dss-gcm-ffdhe2048", "s_server", "dsa2048 -tls1_2 -cipher DHE-DSS-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-gcm-own1024", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/dh1024.pem", "host", "", ()),
+    # TLS 1.3 FFDHE beyond 2048:
+    ("legacy-tls13-ffdhe4096", "s_server", "rsa2048 -tls1_3 -groups ffdhe4096", "host", "", ()),
+    # M6.7 step a: a server preferring DHE, with a group of its own, over ECDHE. 7.94 takes
+    # DHE; the port, offering DHE since step a and refusing any group but RFC 7919's, fails
+    # where before step a it took ECDHE (nse-tls-dhe-own-group, until step e).
+    ("dhe-own2048-serverpref", "s_server", "rsa2048 -tls1_2 -serverpref -cipher DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256 -dhparam CERTS/dh2048.pem", "host", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -479,7 +511,17 @@ def start_server(name, cmd, port, out, err):
         stop(proc)
         print("%s: the server did not come up (try %d of %d)" % (name, attempt + 1, START_TRIES),
               file=sys.stderr, flush=True)
-    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+    # What the server said, so a refusal of its arguments is not taken for a
+    # port held by someone else.
+    said = ""
+    for fh in (out, err):
+        try:
+            fh.flush()
+            with open(fh.name, errors="replace") as r:
+                said += r.read()[-2000:]
+        except (OSError, AttributeError):
+            pass
+    raise SystemExit("%s: the server did not come up: %s\n%s" % (name, " ".join(cmd), said))
 
 
 def server_cmd(kind, args, port, badserver):
@@ -672,7 +714,8 @@ def run_matrix(badserver, logdir):
             rows.append((name, tags, "skipped", "-"))
             continue
         if listening(port):
-            raise SystemExit("port %d (%s) is in use: free 47301-%d and re-run" % (port, name, BASE_PORT + len(FIXTURES)))
+            raise SystemExit("port %d (%s) is in use: free %d-%d and re-run"
+                             % (port, name, BASE_PORT + 1, BASE_PORT + len(FIXTURES)))
         out_p = os.path.join(logdir, name + ".server.out")
         err_p = os.path.join(logdir, name + ".server.err")
         cli_p = os.path.join(logdir, name + ".client.log")
@@ -765,17 +808,18 @@ def generate(outdir, twice, carry):
 # dict for SERVER replaces those `key=value` fields of the golden's.
 _NO_LEGACY = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
               "error=tls_post_process_client_hello:no_shared_cipher")
-_NO_GROUP = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
-             "error=final_key_share:no_suitable_key_share")
+# Since M6.7 step a the port offers DHE and takes the server's flight, then
+# refuses a group that is not one of RFC 7919's (rustls matches none other).
+_OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 "
+           "group=DHE sigalg=rsa_pss_rsae_sha256 alerts=rcvd:illegal_parameter(47) "
+           "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: TLS 1.2 and 1.3, ECDHE, AEAD only. The servers' own refusal.
+    # rustls: no RSA key exchange, CBC or DSA. The servers' own refusal.
     "tls12-rsa-kx-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
     "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls12-dhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls13-x448": ("nse-tls-modern-only",) + _NO_GROUP,
-    "tls13-ffdhe2048": ("nse-tls-modern-only",) + _NO_GROUP,
     "starttls-legacy": ("nse-tls-modern-only", "fail ERROR", "tls failed: NO_SHARED_CIPHER"),
     # The same RSA leaf, which is what the suite order is for; 7.94's DHE-RSA
     # CBC suite is not the port's to offer.
@@ -808,6 +852,23 @@ PORT_PINS = {
     "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
     "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
     "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
+    # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
+    "legacy-rsa-kx-aes128-cbc-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aes256-cbc-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-camellia128-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-rsa-camellia128-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-rsa-cbc-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    # Both refuse the 1,024-bit group after the server's flight: 7.94 with
+    # alert 40 (security level 2), the port with 47 (not an RFC 7919 group).
+    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-dhe-own-group",) + _OWN_DH,
+    # The server prefers DHE with its own group: 7.94 takes it, the port
+    # fails where before step a it took ECDHE.
+    "dhe-own2048-serverpref": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
                           "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
                           "client ClientKeyExchange"),

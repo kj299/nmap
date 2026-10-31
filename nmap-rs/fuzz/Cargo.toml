@@ -459,6 +459,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nse_tls_kx_aead"
+path = "fuzz_targets/nse_tls_kx_aead.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "nse_tls_verifier"
 path = "fuzz_targets/nse_tls_verifier.rs"
 test = false

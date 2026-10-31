@@ -402,12 +402,65 @@ fn the_hello_offers_7_94s_suites_in_its_order() {
         .chunks(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    // TLS 1.3, then the ECDHE AEAD suites: RSA before ECDSA at each strength
-    // (the dual-certificate rule), then the renegotiation SCSV rustls adds.
+    // TLS 1.3, then 7.94's ECDHE and DHE-RSA AEAD suites in its order, except
+    // that each ECDHE-ECDSA suite follows the ECDHE-RSA one after it (the
+    // dual-certificate rule), then the renegotiation SCSV rustls adds.
+    #[rustfmt::skip]
+    let want = [
+        0x1302, 0x1303, 0x1301,
+        0xc030, 0xc02c, 0x009f, // AES-256-GCM
+        0xcca8, 0xcca9, 0xccaa, // ChaCha20-Poly1305
+        0xc0af, 0xc0ad, 0xc0a3, 0xc09f, // AES-256-CCM-8, AES-256-CCM
+        0xc061, 0xc05d, 0xc053, // ARIA-256-GCM
+        0xc02f, 0xc02b, 0x009e, // AES-128-GCM
+        0xc0ae, 0xc0ac, 0xc0a2, 0xc09e, // AES-128-CCM-8, AES-128-CCM
+        0xc060, 0xc05c, 0xc052, // ARIA-128-GCM
+        0x00ff,
+    ];
+    assert_eq!(suites, want);
+}
+
+/// The supported_groups extension: 7.94's list and order
+/// (`spikes/m67-legacy-tls/clienthello_794.txt`), x25519 first, then P-256,
+/// X448, P-521, P-384 and the five RFC 7919 groups; the key share is x25519's.
+#[test]
+#[cfg_attr(miri, ignore = "X25519 key generation is slow under Miri")]
+fn the_hello_offers_7_94s_groups_in_its_order() {
+    let hello = client_hello();
+    let groups = extension(&hello, 10).expect("supported_groups");
+    let n = usize::from(u16::from_be_bytes([groups[0], groups[1]]));
+    let got: Vec<u16> = groups[2..2 + n]
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
     assert_eq!(
-        suites,
-        [0x1302, 0x1303, 0x1301, 0xc030, 0xc02c, 0xcca8, 0xcca9, 0xc02f, 0xc02b, 0x00ff]
+        got,
+        [0x001d, 0x0017, 0x001e, 0x0019, 0x0018, 0x0100, 0x0101, 0x0102, 0x0103, 0x0104]
     );
+    let shares = extension(&hello, 51).expect("key_share");
+    assert_eq!(&shares[2..4], &[0x00, 0x1d], "the one share is x25519's");
+    assert_eq!(
+        usize::from(u16::from_be_bytes([shares[0], shares[1]])),
+        4 + 32
+    );
+}
+
+/// The body of extension `typ` in a ClientHello handshake message.
+fn extension(hello: &[u8], typ: u16) -> Option<Vec<u8>> {
+    let mut at = 44 + usize::from(hello[43]);
+    at += 2 + usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    at += 1 + usize::from(hello[at]);
+    let end = at + 2 + usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    at += 2;
+    while at + 4 <= end {
+        let t = u16::from_be_bytes([hello[at], hello[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([hello[at + 2], hello[at + 3]]));
+        if t == typ {
+            return Some(hello[at + 4..at + 4 + len].to_vec());
+        }
+        at += 4 + len;
+    }
+    None
 }
 
 // ---- whole handshakes, in memory ----------------------------------------------------
@@ -546,7 +599,7 @@ fn a_record_shorter_than_its_tag_is_a_decrypt_error() {
     let mut d13 =
         aead::Aead13::<chacha20poly1305::ChaCha20Poly1305>::new().decrypter(key, Iv::new([0; 12]));
     let mut d12 =
-        aead::Gcm12::<aes_gcm::Aes256Gcm>::new().decrypter(AeadKey::from([7u8; 32]), &[0; 4]);
+        aead::Aead12::<aes_gcm::Aes256Gcm>::new().decrypter(AeadKey::from([7u8; 32]), &[0; 4]);
     for n in [0usize, 1, 15, 23] {
         let mut p = vec![0u8; n];
         let m = InboundOpaqueMessage::new(

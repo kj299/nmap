@@ -1062,8 +1062,11 @@ changes are in what they print:
 - a connection that never reaches TLS prints a line starting `noise:`;
 - `silent.py` holds each connection on its own thread.
 
-**The fixtures.** Each server listens on 127.0.0.1, on port 47300 plus its row
-number (47301–47386; no other M6 generator uses a 47xxx port). `s_server`
+**The fixtures.** Each server listens on 127.0.0.1, on port 29300 plus its row
+number (29301–29426; no other M6 generator uses a 29xxx port). The range is
+below Linux's ephemeral range (32768–60999), so no outgoing connection on the
+machine can hold a fixture's port: the first range, 47301 on, lost a server to
+one on CI twice (47380, 47422). `s_server`
 runs line-buffered (`stdbuf -oL`): it is stopped with SIGTERM, and step f1
 found trace lines lost in stdio's buffer on step a's golden. Fields that
 timing decides are written `*` for both programs (`TIMING_FIELDS`: on the

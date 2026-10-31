@@ -28,6 +28,7 @@ mod rsa;
 mod sigs;
 pub mod stream;
 mod verifier;
+mod x448;
 
 use std::sync::{Arc, OnceLock};
 
@@ -94,6 +95,68 @@ pub mod fuzzing {
                 UnixTime::since_unix_epoch(std::time::Duration::ZERO),
             )
             .is_ok()
+    }
+
+    /// Key agreement with a peer's share: `selector` picks X448 or one of
+    /// the five FFDHE groups (its low bits) and TLS 1.2 or 1.3 (bit 3).
+    /// Whether the share was taken.
+    #[must_use]
+    pub fn agree(selector: u8, peer: &[u8]) -> bool {
+        use rustls::crypto::SupportedKxGroup;
+        let groups: [&dyn SupportedKxGroup; 6] = [
+            &super::provider::X448,
+            &super::provider::FFDHE2048,
+            &super::provider::FFDHE3072,
+            &super::provider::FFDHE4096,
+            &super::provider::FFDHE6144,
+            &super::provider::FFDHE8192,
+        ];
+        let Some(group) = groups.get(
+            usize::from(selector & 7)
+                .checked_rem(groups.len())
+                .unwrap_or(0),
+        ) else {
+            return false;
+        };
+        let Ok(kx) = group.start() else {
+            return false;
+        };
+        let version = if selector & 8 == 0 {
+            &rustls::version::TLS13
+        } else {
+            &rustls::version::TLS12
+        };
+        kx.complete_for_tls_version(peer, version).is_ok()
+    }
+
+    /// A TLS 1.2 record of `body` through the decrypter of one of the step-a
+    /// AEADs (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM), keyed
+    /// with fixed bytes. Whether it opened.
+    #[must_use]
+    pub fn open_tls12(selector: u8, body: &mut [u8]) -> bool {
+        use super::aead::{
+            decrypter12, Aes128Ccm, Aes128Ccm8, Aes256Ccm, Aes256Ccm8, Aria128Gcm, Aria256Gcm,
+        };
+        use rustls::crypto::cipher::InboundOpaqueMessage;
+        let key = [0x42u8; 32];
+        let salt = [1, 2, 3, 4];
+        let dec = match selector % 6 {
+            0 => decrypter12::<Aes128Ccm>(&key[..16], salt),
+            1 => decrypter12::<Aes256Ccm>(&key, salt),
+            2 => decrypter12::<Aes128Ccm8>(&key[..16], salt),
+            3 => decrypter12::<Aes256Ccm8>(&key, salt),
+            4 => decrypter12::<Aria128Gcm>(&key[..16], salt),
+            _ => decrypter12::<Aria256Gcm>(&key, salt),
+        };
+        let Some(mut dec) = dec else {
+            return false;
+        };
+        let msg = InboundOpaqueMessage::new(
+            rustls::ContentType::ApplicationData,
+            rustls::ProtocolVersion::TLSv1_2,
+            body,
+        );
+        dec.decrypt(msg, 0).is_ok()
     }
 
     /// Whether `sig` over `msg` verifies under scheme `scheme` (its code

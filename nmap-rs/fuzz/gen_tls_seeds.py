@@ -8,8 +8,13 @@
 nse_tls_server_flight: what a server sends after a ClientHello. Each fixture
 server (`openssl s_server` with a TLS 1.2 or 1.3 suite, a certificate type
 or a long chain; the fake TLS 1.2 server in each mode) is sent the
-ClientHello of Python's `ssl` (OpenSSL), and everything it sends back within
+ClientHello of Python's `ssl` (OpenSSL, offering every suite), and everything it sends back within
 a second is the seed.
+
+nse_tls_kx_aead (M6.7 step a): a selector byte, then a peer's key share
+(X448's base point and a real share and the range edges 0, 1, p - 1 of each
+FFDHE group, in both TLS versions' forms) or a TLS 1.2 record (each AEAD,
+lengths about the nonce-and-tag minimum).
 
 nse_tls_verifier: flags, scheme, then length-prefixed certificates (leaf
 first, an empty one ends them), message and signature, as the target reads
@@ -30,6 +35,7 @@ CERTS = os.path.join(M65, "certs")
 VECTORS = os.path.join(HERE, "..", "crates", "sys", "src", "tls", "testdata", "vectors.txt")
 FLIGHT = os.path.join(HERE, "seeds", "nse_tls_server_flight")
 VERIFIER = os.path.join(HERE, "seeds", "nse_tls_verifier")
+KX_AEAD = os.path.join(HERE, "seeds", "nse_tls_kx_aead")
 PORT = 47399
 
 
@@ -37,6 +43,9 @@ def client_hello():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # Every suite OpenSSL has, so each fixture server finds its forced one
+    # (CCM-8 and ARIA-GCM are not in Python's default list).
+    ctx.set_ciphers("ALL:@SECLEVEL=0")
     inc, out = ssl.MemoryBIO(), ssl.MemoryBIO()
     obj = ctx.wrap_bio(inc, out, server_hostname="fuzz.test")
     try:
@@ -101,6 +110,16 @@ FLIGHTS = {
     "tls13-rsa": s_server("rsa2048", "-tls1_3"),
     "tls13-p256-hrr": s_server("rsa2048", "-tls1_3", "-groups", "P-256"),
     "tls13-ed25519": s_server("ed25519", "-tls1_3"),
+    # M6.7 step a: DHE (an RFC 7919 group and one of the server's own), CCM-8,
+    # ARIA-GCM, and TLS 1.3 HelloRetryRequests for X448 and FFDHE.
+    "tls12-dhe-ffdhe2048": s_server("rsa2048", "-tls1_2", "-cipher", "DHE-RSA-AES128-GCM-SHA256",
+                                    "-dhparam", os.path.join(CERTS, "ffdhe2048.pem")),
+    "tls12-dhe-own2048": s_server("rsa2048", "-tls1_2", "-cipher", "DHE-RSA-AES128-GCM-SHA256",
+                                  "-dhparam", os.path.join(CERTS, "dh2048.pem")),
+    "tls12-ccm8": s_server("ecp256", "-tls1_2", "-cipher", "ECDHE-ECDSA-AES128-CCM8"),
+    "tls12-aria": s_server("rsa2048", "-tls1_2", "-cipher", "ECDHE-ARIA128-GCM-SHA256"),
+    "tls13-x448-hrr": s_server("rsa2048", "-tls1_3", "-groups", "X448"),
+    "tls13-ffdhe2048-hrr": s_server("rsa2048", "-tls1_3", "-groups", "ffdhe2048"),
     "fake-ok": fake("ok"),
     "fake-badsig": fake("badsig"),
     "fake-trail": fake("trail"),
@@ -128,6 +147,46 @@ def lp(b):
 def verifier_seed(flags, scheme, chain, msg, sig):
     return bytes([flags]) + struct.pack(">H", scheme) + b"".join(lp(c) for c in chain) + \
         lp(b"") + lp(msg) + lp(sig)
+
+
+def ffdhe_prime(bits):
+    """The RFC 7919 prime of a group: the first INTEGER of the DHParameter
+    OpenSSL writes for it."""
+    import base64
+    pem = subprocess.run(["openssl", "genpkey", "-genparam", "-algorithm", "DH", "-pkeyopt",
+                          "group:ffdhe%d" % bits], capture_output=True, text=True, check=True).stdout
+    der = base64.b64decode("".join(l for l in pem.splitlines() if not l.startswith("-----")))
+
+    def tlv(b, at):
+        tag, ln = b[at], b[at + 1]
+        at += 2
+        if ln & 0x80:
+            k = ln & 0x7f
+            ln = int.from_bytes(b[at:at + k], "big")
+            at += k
+        return tag, b[at:at + ln], at + ln
+
+    tag, body, _ = tlv(der, 0)
+    assert tag == 0x30
+    tag, p, _ = tlv(body, 0)
+    assert tag == 0x02
+    return int.from_bytes(p, "big")
+
+
+def kx_aead_seeds():
+    five = bytes([5]) + bytes(55)
+    write(KX_AEAD, "x448-base", bytes([0]) + five)
+    write(KX_AEAD, "x448-zero", bytes([0]) + bytes(56))
+    for i, bits in enumerate((2048, 3072, 4096, 6144, 8192), 1):
+        p = ffdhe_prime(bits)
+        n = bits // 8
+        for tag, y in (("share", pow(2, 0x1234567, p)), ("zero", 0), ("one", 1), ("pm1", p - 1)):
+            yb = y.to_bytes(n, "big")
+            write(KX_AEAD, "ffdhe%d-%s-13" % (bits, tag), bytes([i]) + yb)
+            write(KX_AEAD, "ffdhe%d-%s-12" % (bits, tag), bytes([i | 8]) + yb.lstrip(b"\0"))
+    for sel in range(6):
+        for n in (0, 15, 16, 24, 64):
+            write(KX_AEAD, "aead%d-len%d" % (sel, n), bytes([0x80 | sel]) + bytes(range(n)))
 
 
 def write(d, name, data):
@@ -158,7 +217,9 @@ def main():
     write(VERIFIER, "chain", verifier_seed(0, 0x0403, [der("ecp256.der"), rsa, der("ed25519.der")], b"m", b"s"))
     for c in ("x25519.der", "dh.der", "unknownoid.der", "ecp256.der", "ed25519.der"):
         write(VERIFIER, "key-" + c[:-4], verifier_seed(1, 0x0807, [der(c)], b"m", b"\0" * 64))
-    print("seeds: %d flights, %d verifier inputs" % (len(os.listdir(FLIGHT)), len(os.listdir(VERIFIER))))
+    kx_aead_seeds()
+    print("seeds: %d flights, %d verifier inputs, %d kx/aead inputs"
+          % (len(os.listdir(FLIGHT)), len(os.listdir(VERIFIER)), len(os.listdir(KX_AEAD))))
 
 
 if __name__ == "__main__":

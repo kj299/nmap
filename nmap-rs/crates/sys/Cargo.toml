@@ -59,6 +59,16 @@ p521 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa"
 x25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
 ed25519-dalek = { version = "2.1.1", default-features = false }
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+# M6.7 step a (docs/M6.7-ANALYSIS.md §14): AES-CCM and CCM-8 (`ccm` over
+# `aes`) and ARIA-GCM (`aria` under `aes-gcm`'s generic GCM), each measured in
+# step 0: no unsafe, no build script, deny and MSRV clean. FFDHE and X448 over
+# crypto-bigint's constant-time Montgomery arithmetic, already in the tree
+# through the NIST curves; no secret meets num-bigint (docs/M6.5-ANALYSIS.md).
+aes = { version = "0.8", default-features = false }
+ccm = { version = "0.5", default-features = false }
+aria = { version = "0.1", default-features = false }
+crypto-bigint = { version = "0.7.10", default-features = false, features = ["alloc"] }
+zeroize = { version = "1", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 
 [features]

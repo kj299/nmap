@@ -72,6 +72,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "aria"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0de02853779930437c424aa1404b04c6a55eef84b5e04a8fbd8e125bcea9d424"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -172,6 +181,18 @@ checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
 dependencies = [
  "find-msvc-tools",
  "shlex",
+]
+
+[[package]]
+name = "ccm"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae3c82e4355234767756212c570e29833699ab63e6ffd161887314cc5b43847"
+dependencies = [
+ "aead",
+ "cipher",
+ "ctr",
+ "subtle",
 ]
 
 [[package]]
@@ -279,6 +300,7 @@ dependencies = [
  "hybrid-array",
  "num-traits",
  "rand_core 0.10.1",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -923,8 +945,12 @@ dependencies = [
 name = "nmap-sys"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
+ "aria",
+ "ccm",
  "chacha20poly1305",
+ "crypto-bigint",
  "ed25519-dalek",
  "hmac 0.12.1",
  "libc",
@@ -941,6 +967,7 @@ dependencies = [
  "socket2",
  "tokio",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

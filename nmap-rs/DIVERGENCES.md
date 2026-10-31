@@ -5666,6 +5666,12 @@ so they are opened now and land, pinned per fixture, with step f1
       `tls13-ffdhe2048`, `starttls-legacy`, and `dual-tls12-clientpref` (the
       same RSA leaf as 7.94, over an ECDHE suite where 7.94 took DHE-RSA
       with CBC).
+      - **M6.7 step a** (docs/M6.7-ANALYSIS.md §15) retires part of it:
+        ECDHE and DHE-RSA with AES-CCM, AES-CCM-8 and ARIA-GCM, DHE-RSA with
+        the RFC 7919 groups, and TLS 1.3 X448 and FFDHE now reach as 7.94
+        does (`tls13-x448`, `tls13-ffdhe2048`, and seven `legacy-*` rows
+        unpinned). DHE with the server's own group moved to
+        `nse-tls-dhe-own-group`.
       - **Since step g, a regression for legacy STARTTLS.** With `openssl`
         registered, sslcert retrieves a STARTTLS certificate as 7.94 does,
         by STARTTLS then `reconnect_ssl`, and the port's client cannot
@@ -5673,6 +5679,22 @@ so they are opened now and land, pinned per fixture, with step f1
         where, before step g, it printed the certificate read by tls.lua's
         own handshake (PEM only). Pinned by the CLI scenario
         `starttls-legacy` (`gen_m64_cli.py`, `PORT_PINS`).
+- [x] `nse-tls-dhe-own-group` — since M6.7 step a the port offers DHE-RSA
+      suites, and rustls accepts only the RFC 7919 groups in a
+      ServerKeyExchange (`client/tls12.rs`, the group found by
+      `ffdhe_group()`): a server with a group of its own gets alert 47
+      (illegal_parameter) after its flight, where 7.94 checks the group and
+      goes on. Pinned: `tls12-dhe2048` (the server's 2,048-bit group),
+      `legacy-dhe-rsa-gcm-own1024` (both fail, 7.94 with alert 40 at
+      security level 2) and `dhe-own2048-serverpref`.
+      - **A regression for one kind of server, until step e.** A server that
+        prefers a DHE suite over every ECDHE suite the port offers (server
+        cipher order) and has a group of its own: before step a the port
+        offered no DHE and the server chose ECDHE; now the server chooses
+        DHE and the handshake fails. `dhe-own2048-serverpref` measures it.
+        Step e (the server's own group, with OpenSSL's checks) closes it;
+        the RFC 7919 groups, and every server that prefers ECDHE or honours
+        the client's order, are unaffected.
 - [x] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
       40) when the server sends no `renegotiation_info` extension (RFC 5746,
       OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates

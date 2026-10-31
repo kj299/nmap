@@ -265,6 +265,31 @@ FIXTURES = [
     # handshake refuses and parse_ssl_certificate takes.
     ("cert-fake-trail", "fake", "trail rsa2048.der rsa2048.key", "cert", "", ()),
     ("cert-trail-parse", "s_server", "rsa2048 -tls1_3", "trail", "", ()),
+    # M6.7 step 0 (docs/M6.7-ANALYSIS.md §1): the legacy families 7.94 reaches and the port
+    # does not yet, beside step a's tls12-rsa-kx-gcm, tls12-ecdhe-cbc, tls12-dhe2048,
+    # tls13-x448 and tls13-ffdhe2048. RSA key exchange with each record protection:
+    ("legacy-rsa-kx-aes128-cbc-sha", "s_server", "rsa2048 -tls1_2 -cipher AES128-SHA:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aes256-cbc-sha256", "s_server", "rsa2048 -tls1_2 -cipher AES256-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aes128-ccm", "s_server", "rsa2048 -tls1_2 -cipher AES128-CCM:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-aria128-gcm", "s_server", "rsa2048 -tls1_2 -cipher ARIA128-GCM-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-camellia128-sha", "s_server", "rsa2048 -tls1_2 -cipher CAMELLIA128-SHA:@SECLEVEL=0", "host", "", ()),
+    ("legacy-rsa-kx-seed-sha", "s_server", "rsa2048 -tls1_2 -cipher SEED-SHA:@SECLEVEL=0 -provider legacy -provider default", "host", "", ()),
+    # ECDHE with CBC, ARIA and CCM:
+    ("legacy-ecdhe-rsa-aes256-cbc-sha384", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-RSA-AES256-SHA384:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-rsa-camellia128-sha256", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-RSA-CAMELLIA128-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-rsa-aria128-gcm", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-ARIA128-GCM-SHA256:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-ecdsa-aes128-ccm", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-CCM:@SECLEVEL=0", "host", "", ()),
+    ("legacy-ecdhe-ecdsa-aes128-ccm8", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-CCM8:@SECLEVEL=0", "host", "", ()),
+    # DHE with the RFC 7919 groups, and with a 1,024-bit group of the server's own, which
+    # security level 2 refuses (both programs must fail):
+    ("legacy-dhe-rsa-gcm-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-gcm-ffdhe3072", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe3072.pem", "host", "", ()),
+    ("legacy-dhe-rsa-cbc-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-SHA:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-chacha-ffdhe2048", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-CHACHA20-POLY1305:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-dss-gcm-ffdhe2048", "s_server", "dsa2048 -tls1_2 -cipher DHE-DSS-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/ffdhe2048.pem", "host", "", ()),
+    ("legacy-dhe-rsa-gcm-own1024", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/dh1024.pem", "host", "", ()),
+    # TLS 1.3 FFDHE beyond 2048:
+    ("legacy-tls13-ffdhe4096", "s_server", "rsa2048 -tls1_3 -groups ffdhe4096", "host", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -808,6 +833,27 @@ PORT_PINS = {
     "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
     "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
     "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
+    # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
+    "legacy-rsa-kx-aes128-cbc-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aes256-cbc-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-camellia128-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-rsa-camellia128-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-rsa-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-ecdsa-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-ecdhe-ecdsa-aes128-ccm8": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-rsa-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-rsa-gcm-ffdhe3072": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-rsa-cbc-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-rsa-chacha-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    # Both refuse the 1,024-bit group, 7.94 after the server's flight (its own
+    # alert 40, security level 2), the port before it: no DHE suite offered.
+    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "legacy-tls13-ffdhe4096": ("nse-tls-modern-only",) + _NO_GROUP,
     "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
                           "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
                           "client ClientKeyExchange"),

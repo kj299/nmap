@@ -1,0 +1,29 @@
+record_version 0x0301
+client_version 0x0303
+suites 10
+suite 0x1302
+suite 0x1303
+suite 0x1301
+suite 0xc030
+suite 0xc02c
+suite 0xcca8
+suite 0xcca9
+suite 0xc02f
+suite 0xc02b
+suite 0x00ff
+compression 00
+ext psk_key_exchange_modes
+  modes 01
+ext supported_groups
+  groups x25519 secp256r1 secp521r1 secp384r1
+ext ec_point_formats
+  formats 00
+ext key_share
+  shares x25519
+ext extended_master_secret
+  empty True
+ext status_request
+ext supported_versions
+  versions 0x0304 0x0303
+ext signature_algorithms
+  sigalgs ecdsa_secp256r1_sha256 ecdsa_secp384r1_sha384 ecdsa_secp521r1_sha512 ed25519 rsa_pss_rsae_sha256 rsa_pss_rsae_sha384 rsa_pss_rsae_sha512 rsa_pkcs1_sha256 rsa_pkcs1_sha384 rsa_pkcs1_sha512

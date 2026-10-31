@@ -520,7 +520,7 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    - **Milestone numbers are names, not order:**
      - M6.6 (`nmapdb`, `lpeg`) ran before M6.5;
      - a minimal `lfs` (D1 (c)) runs between them;
-     - M6.7 is legacy TLS: **Phase 0** in [`docs/M6.7-ANALYSIS.md`](docs/M6.7-ANALYSIS.md) measures 22 server families 7.94 reaches and the port does not (9 a rustls provider can add; 13, and four step-f1 pins, need rustls itself changed) and poses D1-D4;
+     - M6.7 is legacy TLS: **Phase 0** in [`docs/M6.7-ANALYSIS.md`](docs/M6.7-ANALYSIS.md) measures 22 server families 7.94 reaches and the port does not (9 a rustls provider can add; 13, and four step-f1 pins, need rustls itself changed) and poses D1-D4, decided 2026-10-31 as recommended. **Step 0** (§14): the four RustCrypto crates measured clean, DSA and X448 first-party (X448 passes RFC 7748), the 18 rows in the M6.5 gate (125 rows, 0 bad), both ClientHellos captured, and the RSA key-exchange rustls patch (8 files, +186 −48) proven end to end on two rows, with the rest of the series estimated at about 450 lines;
      - `zlib` and `libssh2` follow.
 6. 🔶 **M7 is in progress** in parallel: the cutover gate is the MUST tier of
    [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md), of which `--host-timeout`

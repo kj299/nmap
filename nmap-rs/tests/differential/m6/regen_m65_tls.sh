@@ -13,8 +13,8 @@
 #                                      (PORT_PINS)
 #
 # The oracle is the installed nmap 7.94 with --datadir set to this repository,
-# connecting through m65_tls/s0probe.nse to each of the 107 fixture servers of
-# m65_tls/ on 127.0.0.1:47301-47407 (oracle/gen_m65_tls.py): s_server with each
+# connecting through m65_tls/s0probe.nse to each of the 125 fixture servers of
+# m65_tls/ on 127.0.0.1:47301-47425 (oracle/gen_m65_tls.py): s_server with each
 # suite, group and signature scheme forced, STARTTLS, odd certificates and
 # chains, SNI, legacy versions, the fake TLS 1.2 server's negative fixtures, the
 # corrupt TLS 1.3 CertificateVerify, a silent server and a closed port; and
@@ -22,7 +22,9 @@
 # get_ssl_certificate contract, UDP sockets, server names from a target name,
 # and teardown mid-handshake; and step f2's: get_ssl_certificate's whole table,
 # after handshakes that succeed and fail, and parse_ssl_certificate of the leaf
-# with bytes after it. The
+# with bytes after it; and M6.7's legacy-* rows (docs/M6.7-ANALYSIS.md §13):
+# RSA key exchange, CBC, CCM, ARIA, Camellia, SEED, DHE and TLS 1.3 FFDHE and
+# X448, which 7.94 reaches and the port does not yet. The
 # generator runs the matrix twice and refuses to write a golden if an untagged
 # row differs. The three needs-badserver rows are recorded only when the spike's
 # badserver binary is found (BADSERVER, $CARGO_TARGET_DIR/release/badserver,

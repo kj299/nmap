@@ -1,0 +1,136 @@
+diff --git a/nmap-rs/crates/sys/src/tls/provider.rs b/nmap-rs/crates/sys/src/tls/provider.rs
+index a4ddc0e2e..fd5930d4e 100644
+--- a/nmap-rs/crates/sys/src/tls/provider.rs
++++ b/nmap-rs/crates/sys/src/tls/provider.rs
+@@ -86,6 +86,9 @@ static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
+ 
+ macro_rules! tls12 {
+     ($name:ident, $suite:ident, $hash:ident, $hmac:ident, $schemes:ident, $aead:ident, $limit:expr) => {
++        tls12!($name, $suite, $hash, $hmac, $schemes, $aead, $limit, ECDHE);
++    };
++    ($name:ident, $suite:ident, $hash:ident, $hmac:ident, $schemes:ident, $aead:ident, $limit:expr, $kx:ident) => {
+         pub static $name: SupportedCipherSuite = SupportedCipherSuite::Tls12(&Tls12CipherSuite {
+             common: CipherSuiteCommon {
+                 suite: CipherSuite::$suite,
+@@ -93,7 +96,7 @@ macro_rules! tls12 {
+                 confidentiality_limit: $limit,
+             },
+             prf_provider: &PrfUsingHmac(&$hmac),
+-            kx: KeyExchangeAlgorithm::ECDHE,
++            kx: KeyExchangeAlgorithm::$kx,
+             sign: $schemes,
+             aead_alg: &$aead,
+         });
+@@ -155,6 +158,27 @@ tls12!(
+     1 << 24
+ );
+ 
++tls12!(
++    TLS_RSA_WITH_AES_128_GCM_SHA256,
++    TLS_RSA_WITH_AES_128_GCM_SHA256,
++    SHA256,
++    HMAC_SHA256,
++    TLS12_RSA_SCHEMES,
++    AES128_GCM_12,
++    1 << 24,
++    RSA
++);
++tls12!(
++    TLS_RSA_WITH_AES_256_GCM_SHA384,
++    TLS_RSA_WITH_AES_256_GCM_SHA384,
++    SHA384,
++    HMAC_SHA384,
++    TLS12_RSA_SCHEMES,
++    AES256_GCM_12,
++    1 << 24,
++    RSA
++);
++
+ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
+     TLS13_AES_256_GCM_SHA384,
+     TLS13_CHACHA20_POLY1305_SHA256,
+@@ -165,6 +189,8 @@ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
+     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
++    TLS_RSA_WITH_AES_256_GCM_SHA384,
++    TLS_RSA_WITH_AES_128_GCM_SHA256,
+ ];
+ 
+ pub(crate) static X25519: kx::X25519 = kx::X25519;
+@@ -220,5 +246,30 @@ pub fn provider() -> CryptoProvider {
+         signature_verification_algorithms: NO_WEBPKI_ALGS,
+         secure_random: &rand::OsRandom,
+         key_provider: &NoKeys,
++        rsa_key_transport: Some(&RsaTransport),
++    }
++}
++
++/// RSA key transport: RSAES-PKCS1-v1_5 to the leaf's key, read by the reader
++/// the verifier uses.
++#[derive(Debug)]
++pub(crate) struct RsaTransport;
++
++impl rustls::crypto::RsaKeyTransport for RsaTransport {
++    fn encrypt_premaster(
++        &self,
++        end_entity: &rustls::pki_types::CertificateDer<'_>,
++        premaster: &[u8],
++    ) -> Result<Vec<u8>, Error> {
++        let cert = nmap_core::nse::openssl::x509::d2i_x509_len(end_entity.as_ref())
++            .ok_or(Error::General("leaf does not decode".into()))?
++            .0;
++        let Ok(super::sigs::PeerKey::Rsa(n, e)) = super::sigs::PeerKey::from_cert(&cert) else {
++            return Err(Error::General("RSA key exchange needs an RSA key".into()));
++        };
++        let key = super::rsa::RsaPublicKey::new(&n, &e)
++            .ok_or(Error::General("RSA key is degenerate".into()))?;
++        key.encrypt_pkcs1(premaster, |buf| rustls::crypto::SecureRandom::fill(&rand::OsRandom, buf).is_ok())
++            .ok_or(Error::General("RSA key too small for the premaster".into()))
+     }
+ }
+diff --git a/nmap-rs/crates/sys/src/tls/rsa.rs b/nmap-rs/crates/sys/src/tls/rsa.rs
+index c84722cbc..e733aa5fc 100644
+--- a/nmap-rs/crates/sys/src/tls/rsa.rs
++++ b/nmap-rs/crates/sys/src/tls/rsa.rs
+@@ -108,6 +108,40 @@ impl RsaPublicKey {
+         Some(em)
+     }
+ 
++    /// RSAES-PKCS1-v1_5 (RFC 8017 §7.2.1): `00 02 PS 00 M`, PS at least 8
++    /// nonzero random bytes. `None` when `m` does not fit or randomness fails.
++    pub(crate) fn encrypt_pkcs1(
++        &self,
++        m: &[u8],
++        mut fill: impl FnMut(&mut [u8]) -> bool,
++    ) -> Option<Vec<u8>> {
++        let ps_len = self.k.checked_sub(m.len().checked_add(3)?)?;
++        if ps_len < 8 {
++            return None;
++        }
++        let mut ps = vec![0u8; ps_len];
++        if !fill(&mut ps) {
++            return None;
++        }
++        for b in &mut ps {
++            while *b == 0 {
++                let mut one = [0u8; 1];
++                if !fill(&mut one) {
++                    return None;
++                }
++                *b = one[0];
++            }
++        }
++        let mut em = vec![0x00, 0x02];
++        em.extend_from_slice(&ps);
++        em.push(0x00);
++        em.extend_from_slice(m);
++        let c = BigUint::from_bytes_be(&em).modpow(&self.e, &self.n).to_bytes_be();
++        let mut out = vec![0u8; self.k.checked_sub(c.len())?];
++        out.extend_from_slice(&c);
++        Some(out)
++    }
++
+     pub(crate) fn verify_pkcs1(&self, hash: HashAlg, message: &[u8], sig: &[u8]) -> bool {
+         let Some(em) = self.recover(sig, self.k) else {
+             return false;

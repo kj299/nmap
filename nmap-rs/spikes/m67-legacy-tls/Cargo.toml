@@ -1,0 +1,24 @@
+# M6.7 step 0 (docs/M6.7-ANALYSIS.md §11): the crates D2 adds, measured on the
+# RustCrypto generation the tree already locks (cipher 0.4, aead 0.5, digest
+# 0.10), and the first-party X448 of D4 (b) against RFC 7748. Scratch:
+# detached from the workspace (own [workspace]) so nothing here touches the
+# main build, as spikes/m65-tls-provider was for M6.5 step 0.
+[package]
+name = "m67-legacy-tls-spike"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ccm = { version = "0.5", default-features = false, features = ["alloc"] }
+aria = { version = "0.1", default-features = false }
+camellia = { version = "0.1", default-features = false }
+cbc = { version = "0.1", default-features = false, features = ["alloc"] }
+aes = { version = "0.8", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["alloc"] }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-traits = { version = "0.2", default-features = false }
+
+[workspace]

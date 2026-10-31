@@ -5672,6 +5672,11 @@ so they are opened now and land, pinned per fixture, with step f1
         does (`tls13-x448`, `tls13-ffdhe2048`, and seven `legacy-*` rows
         unpinned). DHE with the server's own group moved to
         `nse-tls-dhe-own-group`.
+      - **M6.7 step c** retires RSA key exchange with the AEAD suites
+        (patch 0002 of the vendored rustls): `tls12-rsa-kx-gcm`,
+        `cert-tls12-rsa-kx`, `legacy-rsa-kx-aes128-ccm` and
+        `legacy-rsa-kx-aria128-gcm` reach as 7.94 does. With CBC it waits for
+        step d.
       - **Since step g, a regression for legacy STARTTLS.** With `openssl`
         registered, sslcert retrieves a STARTTLS certificate as 7.94 does,
         by STARTTLS then `reconnect_ssl`, and the port's client cannot

@@ -55,6 +55,7 @@ One file per intent, applied in name order to `rustls/src/`.
 | patch | what it does |
 |---|---|
 | `0001-allow-std-io-errorkind-import.patch` | `#![allow(clippy::std_instead_of_core)]` in `stream.rs`: clippy 1.97 asks for `core::io::ErrorKind`, which does not exist at this workspace's MSRV (1.88) |
+| `0002-rsa-key-exchange.patch` | TLS 1.2 RSA key exchange, client side (M6.7 step c). `KeyExchangeAlgorithm::RSA`, and `CryptoProvider::rsa_key_transport`, an optional `RsaKeyTransport` hook that encrypts the premaster to the leaf (`fips()` is false when it is set; the builder takes it as a key exchange for its suite-has-a-group check). The client expects no ServerKeyExchange and so verifies no signature, draws the premaster (0x0303 and 46 random bytes, RFC 5246 §7.4.7.1), sends it encrypted in a u16-length ClientKeyExchange, and derives the master secret from it with the suite's PRF and EMS as usual (`ConnectionSecrets::from_premaster`). Exhaustive matches elsewhere gain an arm; the server never selects an RSA suite, its filter asking for ECDHE or DHE. 8 files, +191 −48 |
 
 ## Re-deriving this tree
 

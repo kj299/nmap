@@ -36,6 +36,7 @@ pub fn default_provider() -> CryptoProvider {
         signature_verification_algorithms: SUPPORTED_SIG_ALGS,
         secure_random: &Ring,
         key_provider: &Ring,
+        rsa_key_transport: None,
     }
 }
 

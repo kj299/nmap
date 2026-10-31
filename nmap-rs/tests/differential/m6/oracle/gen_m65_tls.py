@@ -815,8 +815,8 @@ _OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_A
            "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: no RSA key exchange, CBC or DSA. The servers' own refusal.
-    "tls12-rsa-kx-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
+    # rustls: no CBC or DSA (RSA key exchange since M6.7 step c). The servers'
+    # own refusal.
     "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
     "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
@@ -848,15 +848,12 @@ PORT_PINS = {
     "sni-table-256": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
     # Step f2's rows on the same servers: no handshake, no table; the same
     # alerts; and where rustls goes on without renegotiation_info, the leaf.
-    "cert-tls12-rsa-kx": ("nse-tls-modern-only", "cert ssl=nil,ERROR table=nil", _NO_LEGACY[1]),
     "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
     "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
     "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
     # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
     "legacy-rsa-kx-aes128-cbc-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-rsa-kx-aes256-cbc-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-rsa-kx-camellia128-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,

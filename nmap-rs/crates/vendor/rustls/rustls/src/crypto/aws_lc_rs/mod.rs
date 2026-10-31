@@ -47,6 +47,7 @@ pub fn default_provider() -> CryptoProvider {
         signature_verification_algorithms: SUPPORTED_SIG_ALGS,
         secure_random: &AwsLcRs,
         key_provider: &AwsLcRs,
+        rsa_key_transport: None,
     }
 }
 

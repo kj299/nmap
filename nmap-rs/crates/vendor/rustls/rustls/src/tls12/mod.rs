@@ -137,6 +137,35 @@ impl ConnectionSecrets {
         Ok(ret)
     }
 
+    /// The secrets from a premaster secret the client chose itself (RSA key
+    /// transport): the same derivation as [`Self::from_key_exchange`].
+    pub(crate) fn from_premaster(
+        premaster: &[u8],
+        ems_seed: Option<hash::Output>,
+        randoms: ConnectionRandoms,
+        suite: &'static Tls12CipherSuite,
+    ) -> Self {
+        let mut ret = Self {
+            randoms,
+            suite,
+            master_secret: [0u8; 48],
+        };
+        let (label, seed) = match ems_seed {
+            Some(seed) => ("extended master secret", Seed::Ems(seed)),
+            None => (
+                "master secret",
+                Seed::Randoms(join_randoms(&ret.randoms.client, &ret.randoms.server)),
+            ),
+        };
+        ret.suite.prf_provider.for_secret(
+            &mut ret.master_secret,
+            premaster,
+            label.as_bytes(),
+            seed.as_ref(),
+        );
+        ret
+    }
+
     pub(crate) fn new_resume(
         randoms: ConnectionRandoms,
         suite: &'static Tls12CipherSuite,

@@ -5,6 +5,11 @@
 //! not needed (§6). The `rsa` crate is not used: it carries
 //! RUSTSEC-2023-0071 and fails `cargo deny`.
 //!
+//! Since M6.7 step c, also RSAES-PKCS1-v1_5 encryption of the TLS 1.2 RSA
+//! key exchange's premaster ([`RsaPublicKey::encrypt_pkcs1`]): a secret, so
+//! that one exponentiation is `crypto-bigint`'s constant-time Montgomery
+//! form, never `num-bigint`.
+//!
 //! As OpenSSL checks them (`crypto/rsa/rsa_sign.c`, `rsa_pss.c` at 3.0.13):
 //! the signature is exactly the modulus's length and below it; a PKCS#1
 //! signature's decoding is compared whole with the one expected, so the
@@ -106,6 +111,62 @@ impl RsaPublicKey {
         let mut em = vec![0u8; pad];
         em.extend_from_slice(&m);
         Some(em)
+    }
+
+    /// RSAES-PKCS1-v1_5 (RFC 8017 §7.2.1): `00 02 PS 00 M`, PS at least 8
+    /// nonzero random bytes, then `EM^e mod n`. `M` is the TLS premaster, a
+    /// secret, so the exponentiation is `crypto-bigint`'s constant-time
+    /// Montgomery form, not `num-bigint` (docs/M6.5-ANALYSIS.md, the
+    /// provider's rule); `e` and `n` are public. `None` when `M` does not
+    /// fit, the modulus is even, or randomness fails.
+    pub(crate) fn encrypt_pkcs1(
+        &self,
+        m: &[u8],
+        mut fill: impl FnMut(&mut [u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
+        use crypto_bigint::{BoxedUint, Odd};
+
+        let ps_len = self.k.checked_sub(m.len().checked_add(3)?)?;
+        if ps_len < 8 {
+            return None;
+        }
+        let mut em = vec![0u8; self.k];
+        let (head, rest) = em.split_at_mut(2);
+        head[1] = 0x02;
+        let (ps, rest) = rest.split_at_mut(ps_len);
+        if !fill(ps) {
+            return None;
+        }
+        // Each zero byte is drawn again, at most 64 times: a source that
+        // gives only zeros fails rather than spinning.
+        for b in ps.iter_mut() {
+            let mut tries = 0u8;
+            while *b == 0 {
+                tries = tries.checked_add(1).filter(|t| *t <= 64)?;
+                let mut one = [0u8; 1];
+                if !fill(&mut one) {
+                    return None;
+                }
+                *b = one[0];
+            }
+        }
+        // rest = 00 || M
+        rest.get_mut(1..)?.copy_from_slice(m);
+        let bits = u32::try_from(self.k.checked_mul(8)?).ok()?;
+        let n = BoxedUint::from_be_slice(&self.n.to_bytes_be(), bits).ok()?;
+        let params = BoxedMontyParams::new_vartime(Option::from(Odd::new(n))?);
+        let e = BoxedUint::from_be_slice(&self.e.to_bytes_be(), bits).ok()?;
+        let e_bits = u32::try_from(self.e.bits()).ok()?;
+        let x = BoxedUint::from_be_slice(&em, bits).ok()?;
+        zeroize::Zeroize::zeroize(&mut em);
+        let c = BoxedMontyForm::new(x, &params)
+            .pow_bounded_exp(&e, e_bits)
+            .retrieve()
+            .to_be_bytes();
+        // k bytes, left-padded: the value is below n.
+        let c = c.get(c.len().checked_sub(self.k)?..)?;
+        Some(c.to_vec())
     }
 
     pub(crate) fn verify_pkcs1(&self, hash: HashAlg, message: &[u8], sig: &[u8]) -> bool {

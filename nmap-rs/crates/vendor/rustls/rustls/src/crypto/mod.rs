@@ -214,6 +214,22 @@ pub struct CryptoProvider {
 
     /// Provider for loading private [`SigningKey`]s from [`PrivateKeyDer`].
     pub key_provider: &'static dyn KeyProvider,
+
+    /// RSA key transport for TLS 1.2 suites whose `kx` is
+    /// [`KeyExchangeAlgorithm::RSA`]. `None` (the default) makes such a
+    /// suite fail at the ClientKeyExchange.
+    pub rsa_key_transport: Option<&'static dyn RsaKeyTransport>,
+}
+
+/// RSA key transport (RFC 5246 §7.4.7.1): encrypts the client's premaster
+/// secret to the server certificate's RSA public key, RSAES-PKCS1-v1_5.
+pub trait RsaKeyTransport: Send + Sync + Debug {
+    /// Returns the ciphertext for `premaster` under `end_entity`'s key.
+    fn encrypt_premaster(
+        &self,
+        end_entity: &pki_types::CertificateDer<'_>,
+        premaster: &[u8],
+    ) -> Result<Vec<u8>, Error>;
 }
 
 impl CryptoProvider {
@@ -298,8 +314,10 @@ See the documentation of the CryptoProvider type for more information.
             signature_verification_algorithms,
             secure_random,
             key_provider,
+            rsa_key_transport,
         } = self;
-        cipher_suites.iter().all(|cs| cs.fips())
+        rsa_key_transport.is_none()
+            && cipher_suites.iter().all(|cs| cs.fips())
             && kx_groups.iter().all(|kx| kx.fips())
             && signature_verification_algorithms.fips()
             && secure_random.fips()

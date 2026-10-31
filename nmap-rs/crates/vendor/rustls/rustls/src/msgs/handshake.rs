@@ -1904,6 +1904,9 @@ pub enum KeyExchangeAlgorithm {
     DHE,
     /// Key exchange performed via elliptic curve Diffie-Hellman.
     ECDHE,
+    /// RSA key transport: no ServerKeyExchange; the client encrypts the
+    /// premaster secret to the server certificate's key. Client side only.
+    RSA,
 }
 
 pub(crate) static ALL_KEY_EXCHANGE_ALGORITHMS: &[KeyExchangeAlgorithm] =
@@ -1976,6 +1979,7 @@ impl KxDecode<'_> for ClientKeyExchangeParams {
         Ok(match algo {
             ECDHE => Self::Ecdh(ClientEcdhParams::read(r)?),
             DHE => Self::Dh(ClientDhParams::read(r)?),
+            RSA => return Err(InvalidMessage::MissingKeyExchange),
         })
     }
 }
@@ -2115,7 +2119,10 @@ impl ServerKeyExchangeParams {
     pub(crate) fn new(kx: &dyn ActiveKeyExchange) -> Self {
         match kx.group().key_exchange_algorithm() {
             KeyExchangeAlgorithm::DHE => Self::Dh(ServerDhParams::new(kx)),
-            KeyExchangeAlgorithm::ECDHE => Self::Ecdh(ServerEcdhParams::new(kx)),
+            // A group is never RSA.
+            KeyExchangeAlgorithm::ECDHE | KeyExchangeAlgorithm::RSA => {
+                Self::Ecdh(ServerEcdhParams::new(kx))
+            }
         }
     }
 
@@ -2142,6 +2149,7 @@ impl KxDecode<'_> for ServerKeyExchangeParams {
         Ok(match algo {
             ECDHE => Self::Ecdh(ServerEcdhParams::read(r)?),
             DHE => Self::Dh(ServerDhParams::read(r)?),
+            RSA => return Err(InvalidMessage::MissingKeyExchange),
         })
     }
 }

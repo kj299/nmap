@@ -1,8 +1,9 @@
 //! The provider: suites in 7.94's ClientHello order
 //! (`tests/differential/m6/m65_tls/clienthello_suites_794.txt`) restricted to
 //! what it carries: the TLS 1.3 three, then ECDHE and DHE-RSA with AES-GCM,
-//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8 and ARIA-GCM (M6.7 step a; RSA key
-//! exchange, CBC and DSA need rustls itself changed, steps c-e). Groups in
+//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8 and ARIA-GCM (M6.7 step a), then RSA
+//! key exchange with the same AEADs but ChaCha20 (step c, through the vendored
+//! rustls's patch 0002). CBC and DSA follow in steps d and e. Groups in
 //! 7.94's order: x25519, P-256, x448, P-521, P-384, then ffdhe2048 to 8192.
 //!
 //! One change to 7.94's order: each ECDHE-ECDSA suite goes after the
@@ -319,6 +320,81 @@ tls12!(
     DHE
 );
 
+// RSA key exchange (M6.7 step c; the vendored rustls's patch 0002), after
+// every ECDHE and DHE suite, as 7.94 offers them.
+tls12!(
+    TLS_RSA_WITH_AES_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    AES256_GCM_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_256_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CCM8_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_256_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CCM_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_ARIA_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    ARIA256_GCM_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_GCM_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_128_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CCM8_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_128_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CCM_12,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_ARIA_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    ARIA128_GCM_12,
+    1 << 24,
+    RSA
+);
+
 pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS13_AES_256_GCM_SHA384,
     TLS13_CHACHA20_POLY1305_SHA256,
@@ -346,6 +422,14 @@ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
     TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_RSA_WITH_AES_256_GCM_SHA384,
+    TLS_RSA_WITH_AES_256_CCM_8,
+    TLS_RSA_WITH_AES_256_CCM,
+    TLS_RSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_RSA_WITH_AES_128_CCM_8,
+    TLS_RSA_WITH_AES_128_CCM,
+    TLS_RSA_WITH_ARIA_128_GCM_SHA256,
 ];
 
 pub(crate) static X25519: kx::X25519 = kx::X25519;
@@ -420,5 +504,42 @@ pub fn provider() -> CryptoProvider {
         signature_verification_algorithms: NO_WEBPKI_ALGS,
         secure_random: &rand::OsRandom,
         key_provider: &NoKeys,
+        rsa_key_transport: Some(&RsaTransport),
+    }
+}
+
+/// RSA key transport (RFC 5246 §7.4.7.1): the premaster rustls draws,
+/// encrypted RSAES-PKCS1-v1_5 to the leaf's key as OpenSSL's
+/// `tls_construct_cke_rsa` does. The key is read by the reader the verifier
+/// uses ([`super::sigs::PeerKey::from_cert`]); a leaf whose key is not RSA
+/// cannot carry this key exchange (OpenSSL: "wrong certificate type").
+#[derive(Debug)]
+pub(crate) struct RsaTransport;
+
+impl rustls::crypto::RsaKeyTransport for RsaTransport {
+    fn encrypt_premaster(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        premaster: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let cert = nmap_core::nse::openssl::x509::d2i_x509_len(end_entity.as_ref())
+            .ok_or(Error::General(
+                "RSA key exchange: the leaf does not decode".into(),
+            ))?
+            .0;
+        let Ok(super::sigs::PeerKey::Rsa(n, e)) = super::sigs::PeerKey::from_cert(&cert) else {
+            return Err(Error::General(
+                "RSA key exchange: the leaf's key is not RSA".into(),
+            ));
+        };
+        let key = super::rsa::RsaPublicKey::new(&n, &e).ok_or(Error::General(
+            "RSA key exchange: a degenerate RSA key".into(),
+        ))?;
+        key.encrypt_pkcs1(premaster, |buf| {
+            rustls::crypto::SecureRandom::fill(&rand::OsRandom, buf).is_ok()
+        })
+        .ok_or(Error::General(
+            "RSA key exchange: the key is too short for the premaster".into(),
+        ))
     }
 }

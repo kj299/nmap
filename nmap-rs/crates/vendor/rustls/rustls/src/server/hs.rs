@@ -576,7 +576,8 @@ impl ExpectClientHello {
                     ffdhe_possible |= supported.is_some();
                     ffdhe_offered = true;
                 }
-                KeyExchangeAlgorithm::ECDHE => {
+                // A group is never RSA.
+                KeyExchangeAlgorithm::ECDHE | KeyExchangeAlgorithm::RSA => {
                     ecdhe_possible |= supported.is_some();
                 }
             }

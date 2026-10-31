@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use crate::client::EchMode;
 use crate::crypto::CryptoProvider;
 use crate::error::Error;
-use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
+use crate::msgs::handshake::{ALL_KEY_EXCHANGE_ALGORITHMS, KeyExchangeAlgorithm};
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
 use crate::versions;
@@ -236,6 +236,15 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
             if supported_kx_algos.len() == ALL_KEY_EXCHANGE_ALGORITHMS.len() {
                 break;
             }
+        }
+
+        // RSA key transport needs no group, only the provider's hook.
+        if self
+            .provider
+            .rsa_key_transport
+            .is_some()
+        {
+            supported_kx_algos.push(KeyExchangeAlgorithm::RSA);
         }
 
         for cs in self.provider.cipher_suites.iter() {

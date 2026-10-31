@@ -13,11 +13,15 @@
 //! - [`rand`]: the one randomness seam (E3), for `rand_*` as for the rest.
 //! - this file, the binding.
 //!
-//! **Not registered.** Under D2(D) the module is registered last, at step g,
-//! once TLS works and every part is in; until then nothing gives scripts
-//! `require "openssl"`, and [`register_for_tests`] opens what exists in the
-//! bare states of the module's own tests, the integration tests and the fuzz
-//! targets (`runtime::tests::openssl_is_not_registered`, E7).
+//! Step g: `supported_digests` and `supported_ciphers`, and the module
+//! registered.
+//!
+//! **Registered** by the runtime as `set_nmap_libraries` registers it
+//! (`nse_main.cc:569-571,581`: `luaL_requiref(L, "openssl", luaopen_openssl,
+//! 1)`), through [`load_openssl`]: a global and in `package.loaded`, after
+//! `lpeg` (D2(D): last, once TLS works and every part is in). The bare states
+//! of the module's own tests, the integration tests and the fuzz targets open
+//! it through [`register_for_tests`].
 //!
 //! **The userdata** is `luaopen_openssl`'s: a metatable named `BIGNUM`
 //! (`__name`), its own `__index`, `__tostring` = `bignum_bn2hex`, the methods,
@@ -225,6 +229,8 @@ enum F {
     Encrypt,
     Decrypt,
     DesStringToKey,
+    SupportedDigests,
+    SupportedCiphers,
 }
 
 impl F {
@@ -262,14 +268,16 @@ impl F {
             F::Encrypt => "openssl.encrypt",
             F::Decrypt => "openssl.decrypt",
             F::DesStringToKey => "openssl.DES_string_to_key",
+            F::SupportedDigests => "openssl.supported_digests",
+            F::SupportedCiphers => "openssl.supported_ciphers",
         })
     }
 }
 
 /// `openssllib`'s entries (`nse_openssl.cc:568-600`): the `BIGNUM` ones
-/// (step b), the digests, HMAC and randomness (step c), and the ciphers
-/// (step d).
-const LIBRARY: [(&str, F); 30] = [
+/// (step b), the digests, HMAC and randomness (step c), the ciphers
+/// (step d), and the lists of both (step g).
+const LIBRARY: [(&str, F); 32] = [
     ("bignum_num_bits", F::NumBits),
     ("bignum_num_bytes", F::NumBytes),
     ("bignum_set_bit", F::SetBit),
@@ -300,6 +308,8 @@ const LIBRARY: [(&str, F); 30] = [
     ("encrypt", F::Encrypt),
     ("decrypt", F::Decrypt),
     ("DES_string_to_key", F::DesStringToKey),
+    ("supported_digests", F::SupportedDigests),
+    ("supported_ciphers", F::SupportedCiphers),
 ];
 
 /// `bignum_methods` (`nse_openssl.cc:551-566`; `is_bit_set` is listed twice
@@ -646,6 +656,20 @@ fn call<'gc>(
             };
             vec![string(ctx, &cipher::des_string_to_key(seven))]
         }
+        // `OBJ_NAME_do_all_sorted` into a new table, one name per index.
+        F::SupportedDigests | F::SupportedCiphers => {
+            let names = if f == F::SupportedDigests {
+                digest::SUPPORTED
+            } else {
+                cipher::SUPPORTED
+            };
+            let t = Table::new(&ctx);
+            for (i, n) in (1i64..).zip(names) {
+                t.set(ctx, i, string(ctx, n.as_bytes()))
+                    .map_err(|_| Failure::Refused)?;
+            }
+            vec![Value::Table(t)]
+        }
     };
     stack.clear();
     stack.extend(out);
@@ -779,9 +803,9 @@ fn callback<'gc>(ctx: Context<'gc>, f: F, name: &'static str) -> Callback<'gc> {
     )
 }
 
-/// `luaopen_openssl`'s library table, as far as the port has come: the
-/// `BIGNUM` functions (step b).
-fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {
+/// `luaopen_openssl`: the library table (`openssllib`), the `BIGNUM`
+/// metatable made on first use. The runtime registers what this returns.
+pub fn load_openssl<'gc>(ctx: Context<'gc>) -> Table<'gc> {
     let lib = Table::new(&ctx);
     for (name, f) in LIBRARY {
         lib.set_field(ctx, name, callback(ctx, f, name));
@@ -792,11 +816,11 @@ fn open<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 /// **For tests only.** Open `openssl` in a bare state (no NSE runtime), put
 /// it in `loaded` (the state's `package.loaded`) when given, and return it.
 ///
-/// The NSE runtime does not register the module before step g (D2(D)); this
-/// is for the states the module's own tests, the integration tests and the
-/// fuzz targets build (`runtime::tests::openssl_is_not_registered`).
+/// The NSE runtime registers it through [`load_openssl`]; this is for the
+/// states the module's own tests, the integration tests and the fuzz targets
+/// build (`runtime::tests::only_tests_register_lpeg_and_openssl`).
 pub fn register_for_tests<'gc>(ctx: Context<'gc>, loaded: Option<Table<'gc>>) -> Table<'gc> {
-    let lib = open(ctx);
+    let lib = load_openssl(ctx);
     if let Some(loaded) = loaded {
         loaded.set_field(ctx, "openssl", lib);
     }

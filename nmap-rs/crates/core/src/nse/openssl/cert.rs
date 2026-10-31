@@ -171,9 +171,9 @@ fn callback<'gc>(ctx: Context<'gc>, f: Func) -> Callback<'gc> {
     })
 }
 
-/// `parse_ssl_certificate` as a function value, for the states that test it
-/// before the socket module that holds it is registered (D2(D)).
-pub fn parse_for_tests<'gc>(ctx: Context<'gc>) -> Callback<'gc> {
+/// `l_parse_ssl_certificate`, which `luaopen_nsock` puts in `nmap.socket`
+/// (`nse_nsock.cc:1187`); also given to the bare states that test it.
+pub fn parse_ssl_certificate<'gc>(ctx: Context<'gc>) -> Callback<'gc> {
     callback(ctx, Func::Parse)
 }
 

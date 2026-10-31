@@ -1,12 +1,12 @@
 # script	outcome	detail: how each shipped script loads, alone, under
 # Nmap version 7.94SVN ( https://nmap.org ) with these C modules removed (--datadir this repository).
-# missing: libssh2,openssl,zlib
-# totals: 561 OK, 1 LOUD, 49 QUIET
+# missing: libssh2,zlib
+# totals: 607 OK, 0 LOUD, 4 QUIET
 # Regenerate from nmap-rs/ with
 # python3 tests/differential/m6/oracle/gen_m66_scriptload.py tests/differential/m6
 acarsd-info	OK	
 address-info	OK	
-afp-brute	QUIET	
+afp-brute	OK	
 afp-ls	OK	
 afp-path-vuln	OK	
 afp-serverinfo	OK	
@@ -25,10 +25,10 @@ backorifice-brute	OK
 backorifice-info	OK	
 bacnet-info	OK	
 banner	OK	
-bitcoin-getaddr	QUIET	
-bitcoin-info	QUIET	
+bitcoin-getaddr	OK	
+bitcoin-info	OK	
 bitcoinrpc-info	OK	
-bittorrent-discovery	QUIET	
+bittorrent-discovery	OK	
 bjnp-discover	OK	
 broadcast-ataoe-discover	OK	
 broadcast-avahi-dos	OK	
@@ -103,7 +103,7 @@ dns-client-subnet-scan	OK
 dns-fuzz	OK	
 dns-ip6-arpa-scan	OK	
 dns-nsec-enum	OK	
-dns-nsec3-enum	QUIET	
+dns-nsec3-enum	OK	
 dns-nsid	OK	
 dns-random-srcport	OK	
 dns-random-txid	OK	
@@ -120,7 +120,7 @@ domino-enum-users	OK
 dpap-brute	OK	
 drda-brute	OK	
 drda-info	OK	
-duplicates	QUIET	
+duplicates	OK	
 eap-info	OK	
 enip-info	OK	
 epmd-info	OK	
@@ -172,10 +172,10 @@ http-backup-finder	OK
 http-barracuda-dir-traversal	OK	
 http-bigip-cookie	OK	
 http-brute	OK	
-http-cakephp-version	QUIET	
+http-cakephp-version	OK	
 http-chrono	OK	
 http-cisco-anyconnect	OK	
-http-coldfusion-subzero	QUIET	
+http-coldfusion-subzero	OK	
 http-comments-displayer	OK	
 http-config-backup	OK	
 http-cookie-flags	OK	
@@ -193,7 +193,7 @@ http-drupal-enum-users	OK
 http-enum	OK	
 http-errors	OK	
 http-exif-spider	OK	
-http-favicon	QUIET	
+http-favicon	OK	
 http-feed	OK	
 http-fetch	OK	
 http-fileupload-exploiter	OK	
@@ -227,7 +227,7 @@ http-ntlm-info	OK
 http-open-proxy	OK	
 http-open-redirect	OK	
 http-passwd	OK	
-http-php-version	QUIET	
+http-php-version	OK	
 http-phpmyadmin-dir-traversal	OK	
 http-phpself-xss	OK	
 http-proxy-brute	OK	
@@ -258,13 +258,13 @@ http-unsafe-output-escaping	OK
 http-useragent-tester	OK	
 http-userdir-enum	OK	
 http-vhosts	OK	
-http-virustotal	QUIET	
+http-virustotal	OK	
 http-vlcstreamer-ls	OK	
 http-vmware-path-vuln	OK	
 http-vuln-cve2006-3392	OK	
 http-vuln-cve2009-3960	OK	
 http-vuln-cve2010-0738	OK	
-http-vuln-cve2010-2861	QUIET	
+http-vuln-cve2010-2861	OK	
 http-vuln-cve2011-3192	OK	
 http-vuln-cve2011-3368	OK	
 http-vuln-cve2012-1823	OK	
@@ -275,7 +275,7 @@ http-vuln-cve2014-2126	OK
 http-vuln-cve2014-2127	OK	
 http-vuln-cve2014-2128	OK	
 http-vuln-cve2014-2129	OK	
-http-vuln-cve2014-3704	LOUD	http-vuln-cve2014-3704.nse:8: module 'openssl' not found
+http-vuln-cve2014-3704	OK	
 http-vuln-cve2014-8877	OK	
 http-vuln-cve2015-1427	OK	
 http-vuln-cve2015-1635	OK	
@@ -293,7 +293,7 @@ http-wordpress-enum	OK
 http-wordpress-users	OK	
 http-xssed	OK	
 https-redirect	OK	
-iax2-brute	QUIET	
+iax2-brute	OK	
 iax2-version	OK	
 icap-info	OK	
 iec-identify	OK	
@@ -326,8 +326,8 @@ irc-brute	OK
 irc-info	OK	
 irc-sasl-brute	OK	
 irc-unrealircd-backdoor	OK	
-iscsi-brute	QUIET	
-iscsi-info	QUIET	
+iscsi-brute	OK	
+iscsi-info	OK	
 isns-info	OK	
 jdwp-exec	OK	
 jdwp-info	OK	
@@ -351,16 +351,16 @@ membase-http-info	OK
 memcached-info	OK	
 metasploit-info	OK	
 metasploit-msgrpc-brute	OK	
-metasploit-xmlrpc-brute	QUIET	
-mikrotik-routeros-brute	QUIET	
+metasploit-xmlrpc-brute	OK	
+mikrotik-routeros-brute	OK	
 mikrotik-routeros-username-brute	OK	
 mikrotik-routeros-version	OK	
 mmouse-brute	OK	
 mmouse-exec	OK	
 modbus-discover	OK	
-mongodb-brute	QUIET	
-mongodb-databases	QUIET	
-mongodb-info	QUIET	
+mongodb-brute	OK	
+mongodb-databases	OK	
+mongodb-info	OK	
 mqtt-subscribe	OK	
 mrinfo	OK	
 ms-sql-brute	OK	
@@ -379,16 +379,16 @@ mtrace	OK
 multicast-profinet-discovery	OK	
 murmur-version	OK	
 mysql-audit	OK	
-mysql-brute	QUIET	
-mysql-databases	QUIET	
+mysql-brute	OK	
+mysql-databases	OK	
 mysql-dump-hashes	OK	
 mysql-empty-password	OK	
-mysql-enum	QUIET	
+mysql-enum	OK	
 mysql-info	OK	
 mysql-query	OK	
-mysql-users	QUIET	
-mysql-variables	QUIET	
-mysql-vuln-cve2012-2122	QUIET	
+mysql-users	OK	
+mysql-variables	OK	
+mysql-vuln-cve2012-2122	OK	
 nat-pmp-info	OK	
 nat-pmp-mapport	OK	
 nbd-info	OK	
@@ -404,14 +404,14 @@ netbus-auth-bypass	OK
 netbus-brute	OK	
 netbus-info	OK	
 netbus-version	OK	
-nexpose-brute	QUIET	
+nexpose-brute	OK	
 nfs-ls	OK	
 nfs-showmount	OK	
 nfs-statfs	OK	
 nje-node-brute	OK	
 nje-pass-brute	OK	
 nntp-ntlm-info	OK	
-nping-brute	QUIET	
+nping-brute	OK	
 nrpe-enum	OK	
 ntp-info	OK	
 ntp-monlist	OK	
@@ -420,11 +420,11 @@ omp2-enum-targets	OK
 omron-info	OK	
 openflow-info	OK	
 openlookup-info	OK	
-openvas-otp-brute	QUIET	
+openvas-otp-brute	OK	
 openwebnet-discovery	OK	
-oracle-brute	QUIET	
-oracle-brute-stealth	QUIET	
-oracle-enum-users	QUIET	
+oracle-brute	OK	
+oracle-brute-stealth	OK	
+oracle-enum-users	OK	
 oracle-sid-brute	OK	
 oracle-tns-version	OK	
 ovs-agent-version	OK	
@@ -432,7 +432,7 @@ p2p-conficker	OK
 path-mtu	OK	
 pcanywhere-brute	OK	
 pcworx-info	OK	
-pgsql-brute	QUIET	
+pgsql-brute	OK	
 pjl-ready-message	OK	
 pop3-brute	OK	
 pop3-capabilities	OK	
@@ -464,20 +464,20 @@ rpc-grind	OK
 rpcap-brute	OK	
 rpcap-info	OK	
 rpcinfo	OK	
-rsa-vuln-roca	QUIET	
-rsync-brute	QUIET	
-rsync-list-modules	QUIET	
+rsa-vuln-roca	OK	
+rsync-brute	OK	
+rsync-list-modules	OK	
 rtsp-methods	OK	
 rtsp-url-brute	OK	
 rusers	OK	
 s7-info	OK	
 samba-vuln-cve-2012-1182	OK	
 servicetags	OK	
-shodan-api	QUIET	
-sip-brute	QUIET	
-sip-call-spoof	QUIET	
-sip-enum-users	QUIET	
-sip-methods	QUIET	
+shodan-api	OK	
+sip-brute	OK	
+sip-call-spoof	OK	
+sip-enum-users	OK	
+sip-methods	OK	
 skypev2-version	OK	
 smb-brute	OK	
 smb-double-pulsar-backdoor	OK	
@@ -489,7 +489,7 @@ smb-enum-sessions	OK
 smb-enum-shares	OK	
 smb-enum-users	OK	
 smb-flood	OK	
-smb-ls	QUIET	
+smb-ls	OK	
 smb-mbenum	OK	
 smb-os-discovery	OK	
 smb-print-text	OK	
@@ -541,10 +541,10 @@ socks-brute	OK
 socks-open-proxy	OK	
 ssh-auth-methods	QUIET	
 ssh-brute	QUIET	
-ssh-hostkey	QUIET	
+ssh-hostkey	OK	
 ssh-publickey-acceptance	QUIET	
 ssh-run	QUIET	
-ssh2-enum-algos	QUIET	
+ssh2-enum-algos	OK	
 sshv1	OK	
 ssl-ccs-injection	OK	
 ssl-cert	OK	
@@ -562,7 +562,7 @@ stun-info	OK
 stun-version	OK	
 stuxnet-detect	OK	
 supermicro-ipmi-conf	OK	
-svn-brute	QUIET	
+svn-brute	OK	
 targets-asn	OK	
 targets-ipv6-eui64	OK	
 targets-ipv6-map4to6	OK	

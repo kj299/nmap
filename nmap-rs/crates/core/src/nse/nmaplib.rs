@@ -340,8 +340,13 @@ pub struct NmapLib {
     queue: VecDeque<Vec<u8>>,
     /// `l_get_version_intensity`'s `static int intensity`.
     intensity: Option<i64>,
-    /// Whether the running script was selected by name (`nse_selectedbyname`).
+    /// Whether the running script was selected by name (`nse_selectedbyname`),
+    /// for the bare states the tests build, which have no engine.
     pub selected_by_name: bool,
+    /// The engine's `_R[SELECTED_BY_NAME]` caller, which `nse_selectedbyname`
+    /// reaches through the registry: set once the engine's prelude has run,
+    /// and then asked instead of [`NmapLib::selected_by_name`].
+    pub(crate) by_name_hook: Option<piccolo::StashedFunction>,
     /// The data `nmapdb` reads on first use.
     pub(crate) db: super::nmapdb::Tables,
 }
@@ -360,6 +365,7 @@ impl NmapLib {
             queue: VecDeque::new(),
             intensity: None,
             selected_by_name: false,
+            by_name_hook: None,
             db: super::nmapdb::Tables::default(),
         }))
     }
@@ -869,7 +875,7 @@ pub(crate) fn install<'gc>(
 /// parsed script arguments, and set it as the global `nmap`.
 pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table<'gc> {
     let t = Table::new(&ctx);
-    let fns: [(&'static str, Body); 24] = [
+    let fns: [(&'static str, Body); 22] = [
         ("get_port_state", l_get_port_state),
         ("get_ports", l_get_ports),
         ("set_port_state", l_set_port_state),
@@ -878,8 +884,6 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
         ("clock_ms", l_clock_ms),
         ("clock", l_clock),
         ("log_write", l_log_write),
-        ("version_intensity", l_version_intensity),
-        ("verbosity", l_verbosity),
         ("debugging", |l, _, s| {
             put(s, Value::Integer(l.borrow().env.debugging))
         }),
@@ -932,6 +936,8 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
     for (name, body) in fns {
         install(ctx, t, lib, name, body);
     }
+    install_by_name(ctx, t, lib, "version_intensity", l_version_intensity);
+    install_by_name(ctx, t, lib, "verbosity", l_verbosity);
     t.set_field(
         ctx,
         "new_try",
@@ -952,10 +958,13 @@ pub fn load_nmap<'gc>(ctx: Context<'gc>, lib: &Shared, args: &ArgTable) -> Table
     for name in ["new", "sleep", "loop", "get_stats"] {
         install(ctx, socket, lib, name, |_, _, _| Err(needs_engine()));
     }
-    // An nmap built without OpenSSL.
-    install(ctx, socket, lib, "parse_ssl_certificate", |_, _, _| {
-        Err(Fail::err("SSL is not available"))
-    });
+    // `l_parse_ssl_certificate` (`nse_ssl_cert.cc`), as in an nmap built
+    // with OpenSSL (M6.5 step g).
+    socket.set_field(
+        ctx,
+        "parse_ssl_certificate",
+        super::openssl::cert::parse_ssl_certificate(ctx),
+    );
     t.set_field(ctx, "new_socket", socket.get_value(ctx, "new"));
     t.set_field(ctx, "socket", socket);
     let dnet = Table::new(&ctx);
@@ -1275,13 +1284,84 @@ fn script_intensity(ctx: Context<'_>) -> Option<i64> {
     }
 }
 
+/// A function that asks `nse_selectedbyname` first, then answers.
+type ByNameBody =
+    for<'gc, 'a> fn(&Shared, Context<'gc>, bool, &mut Stack<'gc, 'a>) -> Result<(), Fail>;
+
+/// Install `body`, given whether the running script was selected by name:
+/// as `nse_selectedbyname` finds it, by calling the engine's
+/// `_R[SELECTED_BY_NAME]` (`nse_main.cc:775-785`, `nse_main.lua:941-943`)
+/// when the engine has run its prelude, else from
+/// [`NmapLib::selected_by_name`].
+fn install_by_name<'gc>(
+    ctx: Context<'gc>,
+    t: Table<'gc>,
+    lib: &Shared,
+    name: &'static str,
+    body: ByNameBody,
+) {
+    t.set_field(
+        ctx,
+        name,
+        Callback::from_fn_with(&ctx, Handle(lib.clone()), move |h, ctx, _, mut stack| {
+            let hook = h.0.borrow().by_name_hook.clone();
+            if let Some(hook) = hook {
+                stack.clear();
+                return Ok(CallbackReturn::Call {
+                    function: ctx.fetch(&hook),
+                    then: Some(BoxSequence::new(
+                        &ctx,
+                        ByName {
+                            lib: h.0.clone(),
+                            name,
+                            body,
+                        },
+                    )),
+                });
+            }
+            let by_name = h.0.borrow().selected_by_name;
+            match body(&h.0, ctx, by_name, &mut stack) {
+                Ok(()) => Ok(CallbackReturn::Return),
+                Err(e) => Err(e.raise(ctx, name)),
+            }
+        }),
+    );
+}
+
+/// The rest of an [`install_by_name`] function, once `_R[SELECTED_BY_NAME]`
+/// has answered (`lua_toboolean` of its result).
+#[derive(Collect)]
+#[collect(require_static)]
+struct ByName {
+    lib: Shared,
+    name: &'static str,
+    body: ByNameBody,
+}
+
+impl<'gc> Sequence<'gc> for ByName {
+    fn poll(
+        self: Pin<&mut Self>,
+        ctx: Context<'gc>,
+        _exec: Execution<'gc, '_>,
+        mut stack: Stack<'gc, '_>,
+    ) -> Result<SequencePoll<'gc>, Error<'gc>> {
+        let by_name = stack.get(0).to_bool();
+        stack.clear();
+        match (self.body)(&self.lib, ctx, by_name, &mut stack) {
+            Ok(()) => Ok(SequencePoll::Return),
+            Err(e) => Err(e.raise(ctx, self.name)),
+        }
+    }
+}
+
 fn l_version_intensity<'gc>(
     lib: &Shared,
     ctx: Context<'gc>,
+    by_name: bool,
     s: &mut Stack<'gc, '_>,
 ) -> Result<(), Fail> {
     let mut l = lib.borrow_mut();
-    let v = if l.selected_by_name {
+    let v = if by_name {
         9
     } else if let Some(i) = l.intensity {
         i
@@ -1307,9 +1387,14 @@ fn l_version_intensity<'gc>(
     put(s, Value::Integer(v))
 }
 
-fn l_verbosity<'gc>(lib: &Shared, _: Context<'gc>, s: &mut Stack<'gc, '_>) -> Result<(), Fail> {
+fn l_verbosity<'gc>(
+    lib: &Shared,
+    _: Context<'gc>,
+    by_name: bool,
+    s: &mut Stack<'gc, '_>,
+) -> Result<(), Fail> {
     let l = lib.borrow();
-    let v = l.env.verbose.saturating_add(i64::from(l.selected_by_name));
+    let v = l.env.verbose.saturating_add(i64::from(by_name));
     drop(l);
     put(s, Value::Integer(v))
 }

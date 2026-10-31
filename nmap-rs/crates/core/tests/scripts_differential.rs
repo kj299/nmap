@@ -107,6 +107,55 @@ fn a_runaway_script_ends_its_phase_under_a_budget() {
         .all(|o| o.output.as_deref() == Some(&b"done"[..])));
 }
 
+/// A script selected by name is told one more verbosity and the highest
+/// version intensity (`l_get_verbosity`, `l_get_version_intensity`): both ask
+/// `nse_selectedbyname`, which calls the engine's `_R[SELECTED_BY_NAME]` for
+/// the running thread. Until M6.5 step g the port read a flag no run ever
+/// set, so a script named on the command line saw 7.94's verbosity less one
+/// (ssl-cert printed only its subject and validity).
+#[test]
+fn a_script_selected_by_name_is_told_one_more_verbosity() {
+    use nmap_core::nse::engine::ChosenScript;
+    let tmp = std::env::temp_dir().join(format!("m65g-byname-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("tmp");
+    let body = "categories = {}\nprerule = function() return true end\n\
+                action = function() return nmap.verbosity() .. ' ' .. nmap.version_intensity() end\n";
+    let write = |name: &str, by_name: bool| {
+        let p = tmp.join(name);
+        std::fs::write(&p, body).expect("script");
+        ChosenScript {
+            path: p.display().to_string().into_bytes(),
+            selection: if by_name { "file path" } else { "category" },
+            verbosity: by_name,
+            forced: false,
+        }
+    };
+    let named = write("a-named.nse", true);
+    let category = write("b-category.nse", false);
+    let mut st = nse_host::state(&nse_host::repo_root()).expect("state");
+    st.load_scripts(&[named, category], None).expect("load");
+    let r = st.run_phase(Phase::PreScan, vec![], None);
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mut got: Vec<(String, String)> = r
+        .run
+        .iter()
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.id).into_owned(),
+                String::from_utf8_lossy(o.output.as_deref().unwrap_or_default()).into_owned(),
+            )
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("a-named".to_string(), "1 9".to_string()),
+            ("b-category".to_string(), "0 7".to_string())
+        ]
+    );
+}
+
 /// `nmap.get_interface_info` (`dnet.get_interface_info`): the interface of
 /// the scan's family named by its full or short name, described as
 /// `list_interfaces` describes it, with the C's errors.

@@ -97,6 +97,49 @@ pub const NAMES: &[(&str, Alg)] = &[
     ("2.16.840.1.101.3.4.2.6", Alg::Sha512_256),
 ];
 
+/// `supported_digests()`'s list: the names OpenSSL 3.0.13's `OBJ_NAME_do_all_sorted`
+/// enumerates for digests (measured on nmap 7.94: 56 digests, 170 ciphers),
+/// as they are spelled there and in its `strcmp` order, kept where
+/// [`resolve`] accepts them: D4(b), "exactly what is accepted"
+/// (`openssl-algorithm-subset`).
+pub const SUPPORTED: &[&str] = &[
+    "RSA-MD4",
+    "RSA-MD5",
+    "RSA-RIPEMD160",
+    "RSA-SHA1",
+    "RSA-SHA1-2",
+    "RSA-SHA224",
+    "RSA-SHA256",
+    "RSA-SHA384",
+    "RSA-SHA512",
+    "RSA-SHA512/224",
+    "RSA-SHA512/256",
+    "md4",
+    "md4WithRSAEncryption",
+    "md5",
+    "md5WithRSAEncryption",
+    "ripemd",
+    "ripemd160",
+    "ripemd160WithRSA",
+    "rmd160",
+    "sha1",
+    "sha1WithRSAEncryption",
+    "sha224",
+    "sha224WithRSAEncryption",
+    "sha256",
+    "sha256WithRSAEncryption",
+    "sha384",
+    "sha384WithRSAEncryption",
+    "sha512",
+    "sha512-224",
+    "sha512-224WithRSAEncryption",
+    "sha512-256",
+    "sha512-256WithRSAEncryption",
+    "sha512WithRSAEncryption",
+    "ssl3-md5",
+    "ssl3-sha1",
+];
+
 /// `EVP_get_digestbyname(name)` over [`NAMES`]: the name up to its first
 /// NUL, compared ignoring ASCII case.
 #[must_use]
@@ -343,6 +386,37 @@ mod tests {
             );
         }
         let _ = unhex;
+    }
+
+    /// `supported_*`'s list is in `OBJ_NAME_do_all_sorted`'s `strcmp`
+    /// order, each name once, each accepted, and every algorithm offered is
+    /// listed (the names themselves are 7.94's, compared with its list by the
+    /// CLI gate).
+    #[test]
+    fn the_supported_list_is_sorted_and_accepted() {
+        assert!(SUPPORTED
+            .windows(2)
+            .all(|w| w[0].as_bytes() < w[1].as_bytes()));
+        for n in SUPPORTED {
+            assert!(resolve(n.as_bytes()).is_some(), "{n}");
+        }
+        for a in [
+            Alg::Md4,
+            Alg::Md5,
+            Alg::Sha1,
+            Alg::Ripemd160,
+            Alg::Sha224,
+            Alg::Sha256,
+            Alg::Sha384,
+            Alg::Sha512,
+            Alg::Sha512_224,
+            Alg::Sha512_256,
+        ] {
+            assert!(
+                SUPPORTED.iter().any(|n| resolve(n.as_bytes()) == Some(a)),
+                "{a:?} is not listed"
+            );
+        }
     }
 
     #[test]

@@ -1506,6 +1506,14 @@ end
 
 -- What the engine itself needs from here on.
 return {
+  -- nse_selectedbyname (nse_main.cc:775-785): the registry's
+  -- NSE_SELECTED_BY_NAME, called when main has set it, else false. The
+  -- runtime gives it to nmap.verbosity and nmap.version_intensity.
+  selected_by_name = function ()
+    local f = _R[SELECTED_BY_NAME];
+    if f == nil then return false end
+    return f();
+  end,
   NSE_YIELD_VALUE = NSE_YIELD_VALUE,
   REQUIRE_ERROR = REQUIRE_ERROR,
   print_verbose = print_verbose,

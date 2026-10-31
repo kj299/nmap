@@ -88,7 +88,8 @@ must differ from the golden (a pin that no longer differs is stale and
 fails). `skipped` rows are not run; the bad13 rows need the badserver.
 
 Environment: NMAP (default nmap), BADSERVER, M65_TLS_LOGS (a directory to
-keep each fixture's server and client logs in).
+keep each fixture's server and client logs in), M65_TLS_BASE_PORT (the port
+below the first fixture's, 47300 by default).
 """
 
 import os
@@ -108,7 +109,10 @@ CERTS = os.path.join(FIXDIR, "certs")
 PROBE = os.path.join(FIXDIR, "s0probe.nse")
 NMAP = os.environ.get("NMAP", "nmap")
 GOLDEN_NAME = "m65_tls_golden.txt"
-BASE_PORT = 47300
+# Each fixture's port is BASE_PORT + its row number. The golden records no
+# port, so M65_TLS_BASE_PORT may move the range, for a machine where some
+# long-lived outgoing connection holds one of 47301-47407 as its local port.
+BASE_PORT = int(os.environ.get("M65_TLS_BASE_PORT", "47300"))
 
 # nsock's cipher list for an ordinary (not max-speed) pool, 7.94.
 CIPHERS_SECURE = "ALL:!aNULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH"
@@ -807,8 +811,6 @@ PORT_PINS = {
     "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
                           "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
                           "client ClientKeyExchange"),
-    # parse_ssl_certificate comes with the module (step g).
-    "cert-trail-parse": ("nse-no-ssl", 'trail parse=raise:"SSL is not available"', None),
 }
 
 

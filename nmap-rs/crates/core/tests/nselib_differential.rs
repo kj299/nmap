@@ -11,10 +11,12 @@
 //!
 //! Every library and suite must do what it does under nmap, a passing suite
 //! running as many tests as it does under nmap, except those that need a C
-//! module the port does not have yet — `openssl`, `libssh2` (M6.5) — which are
-//! pinned, in both directions, to fail for exactly that reason: the module
-//! they failed on, the last one no searcher found while they loaded, must be
-//! the one they are pinned to. `datafiles` and `rpc`, pinned to `nmapdb` until
+//! module the port does not have yet — `libssh2` — which are pinned, in both
+//! directions, to fail for exactly that reason: the module they failed on,
+//! the last one no searcher found while they loaded, must be the one they
+//! are pinned to. The 11 libraries pinned to `openssl` (`bitcoin`,
+//! `bittorrent`, `iax2`, `iscsi`, `mongodb`, `pgsql`, `rsync`, `sip`, `ssh1`,
+//! `ssh2`, `tns`) load since M6.5 step g registered it. `datafiles` and `rpc`, pinned to `nmapdb` until
 //! M6.6 step a ported it, and `coap`, `json`, `lpeg-utility`, `mobileme` and
 //! `re`, pinned to `lpeg` until step e registered it, now load; the `json`
 //! and `coap` suites run 69 and 1,060 tests.
@@ -35,25 +37,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Libraries that cannot load until a C module is ported, and the module.
-/// Most reach `openssl` through `stdnse.silent_require`, which raises a table
+/// A library reaching a module through `stdnse.silent_require` raises a table
 /// rather than a message; the rest name the module they could not find.
 /// `libssh2-utility` was pinned to `openssl` until M6.6 step a; it fails on
 /// `libssh2` (`libssh2-utility.lua:15`, a `silent_require`), and
-/// [`missing`] now tells the two apart.
-const NEEDS_MODULE: &[(&str, &str)] = &[
-    ("bitcoin", "openssl"),
-    ("bittorrent", "openssl"),
-    ("iax2", "openssl"),
-    ("iscsi", "openssl"),
-    ("libssh2-utility", "libssh2"),
-    ("mongodb", "openssl"),
-    ("pgsql", "openssl"),
-    ("rsync", "openssl"),
-    ("sip", "openssl"),
-    ("ssh1", "openssl"),
-    ("ssh2", "openssl"),
-    ("tns", "openssl"),
-];
+/// [`missing`] tells the two apart. M6.5 step g removed the 11 `openssl`
+/// pins.
+const NEEDS_MODULE: &[(&str, &str)] = &[("libssh2-utility", "libssh2")];
 
 fn golden() -> PathBuf {
     std::env::var_os("M64_NSELIB_GOLDEN").map_or_else(

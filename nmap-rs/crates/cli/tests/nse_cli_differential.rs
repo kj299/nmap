@@ -28,7 +28,7 @@ fn script_scans_print_as_under_nmap() {
         .expect("python3 runs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout.contains("0 of 20 scenarios differ"),
+        out.status.success() && stdout.contains("0 of 24 scenarios differ"),
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );

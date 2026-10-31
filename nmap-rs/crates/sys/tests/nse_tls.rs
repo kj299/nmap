@@ -269,7 +269,7 @@ fn run(body: &str) -> String {
     st.lua.enter(|ctx| {
         ctx.set_global(
             "test_parse",
-            nmap_core::nse::openssl::cert::parse_for_tests(ctx),
+            nmap_core::nse::openssl::cert::parse_ssl_certificate(ctx),
         );
     });
     st.load_scripts(

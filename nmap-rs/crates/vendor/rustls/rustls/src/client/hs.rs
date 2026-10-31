@@ -230,6 +230,18 @@ fn emit_client_hello_for_retry(
                 .supported_verify_schemes(),
         ),
         extended_master_secret_request: Some(()),
+        // Encrypt-then-MAC (RFC 7366), when TLS 1.2 may negotiate a suite
+        // with a MAC key.
+        encrypt_then_mac_request: (supported_versions.tls12
+            && config
+                .provider
+                .cipher_suites
+                .iter()
+                .any(|cs| match cs {
+                    SupportedCipherSuite::Tls12(s) => s.aead_alg.mac_key_len() > 0,
+                    SupportedCipherSuite::Tls13(_) => false,
+                }))
+        .then_some(()),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
         protocols: extra_exts.protocols.clone(),
         ..Default::default()

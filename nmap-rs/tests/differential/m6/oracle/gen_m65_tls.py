@@ -297,6 +297,11 @@ FIXTURES = [
     # DHE; the port, offering DHE since step a and refusing any group but RFC 7919's, fails
     # where before step a it took ECDHE (nse-tls-dhe-own-group, until step e).
     ("dhe-own2048-serverpref", "s_server", "rsa2048 -tls1_2 -serverpref -cipher DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256 -dhparam CERTS/dh2048.pem", "host", "", ()),
+    # M6.7 step d: CBC with MAC-then-encrypt (the server refuses encrypt-then-MAC, which
+    # OpenSSL otherwise negotiates): HMAC-SHA1, HMAC-SHA384 and SEED.
+    ("cbc-mte-ecdhe-aes128-sha", "s_server", "rsa2048 -tls1_2 -no_etm -cipher ECDHE-RSA-AES128-SHA", "host", "", ()),
+    ("cbc-mte-ecdhe-aes256-sha384", "s_server", "rsa2048 -tls1_2 -no_etm -cipher ECDHE-RSA-AES256-SHA384", "host", "", ()),
+    ("cbc-mte-rsa-kx-seed-sha", "s_server", "rsa2048 -tls1_2 -no_etm -cipher SEED-SHA:@SECLEVEL=0 -provider legacy -provider default", "host", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -815,17 +820,17 @@ _OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_A
            "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: no CBC or DSA (RSA key exchange since M6.7 step c). The servers'
-    # own refusal.
-    "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
+    # rustls: no DSA (RSA key exchange since M6.7 step c, CBC since step d).
+    # The servers' own refusal.
     "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "starttls-legacy": ("nse-tls-modern-only", "fail ERROR", "tls failed: NO_SHARED_CIPHER"),
-    # The same RSA leaf, which is what the suite order is for; 7.94's DHE-RSA
-    # CBC suite is not the port's to offer.
-    "dual-tls12-clientpref": ("nse-tls-modern-only", None,
-                              {"suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-                               "group": "ecdh_x25519"}),
+    # The same RSA leaf, which is what the suite order is for: the port
+    # offers the DHE-RSA suites last until step e (the server here has
+    # OpenSSL's default DH group, not an RFC 7919 one), so the server takes
+    # its first non-DHE suite, RSA key exchange with CBC.
+    "dual-tls12-clientpref": ("nse-tls-dhe-own-group", None,
+                              {"suite": "TLS_RSA_WITH_AES_256_CBC_SHA",
+                               "group": "-", "sigalg": "-"}),
     # rustls refuses a handshake message over 64 KiB; the server sent it all.
     "chain-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
     "chain13-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
@@ -852,13 +857,6 @@ PORT_PINS = {
     "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
     "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
     # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
-    "legacy-rsa-kx-aes128-cbc-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aes256-cbc-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-camellia128-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-rsa-camellia128-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-rsa-cbc-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
     # Both refuse the 1,024-bit group after the server's flight: 7.94 with
     # alert 40 (security level 2), the port with 47 (not an RFC 7919 group).

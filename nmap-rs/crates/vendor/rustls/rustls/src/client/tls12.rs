@@ -109,6 +109,14 @@ mod server_hello {
             let using_ems = server_hello
                 .extended_master_secret_ack
                 .is_some();
+
+            // Encrypt-then-MAC (RFC 7366): only for a suite with a MAC key;
+            // a server that acknowledges it for an AEAD is ignored, as
+            // OpenSSL ignores it.
+            cx.common.tls12_encrypt_then_mac = server_hello
+                .encrypt_then_mac_ack
+                .is_some()
+                && suite.aead_alg.mac_key_len() > 0;
             if config.require_ems && !using_ems {
                 return Err({
                     cx.common.send_fatal_alert(

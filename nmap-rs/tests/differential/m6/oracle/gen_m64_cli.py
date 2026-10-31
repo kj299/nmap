@@ -138,11 +138,8 @@ UNORDERED = {
 # rows, and the pin must differ from the golden (a pin that no longer differs
 # is stale and fails).
 PORT_PINS = {
-    # The port's TLS client speaks no AES128-SHA: no handshake, so ssl-cert,
-    # which since step g takes the STARTTLS-and-reconnect_ssl path as 7.94
-    # does, has nothing to print. (Before step g it read the certificate,
-    # PEM only, through tls.lua's own handshake.)
-    "starttls-legacy": ("nse-tls-modern-only", [("xml", "port:tcp/46026", "state open")]),
+    # (M6.7 step d retired `starttls-legacy`: the port's TLS client speaks
+    # AES128-SHA, so ssl-cert prints the certificate as 7.94 does.)
 }
 
 # Symbolic links made in @DEST before a scenario runs, (name, target).

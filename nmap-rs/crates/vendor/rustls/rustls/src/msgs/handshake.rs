@@ -913,6 +913,10 @@ extension_struct! {
         ExtensionType::ExtendedMasterSecret =>
             pub(crate) extended_master_secret_request: Option<()>,
 
+        /// Encrypt-then-MAC is requested (RFC7366)
+        ExtensionType::EncryptThenMac =>
+            pub(crate) encrypt_then_mac_request: Option<()>,
+
         /// Offered certificate compression methods (RFC8879)
         ExtensionType::CompressCertificate =>
             pub(crate) certificate_compression_algorithms: Option<Vec<CertificateCompressionAlgorithm>>,
@@ -993,6 +997,7 @@ impl ClientExtensions<'_> {
             client_certificate_types,
             server_certificate_types,
             extended_master_secret_request,
+            encrypt_then_mac_request,
             certificate_compression_algorithms,
             session_ticket,
             preshared_key_offer,
@@ -1021,6 +1026,7 @@ impl ClientExtensions<'_> {
             client_certificate_types,
             server_certificate_types,
             extended_master_secret_request,
+            encrypt_then_mac_request,
             certificate_compression_algorithms,
             session_ticket,
             preshared_key_offer,
@@ -1219,6 +1225,10 @@ extension_struct! {
         ExtensionType::ExtendedMasterSecret =>
             pub(crate) extended_master_secret_ack: Option<()>,
 
+        /// Encrypt-then-MAC is in use (RFC7366)
+        ExtensionType::EncryptThenMac =>
+            pub(crate) encrypt_then_mac_ack: Option<()>,
+
         /// Certificate status acknowledgement (RFC6066)
         ExtensionType::StatusRequest =>
             pub(crate) certificate_status_request_ack: Option<()>,
@@ -1264,6 +1274,7 @@ impl ServerExtensions<'_> {
             client_certificate_type,
             server_certificate_type,
             extended_master_secret_ack,
+            encrypt_then_mac_ack,
             certificate_status_request_ack,
             selected_version,
             transport_parameters,
@@ -1284,6 +1295,7 @@ impl ServerExtensions<'_> {
             client_certificate_type,
             server_certificate_type,
             extended_master_secret_ack,
+            encrypt_then_mac_ack,
             certificate_status_request_ack,
             selected_version,
             transport_parameters: transport_parameters.map(|x| x.into_owned()),

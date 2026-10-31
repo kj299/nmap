@@ -183,12 +183,15 @@ impl ConnectionSecrets {
 
     /// Make a `MessageCipherPair` based on the given supported ciphersuite `self.suite`,
     /// and the session's `secrets`.
-    pub(crate) fn make_cipher_pair(&self, side: Side) -> MessageCipherPair {
-        // Make a key block, and chop it up.
-        // Note: we don't implement any ciphersuites with nonzero mac_key_len.
+    pub(crate) fn make_cipher_pair(&self, side: Side, encrypt_then_mac: bool) -> MessageCipherPair {
+        // Make a key block, and chop it up: the MAC keys first, for a suite
+        // that has them (RFC 5246 §6.3).
         let key_block = self.make_key_block();
         let shape = self.suite.aead_alg.key_block_shape();
+        let mac_len = self.suite.aead_alg.mac_key_len();
 
+        let (client_write_mac, key_block) = key_block.split_at(mac_len);
+        let (server_write_mac, key_block) = key_block.split_at(mac_len);
         let (client_write_key, key_block) = key_block.split_at(shape.enc_key_len);
         let (server_write_key, key_block) = key_block.split_at(shape.enc_key_len);
         let (client_write_iv, key_block) = key_block.split_at(shape.fixed_iv_len);
@@ -209,6 +212,28 @@ impl ConnectionSecrets {
             ),
         };
 
+        if mac_len > 0 {
+            let (write_mac, read_mac) = match side {
+                Side::Client => (client_write_mac, server_write_mac),
+                Side::Server => (server_write_mac, client_write_mac),
+            };
+            return (
+                self.suite.aead_alg.decrypter_with_mac(
+                    read_mac,
+                    read_key,
+                    read_iv,
+                    encrypt_then_mac,
+                ),
+                self.suite.aead_alg.encrypter_with_mac(
+                    write_mac,
+                    write_key,
+                    write_iv,
+                    extra,
+                    encrypt_then_mac,
+                ),
+            );
+        }
+
         (
             self.suite
                 .aead_alg
@@ -222,7 +247,8 @@ impl ConnectionSecrets {
     fn make_key_block(&self) -> Vec<u8> {
         let shape = self.suite.aead_alg.key_block_shape();
 
-        let len = (shape.enc_key_len + shape.fixed_iv_len) * 2 + shape.explicit_nonce_len;
+        let len = (self.suite.aead_alg.mac_key_len() + shape.enc_key_len + shape.fixed_iv_len) * 2
+            + shape.explicit_nonce_len;
 
         let mut out = vec![0u8; len];
 

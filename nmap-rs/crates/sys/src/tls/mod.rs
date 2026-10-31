@@ -19,12 +19,14 @@
 #![forbid(unsafe_code)]
 
 mod aead;
+mod cbc;
 mod hash;
 mod hmac;
 mod kx;
 pub mod provider;
 mod rand;
 mod rsa;
+mod seed;
 mod sigs;
 pub mod stream;
 mod verifier;
@@ -129,9 +131,11 @@ pub mod fuzzing {
         kx.complete_for_tls_version(peer, version).is_ok()
     }
 
-    /// A TLS 1.2 record of `body` through the decrypter of one of the step-a
-    /// AEADs (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM), keyed
-    /// with fixed bytes. Whether it opened.
+    /// A TLS 1.2 record of `body` through one of the decrypters of steps a
+    /// and d (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM; then
+    /// CBC with AES-128 and HMAC-SHA1, Camellia-256 and HMAC-SHA384, SEED and
+    /// HMAC-SHA1, each with MAC-then-encrypt and with encrypt-then-MAC),
+    /// keyed with fixed bytes. Whether it opened.
     #[must_use]
     pub fn open_tls12(selector: u8, body: &mut [u8]) -> bool {
         use super::aead::{
@@ -140,13 +144,37 @@ pub mod fuzzing {
         use rustls::crypto::cipher::InboundOpaqueMessage;
         let key = [0x42u8; 32];
         let salt = [1, 2, 3, 4];
-        let dec = match selector % 6 {
+        use super::cbc::{Cbc12, Sha1, Sha384};
+        use rustls::crypto::cipher::Tls12AeadAlgorithm;
+        let mac = [0x24u8; 48];
+        let etm = selector & 0x40 != 0;
+        let dec = match selector % 9 {
             0 => decrypter12::<Aes128Ccm>(&key[..16], salt),
             1 => decrypter12::<Aes256Ccm>(&key, salt),
             2 => decrypter12::<Aes128Ccm8>(&key[..16], salt),
             3 => decrypter12::<Aes256Ccm8>(&key, salt),
             4 => decrypter12::<Aria128Gcm>(&key[..16], salt),
-            _ => decrypter12::<Aria256Gcm>(&key, salt),
+            5 => decrypter12::<Aria256Gcm>(&key, salt),
+            6 => Some(Cbc12::<aes::Aes128, Sha1>::new().decrypter_with_mac(
+                &mac[..20],
+                &key[..16],
+                &[],
+                etm,
+            )),
+            7 => Some(
+                Cbc12::<camellia::Camellia256, Sha384>::new().decrypter_with_mac(
+                    &mac,
+                    &key,
+                    &[],
+                    etm,
+                ),
+            ),
+            _ => Some(Cbc12::<super::seed::Seed, Sha1>::new().decrypter_with_mac(
+                &mac[..20],
+                &key[..16],
+                &[],
+                etm,
+            )),
         };
         let Some(mut dec) = dec else {
             return false;

@@ -836,6 +836,7 @@ fn sample_server_hello_payload() -> ServerHelloPayload {
                 retry_configs: vec![],
             }),
             extended_master_secret_ack: Some(()),
+            encrypt_then_mac_ack: None,
             certificate_status_request_ack: Some(()),
             selected_version: Some(ProtocolVersion::TLSv1_2),
             transport_parameters: Some(Payload::new(vec![1, 2, 3])),

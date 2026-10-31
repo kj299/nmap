@@ -5672,6 +5672,12 @@ so they are opened now and land, pinned per fixture, with step f1
         does (`tls13-x448`, `tls13-ffdhe2048`, and seven `legacy-*` rows
         unpinned). DHE with the server's own group moved to
         `nse-tls-dhe-own-group`.
+      - **M6.7 step d** retires CBC: AES, Camellia and SEED with HMAC-SHA1,
+        -SHA256 and -SHA384, MAC-then-encrypt and encrypt-then-MAC (patch
+        0003). `tls12-ecdhe-cbc`, `starttls-legacy` (the fixture gate and
+        the M6.4 CLI scenario) and seven `legacy-*` CBC rows reach as 7.94
+        does. Of this entry, only DSA certificates remain (`dsa-dhe`,
+        `legacy-dhe-dss-gcm-ffdhe2048`), for step e.
       - **M6.7 step c** retires RSA key exchange with the AEAD suites
         (patch 0002 of the vendored rustls): `tls12-rsa-kx-gcm`,
         `cert-tls12-rsa-kx`, `legacy-rsa-kx-aes128-ccm` and
@@ -5700,6 +5706,27 @@ so they are opened now and land, pinned per fixture, with step f1
         Step e (the server's own group, with OpenSSL's checks) closes it;
         the RFC 7919 groups, and every server that prefers ECDHE or honours
         the client's order, are unaffected.
+- [x] `nse-tls-table-ciphers` — the TLS provider's ARIA (`aria`, M6.7
+      step a), Camellia (`camellia`, step d) and SEED (first-party,
+      `sys::tls::seed`, step d) index their S-box tables with key- and
+      data-dependent bytes, so they are not constant-time. That is what
+      M6.5's rule kept DES and CAST5 out of the provider for. The rule is
+      narrowed for these three with the user's agreement (2026-10-31;
+      docs/M6.7-ANALYSIS.md §18), for three reasons:
+      - each runs only when the server chose such a suite;
+      - the TLS peer cannot use the leak, since it holds the session keys;
+      - exploiting it needs an attacker running code on the scanning host.
+      7.94's OpenSSL implements all three with tables too. AES (AES-NI or
+      fixsliced), ChaCha20, the GHASH/POLYVAL MACs and HMAC are unaffected.
+- [x] `nse-tls-cbc-lucky13` — with MAC-then-encrypt (the default unless
+      the server acknowledges encrypt-then-MAC), how long the port's CBC
+      record check takes depends on the padding length, through how much
+      the MAC covers (Lucky 13, CVE-2013-0169). The padding and the MAC are
+      themselves compared without branches (`sys::tls::cbc`). OpenSSL
+      instead equalises the digest's work (`ssl3_cbc_digest_record`). The
+      timing is visible only to the server, which holds the keys already
+      (docs/M6.7-ANALYSIS.md §6). Encrypt-then-MAC, which OpenSSL servers
+      negotiate by default, checks the MAC first and has no such leak.
 - [x] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
       40) when the server sends no `renegotiation_info` extension (RFC 5746,
       OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates

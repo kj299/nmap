@@ -402,24 +402,38 @@ fn the_hello_offers_7_94s_suites_in_its_order() {
         .chunks(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    // TLS 1.3, then 7.94's ECDHE, DHE-RSA and RSA AEAD suites in its order, except
-    // that each ECDHE-ECDSA suite follows the ECDHE-RSA one after it (the
-    // dual-certificate rule), then the renegotiation SCSV rustls adds.
-    #[rustfmt::skip]
-    let want = [
-        0x1302, 0x1303, 0x1301,
-        0xc030, 0xc02c, 0x009f, // AES-256-GCM
-        0xcca8, 0xcca9, 0xccaa, // ChaCha20-Poly1305
-        0xc0af, 0xc0ad, 0xc0a3, 0xc09f, // AES-256-CCM-8, AES-256-CCM
-        0xc061, 0xc05d, 0xc053, // ARIA-256-GCM
-        0xc02f, 0xc02b, 0x009e, // AES-128-GCM
-        0xc0ae, 0xc0ac, 0xc0a2, 0xc09e, // AES-128-CCM-8, AES-128-CCM
-        0xc060, 0xc05c, 0xc052, // ARIA-128-GCM
-        // RSA key exchange (step c), after every ECDHE and DHE suite:
-        0x009d, 0xc0a1, 0xc09d, 0xc051, // AES-256-GCM, -CCM-8, -CCM, ARIA-256-GCM
-        0x009c, 0xc0a0, 0xc09c, 0xc050, // the same at 128 bits
-        0x00ff,
+    // 7.94's ClientHello as captured (`spikes/m67-legacy-tls/clienthello_794.txt`),
+    // less the DHE-DSS suites (step e), with the DHE-RSA suites moved after
+    // the rest (until step e; `provider::ALL_CIPHER_SUITES`). 7.94's list
+    // ends with the renegotiation SCSV, as rustls's does.
+    let captured = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spikes/m67-legacy-tls/clienthello_794.txt"
+    ));
+    let v794: Vec<u16> = captured
+        .lines()
+        .filter_map(|l| l.strip_prefix("suite 0x"))
+        .map(|h| u16::from_str_radix(h, 16).expect("hex"))
+        .collect();
+    assert_eq!(v794.len(), 78);
+    let dss = [
+        0x00a3, 0x00a2, 0xc057, 0xc056, 0x006a, 0x00c3, 0x0040, 0x00bd, 0x0038, 0x0087, 0x0032,
+        0x0099, 0x0044,
     ];
+    let dhe_rsa = [
+        0x0033, 0x0039, 0x009f, 0xccaa, 0xc0a3, 0xc09f, 0xc053, 0x009e, 0xc0a2, 0xc09e, 0xc052,
+        0x006b, 0x00c4, 0x0067, 0x00be, 0x0088, 0x009a, 0x0045,
+    ];
+    let kept: Vec<u16> = v794.into_iter().filter(|s| !dss.contains(s)).collect();
+    let (scsv, kept) = kept.split_last().expect("suites");
+    assert_eq!(*scsv, 0x00ff);
+    let mut want: Vec<u16> = kept
+        .iter()
+        .copied()
+        .filter(|s| !dhe_rsa.contains(s))
+        .collect();
+    want.extend(kept.iter().copied().filter(|s| dhe_rsa.contains(s)));
+    want.push(0x00ff);
     assert_eq!(suites, want);
 }
 
@@ -701,4 +715,14 @@ fn rsa_kx_needs_an_rsa_leaf() {
     let ec = provider::RsaTransport
         .encrypt_premaster(&CertificateDer::from(fixture!("ecp256.der")), &pm);
     assert!(ec.is_err());
+}
+
+/// Encrypt-then-MAC (RFC 7366): requested, empty, as 7.94 requests it
+/// (`clienthello_794.txt`: `ext encrypt_then_mac`), since the port offers CBC
+/// suites (M6.7 step d).
+#[test]
+#[cfg_attr(miri, ignore = "X25519 key generation is slow under Miri")]
+fn the_hello_requests_encrypt_then_mac() {
+    let hello = client_hello();
+    assert_eq!(extension(&hello, 0x0016), Some(vec![]));
 }

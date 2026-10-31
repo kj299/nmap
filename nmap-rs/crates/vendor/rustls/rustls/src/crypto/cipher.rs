@@ -80,6 +80,43 @@ pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
         explicit: &[u8],
     ) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError>;
 
+    /// The length of each side's MAC key at the start of the key block (RFC
+    /// 5246 §6.3): 0, the default, for an AEAD; the HMAC's for a CBC suite.
+    /// When nonzero, the cipher pair is built by [`Self::encrypter_with_mac`]
+    /// and [`Self::decrypter_with_mac`].
+    fn mac_key_len(&self) -> usize {
+        0
+    }
+
+    /// Build a `MessageEncrypter` for a suite with a MAC key: the MAC key,
+    /// the write key and IV as the key block holds them, the extra key block,
+    /// and whether encrypt-then-MAC (RFC 7366) was negotiated. The default,
+    /// for an AEAD, is [`Self::encrypter`].
+    fn encrypter_with_mac(
+        &self,
+        mac_key: &[u8],
+        key: &[u8],
+        iv: &[u8],
+        extra: &[u8],
+        encrypt_then_mac: bool,
+    ) -> Box<dyn MessageEncrypter> {
+        let _ = (mac_key, encrypt_then_mac);
+        self.encrypter(AeadKey::new(key), iv, extra)
+    }
+
+    /// Build a `MessageDecrypter` for a suite with a MAC key; see
+    /// [`Self::encrypter_with_mac`]. The default is [`Self::decrypter`].
+    fn decrypter_with_mac(
+        &self,
+        mac_key: &[u8],
+        key: &[u8],
+        iv: &[u8],
+        encrypt_then_mac: bool,
+    ) -> Box<dyn MessageDecrypter> {
+        let _ = (mac_key, encrypt_then_mac);
+        self.decrypter(AeadKey::new(key), iv)
+    }
+
     /// Return `true` if this is backed by a FIPS-approved implementation.
     fn fips(&self) -> bool {
         false

@@ -61,6 +61,9 @@ pub struct CommonState {
     pub(crate) refresh_traffic_keys_pending: bool,
     pub(crate) fips: bool,
     pub(crate) tls13_tickets_received: u32,
+    /// Whether the TLS 1.2 server acknowledged encrypt-then-MAC (RFC 7366)
+    /// for a suite with a MAC key.
+    pub(crate) tls12_encrypt_then_mac: bool,
 }
 
 impl CommonState {
@@ -94,6 +97,7 @@ impl CommonState {
             refresh_traffic_keys_pending: false,
             fips: false,
             tls13_tickets_received: 0,
+            tls12_encrypt_then_mac: false,
         }
     }
 
@@ -559,7 +563,7 @@ impl CommonState {
 
     #[cfg(feature = "tls12")]
     pub(crate) fn start_encryption_tls12(&mut self, secrets: &ConnectionSecrets, side: Side) {
-        let (dec, enc) = secrets.make_cipher_pair(side);
+        let (dec, enc) = secrets.make_cipher_pair(side, self.tls12_encrypt_then_mac);
         self.record_layer
             .prepare_message_encrypter(
                 enc,

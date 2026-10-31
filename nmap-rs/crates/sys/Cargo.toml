@@ -69,6 +69,14 @@ num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 aes = { version = "0.8", default-features = false }
 ccm = { version = "0.5", default-features = false }
 aria = { version = "0.1", default-features = false }
+# M6.7 step d: Camellia-CBC (measured in step 0; not constant-time, under the
+# ledger entry nse-tls-table-ciphers, as ARIA above), and SHA-1 for the
+# HMAC-SHA1 CBC suites (already in the tree through nmap-core).
+camellia = { version = "0.1", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+# Constant-time comparison of record MACs and padding (already in the tree
+# through rustls).
+subtle = { version = "2.5", default-features = false }
 crypto-bigint = { version = "0.7.10", default-features = false, features = ["alloc"] }
 zeroize = { version = "1", default-features = false }
 rand_core = { version = "0.6", default-features = false }

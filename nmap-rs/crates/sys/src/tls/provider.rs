@@ -1,18 +1,19 @@
 //! The provider: suites in 7.94's ClientHello order
-//! (`tests/differential/m6/m65_tls/clienthello_suites_794.txt`) restricted to
-//! what it carries: the TLS 1.3 three, then ECDHE and DHE-RSA with AES-GCM,
-//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8 and ARIA-GCM (M6.7 step a), then RSA
-//! key exchange with the same AEADs but ChaCha20 (step c, through the vendored
-//! rustls's patch 0002). CBC and DSA follow in steps d and e. Groups in
-//! 7.94's order: x25519, P-256, x448, P-521, P-384, then ffdhe2048 to 8192.
+//! (`spikes/m67-legacy-tls/clienthello_794.txt`), all of them but the
+//! DHE-DSS ones, which need DSA (M6.7 step e): the TLS 1.3 three, then TLS
+//! 1.2 with ECDHE, DHE-RSA and RSA key exchange (step c) and AES-GCM,
+//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8, ARIA-GCM (step a), and AES,
+//! Camellia and SEED in CBC mode with an HMAC (step d). Groups in 7.94's
+//! order: x25519, P-256, x448, P-521, P-384, then ffdhe2048 to 8192.
 //!
-//! One change to 7.94's order: each ECDHE-ECDSA suite goes after the
-//! ECDHE-RSA suite that follows it in 7.94's list, so the RSA-signed suite of
-//! each kind comes first. 7.94 offers DHE-RSA-AES128-SHA (CBC) before any
-//! AEAD suite, so against a server holding both an RSA and an ECDSA
-//! certificate and honouring client preference it gets the RSA one, and so
-//! must the port (`ssl-cert` prints it; the `dual-tls12-clientpref`
-//! fixture). Step d, which brings CBC, ends the exception.
+//! Since step d the order is 7.94's but for one move: M6.5's exception
+//! (each ECDHE-ECDSA suite after its ECDHE-RSA twin) is gone, and the
+//! DHE-RSA suites go last until step e (see `ALL_CIPHER_SUITES`). A
+//! dual-certificate server honouring client preference then picks RSA key
+//! exchange with CBC, and so the RSA leaf, as 7.94 does.
+//!
+//! ARIA, Camellia and SEED are table-based, not constant-time: ledgered as
+//! `nse-tls-table-ciphers` (docs/M6.7-ANALYSIS.md §18).
 
 use rustls::crypto::tls12::PrfUsingHmac;
 use rustls::crypto::tls13::HkdfUsingHmac;
@@ -24,7 +25,7 @@ use rustls::{CipherSuite, Error, NamedGroup, SignatureScheme, SupportedCipherSui
 use rustls::{CipherSuiteCommon, Tls12CipherSuite, Tls13CipherSuite};
 use std::sync::Arc;
 
-use super::{aead, hash, hmac, kx, rand};
+use super::{aead, cbc, hash, hmac, kx, rand};
 
 pub(crate) static SHA256: hash::Sha256 = hash::Sha256;
 pub(crate) static SHA384: hash::Sha384 = hash::Sha384;
@@ -43,6 +44,18 @@ static AES128_CCM_12: aead::Aead12<aead::Aes128Ccm> = aead::Aead12::new();
 static AES256_CCM_12: aead::Aead12<aead::Aes256Ccm> = aead::Aead12::new();
 static AES128_CCM8_12: aead::Aead12<aead::Aes128Ccm8> = aead::Aead12::new();
 static AES256_CCM8_12: aead::Aead12<aead::Aes256Ccm8> = aead::Aead12::new();
+// CBC with an HMAC (M6.7 step d; the vendored rustls's patch 0003).
+static AES128_CBC_SHA1: cbc::Cbc12<aes::Aes128, cbc::Sha1> = cbc::Cbc12::new();
+static AES256_CBC_SHA1: cbc::Cbc12<aes::Aes256, cbc::Sha1> = cbc::Cbc12::new();
+static AES128_CBC_SHA256: cbc::Cbc12<aes::Aes128, cbc::Sha256> = cbc::Cbc12::new();
+static AES256_CBC_SHA256: cbc::Cbc12<aes::Aes256, cbc::Sha256> = cbc::Cbc12::new();
+static AES256_CBC_SHA384: cbc::Cbc12<aes::Aes256, cbc::Sha384> = cbc::Cbc12::new();
+static CAMELLIA128_CBC_SHA1: cbc::Cbc12<camellia::Camellia128, cbc::Sha1> = cbc::Cbc12::new();
+static CAMELLIA256_CBC_SHA1: cbc::Cbc12<camellia::Camellia256, cbc::Sha1> = cbc::Cbc12::new();
+static CAMELLIA128_CBC_SHA256: cbc::Cbc12<camellia::Camellia128, cbc::Sha256> = cbc::Cbc12::new();
+static CAMELLIA256_CBC_SHA256: cbc::Cbc12<camellia::Camellia256, cbc::Sha256> = cbc::Cbc12::new();
+static CAMELLIA256_CBC_SHA384: cbc::Cbc12<camellia::Camellia256, cbc::Sha384> = cbc::Cbc12::new();
+static SEED_CBC_SHA1: cbc::Cbc12<super::seed::Seed, cbc::Sha1> = cbc::Cbc12::new();
 
 pub(crate) static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
@@ -113,19 +126,55 @@ macro_rules! tls12 {
 }
 
 tls12!(
-    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-    SHA384,
-    HMAC_SHA384,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
     TLS12_RSA_SCHEMES,
-    AES256_GCM_12,
+    AES128_CBC_SHA1,
     1 << 24,
-    ECDHE
+    DHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_RSA_WITH_AES_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA1,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CBC_SHA1,
+    1 << 24,
+    RSA
 );
 tls12!(
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     SHA384,
     HMAC_SHA384,
     TLS12_ECDSA_SCHEMES,
+    AES256_GCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
     AES256_GCM_12,
     1 << 24,
     ECDHE
@@ -140,19 +189,19 @@ tls12!(
     DHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_RSA_SCHEMES,
+    TLS12_ECDSA_SCHEMES,
     CHACHA_12,
     u64::MAX,
     ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_ECDSA_SCHEMES,
+    TLS12_RSA_SCHEMES,
     CHACHA_12,
     u64::MAX,
     ECDHE
@@ -203,19 +252,19 @@ tls12!(
     DHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
     SHA384,
     HMAC_SHA384,
-    TLS12_RSA_SCHEMES,
+    TLS12_ECDSA_SCHEMES,
     ARIA256_GCM_12,
     1 << 24,
     ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
     SHA384,
     HMAC_SHA384,
-    TLS12_ECDSA_SCHEMES,
+    TLS12_RSA_SCHEMES,
     ARIA256_GCM_12,
     1 << 24,
     ECDHE
@@ -230,19 +279,19 @@ tls12!(
     DHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_RSA_SCHEMES,
+    TLS12_ECDSA_SCHEMES,
     AES128_GCM_12,
     1 << 24,
     ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_ECDSA_SCHEMES,
+    TLS12_RSA_SCHEMES,
     AES128_GCM_12,
     1 << 24,
     ECDHE
@@ -293,19 +342,19 @@ tls12!(
     DHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_RSA_SCHEMES,
+    TLS12_ECDSA_SCHEMES,
     ARIA128_GCM_12,
     1 << 24,
     ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
-    TLS12_ECDSA_SCHEMES,
+    TLS12_RSA_SCHEMES,
     ARIA128_GCM_12,
     1 << 24,
     ECDHE
@@ -319,9 +368,177 @@ tls12!(
     1 << 24,
     DHE
 );
-
-// RSA key exchange (M6.7 step c; the vendored rustls's patch 0002), after
-// every ECDHE and DHE suite, as 7.94 offers them.
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_ECDSA_SCHEMES,
+    AES256_CBC_SHA384,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA384,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_ECDSA_SCHEMES,
+    CAMELLIA256_CBC_SHA384,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA256_CBC_SHA384,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA256_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES128_CBC_SHA256,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CBC_SHA256,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    CAMELLIA128_CBC_SHA256,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA128_CBC_SHA256,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA128_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES256_CBC_SHA1,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA1,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA256_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES128_CBC_SHA1,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CBC_SHA1,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_SEED_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    SEED_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA128_CBC_SHA1,
+    1 << 24,
+    DHE
+);
 tls12!(
     TLS_RSA_WITH_AES_256_GCM_SHA384,
     SHA384,
@@ -394,34 +611,108 @@ tls12!(
     1 << 24,
     RSA
 );
+tls12!(
+    TLS_RSA_WITH_AES_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CBC_SHA256,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA256_CBC_SHA256,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_AES_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CBC_SHA256,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA128_CBC_SHA256,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA256_CBC_SHA1,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_SEED_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    SEED_CBC_SHA1,
+    1 << 24,
+    RSA
+);
+tls12!(
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CAMELLIA128_CBC_SHA1,
+    1 << 24,
+    RSA
+);
 
+/// 7.94's order (`spikes/m67-legacy-tls/clienthello_794.txt`) less the
+/// DHE-DSS suites, which wait for DSA (step e), and with the DHE-RSA suites
+/// moved after all the others until step e accepts a server's own DH group
+/// (`nse-tls-dhe-own-group`): 7.94 offers DHE-RSA-AES128-SHA first, and a
+/// server honouring the client's order with OpenSSL's default DH group (not
+/// an RFC 7919 one) would otherwise choose a DHE suite the port must refuse.
 pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS13_AES_256_GCM_SHA384,
     TLS13_CHACHA20_POLY1305_SHA256,
     TLS13_AES_128_GCM_SHA256,
-    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    TLS_RSA_WITH_AES_256_CBC_SHA,
+    TLS_RSA_WITH_AES_128_CBC_SHA,
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
-    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
-    TLS_DHE_RSA_WITH_AES_256_CCM_8,
-    TLS_DHE_RSA_WITH_AES_256_CCM,
-    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
-    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
-    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
-    TLS_DHE_RSA_WITH_AES_128_CCM_8,
-    TLS_DHE_RSA_WITH_AES_128_CCM,
-    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
-    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384,
+    TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384,
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
     TLS_RSA_WITH_AES_256_GCM_SHA384,
     TLS_RSA_WITH_AES_256_CCM_8,
     TLS_RSA_WITH_AES_256_CCM,
@@ -430,6 +721,32 @@ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS_RSA_WITH_AES_128_CCM_8,
     TLS_RSA_WITH_AES_128_CCM,
     TLS_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_RSA_WITH_AES_256_CBC_SHA256,
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+    TLS_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA,
+    TLS_RSA_WITH_SEED_CBC_SHA,
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA,
+    // The DHE-RSA suites, in 7.94's order among themselves:
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_DHE_RSA_WITH_AES_256_CCM_8,
+    TLS_DHE_RSA_WITH_AES_256_CCM,
+    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_CCM_8,
+    TLS_DHE_RSA_WITH_AES_128_CCM,
+    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
+    TLS_DHE_RSA_WITH_SEED_CBC_SHA,
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA,
 ];
 
 pub(crate) static X25519: kx::X25519 = kx::X25519;

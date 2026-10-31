@@ -13,8 +13,8 @@ a second is the seed.
 
 nse_tls_kx_aead (M6.7 step a): a selector byte, then a peer's key share
 (X448's base point and a real share and the range edges 0, 1, p - 1 of each
-FFDHE group, in both TLS versions' forms) or a TLS 1.2 record (each AEAD,
-lengths about the nonce-and-tag minimum).
+FFDHE group, in both TLS versions' forms) or a TLS 1.2 record (each AEAD and
+CBC protection, lengths about the nonce-and-tag minimum).
 
 nse_tls_verifier: flags, scheme, then length-prefixed certificates (leaf
 first, an empty one ends them), message and signature, as the target reads
@@ -186,7 +186,9 @@ def kx_aead_seeds():
             yb = y.to_bytes(n, "big")
             write(KX_AEAD, "ffdhe%d-%s-13" % (bits, tag), bytes([i]) + yb)
             write(KX_AEAD, "ffdhe%d-%s-12" % (bits, tag), bytes([i | 8]) + yb.lstrip(b"\0"))
-    for sel in range(6):
+    # The AEADs (0-5) and, since M6.7 step d, the CBC suites (6-8), each CBC
+    # one with MAC-then-encrypt and with encrypt-then-MAC (bit 0x40).
+    for sel in list(range(6)) + [6, 7, 8, 0x40 | 6, 0x40 | 7, 0x40 | 8]:
         for n in (0, 15, 16, 24, 64):
             write(KX_AEAD, "aead%d-len%d" % (sel, n), bytes([0x80 | sel]) + bytes(range(n)))
 

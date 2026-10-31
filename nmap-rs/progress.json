@@ -684,46 +684,46 @@
     },
     "sys::tls": {
       "differential": {
-        "files": 13,
-        "sha256": "c0ce0c0171153e8fcb6e5bcd9dc352cc97853fdc6abaac62a505287d3d7b6f22"
+        "files": 15,
+        "sha256": "db87124ffd6e9138f3e498a5c81b75e5c87ce945e2653ee6f2cfce6d07acaa39"
       },
       "fuzzed": {
-        "files": 13,
-        "sha256": "c0ce0c0171153e8fcb6e5bcd9dc352cc97853fdc6abaac62a505287d3d7b6f22"
+        "files": 15,
+        "sha256": "db87124ffd6e9138f3e498a5c81b75e5c87ce945e2653ee6f2cfce6d07acaa39"
       },
       "ported": {
-        "files": 13,
-        "sha256": "c0ce0c0171153e8fcb6e5bcd9dc352cc97853fdc6abaac62a505287d3d7b6f22"
+        "files": 15,
+        "sha256": "db87124ffd6e9138f3e498a5c81b75e5c87ce945e2653ee6f2cfce6d07acaa39"
       },
       "sanitized": {
-        "files": 13,
-        "sha256": "c0ce0c0171153e8fcb6e5bcd9dc352cc97853fdc6abaac62a505287d3d7b6f22"
+        "files": 15,
+        "sha256": "db87124ffd6e9138f3e498a5c81b75e5c87ce945e2653ee6f2cfce6d07acaa39"
       },
       "unsafe_audited": {
-        "files": 13,
-        "sha256": "c0ce0c0171153e8fcb6e5bcd9dc352cc97853fdc6abaac62a505287d3d7b6f22"
+        "files": 15,
+        "sha256": "db87124ffd6e9138f3e498a5c81b75e5c87ce945e2653ee6f2cfce6d07acaa39"
       }
     },
     "sys::tls::provider": {
       "differential": {
         "files": 1,
-        "sha256": "11a11cb1d9121a13bfdc0794d5b5605eb649314de65843130079539946dbfc55"
+        "sha256": "ec50e1f65b0e1236e807785d5e37de6c869089adddb25f00ef7e9875ed63487d"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "11a11cb1d9121a13bfdc0794d5b5605eb649314de65843130079539946dbfc55"
+        "sha256": "ec50e1f65b0e1236e807785d5e37de6c869089adddb25f00ef7e9875ed63487d"
       },
       "ported": {
         "files": 1,
-        "sha256": "11a11cb1d9121a13bfdc0794d5b5605eb649314de65843130079539946dbfc55"
+        "sha256": "ec50e1f65b0e1236e807785d5e37de6c869089adddb25f00ef7e9875ed63487d"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "11a11cb1d9121a13bfdc0794d5b5605eb649314de65843130079539946dbfc55"
+        "sha256": "ec50e1f65b0e1236e807785d5e37de6c869089adddb25f00ef7e9875ed63487d"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "11a11cb1d9121a13bfdc0794d5b5605eb649314de65843130079539946dbfc55"
+        "sha256": "ec50e1f65b0e1236e807785d5e37de6c869089adddb25f00ef7e9875ed63487d"
       }
     },
     "sys::tls::stream": {

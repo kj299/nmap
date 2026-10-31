@@ -520,7 +520,7 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    - **Milestone numbers are names, not order:**
      - M6.6 (`nmapdb`, `lpeg`) ran before M6.5;
      - a minimal `lfs` (D1 (c)) runs between them;
-     - M6.7 is legacy TLS;
+     - M6.7 is legacy TLS: **Phase 0** in [`docs/M6.7-ANALYSIS.md`](docs/M6.7-ANALYSIS.md) measures 22 server families 7.94 reaches and the port does not (9 a rustls provider can add; 13, and four step-f1 pins, need rustls itself changed) and poses D1-D4;
      - `zlib` and `libssh2` follow.
 6. 🔶 **M7 is in progress** in parallel: the cutover gate is the MUST tier of
    [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md), of which `--host-timeout`

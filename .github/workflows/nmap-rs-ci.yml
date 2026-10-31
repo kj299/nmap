@@ -170,6 +170,10 @@ jobs:
       # and deliberately fails rather than skips when it cannot verify.
       - run: nmap-rs/crates/vendor/piccolo/check_vendor.sh
         working-directory: .
+      # The same gate for rustls (M6.7 step b): rustls/src, the test-ca files and
+      # the fuzz corpus its unit tests read, against tag v/0.23.46 + patches/.
+      - run: nmap-rs/crates/vendor/rustls/check_vendor.sh
+        working-directory: .
       # Fails if a shipped module never reached progress.json. The kit template has
       # carried this step since LESSONS #021 ("keep the table current" was a habit,
       # and habits rot silently — one milestone added ten modules and none reached

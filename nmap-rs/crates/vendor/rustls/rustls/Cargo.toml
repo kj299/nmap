@@ -1,0 +1,81 @@
+# VENDORED THIRD-PARTY CODE — see ../PROVENANCE.md before editing anything here.
+#
+# `rustls` 0.23.46 (upstream tag v/0.23.46, commit f04804f), the TLS client
+# under NSE's `connect(..., "ssl")`, vendored by M6.7 step b
+# (docs/M6.7-ANALYSIS.md, D1 (b)): what 7.94 reaches and the provider
+# interface cannot carry (RSA key exchange, CBC, the server's own DH group,
+# DSA, OpenSSL's limits, 7.94's ClientHello) needs rustls itself changed, and
+# upstream declines those by design. The changes are a numbered patch series
+# in ../patches/, checked by ../check_vendor.sh.
+#
+# The layout mirrors upstream's repository (`rustls/` beside `test-ca/`) so
+# the unit tests' `include_bytes!("../../../test-ca/...")` paths hold
+# unchanged; only the nine test-ca files those tests read are vendored.
+#
+# This manifest is OURS, not upstream's (whose dependencies are `workspace =
+# true` against upstream's root). Its differences, each deliberate:
+#   * no `ring`, `aws-lc-rs`, `brotli`, `zlib-rs` or `hashbrown`: the C ban
+#     (deny.toml) and the port's first-party provider. Their features are
+#     not declared, so `--all-features` (CI's clippy and test jobs) cannot
+#     reach code that names those crates; the lint table below keeps
+#     `unexpected_cfgs` quiet about the `cfg(feature = ...)` that still
+#     mention them.
+#   * no build script: it only sets `cfg(read_buf)` on nightly when the
+#     `read_buf` feature is on, which is not declared here.
+#   * the dev-dependencies are only those the library's own unit tests use
+#     (`cargo test -p rustls --lib`), and doctests are off. Upstream's
+#     integration tests (`tests/`) need `rcgen` and `rustls-test`, which pull
+#     in `aws-lc-sys` (C), and are not vendored.
+[package]
+publish = false          # vendored third party; never published to crates.io
+name = "rustls"
+version = "0.23.46"
+edition = "2021"
+rust-version = "1.71"
+license = "Apache-2.0 OR ISC OR MIT"
+description = "Rustls is a modern TLS library written in Rust (vendored; see ../PROVENANCE.md)"
+repository = "https://github.com/rustls/rustls"
+autobenches = false
+autotests = false
+autoexamples = false
+
+[features]
+default = ["logging", "std", "tls12"]
+custom-provider = []
+logging = ["log"]
+std = ["webpki/std", "pki-types/std", "once_cell/std"]
+tls12 = []
+
+[dependencies]
+log = { version = "0.4.8", optional = true }
+once_cell = { version = "1.16", default-features = false, features = ["alloc", "race"] }
+subtle = { version = "2.5.0", default-features = false }
+webpki = { package = "rustls-webpki", version = "0.103.14", features = ["alloc"], default-features = false }
+pki-types = { package = "rustls-pki-types", version = "1.12", features = ["alloc"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+# Only what `src/`'s unit tests use with no provider crate: two of them start
+# a logger, and `test_macros.rs` builds on `macro_rules_attribute`. Upstream's
+# others (`hex`, `serde`, `serde_json`, `time`, `webpki-roots`,
+# `x509-parser`, `base64`, `num-bigint`, `bencher`, `rcgen`, `rustls-test`)
+# serve the ring and aws-lc-rs tests, the benches, the doc examples and the
+# integration tests, none of which build here.
+env_logger = "0.11"
+log = { version = "0.4.8" }
+macro_rules_attribute = "0.2"
+
+[lib]
+# The doc examples assume a provider crate (`rustls::crypto::ring`,
+# `aws_lc_rs`), which the C ban keeps out.
+doctest = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(bench)",
+  "cfg(coverage_nightly)",
+  "cfg(read_buf)",
+  "cfg(rustls_docsrs)",
+  # Upstream's features that this manifest leaves out (see above).
+  'cfg(feature, values("aws_lc_rs", "aws-lc-rs", "brotli", "fips", "hashbrown", "prefer-post-quantum", "read_buf", "ring", "zlib"))',
+] }

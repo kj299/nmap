@@ -48,7 +48,9 @@ socket2 = "0.6.5"
 # crates follow, the lock holds both generations of their support crates
 # (digest, sha2, hmac, signature, rand_core, ...), which deny.toml reports as
 # duplicate warnings; the TLS seam implements both rand_core versions.
-rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
+# Vendored since M6.7 step b (crates/vendor/rustls/PROVENANCE.md): 0.23.46 plus
+# a numbered patch series, for what the provider interface cannot carry.
+rustls = { path = "../vendor/rustls/rustls", default-features = false, features = ["std", "tls12"] }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }

@@ -54,8 +54,7 @@ One file per intent, applied in name order to `rustls/src/`.
 
 | patch | what it does |
 |---|---|
-| `0001-skip-isolation-tests-under-miri.patch` | marks the unit tests that read the clock or the filesystem `cfg_attr(miri, ignore)`, as piccolo's `0003` does: CI's Miri job runs the workspace with isolation on, which refuses those calls |
-| `0002-allow-std-io-errorkind-import.patch` | `#![allow(clippy::std_instead_of_core)]` in `stream.rs`: clippy 1.97 asks for `core::io::ErrorKind`, which does not exist at this workspace's MSRV (1.88) |
+| `0001-allow-std-io-errorkind-import.patch` | `#![allow(clippy::std_instead_of_core)]` in `stream.rs`: clippy 1.97 asks for `core::io::ErrorKind`, which does not exist at this workspace's MSRV (1.88) |
 
 ## Re-deriving this tree
 
@@ -88,8 +87,8 @@ port no longer gets rustls fixes through `cargo update`.
 |---|---|---|
 | `cargo deny` | yes | it resolves the whole graph |
 | `audit_unsafe.py` | yes | it is under `crates/`; rustls is `#![forbid(unsafe_code)]`, so the count is 0 |
-| clippy (`-D warnings`, `--all-features`) | yes | a workspace member; `0002` is what it needed |
+| clippy (`-D warnings`, `--all-features`) | yes | a workspace member; `0001` is what it needed |
 | `cargo fmt --check` | yes | under upstream's `.rustfmt.toml`, which the tree already follows |
 | unit tests | yes | `cargo test --all` runs its 148 |
-| Miri | yes | `cargo miri test` runs them, less those `0001` ignores |
+| Miri | **no, deliberately** | `--exclude rustls` in the Miri job: the crate is `#![forbid(unsafe_code)]`, its 148 tests run past 25 minutes under Miri (measured), and several read the clock or the filesystem, which isolation refuses. The unsafe in its dependencies (`subtle`, `zeroize`, `once_cell`) runs under Miri through `nmap-sys`'s TLS tests |
 | progress tracker | skipped, reported | `PROVENANCE.md` marks a vendored tree |

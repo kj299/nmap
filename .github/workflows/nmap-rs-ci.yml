@@ -236,7 +236,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
-      - run: cargo +nightly miri test
+      # The vendored rustls (M6.7 step b) is left out: it is
+      # `#![forbid(unsafe_code)]`, so Miri has no unsafe of its to check, and
+      # its 148 unit tests run past 25 minutes under Miri (measured), where
+      # several also read the clock or the filesystem, which isolation refuses.
+      # The unsafe in its dependencies (subtle, zeroize, once_cell) runs under
+      # Miri through nmap-sys's TLS tests. Its tests run natively in the test job.
+      - run: cargo +nightly miri test --workspace --exclude rustls
 
   # ASan over the crates that hold `unsafe`. This job exists because the gate it
   # replaces was vacuous, and the way it was vacuous is worth writing down.

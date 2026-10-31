@@ -1,4 +1,4 @@
-// nmap-rs patch 0002: `ErrorKind` is in `core::io` only in newer Rust than
+// nmap-rs patch 0001: `ErrorKind` is in `core::io` only in newer Rust than
 // this workspace's MSRV (1.88), and clippy 1.97 asks for it there.
 #![allow(clippy::std_instead_of_core)]
 

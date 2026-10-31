@@ -1,16 +1,11 @@
-//! The provider: suites in 7.94's ClientHello order
-//! (`spikes/m67-legacy-tls/clienthello_794.txt`), all of them but the
-//! DHE-DSS ones, which need DSA (M6.7 step e): the TLS 1.3 three, then TLS
-//! 1.2 with ECDHE, DHE-RSA and RSA key exchange (step c) and AES-GCM,
-//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8, ARIA-GCM (step a), and AES,
-//! Camellia and SEED in CBC mode with an HMAC (step d). Groups in 7.94's
-//! order: x25519, P-256, x448, P-521, P-384, then ffdhe2048 to 8192.
-//!
-//! Since step d the order is 7.94's but for one move: M6.5's exception
-//! (each ECDHE-ECDSA suite after its ECDHE-RSA twin) is gone, and the
-//! DHE-RSA suites go last until step e (see `ALL_CIPHER_SUITES`). A
-//! dual-certificate server honouring client preference then picks RSA key
-//! exchange with CBC, and so the RSA leaf, as 7.94 does.
+//! The provider: since M6.7 step e, every suite 7.94's ClientHello offers,
+//! in its order (`spikes/m67-legacy-tls/clienthello_794.txt`): the TLS 1.3
+//! three, then TLS 1.2 with ECDHE, DHE-RSA, DHE-DSS (step e) and RSA key
+//! exchange (step c), and AES-GCM, ChaCha20-Poly1305, AES-CCM, AES-CCM-8,
+//! ARIA-GCM (step a), and AES, Camellia and SEED in CBC mode with an HMAC
+//! (step d). DHE takes the server's own group as well as RFC 7919's (step
+//! e, `kx::OwnDh`). Groups in 7.94's order: x25519, P-256, x448, P-521,
+//! P-384, then ffdhe2048 to 8192.
 //!
 //! ARIA, Camellia and SEED are table-based, not constant-time: ledgered as
 //! `nse-tls-table-ciphers` (docs/M6.7-ANALYSIS.md §18).
@@ -101,6 +96,13 @@ static TLS12_RSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PKCS1_SHA256,
     SignatureScheme::RSA_PKCS1_SHA384,
     SignatureScheme::RSA_PKCS1_SHA512,
+];
+/// dsa_sha224 to dsa_sha512, as 7.94 offers them (M6.7 step e).
+static TLS12_DSA_SCHEMES: &[SignatureScheme] = &[
+    SignatureScheme::Unknown(0x0302),
+    SignatureScheme::Unknown(0x0402),
+    SignatureScheme::Unknown(0x0502),
+    SignatureScheme::Unknown(0x0602),
 ];
 static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ECDSA_NISTP256_SHA256,
@@ -675,44 +677,191 @@ tls12!(
     RSA
 );
 
-/// 7.94's order (`spikes/m67-legacy-tls/clienthello_794.txt`) less the
-/// DHE-DSS suites, which wait for DSA (step e), and with the DHE-RSA suites
-/// moved after all the others until step e accepts a server's own DH group
-/// (`nse-tls-dhe-own-group`): 7.94 offers DHE-RSA-AES128-SHA first, and a
-/// server honouring the client's order with OpenSSL's default DH group (not
-/// an RFC 7919 one) would otherwise choose a DHE suite the port must refuse.
+// DHE-DSS (M6.7 step e): DSA certificates, the vendored rustls's patch 0004.
+tls12!(
+    TLS_DHE_DSS_WITH_AES_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_DSA_SCHEMES,
+    AES256_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_ARIA_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_DSA_SCHEMES,
+    ARIA256_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_AES_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    AES128_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_ARIA_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    ARIA128_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    AES256_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    CAMELLIA256_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    AES128_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    CAMELLIA128_CBC_SHA256,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    AES256_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    CAMELLIA256_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    AES128_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_SEED_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    SEED_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_DSA_SCHEMES,
+    CAMELLIA128_CBC_SHA1,
+    1 << 24,
+    DHE
+);
+
+/// 7.94's order exactly (`spikes/m67-legacy-tls/clienthello_794.txt`), since
+/// M6.7 step e: every suite 7.94 offers, the renegotiation SCSV rustls adds
+/// last as 7.94 has it.
 pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS13_AES_256_GCM_SHA384,
     TLS13_CHACHA20_POLY1305_SHA256,
     TLS13_AES_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
     TLS_RSA_WITH_AES_256_CBC_SHA,
     TLS_RSA_WITH_AES_128_CBC_SHA,
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    TLS_DHE_DSS_WITH_AES_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
     TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
+    TLS_DHE_RSA_WITH_AES_256_CCM_8,
+    TLS_DHE_RSA_WITH_AES_256_CCM,
     TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
     TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_DHE_DSS_WITH_ARIA_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_DHE_DSS_WITH_AES_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
     TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
+    TLS_DHE_RSA_WITH_AES_128_CCM_8,
+    TLS_DHE_RSA_WITH_AES_128_CCM,
     TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
     TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_DHE_DSS_WITH_ARIA_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
     TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA256,
     TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384,
     TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384,
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
     TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA256,
     TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256,
     TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
     TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA,
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA,
     TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
     TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA,
+    TLS_DHE_RSA_WITH_SEED_CBC_SHA,
+    TLS_DHE_DSS_WITH_SEED_CBC_SHA,
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA,
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA,
     TLS_RSA_WITH_AES_256_GCM_SHA384,
     TLS_RSA_WITH_AES_256_CCM_8,
     TLS_RSA_WITH_AES_256_CCM,
@@ -728,25 +877,6 @@ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS_RSA_WITH_CAMELLIA_256_CBC_SHA,
     TLS_RSA_WITH_SEED_CBC_SHA,
     TLS_RSA_WITH_CAMELLIA_128_CBC_SHA,
-    // The DHE-RSA suites, in 7.94's order among themselves:
-    TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
-    TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
-    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
-    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-    TLS_DHE_RSA_WITH_AES_256_CCM_8,
-    TLS_DHE_RSA_WITH_AES_256_CCM,
-    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
-    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
-    TLS_DHE_RSA_WITH_AES_128_CCM_8,
-    TLS_DHE_RSA_WITH_AES_128_CCM,
-    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
-    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
-    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
-    TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
-    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256,
-    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
-    TLS_DHE_RSA_WITH_SEED_CBC_SHA,
-    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA,
 ];
 
 pub(crate) static X25519: kx::X25519 = kx::X25519;
@@ -771,6 +901,9 @@ ffdhe!(FFDHE4096, FFDHE4096, 325);
 ffdhe!(FFDHE6144, FFDHE6144, 375);
 ffdhe!(FFDHE8192, FFDHE8192, 400);
 
+/// DHE over a server's own group (M6.7 step e).
+pub(crate) static OWN_DH: kx::OwnDh = kx::OwnDh;
+
 pub(crate) static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     &X25519, &SECP256R1, &X448, &SECP521R1, &SECP384R1, &FFDHE2048, &FFDHE3072, &FFDHE4096,
     &FFDHE6144, &FFDHE8192,
@@ -786,7 +919,8 @@ static NO_WEBPKI_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
 
 /// The signature_algorithms extension, in 7.94's order (OpenSSL's default
 /// client list, minus what the provider cannot verify: Ed448, rsa_pss_pss_*,
-/// SHA-224, DSA).
+/// ecdsa_sha224 and rsa_pkcs1_sha224). DSA with SHA-224 to SHA-512 since M6.7
+/// step e.
 pub(crate) static CLIENT_SIG_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ECDSA_NISTP256_SHA256,
     SignatureScheme::ECDSA_NISTP384_SHA384,
@@ -798,6 +932,11 @@ pub(crate) static CLIENT_SIG_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PKCS1_SHA256,
     SignatureScheme::RSA_PKCS1_SHA384,
     SignatureScheme::RSA_PKCS1_SHA512,
+    // dsa_sha224, dsa_sha256, dsa_sha384, dsa_sha512 (M6.7 step e).
+    SignatureScheme::Unknown(0x0302),
+    SignatureScheme::Unknown(0x0402),
+    SignatureScheme::Unknown(0x0502),
+    SignatureScheme::Unknown(0x0602),
 ];
 
 /// The client never presents a certificate, so no private key is ever loaded.
@@ -822,6 +961,7 @@ pub fn provider() -> CryptoProvider {
         secure_random: &rand::OsRandom,
         key_provider: &NoKeys,
         rsa_key_transport: Some(&RsaTransport),
+        custom_dh: Some(&OWN_DH),
     }
 }
 

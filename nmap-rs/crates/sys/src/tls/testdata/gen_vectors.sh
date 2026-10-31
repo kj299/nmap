@@ -30,5 +30,10 @@ sig() { openssl dgst "-$1" -sign "$CERTS/$2.key" "${@:3}" "$W/msg" | od -An -v -
   # TLS 1.2: the scheme names the hash; the curve is the key's.
   echo "ecdsa-p384-sha256 ECDSA_NISTP256_SHA256 $(der ecp384) $MSG $(sig sha256 ecp384) tls12"
   echo "ecdsa-p521-sha256 ECDSA_NISTP256_SHA256 $(der ecp521) $MSG $(sig sha256 ecp521) tls12"
+  # M6.7 step e: DSA, TLS 1.2 only.
+  for h in sha224 sha256 sha384 sha512; do
+    echo "dsa-$h DSA_${h^^} $(der dsa2048) $MSG $(sig $h dsa2048) tls12"
+  done
+  echo "dsa-sha256-nonminimal DSA_SHA256 $(der dsa2048) $MSG $(sig sha256 dsa2048 | python3 -c 'import sys; h=bytes.fromhex(sys.stdin.read().strip()); r=h[2:]; l=r[1]; b=bytes([0x02,l+1,0])+r[2:2+l]+r[2+l:]; print((bytes([0x30,len(b)])+b).hex())') bad"
   echo "ed25519 ED25519 $(der ed25519) $MSG $(openssl pkeyutl -sign -inkey "$CERTS/ed25519.key" -rawin -in "$W/msg" | od -An -v -tx1 | tr -d ' \n') ok"
 } > "$HERE/vectors.txt"

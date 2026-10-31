@@ -5660,7 +5660,9 @@ so they are opened now and land, pinned per fixture, with step f1
       only such suites (`starttls-legacy`: 7.94 reconnects with AES128-SHA,
       the port gets `HandshakeFailure`). Where both fail: TLS 1.0 and 1.1
       only, a SHA-1-only signature algorithm, a secp256k1 certificate (neither
-      ClientHello offers an ECDSA signature algorithm for that curve). Retired by M6.7, legacy TLS.
+      ClientHello offers an ECDSA signature algorithm for that curve).
+      **Retired by M6.7 step e** (docs/M6.7-ANALYSIS.md §19), with DSA
+      certificates, the last of it: no row is pinned to it.
       Pinned by step f1 (`gen_m65_tls.py`, `PORT_PINS`): `tls12-rsa-kx-gcm`,
       `tls12-ecdhe-cbc`, `tls12-dhe2048`, `dsa-dhe`, `tls13-x448`,
       `tls13-ffdhe2048`, `starttls-legacy`, and `dual-tls12-clientpref` (the
@@ -5678,6 +5680,10 @@ so they are opened now and land, pinned per fixture, with step f1
         the M6.4 CLI scenario) and seven `legacy-*` CBC rows reach as 7.94
         does. Of this entry, only DSA certificates remain (`dsa-dhe`,
         `legacy-dhe-dss-gcm-ffdhe2048`), for step e.
+      - **M6.7 step e** retires DSA certificates (`dsa_sha224` to
+        `dsa_sha512`, verified first-party over public values, and the 13
+        DHE-DSS suites): `dsa-dhe` and `legacy-dhe-dss-gcm-ffdhe2048` reach
+        as 7.94 does.
       - **M6.7 step c** retires RSA key exchange with the AEAD suites
         (patch 0002 of the vendored rustls): `tls12-rsa-kx-gcm`,
         `cert-tls12-rsa-kx`, `legacy-rsa-kx-aes128-ccm` and
@@ -5706,6 +5712,14 @@ so they are opened now and land, pinned per fixture, with step f1
         Step e (the server's own group, with OpenSSL's checks) closes it;
         the RFC 7919 groups, and every server that prefers ECDHE or honours
         the client's order, are unaffected.
+      - **Retired by M6.7 step e** (docs/M6.7-ANALYSIS.md §19). Patch 0004
+        gives rustls a `CustomDhGroups` hook for a group that is not RFC
+        7919's, and the provider applies OpenSSL's checks (an odd `p` of 512
+        to 10,000 bits, 1 < g < p - 1, then security level 2: under 112 bits
+        of security is handshake_failure). `tls12-dhe2048`,
+        `dhe-own2048-serverpref`, `dual-tls12-clientpref` (7.94's exact suite
+        order is back) and `legacy-dhe-rsa-gcm-own1024` (now alert 40 on
+        both sides) reach as 7.94 does.
 - [x] `nse-tls-table-ciphers` — the TLS provider's ARIA (`aria`, M6.7
       step a), Camellia (`camellia`, step d) and SEED (first-party,
       `sys::tls::seed`, step d) index their S-box tables with key- and

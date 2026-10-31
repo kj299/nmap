@@ -131,6 +131,32 @@ pub mod fuzzing {
         kx.complete_for_tls_version(peer, version).is_ok()
     }
 
+    /// Key agreement in a server's own DH group (M6.7 step e): `params` is
+    /// p's length (two bytes), p, g's length (two bytes), g, then the
+    /// server's share. Whether the group passed OpenSSL's checks and the
+    /// share was taken.
+    #[must_use]
+    pub fn own_dh(params: &[u8]) -> bool {
+        use rustls::crypto::CustomDhGroups;
+        /// A two-byte length, then that many bytes; and the rest.
+        fn field(b: &[u8]) -> Option<(&[u8], &[u8])> {
+            let (len, rest) = b.split_first_chunk::<2>()?;
+            let n = usize::from(u16::from_be_bytes(*len));
+            (rest.len() >= n).then(|| rest.split_at(n))
+        }
+        let Some((p, rest)) = field(params) else {
+            return false;
+        };
+        let Some((g, y)) = field(rest) else {
+            return false;
+        };
+        let Ok(kx) = super::provider::OWN_DH.start(p, g) else {
+            return false;
+        };
+        kx.complete_for_tls_version(y, &rustls::version::TLS12)
+            .is_ok()
+    }
+
     /// A TLS 1.2 record of `body` through one of the decrypters of steps a
     /// and d (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM; then
     /// CBC with AES-128 and HMAC-SHA1, Camellia-256 and HMAC-SHA384, SEED and

@@ -37,6 +37,7 @@ pub fn default_provider() -> CryptoProvider {
         secure_random: &Ring,
         key_provider: &Ring,
         rsa_key_transport: None,
+        custom_dh: None,
     }
 }
 

@@ -195,6 +195,10 @@ fn scheme(name: &str) -> SignatureScheme {
         "ECDSA_NISTP384_SHA384" => SignatureScheme::ECDSA_NISTP384_SHA384,
         "ECDSA_NISTP521_SHA512" => SignatureScheme::ECDSA_NISTP521_SHA512,
         "ED25519" => SignatureScheme::ED25519,
+        "DSA_SHA224" => SignatureScheme::Unknown(0x0302),
+        "DSA_SHA256" => SignatureScheme::Unknown(0x0402),
+        "DSA_SHA384" => SignatureScheme::Unknown(0x0502),
+        "DSA_SHA512" => SignatureScheme::Unknown(0x0602),
         other => panic!("scheme {other}"),
     }
 }
@@ -242,7 +246,7 @@ fn signatures_verify_as_openssl_verifies_them() {
         }
         n += 1;
     }
-    assert_eq!(n, 15);
+    assert_eq!(n, 20);
 }
 
 #[test]
@@ -403,37 +407,18 @@ fn the_hello_offers_7_94s_suites_in_its_order() {
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     // 7.94's ClientHello as captured (`spikes/m67-legacy-tls/clienthello_794.txt`),
-    // less the DHE-DSS suites (step e), with the DHE-RSA suites moved after
-    // the rest (until step e; `provider::ALL_CIPHER_SUITES`). 7.94's list
-    // ends with the renegotiation SCSV, as rustls's does.
+    // exactly, since M6.7 step e: all 77 suites and the renegotiation SCSV
+    // last, where rustls adds it.
     let captured = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../spikes/m67-legacy-tls/clienthello_794.txt"
     ));
-    let v794: Vec<u16> = captured
+    let want: Vec<u16> = captured
         .lines()
         .filter_map(|l| l.strip_prefix("suite 0x"))
         .map(|h| u16::from_str_radix(h, 16).expect("hex"))
         .collect();
-    assert_eq!(v794.len(), 78);
-    let dss = [
-        0x00a3, 0x00a2, 0xc057, 0xc056, 0x006a, 0x00c3, 0x0040, 0x00bd, 0x0038, 0x0087, 0x0032,
-        0x0099, 0x0044,
-    ];
-    let dhe_rsa = [
-        0x0033, 0x0039, 0x009f, 0xccaa, 0xc0a3, 0xc09f, 0xc053, 0x009e, 0xc0a2, 0xc09e, 0xc052,
-        0x006b, 0x00c4, 0x0067, 0x00be, 0x0088, 0x009a, 0x0045,
-    ];
-    let kept: Vec<u16> = v794.into_iter().filter(|s| !dss.contains(s)).collect();
-    let (scsv, kept) = kept.split_last().expect("suites");
-    assert_eq!(*scsv, 0x00ff);
-    let mut want: Vec<u16> = kept
-        .iter()
-        .copied()
-        .filter(|s| !dhe_rsa.contains(s))
-        .collect();
-    want.extend(kept.iter().copied().filter(|s| dhe_rsa.contains(s)));
-    want.push(0x00ff);
+    assert_eq!(want.len(), 78);
     assert_eq!(suites, want);
 }
 
@@ -725,4 +710,29 @@ fn rsa_kx_needs_an_rsa_leaf() {
 fn the_hello_requests_encrypt_then_mac() {
     let hello = client_hello();
     assert_eq!(extension(&hello, 0x0016), Some(vec![]));
+}
+
+/// The fuzz target's own-group seeds (`fuzz/gen_tls_seeds.py`): the good
+/// group and share are taken, each edge OpenSSL refuses is refused.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "2,048-bit modular exponentiation is too slow under Miri"
+)]
+fn the_own_group_seeds_meet_openssls_checks() {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fuzz/seeds/nse_tls_kx_aead/"
+    );
+    for (name, taken) in [
+        ("own2048-share", true),
+        ("own2048-gpm1", false),
+        ("own2048-even", false),
+        ("own2048-ypm1", false),
+        ("own1024", false),
+    ] {
+        let seed = std::fs::read(format!("{dir}{name}")).expect("seed");
+        assert_eq!(seed.first(), Some(&0x40), "{name}");
+        assert_eq!(super::fuzzing::own_dh(&seed[1..]), taken, "{name}");
+    }
 }

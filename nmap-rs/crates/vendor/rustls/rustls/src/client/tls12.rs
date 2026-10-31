@@ -1040,14 +1040,28 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
                             .copied()
                     }
                 };
-                let Some(skxg) = maybe_skxg else {
-                    return Err(cx.common.send_fatal_alert(
-                        AlertDescription::IllegalParameter,
-                        PeerMisbehaved::SelectedUnofferedKxGroup,
-                    ));
+                let kx = match (maybe_skxg, &kx_params, st.config.provider.custom_dh) {
+                    (Some(skxg), _, _) => {
+                        cx.common.kx_state = KxState::Start(skxg);
+                        skxg.start()?
+                    }
+                    // A DH group of the server's own, through the provider.
+                    (None, ServerKeyExchangeParams::Dh(dh), Some(custom)) => custom
+                        .start(&dh.dh_p.0, &dh.dh_g.0)
+                        .map_err(|err| {
+                            let alert = match err {
+                                Error::PeerIncompatible(_) => AlertDescription::HandshakeFailure,
+                                _ => AlertDescription::IllegalParameter,
+                            };
+                            cx.common.send_fatal_alert(alert, err)
+                        })?,
+                    _ => {
+                        return Err(cx.common.send_fatal_alert(
+                            AlertDescription::IllegalParameter,
+                            PeerMisbehaved::SelectedUnofferedKxGroup,
+                        ));
+                    }
                 };
-                cx.common.kx_state = KxState::Start(skxg);
-                let kx = skxg.start()?;
                 let ours = kx.pub_key().to_vec();
                 (Ok((kx, kx_params.pub_key().to_vec())), ours)
             }
@@ -1078,7 +1092,10 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
                     cx.common
                         .send_fatal_alert(AlertDescription::IllegalParameter, err)
                 })?;
-                cx.common.kx_state.complete();
+                // A group of the server's own has no `KxState`.
+                if matches!(cx.common.kx_state, KxState::Start(_)) {
+                    cx.common.kx_state.complete();
+                }
                 secrets
             }
             Err(premaster) => {

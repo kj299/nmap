@@ -537,6 +537,12 @@ impl SignatureScheme {
             | Self::ECDSA_NISTP521_SHA512 => Some(SignatureAlgorithm::ECDSA),
             Self::ED25519 => Some(SignatureAlgorithm::ED25519),
             Self::ED448 => Some(SignatureAlgorithm::ED448),
+            // dsa_sha1, dsa_sha224, dsa_sha256, dsa_sha384, dsa_sha512
+            // (RFC 5246 §7.4.1.4.1): TLS 1.2 only, which `supported_in_tls13`
+            // keeps so.
+            Self::Unknown(0x0202 | 0x0302 | 0x0402 | 0x0502 | 0x0602) => {
+                Some(SignatureAlgorithm::DSA)
+            }
             _ => None,
         }
     }

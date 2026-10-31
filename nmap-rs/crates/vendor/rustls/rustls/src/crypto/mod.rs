@@ -219,6 +219,20 @@ pub struct CryptoProvider {
     /// [`KeyExchangeAlgorithm::RSA`]. `None` (the default) makes such a
     /// suite fail at the ClientKeyExchange.
     pub rsa_key_transport: Option<&'static dyn RsaKeyTransport>,
+
+    /// TLS 1.2 DHE with a group of the server's own, not one of RFC 7919's.
+    /// `None` (the default) refuses such a group, as upstream rustls does.
+    pub custom_dh: Option<&'static dyn CustomDhGroups>,
+}
+
+/// TLS 1.2 DHE over the group a server sent in its ServerKeyExchange, when
+/// it is none of the provider's `kx_groups`. The implementation checks the
+/// group: an error that is `Error::PeerIncompatible` is sent as a
+/// handshake_failure alert (a group too weak to accept), any other as
+/// illegal_parameter (a malformed one).
+pub trait CustomDhGroups: Send + Sync + Debug {
+    /// Starts a key exchange over the group (`p`, `g`), big-endian.
+    fn start(&self, p: &[u8], g: &[u8]) -> Result<Box<dyn ActiveKeyExchange>, Error>;
 }
 
 /// RSA key transport (RFC 5246 §7.4.7.1): encrypts the client's premaster
@@ -315,8 +329,10 @@ See the documentation of the CryptoProvider type for more information.
             secure_random,
             key_provider,
             rsa_key_transport,
+            custom_dh,
         } = self;
         rsa_key_transport.is_none()
+            && custom_dh.is_none()
             && cipher_suites.iter().all(|cs| cs.fips())
             && kx_groups.iter().all(|kx| kx.fips())
             && signature_verification_algorithms.fips()

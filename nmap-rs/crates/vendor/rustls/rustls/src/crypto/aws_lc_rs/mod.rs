@@ -48,6 +48,7 @@ pub fn default_provider() -> CryptoProvider {
         secure_random: &AwsLcRs,
         key_provider: &AwsLcRs,
         rsa_key_transport: None,
+        custom_dh: None,
     }
 }
 

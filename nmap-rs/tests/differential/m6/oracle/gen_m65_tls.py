@@ -811,26 +811,8 @@ def generate(outdir, twice, carry):
 # Where the port differs from 7.94, by fixture: (ledger id in DIVERGENCES.md,
 # the port's RESULT, the port's SERVER). None keeps the golden's field; a
 # dict for SERVER replaces those `key=value` fields of the golden's.
-_NO_LEGACY = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
-              "error=tls_post_process_client_hello:no_shared_cipher")
-# Since M6.7 step a the port offers DHE and takes the server's flight, then
-# refuses a group that is not one of RFC 7919's (rustls matches none other).
-_OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 "
-           "group=DHE sigalg=rsa_pss_rsae_sha256 alerts=rcvd:illegal_parameter(47) "
-           "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: no DSA (RSA key exchange since M6.7 step c, CBC since step d).
-    # The servers' own refusal.
-    "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
-    "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
-    # The same RSA leaf, which is what the suite order is for: the port
-    # offers the DHE-RSA suites last until step e (the server here has
-    # OpenSSL's default DH group, not an RFC 7919 one), so the server takes
-    # its first non-DHE suite, RSA key exchange with CBC.
-    "dual-tls12-clientpref": ("nse-tls-dhe-own-group", None,
-                              {"suite": "TLS_RSA_WITH_AES_256_CBC_SHA",
-                               "group": "-", "sigalg": "-"}),
     # rustls refuses a handshake message over 64 KiB; the server sent it all.
     "chain-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
     "chain13-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
@@ -856,14 +838,6 @@ PORT_PINS = {
     "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
     "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
     "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
-    # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
-    "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    # Both refuse the 1,024-bit group after the server's flight: 7.94 with
-    # alert 40 (security level 2), the port with 47 (not an RFC 7919 group).
-    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-dhe-own-group",) + _OWN_DH,
-    # The server prefers DHE with its own group: 7.94 takes it, the port
-    # fails where before step a it took ECDHE.
-    "dhe-own2048-serverpref": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
                           "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
                           "client ClientKeyExchange"),

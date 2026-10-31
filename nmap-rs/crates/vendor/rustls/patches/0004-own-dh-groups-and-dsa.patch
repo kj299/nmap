@@ -1,0 +1,129 @@
+diff --git a/rustls/src/client/tls12.rs b/rustls/src/client/tls12.rs
+index 24ad796..0fc7795 100644
+--- a/rustls/src/client/tls12.rs
++++ b/rustls/src/client/tls12.rs
+@@ -1040,14 +1040,28 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
+                             .copied()
+                     }
+                 };
+-                let Some(skxg) = maybe_skxg else {
+-                    return Err(cx.common.send_fatal_alert(
+-                        AlertDescription::IllegalParameter,
+-                        PeerMisbehaved::SelectedUnofferedKxGroup,
+-                    ));
++                let kx = match (maybe_skxg, &kx_params, st.config.provider.custom_dh) {
++                    (Some(skxg), _, _) => {
++                        cx.common.kx_state = KxState::Start(skxg);
++                        skxg.start()?
++                    }
++                    // A DH group of the server's own, through the provider.
++                    (None, ServerKeyExchangeParams::Dh(dh), Some(custom)) => custom
++                        .start(&dh.dh_p.0, &dh.dh_g.0)
++                        .map_err(|err| {
++                            let alert = match err {
++                                Error::PeerIncompatible(_) => AlertDescription::HandshakeFailure,
++                                _ => AlertDescription::IllegalParameter,
++                            };
++                            cx.common.send_fatal_alert(alert, err)
++                        })?,
++                    _ => {
++                        return Err(cx.common.send_fatal_alert(
++                            AlertDescription::IllegalParameter,
++                            PeerMisbehaved::SelectedUnofferedKxGroup,
++                        ));
++                    }
+                 };
+-                cx.common.kx_state = KxState::Start(skxg);
+-                let kx = skxg.start()?;
+                 let ours = kx.pub_key().to_vec();
+                 (Ok((kx, kx_params.pub_key().to_vec())), ours)
+             }
+@@ -1078,7 +1092,10 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
+                     cx.common
+                         .send_fatal_alert(AlertDescription::IllegalParameter, err)
+                 })?;
+-                cx.common.kx_state.complete();
++                // A group of the server's own has no `KxState`.
++                if matches!(cx.common.kx_state, KxState::Start(_)) {
++                    cx.common.kx_state.complete();
++                }
+                 secrets
+             }
+             Err(premaster) => {
+diff --git a/rustls/src/crypto/aws_lc_rs/mod.rs b/rustls/src/crypto/aws_lc_rs/mod.rs
+index 65f7ac8..4764cea 100644
+--- a/rustls/src/crypto/aws_lc_rs/mod.rs
++++ b/rustls/src/crypto/aws_lc_rs/mod.rs
+@@ -48,6 +48,7 @@ pub fn default_provider() -> CryptoProvider {
+         secure_random: &AwsLcRs,
+         key_provider: &AwsLcRs,
+         rsa_key_transport: None,
++        custom_dh: None,
+     }
+ }
+ 
+diff --git a/rustls/src/crypto/mod.rs b/rustls/src/crypto/mod.rs
+index 144bb5f..e7e8745 100644
+--- a/rustls/src/crypto/mod.rs
++++ b/rustls/src/crypto/mod.rs
+@@ -219,6 +219,20 @@ pub struct CryptoProvider {
+     /// [`KeyExchangeAlgorithm::RSA`]. `None` (the default) makes such a
+     /// suite fail at the ClientKeyExchange.
+     pub rsa_key_transport: Option<&'static dyn RsaKeyTransport>,
++
++    /// TLS 1.2 DHE with a group of the server's own, not one of RFC 7919's.
++    /// `None` (the default) refuses such a group, as upstream rustls does.
++    pub custom_dh: Option<&'static dyn CustomDhGroups>,
++}
++
++/// TLS 1.2 DHE over the group a server sent in its ServerKeyExchange, when
++/// it is none of the provider's `kx_groups`. The implementation checks the
++/// group: an error that is `Error::PeerIncompatible` is sent as a
++/// handshake_failure alert (a group too weak to accept), any other as
++/// illegal_parameter (a malformed one).
++pub trait CustomDhGroups: Send + Sync + Debug {
++    /// Starts a key exchange over the group (`p`, `g`), big-endian.
++    fn start(&self, p: &[u8], g: &[u8]) -> Result<Box<dyn ActiveKeyExchange>, Error>;
+ }
+ 
+ /// RSA key transport (RFC 5246 §7.4.7.1): encrypts the client's premaster
+@@ -315,8 +329,10 @@ See the documentation of the CryptoProvider type for more information.
+             secure_random,
+             key_provider,
+             rsa_key_transport,
++            custom_dh,
+         } = self;
+         rsa_key_transport.is_none()
++            && custom_dh.is_none()
+             && cipher_suites.iter().all(|cs| cs.fips())
+             && kx_groups.iter().all(|kx| kx.fips())
+             && signature_verification_algorithms.fips()
+diff --git a/rustls/src/crypto/ring/mod.rs b/rustls/src/crypto/ring/mod.rs
+index 6696047..43b672c 100644
+--- a/rustls/src/crypto/ring/mod.rs
++++ b/rustls/src/crypto/ring/mod.rs
+@@ -37,6 +37,7 @@ pub fn default_provider() -> CryptoProvider {
+         secure_random: &Ring,
+         key_provider: &Ring,
+         rsa_key_transport: None,
++        custom_dh: None,
+     }
+ }
+ 
+diff --git a/rustls/src/enums.rs b/rustls/src/enums.rs
+index 817c933..f6675ca 100644
+--- a/rustls/src/enums.rs
++++ b/rustls/src/enums.rs
+@@ -537,6 +537,12 @@ impl SignatureScheme {
+             | Self::ECDSA_NISTP521_SHA512 => Some(SignatureAlgorithm::ECDSA),
+             Self::ED25519 => Some(SignatureAlgorithm::ED25519),
+             Self::ED448 => Some(SignatureAlgorithm::ED448),
++            // dsa_sha1, dsa_sha224, dsa_sha256, dsa_sha384, dsa_sha512
++            // (RFC 5246 §7.4.1.4.1): TLS 1.2 only, which `supported_in_tls13`
++            // keeps so.
++            Self::Unknown(0x0202 | 0x0302 | 0x0402 | 0x0502 | 0x0602) => {
++                Some(SignatureAlgorithm::DSA)
++            }
+             _ => None,
+         }
+     }

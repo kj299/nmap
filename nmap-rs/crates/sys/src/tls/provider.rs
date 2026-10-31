@@ -1,12 +1,17 @@
 //! The provider: suites in 7.94's ClientHello order
 //! (`tests/differential/m6/m65_tls/clienthello_suites_794.txt`) restricted to
-//! what rustls can carry (the TLS 1.3 three, then ECDHE with GCM and
-//! ChaCha20); groups in 7.94's order (x25519, P-256, P-521, P-384; no x448);
-//! no FFDHE (§6). Within the ECDHE suites the RSA-signed ones go before the
-//! ECDSA-signed ones: 7.94 offers DHE-RSA before any ECDHE suite, so against
-//! a server holding both an RSA and an ECDSA certificate and honouring client
-//! preference it gets the RSA one, and so must the port (`ssl-cert` prints
-//! it; the `dual-tls12-clientpref` fixture).
+//! what it carries: the TLS 1.3 three, then ECDHE and DHE-RSA with AES-GCM,
+//! ChaCha20-Poly1305, AES-CCM, AES-CCM-8 and ARIA-GCM (M6.7 step a; RSA key
+//! exchange, CBC and DSA need rustls itself changed, steps c-e). Groups in
+//! 7.94's order: x25519, P-256, x448, P-521, P-384, then ffdhe2048 to 8192.
+//!
+//! One change to 7.94's order: each ECDHE-ECDSA suite goes after the
+//! ECDHE-RSA suite that follows it in 7.94's list, so the RSA-signed suite of
+//! each kind comes first. 7.94 offers DHE-RSA-AES128-SHA (CBC) before any
+//! AEAD suite, so against a server holding both an RSA and an ECDSA
+//! certificate and honouring client preference it gets the RSA one, and so
+//! must the port (`ssl-cert` prints it; the `dual-tls12-clientpref`
+//! fixture). Step d, which brings CBC, ends the exception.
 
 use rustls::crypto::tls12::PrfUsingHmac;
 use rustls::crypto::tls13::HkdfUsingHmac;
@@ -14,7 +19,7 @@ use rustls::crypto::{
     CryptoProvider, KeyExchangeAlgorithm, KeyProvider, SupportedKxGroup, WebPkiSupportedAlgorithms,
 };
 use rustls::sign::SigningKey;
-use rustls::{CipherSuite, Error, SignatureScheme, SupportedCipherSuite};
+use rustls::{CipherSuite, Error, NamedGroup, SignatureScheme, SupportedCipherSuite};
 use rustls::{CipherSuiteCommon, Tls12CipherSuite, Tls13CipherSuite};
 use std::sync::Arc;
 
@@ -28,9 +33,15 @@ pub(crate) static HMAC_SHA384: hmac::HmacSha384 = hmac::HmacSha384;
 static AES128_GCM_13: aead::Aead13<aes_gcm::Aes128Gcm> = aead::Aead13::new();
 static AES256_GCM_13: aead::Aead13<aes_gcm::Aes256Gcm> = aead::Aead13::new();
 static CHACHA_13: aead::Aead13<chacha20poly1305::ChaCha20Poly1305> = aead::Aead13::new();
-static AES128_GCM_12: aead::Gcm12<aes_gcm::Aes128Gcm> = aead::Gcm12::new();
-static AES256_GCM_12: aead::Gcm12<aes_gcm::Aes256Gcm> = aead::Gcm12::new();
+static AES128_GCM_12: aead::Aead12<aes_gcm::Aes128Gcm> = aead::Aead12::new();
+static AES256_GCM_12: aead::Aead12<aes_gcm::Aes256Gcm> = aead::Aead12::new();
 static CHACHA_12: aead::Chacha12 = aead::Chacha12;
+static ARIA128_GCM_12: aead::Aead12<aead::Aria128Gcm> = aead::Aead12::new();
+static ARIA256_GCM_12: aead::Aead12<aead::Aria256Gcm> = aead::Aead12::new();
+static AES128_CCM_12: aead::Aead12<aead::Aes128Ccm> = aead::Aead12::new();
+static AES256_CCM_12: aead::Aead12<aead::Aes256Ccm> = aead::Aead12::new();
+static AES128_CCM8_12: aead::Aead12<aead::Aes128Ccm8> = aead::Aead12::new();
+static AES256_CCM8_12: aead::Aead12<aead::Aes256Ccm8> = aead::Aead12::new();
 
 pub(crate) static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
@@ -85,15 +96,15 @@ static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
 ];
 
 macro_rules! tls12 {
-    ($name:ident, $suite:ident, $hash:ident, $hmac:ident, $schemes:ident, $aead:ident, $limit:expr) => {
+    ($name:ident, $hash:ident, $hmac:ident, $schemes:ident, $aead:ident, $limit:expr, $kx:ident) => {
         pub static $name: SupportedCipherSuite = SupportedCipherSuite::Tls12(&Tls12CipherSuite {
             common: CipherSuiteCommon {
-                suite: CipherSuite::$suite,
+                suite: CipherSuite::$name,
                 hash_provider: &$hash,
                 confidentiality_limit: $limit,
             },
             prf_provider: &PrfUsingHmac(&$hmac),
-            kx: KeyExchangeAlgorithm::ECDHE,
+            kx: KeyExchangeAlgorithm::$kx,
             sign: $schemes,
             aead_alg: &$aead,
         });
@@ -102,57 +113,210 @@ macro_rules! tls12 {
 
 tls12!(
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
     SHA384,
     HMAC_SHA384,
     TLS12_RSA_SCHEMES,
     AES256_GCM_12,
-    1 << 24
+    1 << 24,
+    ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     SHA384,
     HMAC_SHA384,
     TLS12_ECDSA_SCHEMES,
     AES256_GCM_12,
-    1 << 24
+    1 << 24,
+    ECDHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    AES256_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
     TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     SHA256,
     HMAC_SHA256,
     TLS12_RSA_SCHEMES,
     CHACHA_12,
-    u64::MAX
+    u64::MAX,
+    ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     SHA256,
     HMAC_SHA256,
     TLS12_ECDSA_SCHEMES,
     CHACHA_12,
-    u64::MAX
+    u64::MAX,
+    ECDHE
 );
 tls12!(
-    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    CHACHA_12,
+    u64::MAX,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES256_CCM8_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES256_CCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_256_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CCM8_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_256_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES256_CCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    ARIA256_GCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_ECDSA_SCHEMES,
+    ARIA256_GCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    SHA384,
+    HMAC_SHA384,
+    TLS12_RSA_SCHEMES,
+    ARIA256_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
     TLS12_RSA_SCHEMES,
     AES128_GCM_12,
-    1 << 24
+    1 << 24,
+    ECDHE
 );
 tls12!(
-    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
     SHA256,
     HMAC_SHA256,
     TLS12_ECDSA_SCHEMES,
     AES128_GCM_12,
-    1 << 24
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_GCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES128_CCM8_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    AES128_CCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_128_CCM_8,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CCM8_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_AES_128_CCM,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    AES128_CCM_12,
+    1 << 24,
+    DHE
+);
+tls12!(
+    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    ARIA128_GCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_ECDSA_SCHEMES,
+    ARIA128_GCM_12,
+    1 << 24,
+    ECDHE
+);
+tls12!(
+    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    SHA256,
+    HMAC_SHA256,
+    TLS12_RSA_SCHEMES,
+    ARIA128_GCM_12,
+    1 << 24,
+    DHE
 );
 
 pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
@@ -161,10 +325,27 @@ pub(crate) static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     TLS13_AES_128_GCM_SHA256,
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
     TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
+    TLS_DHE_RSA_WITH_AES_256_CCM_8,
+    TLS_DHE_RSA_WITH_AES_256_CCM,
+    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384,
+    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384,
     TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
+    TLS_DHE_RSA_WITH_AES_128_CCM_8,
+    TLS_DHE_RSA_WITH_AES_128_CCM,
+    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256,
+    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256,
 ];
 
 pub(crate) static X25519: kx::X25519 = kx::X25519;
@@ -172,8 +353,27 @@ pub(crate) static SECP256R1: kx::Secp256r1 = kx::Secp256r1;
 pub(crate) static SECP384R1: kx::Secp384r1 = kx::Secp384r1;
 pub(crate) static SECP521R1: kx::Secp521r1 = kx::Secp521r1;
 
-pub(crate) static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] =
-    &[&X25519, &SECP256R1, &SECP521R1, &SECP384R1];
+pub(crate) static X448: kx::X448 = kx::X448;
+
+macro_rules! ffdhe {
+    ($name:ident, $group:ident, $bits:expr) => {
+        pub(crate) static $name: kx::Ffdhe = kx::Ffdhe {
+            name: NamedGroup::$group,
+            group: rustls::ffdhe_groups::$name,
+            exp_bits: $bits,
+        };
+    };
+}
+ffdhe!(FFDHE2048, FFDHE2048, 225);
+ffdhe!(FFDHE3072, FFDHE3072, 275);
+ffdhe!(FFDHE4096, FFDHE4096, 325);
+ffdhe!(FFDHE6144, FFDHE6144, 375);
+ffdhe!(FFDHE8192, FFDHE8192, 400);
+
+pub(crate) static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
+    &X25519, &SECP256R1, &X448, &SECP521R1, &SECP384R1, &FFDHE2048, &FFDHE3072, &FFDHE4096,
+    &FFDHE6144, &FFDHE8192,
+];
 
 /// The provider's table for rustls's own WebPKI verifier, which this client
 /// never uses: its verifier ([`super::verifier::NmapVerifier`]) verifies

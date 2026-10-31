@@ -165,6 +165,7 @@
       "nse_tls_verifier"
     ],
     "sys::tls::provider": [
+      "nse_tls_kx_aead",
       "nse_tls_server_flight"
     ],
     "targets": [
@@ -258,7 +259,7 @@
       "fuzzed": "Installs already-verified bytes to disk. The manifest parsing, and the single-path-component invariant install() relies on, are fuzzed in core by sigstore_manifest."
     },
     "sys::tls::stream": {
-      "fuzzed": "Drives rustls over a tokio TcpStream: reads and writes bytes and hands them to rustls, parsing none itself. What a peer sends reaches rustls and the provider, which nse_tls_server_flight fuzzes with the shipped client config. Exercised end to end by nse_tls (13 engine-level tests: end of stream, teardown, close_notify, the certificate kept after a failed handshake) and the 107-row TLS fixture gate against nmap 7.94."
+      "fuzzed": "Drives rustls over a tokio TcpStream: reads and writes bytes and hands them to rustls, parsing none itself. What a peer sends reaches rustls and the provider, which nse_tls_server_flight fuzzes with the shipped client config. Exercised end to end by nse_tls (13 engine-level tests: end of stream, teardown, close_notify, the certificate kept after a failed handshake) and the 126-row TLS fixture gate against nmap 7.94."
     },
     "timing": {
       "fuzzed": "RTT and timeout arithmetic over our own measurements. No untrusted-input parse path."

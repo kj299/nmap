@@ -1063,7 +1063,7 @@ changes are in what they print:
 - `silent.py` holds each connection on its own thread.
 
 **The fixtures.** Each server listens on 127.0.0.1, on port 29300 plus its row
-number (29301–29425; no other M6 generator uses a 29xxx port). The range is
+number (29301–29426; no other M6 generator uses a 29xxx port). The range is
 below Linux's ephemeral range (32768–60999), so no outgoing connection on the
 machine can hold a fixture's port: the first range, 47301 on, lost a server to
 one on CI twice (47380, 47422). `s_server`

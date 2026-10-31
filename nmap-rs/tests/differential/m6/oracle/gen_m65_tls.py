@@ -293,6 +293,10 @@ FIXTURES = [
     ("legacy-dhe-rsa-gcm-own1024", "s_server", "rsa2048 -tls1_2 -cipher DHE-RSA-AES128-GCM-SHA256:@SECLEVEL=0 -dhparam CERTS/dh1024.pem", "host", "", ()),
     # TLS 1.3 FFDHE beyond 2048:
     ("legacy-tls13-ffdhe4096", "s_server", "rsa2048 -tls1_3 -groups ffdhe4096", "host", "", ()),
+    # M6.7 step a: a server preferring DHE, with a group of its own, over ECDHE. 7.94 takes
+    # DHE; the port, offering DHE since step a and refusing any group but RFC 7919's, fails
+    # where before step a it took ECDHE (nse-tls-dhe-own-group, until step e).
+    ("dhe-own2048-serverpref", "s_server", "rsa2048 -tls1_2 -serverpref -cipher DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256 -dhparam CERTS/dh2048.pem", "host", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -804,17 +808,18 @@ def generate(outdir, twice, carry):
 # dict for SERVER replaces those `key=value` fields of the golden's.
 _NO_LEGACY = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
               "error=tls_post_process_client_hello:no_shared_cipher")
-_NO_GROUP = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
-             "error=final_key_share:no_suitable_key_share")
+# Since M6.7 step a the port offers DHE and takes the server's flight, then
+# refuses a group that is not one of RFC 7919's (rustls matches none other).
+_OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 "
+           "group=DHE sigalg=rsa_pss_rsae_sha256 alerts=rcvd:illegal_parameter(47) "
+           "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: TLS 1.2 and 1.3, ECDHE, AEAD only. The servers' own refusal.
+    # rustls: no RSA key exchange, CBC or DSA. The servers' own refusal.
     "tls12-rsa-kx-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
     "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls12-dhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
+    "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls13-x448": ("nse-tls-modern-only",) + _NO_GROUP,
-    "tls13-ffdhe2048": ("nse-tls-modern-only",) + _NO_GROUP,
     "starttls-legacy": ("nse-tls-modern-only", "fail ERROR", "tls failed: NO_SHARED_CIPHER"),
     # The same RSA leaf, which is what the suite order is for; 7.94's DHE-RSA
     # CBC suite is not the port's to offer.
@@ -856,18 +861,14 @@ PORT_PINS = {
     "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-ecdhe-rsa-camellia128-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-rsa-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-ecdsa-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-ecdsa-aes128-ccm8": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-rsa-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-rsa-gcm-ffdhe3072": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-dhe-rsa-cbc-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-rsa-chacha-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
     "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    # Both refuse the 1,024-bit group, 7.94 after the server's flight (its own
-    # alert 40, security level 2), the port before it: no DHE suite offered.
-    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-tls13-ffdhe4096": ("nse-tls-modern-only",) + _NO_GROUP,
+    # Both refuse the 1,024-bit group after the server's flight: 7.94 with
+    # alert 40 (security level 2), the port with 47 (not an RFC 7919 group).
+    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-dhe-own-group",) + _OWN_DH,
+    # The server prefers DHE with its own group: 7.94 takes it, the port
+    # fails where before step a it took ECDHE.
+    "dhe-own2048-serverpref": ("nse-tls-dhe-own-group",) + _OWN_DH,
     "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
                           "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
                           "client ClientKeyExchange"),

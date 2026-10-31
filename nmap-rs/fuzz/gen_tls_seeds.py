@@ -119,6 +119,8 @@ FLIGHTS = {
     "tls12-ccm8": s_server("ecp256", "-tls1_2", "-cipher", "ECDHE-ECDSA-AES128-CCM8"),
     "tls12-aria": s_server("rsa2048", "-tls1_2", "-cipher", "ECDHE-ARIA128-GCM-SHA256"),
     "tls13-x448-hrr": s_server("rsa2048", "-tls1_3", "-groups", "X448"),
+    # M6.7 step c: RSA key exchange, a TLS 1.2 flight with no ServerKeyExchange.
+    "tls12-rsa-kx": s_server("rsa2048", "-tls1_2", "-cipher", "AES128-GCM-SHA256:@SECLEVEL=0"),
     "tls13-ffdhe2048-hrr": s_server("rsa2048", "-tls1_3", "-groups", "ffdhe2048"),
     "fake-ok": fake("ok"),
     "fake-badsig": fake("badsig"),

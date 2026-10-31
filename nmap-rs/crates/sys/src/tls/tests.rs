@@ -402,7 +402,7 @@ fn the_hello_offers_7_94s_suites_in_its_order() {
         .chunks(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    // TLS 1.3, then 7.94's ECDHE and DHE-RSA AEAD suites in its order, except
+    // TLS 1.3, then 7.94's ECDHE, DHE-RSA and RSA AEAD suites in its order, except
     // that each ECDHE-ECDSA suite follows the ECDHE-RSA one after it (the
     // dual-certificate rule), then the renegotiation SCSV rustls adds.
     #[rustfmt::skip]
@@ -415,6 +415,9 @@ fn the_hello_offers_7_94s_suites_in_its_order() {
         0xc02f, 0xc02b, 0x009e, // AES-128-GCM
         0xc0ae, 0xc0ac, 0xc0a2, 0xc09e, // AES-128-CCM-8, AES-128-CCM
         0xc060, 0xc05c, 0xc052, // ARIA-128-GCM
+        // RSA key exchange (step c), after every ECDHE and DHE suite:
+        0x009d, 0xc0a1, 0xc09d, 0xc051, // AES-256-GCM, -CCM-8, -CCM, ARIA-256-GCM
+        0x009c, 0xc0a0, 0xc09c, 0xc050, // the same at 128 bits
         0x00ff,
     ];
     assert_eq!(suites, want);
@@ -617,4 +620,85 @@ fn a_record_shorter_than_its_tag_is_a_decrypt_error() {
         );
         assert!(d12.decrypt(m, 0).is_err(), "TLS 1.2 GCM, {n} bytes");
     }
+}
+
+// ---- RSA key exchange (M6.7 step c) -------------------------------------------------
+
+fn rsa2048() -> rsa::RsaPublicKey {
+    let Ok(PeerKey::Rsa(n, e)) =
+        PeerKey::from_cert(&d2i_x509(fixture!("rsa2048.der")).expect("decodes"))
+    else {
+        panic!("an RSA key");
+    };
+    rsa::RsaPublicKey::new(&n, &e).expect("key")
+}
+
+/// The premaster 03 03 01..2e under the fixture's RSA-2048 key, PS all 0xab.
+/// The expected ciphertext was computed with Python's `pow`, and OpenSSL
+/// 3.0.13 decrypts it to the premaster with the fixture's private key
+/// (`openssl pkeyutl -decrypt -pkeyopt rsa_padding_mode:pkcs1`).
+#[test]
+#[cfg_attr(miri, ignore = "a 2,048-bit exponentiation is slow under Miri")]
+fn rsa_kx_encrypts_as_openssl_decrypts() {
+    let mut pm = vec![3u8, 3];
+    pm.extend(1..=46u8);
+    let c = rsa2048()
+        .encrypt_pkcs1(&pm, |b| {
+            b.fill(0xab);
+            true
+        })
+        .expect("encrypts");
+    assert_eq!(c.len(), 256);
+    assert_eq!(c, unhex("0cba7265774b94345fd2d53eeb9dc2a4423f469da588484cb0f1b8179f28e91328525ecf45b12f2cc0b398a504279a43c6fce20770d16cf458a9401b6084d37f607465978e48561a5c1136b96ff8a2f4e3a478e5685226f7f87742d9acea5c8287586c81471526334c242f646111055f971d354c57e52331af41e17eb6a7892472959049e1df8e1eb627e705b95b0c4be0bc546641bd6a314f605762b4417332fe426b295b3edb6550d90c41d7d6e2b046485a914eae7932c87fddb0ec94da00915f326e0f67461b4d74b7849c6b75cc90ce44e84cc3c4a34321569fb89cda975a96d51b97cd497e75be19d58bc643741723315419224942337a6fc9be9ca639"));
+}
+
+/// The padding source: a refusal fails the encryption, a zero is drawn
+/// again, and a source that gives only zeros fails rather than spins.
+#[test]
+#[cfg_attr(miri, ignore = "a 2,048-bit exponentiation is slow under Miri")]
+fn rsa_kx_padding_is_nonzero_and_bounded() {
+    let key = rsa2048();
+    let pm = [3u8; 48];
+    assert!(key.encrypt_pkcs1(&pm, |_| false).is_none());
+    assert!(key
+        .encrypt_pkcs1(&pm, |b| {
+            b.fill(0);
+            true
+        })
+        .is_none());
+    // Zeros at first, then nonzero bytes: the result is the all-0xab one's
+    // with a different PS, so only check it encrypts and is k bytes.
+    let mut calls = 0u32;
+    let c = key
+        .encrypt_pkcs1(&pm, |b| {
+            calls += 1;
+            b.fill(if calls == 1 { 0 } else { 0xab });
+            true
+        })
+        .expect("encrypts");
+    assert_eq!(c.len(), 256);
+    assert!(calls > 1, "the zeros were drawn again");
+    // A modulus too short for 00 02, eight PS bytes, 00 and 48 bytes.
+    let short = rsa::RsaPublicKey::new(&[0xc3; 58], &[1, 0, 1]).expect("key");
+    assert!(short
+        .encrypt_pkcs1(&pm, |b| {
+            b.fill(1);
+            true
+        })
+        .is_none());
+}
+
+/// The provider's hook: the leaf's key must be RSA (an ECDSA leaf is
+/// refused: OpenSSL's "wrong certificate type").
+#[test]
+#[cfg_attr(miri, ignore = "a 2,048-bit exponentiation is slow under Miri")]
+fn rsa_kx_needs_an_rsa_leaf() {
+    use rustls::crypto::RsaKeyTransport;
+    let pm = [3u8; 48];
+    let rsa = provider::RsaTransport
+        .encrypt_premaster(&CertificateDer::from(fixture!("rsa2048.der")), &pm);
+    assert_eq!(rsa.expect("an RSA leaf").len(), 256);
+    let ec = provider::RsaTransport
+        .encrypt_premaster(&CertificateDer::from(fixture!("ecp256.der")), &pm);
+    assert!(ec.is_err());
 }

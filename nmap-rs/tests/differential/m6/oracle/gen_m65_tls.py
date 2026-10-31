@@ -16,8 +16,8 @@ gate.
 The fixtures are step 0's (spikes/m65-tls-provider/fixtures/run.py, written
 up in docs/M6.5-ANALYSIS.md 14.1), committed in ../m65_tls/: every row of
 run.py is here, with the same name. Each fixture server is started on
-127.0.0.1, port BASE_PORT + its row number (47301-47361; nothing else in the
-M6 generators uses 47xxx), and nmap 7.94 connects to it once, through
+127.0.0.1, port BASE_PORT + its row number (29301 on; nothing else in the
+M6 generators uses 29xxx), and nmap 7.94 connects to it once, through
 m65_tls/s0probe.nse, with --datadir set to this repository (located from
 this file, as every M6 generator does):
 
@@ -89,7 +89,7 @@ fails). `skipped` rows are not run; the bad13 rows need the badserver.
 
 Environment: NMAP (default nmap), BADSERVER, M65_TLS_LOGS (a directory to
 keep each fixture's server and client logs in), M65_TLS_BASE_PORT (the port
-below the first fixture's, 47300 by default).
+below the first fixture's, 29300 by default).
 """
 
 import os
@@ -109,10 +109,13 @@ CERTS = os.path.join(FIXDIR, "certs")
 PROBE = os.path.join(FIXDIR, "s0probe.nse")
 NMAP = os.environ.get("NMAP", "nmap")
 GOLDEN_NAME = "m65_tls_golden.txt"
-# Each fixture's port is BASE_PORT + its row number. The golden records no
-# port, so M65_TLS_BASE_PORT may move the range, for a machine where some
-# long-lived outgoing connection holds one of 47301-47407 as its local port.
-BASE_PORT = int(os.environ.get("M65_TLS_BASE_PORT", "47300"))
+# Each fixture's port is BASE_PORT + its row number. The default range sits
+# below Linux's ephemeral range (32768-60999), so no outgoing connection on
+# the machine can hold one as its local port: the old 47301-47425 lost a
+# server to that on CI twice (47380, 47422), and another generator once
+# (46032). The golden records no port, so M65_TLS_BASE_PORT may move the
+# range.
+BASE_PORT = int(os.environ.get("M65_TLS_BASE_PORT", "29300"))
 
 # nsock's cipher list for an ordinary (not max-speed) pool, 7.94.
 CIPHERS_SECURE = "ALL:!aNULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH"
@@ -504,7 +507,17 @@ def start_server(name, cmd, port, out, err):
         stop(proc)
         print("%s: the server did not come up (try %d of %d)" % (name, attempt + 1, START_TRIES),
               file=sys.stderr, flush=True)
-    raise SystemExit("%s: the server did not come up: %s" % (name, " ".join(cmd)))
+    # What the server said, so a refusal of its arguments is not taken for a
+    # port held by someone else.
+    said = ""
+    for fh in (out, err):
+        try:
+            fh.flush()
+            with open(fh.name, errors="replace") as r:
+                said += r.read()[-2000:]
+        except (OSError, AttributeError):
+            pass
+    raise SystemExit("%s: the server did not come up: %s\n%s" % (name, " ".join(cmd), said))
 
 
 def server_cmd(kind, args, port, badserver):
@@ -697,7 +710,8 @@ def run_matrix(badserver, logdir):
             rows.append((name, tags, "skipped", "-"))
             continue
         if listening(port):
-            raise SystemExit("port %d (%s) is in use: free 47301-%d and re-run" % (port, name, BASE_PORT + len(FIXTURES)))
+            raise SystemExit("port %d (%s) is in use: free %d-%d and re-run"
+                             % (port, name, BASE_PORT + 1, BASE_PORT + len(FIXTURES)))
         out_p = os.path.join(logdir, name + ".server.out")
         err_p = os.path.join(logdir, name + ".server.err")
         cli_p = os.path.join(logdir, name + ".client.log")

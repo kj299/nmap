@@ -14,7 +14,7 @@
 #
 # The oracle is the installed nmap 7.94 with --datadir set to this repository,
 # connecting through m65_tls/s0probe.nse to each of the 125 fixture servers of
-# m65_tls/ on 127.0.0.1:47301-47425 (oracle/gen_m65_tls.py): s_server with each
+# m65_tls/ on 127.0.0.1:29301-29425 (oracle/gen_m65_tls.py): s_server with each
 # suite, group and signature scheme forced, STARTTLS, odd certificates and
 # chains, SNI, legacy versions, the fake TLS 1.2 server's negative fixtures, the
 # corrupt TLS 1.3 CertificateVerify, a silent server and a closed port; and

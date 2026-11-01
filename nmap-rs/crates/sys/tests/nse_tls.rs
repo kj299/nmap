@@ -176,6 +176,54 @@ fn tls_hello_server() -> (u16, Log) {
     (port, log)
 }
 
+/// A TCP server that reads one ClientHello record and notes its
+/// server_name as sent (`sni=<bytes>`, `sni=-` for none), then closes: what
+/// the client put on the wire, whatever a TLS server would make of it.
+fn hello_capture_server() -> (u16, Log) {
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = l.local_addr().expect("addr").port();
+    let log: Log = Arc::default();
+    let lg = log.clone();
+    thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let lg = lg.clone();
+            thread::spawn(move || {
+                let _ = c.set_read_timeout(Some(Duration::from_secs(10)));
+                let mut head = [0u8; 5];
+                if c.read_exact(&mut head).is_err() {
+                    return note(&lg, "no hello");
+                }
+                let mut rec = vec![0u8; usize::from(u16::from_be_bytes([head[3], head[4]]))];
+                if c.read_exact(&mut rec).is_err() {
+                    return note(&lg, "no hello");
+                }
+                note(&lg, format!("sni={}", hello_sni(&rec)));
+            });
+        }
+    });
+    (port, log)
+}
+
+/// The host name in a ClientHello handshake message, or `-`.
+fn hello_sni(hs: &[u8]) -> String {
+    let mut at = 4 + 2 + 32;
+    at += 1 + usize::from(hs[at]);
+    at += 2 + usize::from(u16::from_be_bytes([hs[at], hs[at + 1]]));
+    at += 1 + usize::from(hs[at]);
+    let end = at + 2 + usize::from(u16::from_be_bytes([hs[at], hs[at + 1]]));
+    at += 2;
+    while at + 4 <= end {
+        let t = u16::from_be_bytes([hs[at], hs[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([hs[at + 2], hs[at + 3]]));
+        if t == 0 {
+            // list length(2), type(1), name length(2), name
+            return String::from_utf8_lossy(&hs[at + 4 + 5..at + 4 + len]).into_owned();
+        }
+        at += 4 + len;
+    }
+    "-".to_owned()
+}
+
 /// A TCP server that never speaks: notes `closed` when the client ends a
 /// connection (FIN or RST).
 fn silent_server() -> (u16, Log) {
@@ -330,8 +378,10 @@ fn the_server_name_is_the_targetname_where_rustls_can_send_it() {
         .into_iter()
         .filter(|l| l.starts_with("sni="))
         .collect();
-    // A host table without a target name sends none; an IP literal is not
-    // sent (nse-tls-sni-rustls-names); a name is cut at its NUL (strdup).
+    // A host table without a target name sends none; a name is cut at its
+    // NUL (strdup). An IP literal is sent as it is (M6.7 step f), which this
+    // rustls server takes as no name; `the_bytes_sent_are_the_targetname`
+    // looks at the wire.
     assert_eq!(
         seen,
         [
@@ -366,23 +416,40 @@ fn a_name_openssl_refuses_is_a_lua_error_not_a_fatal_one() {
          return s:reconnect_ssl()"
     ));
     assert!(out.contains(nmap_core::nse::net::SNI_REFUSED), "{out}");
-    let out = run(&format!(
+    // The refused connects never reached the server; the plain connect
+    // did, and never handshook.
+    let seen = wait_for(&log, 1);
+    assert!(seen.iter().any(|l| l == "no handshake"), "{seen:?}");
+    // 255 bytes is a name OpenSSL takes, and it is sent (a rustls server
+    // would refuse its 255-byte label, as an OpenSSL server does not:
+    // gate row `sni-table-255`).
+    let (port, log) = hello_capture_server();
+    let _ = run(&format!(
         "local s = nmap.new_socket()\n\
          return tostring(s:connect({{ip='127.0.0.1', targetname=string.rep('a', 255)}}, {port}, 'ssl'))"
     ));
-    assert_eq!(out, "true");
-    // The refused connects never reached the server; the plain connect
-    // did, and never handshook. The 255-byte name is not one rustls can
-    // send (nse-tls-sni-rustls-names).
-    let seen = wait_for(&log, 3);
+    assert_eq!(wait_for(&log, 1), [format!("sni={}", "a".repeat(255))]);
+}
+
+/// M6.7 step f: the target name goes on the wire as 7.94 sends it: an IP
+/// literal, a trailing dot, a space (`nse-tls-sni-rustls-names`, retired).
+#[test]
+fn the_bytes_sent_are_the_targetname() {
+    let (port, log) = hello_capture_server();
+    let out = run(&format!(
+        "for _, t in ipairs({{ '127.0.0.1', {{ip='127.0.0.1', targetname='LocalHost.'}},\n\
+                              {{ip='127.0.0.1', targetname='bad name x'}}, {{ip='127.0.0.1'}} }}) do\n\
+           local s = nmap.new_socket()\n\
+           s:connect(t, {port}, 'ssl')\n\
+           s:close()\n\
+         end\n\
+         return 'done'"
+    ));
+    assert_eq!(out, "done");
     assert_eq!(
-        seen.iter()
-            .filter(|l| l.starts_with("sni="))
-            .collect::<Vec<_>>(),
-        ["sni=-"],
-        "{seen:?}"
+        wait_for(&log, 4),
+        ["sni=127.0.0.1", "sni=LocalHost.", "sni=bad name x", "sni=-"]
     );
-    assert!(seen.iter().any(|l| l == "no handshake"), "{seen:?}");
 }
 
 // ---- get_ssl_certificate and UDP sockets ------------------------------------------

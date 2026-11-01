@@ -684,68 +684,68 @@
     },
     "sys::tls": {
       "differential": {
-        "files": 15,
-        "sha256": "5b2b5312af5f7c3a29b57dd147071c1c9352989470408f8d77142afdeb8a28d8"
+        "files": 16,
+        "sha256": "3a5de64a4507bd91b44a2159b324d0eaa5de206b3f64ac1284d6d36526ed6592"
       },
       "fuzzed": {
-        "files": 15,
-        "sha256": "5b2b5312af5f7c3a29b57dd147071c1c9352989470408f8d77142afdeb8a28d8"
+        "files": 16,
+        "sha256": "3a5de64a4507bd91b44a2159b324d0eaa5de206b3f64ac1284d6d36526ed6592"
       },
       "ported": {
-        "files": 15,
-        "sha256": "5b2b5312af5f7c3a29b57dd147071c1c9352989470408f8d77142afdeb8a28d8"
+        "files": 16,
+        "sha256": "3a5de64a4507bd91b44a2159b324d0eaa5de206b3f64ac1284d6d36526ed6592"
       },
       "sanitized": {
-        "files": 15,
-        "sha256": "5b2b5312af5f7c3a29b57dd147071c1c9352989470408f8d77142afdeb8a28d8"
+        "files": 16,
+        "sha256": "3a5de64a4507bd91b44a2159b324d0eaa5de206b3f64ac1284d6d36526ed6592"
       },
       "unsafe_audited": {
-        "files": 15,
-        "sha256": "5b2b5312af5f7c3a29b57dd147071c1c9352989470408f8d77142afdeb8a28d8"
+        "files": 16,
+        "sha256": "3a5de64a4507bd91b44a2159b324d0eaa5de206b3f64ac1284d6d36526ed6592"
       }
     },
     "sys::tls::provider": {
       "differential": {
         "files": 1,
-        "sha256": "6702b0b998f78050c568736a64da3a44f3e700b28ffcadb12c07704269f6b31b"
+        "sha256": "3689bbc8203a43c240e40e1afe4d117ca6acfed63eba66b06cd3585f4632f7e6"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "6702b0b998f78050c568736a64da3a44f3e700b28ffcadb12c07704269f6b31b"
+        "sha256": "3689bbc8203a43c240e40e1afe4d117ca6acfed63eba66b06cd3585f4632f7e6"
       },
       "ported": {
         "files": 1,
-        "sha256": "6702b0b998f78050c568736a64da3a44f3e700b28ffcadb12c07704269f6b31b"
+        "sha256": "3689bbc8203a43c240e40e1afe4d117ca6acfed63eba66b06cd3585f4632f7e6"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "6702b0b998f78050c568736a64da3a44f3e700b28ffcadb12c07704269f6b31b"
+        "sha256": "3689bbc8203a43c240e40e1afe4d117ca6acfed63eba66b06cd3585f4632f7e6"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "6702b0b998f78050c568736a64da3a44f3e700b28ffcadb12c07704269f6b31b"
+        "sha256": "3689bbc8203a43c240e40e1afe4d117ca6acfed63eba66b06cd3585f4632f7e6"
       }
     },
     "sys::tls::stream": {
       "differential": {
         "files": 1,
-        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
+        "sha256": "ca8bba8dce045eeb1f38d9b686fe5726fc13c9e54bd347bdf022521cb6f538ca"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
+        "sha256": "ca8bba8dce045eeb1f38d9b686fe5726fc13c9e54bd347bdf022521cb6f538ca"
       },
       "ported": {
         "files": 1,
-        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
+        "sha256": "ca8bba8dce045eeb1f38d9b686fe5726fc13c9e54bd347bdf022521cb6f538ca"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
+        "sha256": "ca8bba8dce045eeb1f38d9b686fe5726fc13c9e54bd347bdf022521cb6f538ca"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "a847d35a5d899ffc40a116175728fc795e446712520ddad0b9c807ac512a0a1f"
+        "sha256": "ca8bba8dce045eeb1f38d9b686fe5726fc13c9e54bd347bdf022521cb6f538ca"
       }
     }
   }

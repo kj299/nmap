@@ -47,6 +47,14 @@ pub trait PacketSource: Send + 'static {
     /// # Errors
     /// Propagates a fatal error from the underlying capture handle.
     fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>>;
+
+    /// Whether each frame starts with a 14-byte Ethernet header (`true`) or at
+    /// the network header (`false`). A live capture knows from its datalink
+    /// (`pcap_datalink`, as nmap's `datalink_offset` does); a source that
+    /// says nothing delivers Ethernet frames.
+    fn eth_included(&self) -> bool {
+        true
+    }
 }
 
 /// One captured frame delivered to the async side.

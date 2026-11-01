@@ -609,15 +609,15 @@ pub async fn group_scan_targets<K: RawScanKind>(
 
     let span = u16::try_from(params.max_retransmissions).unwrap_or(16);
 
-    // Bucket the IPv4 targets by (interface, source, eth). Non-IPv4 / unroutable
+    // Bucket the IPv4 targets by (interface, source). Non-IPv4 / unroutable
     // targets become `Down` placeholders, keeping the output aligned with the input.
     let mut result_slot: Vec<Option<Host>> = vec![None; targets.len()];
-    let mut groups: HashMap<(String, Ipv4Addr, bool), Vec<(usize, Ipv4Addr)>> = HashMap::new();
+    let mut groups: HashMap<(String, Ipv4Addr), Vec<(usize, Ipv4Addr)>> = HashMap::new();
     for (i, &ip) in targets.iter().enumerate() {
         match ip {
             IpAddr::V4(v4) => match route_for(v4)? {
                 Some(route) => groups
-                    .entry((route.iface, route.src, route.eth_included))
+                    .entry((route.iface, route.src))
                     .or_default()
                     .push((i, v4)),
                 None => result_slot[i] = Some(Host::new(ip, HostState::Down)),
@@ -626,11 +626,14 @@ pub async fn group_scan_targets<K: RawScanKind>(
         }
     }
 
-    for ((iface, src, eth), members) in groups {
+    for ((iface, src), members) in groups {
         let (_seqmask, base_port) = random_scan_keys();
         let group_targets: Vec<Ipv4Addr> = members.iter().map(|(_, ip)| *ip).collect();
         let sender = RawIpv4Sender::new()?;
         let source = PcapSource::open(&iface, 65535, 100, Some(&kind.bpf(src, base_port, span)))?;
+        // Ethernet framing or not is the capture's datalink to say (FreeBSD's
+        // lo0 is DLT_NULL).
+        let eth = source.eth_included();
         let hosts = group_scan(
             src,
             &group_targets,

@@ -25,10 +25,6 @@ pub struct Route {
     pub iface: String,
     /// Source IPv4 address to stamp on outgoing probes.
     pub src: Ipv4Addr,
-    /// Whether a capture on `iface` includes a link-layer header (Ethernet/loopback →
-    /// `true`; a bare-IP datalink → `false`). Defaults to `true`, which is correct for
-    /// Linux `lo` and Ethernet — the datalinks this port currently parses.
-    pub eth_included: bool,
 }
 
 /// True if `target` is inside the network `net_addr/prefix`.
@@ -64,7 +60,6 @@ pub fn route_for(target: Ipv4Addr) -> io::Result<Option<Route>> {
             return Ok(Some(Route {
                 iface: i.name.clone(),
                 src,
-                eth_included: true,
             }));
         }
     }
@@ -79,7 +74,6 @@ pub fn route_for(target: Ipv4Addr) -> io::Result<Option<Route>> {
                 return Ok(Some(Route {
                     iface: i.name.clone(),
                     src: net.addr,
-                    eth_included: true,
                 }));
             }
         }
@@ -92,7 +86,6 @@ pub fn route_for(target: Ipv4Addr) -> io::Result<Option<Route>> {
                 return Ok(Some(Route {
                     iface: i.name.clone(),
                     src,
-                    eth_included: true,
                 }));
             }
         }
@@ -179,8 +172,6 @@ pub struct Route6 {
     /// Whether the target is on the same link. Gates the `NS` probe in the
     /// OS-detection battery (`Build6Params::directly_connected`).
     pub directly_connected: bool,
-    /// Whether a capture on `iface` includes a link-layer header.
-    pub eth_included: bool,
 }
 
 /// Pick a source address on `iface` matching `scope`.
@@ -217,7 +208,6 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                 next_hop: target,
                 next_hop_mac: None,
                 directly_connected: true,
-                eth_included: true,
             });
         }
     }
@@ -241,7 +231,6 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                     next_hop: target,
                     next_hop_mac: None,
                     directly_connected: true,
-                    eth_included: true,
                 });
             }
         }
@@ -273,7 +262,6 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                 next_hop,
                 next_hop_mac: gw.mac,
                 directly_connected: false,
-                eth_included: true,
             });
         }
     }

@@ -121,7 +121,35 @@ above held. One more test failed:
 |---|---|---|---|
 | `net::an_open_port_probe_ends_in_a_reset` | the listener's `accept` fails with `ECONNABORTED` | the connect probe resets (linger 0), as nmap's does. FreeBSD drops a connection reset in the accept queue; Linux keeps it, and the read gets `ECONNRESET` | either form of reset passes; a graceful close still fails |
 
-The privileged e2e tests stay `#[ignore]`d, as on Linux. They run in steps
+The fourth run passed the whole suite on FreeBSD. The M1 differential then
+matched 7.94 on 19 of its 20 cases. `sv-ssh-banner` (`-sV -Pn -n -p 18022
+127.0.0.1`) timed out in the port. The job runs as root, so with no `-sT` both
+programs SYN-scan through pcap. That is **F1 on a real host**: the port
+parsed `lo0`'s `DLT_NULL` frames as Ethernet, matched no reply, and waited.
+The Linux differential job runs unprivileged and connect-scans, so it never
+took this path. Step c fixes it (below).
+
+The privileged e2e tests stay `#[ignore]`d, as on Linux.
+
+## 4b. Step c: datalinks (capture)
+
+- **`PcapSource` reads `pcap_datalink` at open** and handles each link as
+  `datalink_offset` does:
+  - Ethernet (`DLT_EN10MB`) is kept whole for the parsers;
+  - `DLT_NULL` and `DLT_LOOP` lose their 4-byte family;
+  - `DLT_RAW` (12, 14 on OpenBSD, or 101) passes as it is;
+  - any other datalink is refused at open, not misparsed.
+- **The scans take `eth_included` from the capture**
+  (`PacketSource::eth_included`, `true` unless a source says otherwise):
+  the SYN, UDP and flag scans (`group`), the IPv4 OS scan (`osscan`) and
+  the IPv6 one (`fpengine`). `Route` and `Route6` lose their `eth_included`
+  field, which was always `true`.
+- **Tests.** The datalink table, and a SYN-ACK and an ICMP error matching
+  the same with their Ethernet header stripped. The parsers' no-Ethernet
+  path had no test before. The fuzz targets need nothing new: `match_syn`,
+  `match_udp`, `match_flag`, `parse_packet` and `osprobe_demux` already run
+  both framings. The strip itself is one bounds-checked slice.
+- Sending on `DLT_NULL` (the IPv6 L2 path on `lo0`) is step e. They run in steps
 c and d, after F1 and F7.
 
 ## 5. Engineering choices (recorded; you may veto)
@@ -192,7 +220,7 @@ and FreeBSD has none either.
 |---|---|---|
 | **a — the CI job** (in progress, §4a) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
 | **b — data and files** | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
-| **c — datalinks** | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
+| **c — datalinks** (capture done, §4b) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
 | **d — routes and MACs** | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
 | **e — IPv6** (D1 (b)) | F1 for sending: the L2 sender framing `DLT_NULL` | `-6 -sS` and `-6 -O` of `::1` and the VM's IPv6 address against the C |
 

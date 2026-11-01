@@ -349,9 +349,10 @@ pub async fn os_scan_host6(
         Locality::Remote
     };
 
-    // The capture includes the Ethernet header: we opened an L2 device.
+    // Whether the capture includes an Ethernet header is its datalink's to say.
+    let eth_included = source.eth_included();
     let (observation, results) =
-        scan_host(&mut sender, source, &params, true, locality, model).await;
+        scan_host(&mut sender, source, &params, eth_included, locality, model).await;
     Ok((observation, results, params))
 }
 

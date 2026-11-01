@@ -971,10 +971,16 @@ fn ed448_refuses_s_not_below_l_and_a_bent_r() {
     let mut sb = s.to_bytes_le();
     sb.resize(57, 0);
     bent.extend(sb);
-    assert!(verify(SignatureScheme::ED448, &key, &msg, &bent, true).is_err(), "S + L");
+    assert!(
+        verify(SignatureScheme::ED448, &key, &msg, &bent, true).is_err(),
+        "S + L"
+    );
     let mut flipped = sig.clone();
     flipped[56] ^= 0x80;
-    assert!(verify(SignatureScheme::ED448, &key, &msg, &flipped, true).is_err(), "R's sign");
+    assert!(
+        verify(SignatureScheme::ED448, &key, &msg, &flipped, true).is_err(),
+        "R's sign"
+    );
     // Ed448 under any other scheme, and another key under ed448: no.
     assert!(verify(SignatureScheme::ED25519, &key, &msg, &sig, true).is_err());
 }

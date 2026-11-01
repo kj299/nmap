@@ -229,6 +229,20 @@ the VM (§4c).
     reads the directory 7.94 reports reading (`-d`'s "Read from"); this
     tree's own `nmap-os-db` is newer than 7.94, which aborts on it.
   - `sv-ssh-banner`: the fixture (§4b).
+- **The second VM run of step d** (`8ac31adeb`) passed every gate on
+  FreeBSD 15.0, as root, against 7.94 built in the VM:
+  - all 8 privileged e2e tests, on `lo0` (`127.0.0.2` aliased);
+  - the `raw-ffi` cross-check: `getifaddrs` with `AF_LINK` agrees with
+    `netdev` on every interface's name, IPv4 addresses and MAC (F8), and
+    `link_mac`'s three tests;
+  - F5: `vtnet0`'s gateway `192.168.122.2`, with its MAC, as `route get
+    default` gives it;
+  - the raw differential, 8 of 8 scans on `192.168.122.10` and on
+    `127.0.0.1`, port by port;
+  - `-O`: 13 fingerprint tests and the distance (0 hops) agree on both;
+  - the M1 matrix, 20 of 20, `sv-ssh-banner` included.
+  
+  **Step d is complete.**
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range
@@ -303,10 +317,10 @@ and FreeBSD has none either.
 
 | step | delivers | gates |
 |---|---|---|
-| **a — the CI job** (in progress, §4a) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
-| **b — data and files** | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
-| **c — datalinks** (capture done, §4b) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
-| **d — routes and MACs** (in progress, §4c) | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
+| **a — the CI job** (done, §4a) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
+| **b — data and files** (fixes in; the gate not yet run in the VM) | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
+| **c — datalinks** (done for capture, §4b; its gates pass in the VM since step d) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
+| **d — routes and MACs** (done, §4c) | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
 | **e — IPv6** (D1 (b)) | F1 for sending: the L2 sender framing `DLT_NULL` | `-6 -sS` and `-6 -O` of `::1` and the VM's IPv6 address against the C |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7.

@@ -246,14 +246,23 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let r = tcp_connect(addr, Duration::from_secs(2)).await;
         assert_eq!(r.state, PortState::Open);
-        let (mut peer, _) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 1];
-        let got = tokio::io::AsyncReadExt::read(&mut peer, &mut buf).await;
-        assert_eq!(
-            got.map_err(|e| e.kind()),
-            Err(io::ErrorKind::ConnectionReset),
-            "a graceful close"
-        );
+        // Linux keeps a connection reset in the accept queue, and the read
+        // gets ECONNRESET. FreeBSD drops it from the queue, and `accept`
+        // itself fails with ECONNABORTED (docs/FREEBSD-ANALYSIS.md §4a).
+        // Either way it was a reset; a graceful close would be accepted
+        // and read as end of file.
+        match listener.accept().await {
+            Ok((mut peer, _)) => {
+                let mut buf = [0u8; 1];
+                let got = tokio::io::AsyncReadExt::read(&mut peer, &mut buf).await;
+                assert_eq!(
+                    got.map_err(|e| e.kind()),
+                    Err(io::ErrorKind::ConnectionReset),
+                    "a graceful close"
+                );
+            }
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted, "{e}"),
+        }
     }
 
     #[cfg_attr(miri, ignore = "miri cannot execute real network syscalls")]

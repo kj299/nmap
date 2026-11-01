@@ -112,6 +112,15 @@ port:
 | `cli data_file_tests::a_socket_is_unreadable_with_the_cs_reason` | `open(2)` on a socket gives `EOPNOTSUPP` ("Operation not supported (45)"), not Linux's `ENXIO` | 7.94's `fopen` gets the same there; the port reports what the OS says | the expectation by OS |
 | `nse_exit_differential` | no `unshare` | isolation by Linux user namespace | a VNET jail holding only `lo0` on FreeBSD; the golden regenerated on the VM from the 7.94 oracle |
 
+The third run built the oracle from `3be01efb1` (`Nmap version 7.94SVN`),
+regenerated the exit differential's golden in a VNET jail, and passed it:
+**the port's 18 exit scenarios match 7.94's on FreeBSD.** The three fixes
+above held. One more test failed:
+
+| test | on FreeBSD | cause | fix |
+|---|---|---|---|
+| `net::an_open_port_probe_ends_in_a_reset` | the listener's `accept` fails with `ECONNABORTED` | the connect probe resets (linger 0), as nmap's does. FreeBSD drops a connection reset in the accept queue; Linux keeps it, and the read gets `ECONNRESET` | either form of reset passes; a graceful close still fails |
+
 The privileged e2e tests stay `#[ignore]`d, as on Linux. They run in steps
 c and d, after F1 and F7.
 

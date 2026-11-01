@@ -15,8 +15,11 @@ use std::time::Duration;
 use nmap_core::model::{HostState, PortState};
 use nmap_core::timing::{TimingParams, TimingTemplate};
 
+use nmap_sys::capture::PacketSource;
 use nmap_sys::group::{group_scan, SynKind};
 use nmap_sys::rawio::RawIpv4Sender;
+
+mod common;
 
 fn raw_sender_or_skip() -> Option<RawIpv4Sender> {
     match RawIpv4Sender::new() {
@@ -55,8 +58,14 @@ async fn two_loopback_hosts_scanned_as_one_group() {
         base_port,
         base_port + 16
     );
-    let source =
-        nmap_sys::capture::pcap_source::PcapSource::open("lo", 65535, 100, Some(&bpf)).unwrap();
+    let source = nmap_sys::capture::pcap_source::PcapSource::open(
+        &common::loopback(),
+        65535,
+        100,
+        Some(&bpf),
+    )
+    .unwrap();
+    let eth = source.eth_included();
 
     // Scan p1 on both hosts and p2 on both hosts; only the owning host has each open.
     let targets = [Ipv4Addr::new(127, 0, 0, 1), Ipv4Addr::new(127, 0, 0, 2)];
@@ -73,7 +82,7 @@ async fn two_loopback_hosts_scanned_as_one_group() {
             TimingParams::for_template(TimingTemplate::Insane),
             0,
             base_port,
-            true,
+            eth,
             Default::default(),
         ),
     )

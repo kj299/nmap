@@ -123,13 +123,14 @@ above held. One more test failed:
 
 The fourth run passed the whole suite on FreeBSD. The M1 differential then
 matched 7.94 on 19 of its 20 cases. `sv-ssh-banner` (`-sV -Pn -n -p 18022
-127.0.0.1`) timed out in the port. The job runs as root, so with no `-sT` both
-programs SYN-scan through pcap. That is **F1 on a real host**: the port
-parsed `lo0`'s `DLT_NULL` frames as Ethernet, matched no reply, and waited.
-The Linux differential job runs unprivileged and connect-scans, so it never
-took this path. Step c fixes it (below).
+127.0.0.1`) timed out in the port (the harness gives a case 15 s). This
+document first put that down to F1, reasoning that as root both programs
+SYN-scan through pcap. **That was wrong** (§4b): with no scan type, nmap-rs
+connect-scans even as root (`ScanKind`'s default), so the case never took
+the raw path. Its cause is still open.
 
-The privileged e2e tests stay `#[ignore]`d, as on Linux.
+The privileged e2e tests stay `#[ignore]`d, as on Linux; step d runs them in
+the VM (§4c).
 
 ## 4b. Step c: datalinks (capture)
 
@@ -149,8 +150,66 @@ The privileged e2e tests stay `#[ignore]`d, as on Linux.
   path had no test before. The fuzz targets need nothing new: `match_syn`,
   `match_udp`, `match_flag`, `parse_packet` and `osprobe_demux` already run
   both framings. The strip itself is one bounds-checked slice.
-- Sending on `DLT_NULL` (the IPv6 L2 path on `lo0`) is step e. They run in steps
-c and d, after F1 and F7.
+- Sending on `DLT_NULL` (the IPv6 L2 path on `lo0`) is step e.
+- **The fifth and sixth runs.** With the capture change, `sv-ssh-banner`
+  still timed out. The sixth run kept a failed capture's error and ran the
+  port's root scans of `lo0`'s sshd for 40 s each: `-sS` finished in
+  0.01 s, port 22 open on a SYN-ACK, so the raw path on `lo0` works. Its
+  `-sV` runs connect-scanned and skipped version detection, for want of the
+  probe database the matrix loads. So the timeout is in version detection
+  with the database loaded, not in capture. Step d's run times that case for
+  both programs and traces the port's system calls (`truss`).
+
+## 4c. Step d: routes and MACs
+
+- **The host's own address goes over the loopback.** `route_dst` checks
+  the interface addresses before the routing table: a target that is one of
+  them goes out of a loopback device, with the target itself as the source
+  ("we need to use a localhost device for these"). The port went to the
+  address's own interface instead, and captured there. The kernel delivers
+  such a probe, and the reply, over the loopback, so the capture saw
+  nothing. **A raw scan of the host's own address reported every port
+  filtered, on Linux as well**: on the Linux host this step was developed
+  on, `-sS` of its own `192.0.2.2` gave `filtered` where 7.94 gives
+  `closed`. The route
+  is now a pure function of the interface table (`route::choose_route`,
+  tested on synthetic topologies), with `route_dst`'s rule second, after the
+  loopback range. `-O` takes its distance from `route::is_localhost`, a port
+  of `islocalhost` (127/8, 0.0.0.0, or an interface address), and reports 0
+  hops there as the C does; it said 1. IPv6's own-address rule waits for
+  step e, which can test it.
+- **F8.** `raw-ffi`'s `getifaddrs` walk reads MACs from `AF_LINK` on the
+  BSDs. The `sockaddr_dl` is read through its own `sa_len`, not the struct's
+  nominal `sdl_data` (12 bytes on macOS, shorter than some names plus an
+  address), and parsed by a safe function (`link_mac`: a 6-byte address
+  after `sdl_nlen` bytes of name, inside the sockaddr, non-zero), unit-tested
+  on every OS. One new `unsafe` block, documented. The cross-check against
+  `netdev` now compares each interface's IPv4 addresses with prefixes and
+  its MAC, not just the names, and fails if no interface has a MAC at all.
+- **F7.** The five privileged e2e files ask the route for the loopback's name
+  (`tests/common`) and take the framing from the capture. CI never ran them;
+  now the Linux job runs them under `sudo` (cargo's runner, so nothing is
+  rebuilt as root) and the VM job runs them, with `127.0.0.2` aliased on
+  `lo0`, which FreeBSD does not route by default.
+- **F5.** An ignored test reads the OS's default route (`/proc/net/route`,
+  or `route -n get default`) and requires `netdev` to report that gateway on
+  that interface, and an off-link target to route out of it. Both CI jobs
+  run it.
+- **Gates.** `tests/differential/raw/run_raw_differential.sh` runs `-sS`,
+  `-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM` and `-sU` with both programs as
+  root against one target, by default the host's own address
+  (`own_address.py`), and compares each port's state and reason. The OS
+  differential takes a target too, and now compares the distance line. Both
+  CI jobs run the raw differential on the own address and on 127.0.0.1, and
+  the OS differential on the own address. On the development host (Linux):
+  8 of 8 scans match on both targets, and `-O` matches (13 tests, 0 hops).
+- **Sabotage**, 7 variants, each caught: the own-address rule removed (two
+  unit tests), and again against the raw differential alone (every scan
+  diverges, each port `filtered`); `is_localhost` back to the loopback range
+  (the OS differential on the own address); the `AF_PACKET` MAC read one
+  byte late (the cross-check); `sdl_data` at offset 7, and the name length
+  ignored (`link_mac`'s tests); `is_local` ignoring the interfaces (its
+  test).
 
 ## 5. Engineering choices (recorded; you may veto)
 
@@ -221,7 +280,7 @@ and FreeBSD has none either.
 | **a — the CI job** (in progress, §4a) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
 | **b — data and files** | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
 | **c — datalinks** (capture done, §4b) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
-| **d — routes and MACs** | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
+| **d — routes and MACs** (in progress, §4c) | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
 | **e — IPv6** (D1 (b)) | F1 for sending: the L2 sender framing `DLT_NULL` | `-6 -sS` and `-6 -O` of `::1` and the VM's IPv6 address against the C |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7.

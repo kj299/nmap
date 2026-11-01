@@ -868,7 +868,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String 
         });
 
         let facts = HostFacts {
-            is_localhost: v4.is_loopback(),
+            is_localhost: nmap_sys::route::is_localhost(v4),
             has_mac_address: false,
         };
         let distance = attribute_distance(facts, observation.distance);

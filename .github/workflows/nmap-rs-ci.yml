@@ -117,7 +117,20 @@ jobs:
       # 96 tests, `--features raw-ffi` runs 97 (as of M6.4c1). That extra one —
       # netif::tests::ffi_backend_agrees_with_netdev_on_names_and_v4 — is the ONLY test
       # in the project that executes any `unsafe`, and until M7.1 no CI job ran it.
+      # (Since FreeBSD step d it is ..._on_names_v4_and_macs, and compares MACs too.)
       - run: cargo test --all --all-features
+      # The privileged e2e tests: raw send, capture and the three raw scan drivers on
+      # the loopback the route names (FreeBSD's F7). They are #[ignore]d for want of
+      # root, and until FreeBSD step d no CI job ran them. The runner makes cargo run
+      # the test binaries it already built under sudo, so nothing is rebuilt as root.
+      - run: >
+          cargo test -p nmap-sys --all-features
+          --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e
+          --test flagscan_e2e --test group_e2e -- --ignored
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+      # F5: netdev's default gateway is the one /proc/net/route gives.
+      - run: cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
 
   # Builds the workspace at the DECLARED MSRV, so `rust-version` is a promise the
   # repo keeps rather than a number nobody checks. It sat at "1.74" through five
@@ -547,6 +560,13 @@ jobs:
       - run: sudo apt-get install -y libpcap-dev
       - run: cargo build --release --features pcap
       - run: sudo -E env "PATH=$PATH" bash tests/differential/m5/run_os_differential.sh
+      # FreeBSD step d: the host's own non-loopback address, which C nmap scans over
+      # the loopback (`route_dst`) at distance 0 (`islocalhost`); before step d the
+      # port captured on eth0 and called every port filtered. Every raw IPv4 scan
+      # type, there and on 127.0.0.1, port by port against C nmap; then -O there.
+      - run: sudo -E env "PATH=$PATH" bash tests/differential/raw/run_raw_differential.sh
+      - run: sudo -E env "PATH=$PATH" TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
+      - run: sudo -E env "PATH=$PATH" TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
       # M4/M5 packet-walk differential: rebuild the C PacketParser oracle and
       # regenerate the committed corpus + golden, then require them to be unchanged.
       # The cargo test compares against the committed golden, so without this step a
@@ -880,21 +900,42 @@ jobs:
             python3 tests/differential/m6/oracle/gen_m66_exit.py /tmp
             export M66_EXIT_GOLDEN=/tmp/m66_exit_golden.txt
             cargo test --all --all-features --no-fail-fast
-            # Diagnostic, not a gate (step c): the port's root scans of lo0's
-            # sshd, each given 40 s. One still running is shown where it
-            # waits (kernel stacks and thread states), then killed.
-            for args in "-sS" "-sT -sV" "-sV"; do
-              ./target/release/nmap-rs -d $args -Pn -n -p 22 127.0.0.1 >/tmp/diag.out 2>&1 &
-              pid=$!; i=0
-              while kill -0 $pid 2>/dev/null && [ $i -lt 40 ]; do sleep 1; i=$((i+1)); done
-              if kill -0 $pid 2>/dev/null; then
-                echo "== diag [$args]: still running after 40 s"
-                procstat -kk $pid || true
-                ps -H -o pid,lwp,state,wchan,%cpu,comm -p $pid || true
-                kill -9 $pid
-              else
-                wait $pid; echo "== diag [$args]: rc=$?"
-              fi
-              tail -25 /tmp/diag.out
+            # The gates below all run; any failure fails the job at the end.
+            failed=""
+            gate() { echo "== gate: $*"; "$@" || { echo "== FAILED: $*"; failed="$failed|$*"; }; }
+            # Step d. The privileged e2e tests open the loopback the route
+            # names (F7). 127.0.0.2 answers on lo0 only as an alias, where
+            # Linux routes all of 127/8 to lo.
+            ifconfig lo0 alias 127.0.0.2/32
+            gate cargo test -p nmap-sys --all-features --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e -- --ignored
+            # F5: netdev's gateway is the one `route get default` gives.
+            gate cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
+            # Raw scans and -O of the VM's own address (over lo0, as the C
+            # routes them) and of lo0 itself, against the oracle.
+            gate bash tests/differential/raw/run_raw_differential.sh
+            gate env TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
+            gate env TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
+            gate bash tests/differential/m5/run_os_differential.sh
+            # Diagnostic, not a gate (step c): sv-ssh-banner exactly as the
+            # M1 matrix runs it (its banner fixture, the probe database
+            # loaded), timed for each tool; nmap-rs again under truss, with
+            # every syscall that follows a gap of half a second or more.
+            python3 -c '
+            import socket, time
+            s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 18022)); s.listen(64)
+            while True:
+                c, _ = s.accept(); c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n"); time.sleep(0.05); c.close()
+            ' &
+            banner=$!; sleep 1
+            for tool in "nmap --datadir $PWD/.." ./target/release/nmap-rs; do
+              t0=$(date +%s)
+              NMAP_RS_DATADIR="$PWD/.." timeout 120 $tool -d -sV -Pn -n -p 18022 127.0.0.1 >/tmp/sv.out 2>&1 && rc=0 || rc=$?
+              echo "== diag [$tool -sV]: rc=$rc after $(( $(date +%s) - t0 )) s"; tail -12 /tmp/sv.out
             done
-            NMAP="$(command -v nmap)" bash tests/differential/run_differential.sh
+            NMAP_RS_DATADIR="$PWD/.." timeout 120 truss -f -d -o /tmp/truss.out ./target/release/nmap-rs -sV -Pn -n -p 18022 127.0.0.1 >/dev/null 2>&1 || true
+            awk '{ split($2, t, " "); if ($2 + 0 - prev >= 0.5) print "gap " ($2 - prev) ": " $0; prev = $2 + 0 }' /tmp/truss.out | head -40
+            tail -30 /tmp/truss.out
+            kill $banner
+            gate env NMAP="$(command -v nmap)" bash tests/differential/run_differential.sh
+            [ -z "$failed" ] || { echo "failed gates: $failed"; exit 1; }

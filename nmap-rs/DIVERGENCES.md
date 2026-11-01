@@ -443,13 +443,19 @@ the driver-specific choices.
   encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
   `recv-validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
 
-- [x] `route-minimal-onlink-then-gateway` (`sys::route`, minimal port of
-      `nmap_route_dst`): source/interface selection tries loopback → an interface whose
-      subnet contains the target → the first up interface with a default gateway, rather
-      than a full longest-prefix routing-table lookup. Correct for the common
-      single-subnet / default-route host; a full route table read is a later
-      refinement. The capture is assumed to carry a link header (`eth_included = true`),
-      correct for Linux `lo` and Ethernet — the datalinks the parser handles.
+- [x] `route-minimal-onlink-then-gateway` (`sys::route::choose_route`, minimal port of
+      `nmap_route_dst`): source/interface selection tries loopback → one of the host's
+      own addresses → an interface whose subnet contains the target → the first up
+      interface with a default gateway, rather than a full longest-prefix routing-table
+      lookup. Correct for the common single-subnet / default-route host; a full route
+      table read is a later refinement. The own-address rule is `route_dst`'s and came
+      in FreeBSD step d: such a target goes over the loopback with itself as the
+      source, since the kernel delivers the probe and the reply there. Before it, a raw
+      scan of the host's own address captured on that address's interface, saw no
+      reply, and reported every port filtered, on Linux as on FreeBSD; `-O` also
+      reported one hop where the C, by `islocalhost`, reports 0
+      (`route::is_localhost`). IPv6's own-address rule is FreeBSD step e's. Whether the
+      capture carries a link header is its datalink's to say (FreeBSD step c).
 - [x] `route6-explicit-source-scope-selection` (`sys::route::choose_route6`, the IPv6
       counterpart of the entry above): nmap picks the source address by reading the OS
       route table, where each matched route already carries its own device address — so

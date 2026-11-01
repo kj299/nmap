@@ -736,3 +736,57 @@ fn the_own_group_seeds_meet_openssls_checks() {
         assert_eq!(super::fuzzing::own_dh(&seed[1..]), taken, "{name}");
     }
 }
+
+/// DSA's r and s are taken only below q: r + q and s + q verify in the
+/// arithmetic (mod q), and are refused as OpenSSL refuses them.
+#[test]
+#[cfg_attr(miri, ignore = "DSA arithmetic is too slow under Miri")]
+fn dsa_refuses_r_or_s_not_below_q() {
+    use num_bigint::BigUint;
+    fn int(n: &BigUint) -> Vec<u8> {
+        let mut b = n.to_bytes_be();
+        if b[0] & 0x80 != 0 {
+            b.insert(0, 0);
+        }
+        let mut out = vec![0x02, u8::try_from(b.len()).expect("short")];
+        out.extend(b);
+        out
+    }
+    fn seq(r: &BigUint, s: &BigUint) -> Vec<u8> {
+        let mut body = int(r);
+        body.extend(int(s));
+        let mut out = vec![0x30, u8::try_from(body.len()).expect("short")];
+        out.extend(body);
+        out
+    }
+    let vectors = include_str!("testdata/vectors.txt");
+    let f: Vec<&str> = vectors
+        .lines()
+        .find(|l| l.starts_with("dsa-sha256 "))
+        .expect("vector")
+        .split(' ')
+        .collect();
+    let (sch, der, msg, sig) = (scheme(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4]));
+    let key = PeerKey::from_cert(&d2i_x509(&der).expect("decodes")).expect("a TLS key");
+    let PeerKey::Dsa(k) = &key else {
+        panic!("a DSA key")
+    };
+    let q = BigUint::from_bytes_be(&k.q);
+    // The vector's (r, s): a SEQUENCE of two short INTEGERs.
+    let (rl, sl) = (
+        usize::from(sig[3]),
+        usize::from(sig[5 + usize::from(sig[3])]),
+    );
+    let r = BigUint::from_bytes_be(&sig[4..4 + rl]);
+    let s = BigUint::from_bytes_be(&sig[6 + rl..6 + rl + sl]);
+    assert_eq!(seq(&r, &s), sig, "re-encodes");
+    assert!(verify(sch, &key, &msg, &seq(&r, &s), false).is_ok());
+    assert!(
+        verify(sch, &key, &msg, &seq(&r, &(&s + &q)), false).is_err(),
+        "s + q"
+    );
+    assert!(
+        verify(sch, &key, &msg, &seq(&(&r + &q), &s), false).is_err(),
+        "r + q"
+    );
+}

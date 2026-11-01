@@ -824,10 +824,11 @@ jobs:
 
   # The FreeBSD backend (docs/FREEBSD-ANALYSIS.md; D1-D4 decided 2026-11-01):
   # the port built and tested on FreeBSD 15.0, the release the repository's C
-  # FreeBSD job builds on (build.yml), against C nmap built from THIS
-  # repository in the same VM (D2: the source every golden comes from, not
-  # FreeBSD's packaged nmap). The container this port is developed in has no
-  # KVM, so this job is where every FreeBSD runtime claim is proven.
+  # FreeBSD job builds on (build.yml), against C nmap 7.94 built in the same
+  # VM from 3be01efb1 (D2): the commit Debian's 7.94, the oracle of every
+  # golden, is built from (docs/M6.5-ANALYSIS.md §1.1). This repository's own
+  # C is 7.99SVN. The container this port is developed in has no KVM, so this
+  # job is where every FreeBSD runtime claim is proven.
   #
   # vmactions/freebsd-vm is third-party, so it is pinned by commit (v1.5.9),
   # not by a moving tag. The VM runs as root, so the raw/BPF paths are
@@ -841,6 +842,12 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      # The oracle's source, 7.94 at 3be01efb1, beside the tree; the sync
+      # below carries it into the VM.
+      - run: |
+          git fetch --no-tags --depth=1 origin 3be01efb1c11dc9c3d0b53e2a72ae340a48df764
+          git archive --prefix=oracle-794/ FETCH_HEAD | tar -x
+        working-directory: .
       - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "15.0"
@@ -857,15 +864,20 @@ jobs:
             set -e
             . "$HOME/.cargo/env"
             id; freebsd-version -ku; uname -m
-            # The oracle: C nmap from this repository (D2). pkg's pcre2 is in
-            # /usr/local, outside cc's default search path, and nmap's bundled
-            # copy does not link under FreeBSD's lld (its version script names
-            # JIT symbols the build leaves out), so it is pointed there.
-            ./configure --with-libpcre=/usr/local --without-zenmap --without-ndiff --without-ncat --without-nping >/dev/null
-            gmake -j4 >/dev/null
-            ./nmap --version | head -1
+            # The oracle: C nmap 7.94 from 3be01efb1 (D2), first on PATH, as
+            # /usr/bin/nmap is in the Linux jobs. pkg's pcre2 is in /usr/local,
+            # outside cc's default search path, and nmap's bundled copy does
+            # not link under FreeBSD's lld (its version script names JIT
+            # symbols the build leaves out), so it is pointed there.
+            (cd oracle-794 && ./configure --with-libpcre=/usr/local --without-zenmap --without-ndiff --without-ncat --without-nping >/dev/null && gmake -j4 >/dev/null)
+            export PATH="$PWD/oracle-794:$PATH"
+            nmap --version | head -1
             cd nmap-rs
             rustc --version
             cargo build --release --all-features
+            # The exit differential's golden, from the oracle on this host: in
+            # its scenarios the OS shows through (isolation, errno text).
+            python3 tests/differential/m6/oracle/gen_m66_exit.py /tmp
+            export M66_EXIT_GOLDEN=/tmp/m66_exit_golden.txt
             cargo test --all --all-features --no-fail-fast
-            NMAP="$PWD/../nmap" bash tests/differential/run_differential.sh
+            NMAP="$(command -v nmap)" bash tests/differential/run_differential.sh

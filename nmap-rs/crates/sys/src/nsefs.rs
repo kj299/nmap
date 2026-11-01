@@ -875,7 +875,11 @@ mod tests {
         assert_eq!(mk("f/."), Some(20), "mkdir f/. on a file");
         assert_eq!(mk("a/."), Some(17), "mkdir a/. on a directory");
         assert_eq!(mk("f/x"), Some(20), "mkdir beneath a file");
-        assert_eq!(mk("loop/x"), Some(40), "mkdir through a loop");
+        assert_eq!(
+            mk("loop/x"),
+            Some(i64::from(libc::ELOOP)),
+            "mkdir through a loop"
+        );
         assert_eq!(open_errno("q/.", b"w"), Some(2));
         assert!(!out.join("q").exists(), "q/. created q");
         assert_eq!(open_errno("f/.", b"w"), Some(20));
@@ -892,11 +896,14 @@ mod tests {
         assert_eq!(open_errno("new/", b"a"), Some(21), "fopen new/ a");
         assert!(!out.join("new").exists());
         assert_eq!(open_errno("a/", b"w"), Some(21), "fopen dir/ w");
-        assert_eq!(open_errno("loop/x", b"w"), Some(40));
+        assert_eq!(open_errno("loop/x", b"w"), Some(i64::from(libc::ELOOP)));
         // PATH_MAX bytes or more, though they canonicalise short.
         let long = format!("{}/{}z", out.display(), "../loot/".repeat(600));
         assert!(long.len() >= 4096);
-        assert_eq!(errno(fs.mkdir(long.as_bytes())), Some(36));
+        assert_eq!(
+            errno(fs.mkdir(long.as_bytes())),
+            Some(i64::from(libc::ENAMETOOLONG))
+        );
         assert!(!out.join("z").exists());
         let _ = std::fs::remove_dir_all(&root);
     }

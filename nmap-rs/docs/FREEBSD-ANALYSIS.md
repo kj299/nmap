@@ -65,9 +65,13 @@ does (§5).
 
 ## 4. The oracle and CI
 
-**Oracle:** C nmap built from this repository in the same FreeBSD VM, with
-the recipe `build.yml` already uses (`./configure && gmake`). That is the
-same source every golden comes from, so the gates carry over unchanged:
+**Oracle:** C nmap 7.94 built in the same FreeBSD VM from commit
+`3be01efb1`, with the recipe `build.yml` already uses (`./configure &&
+gmake`). That is the source of Debian's `7.94+git20230807.3be01efb1`, the
+oracle every golden comes from (docs/M6.5-ANALYSIS.md §1.1), so the gates
+carry over unchanged. (*Corrected in step a:* this section first said "built
+from this repository". This repository's own C is 7.99SVN, not the goldens'
+source.)
 - the M1 connect-scan differential;
 - the NSE corpus;
 - the CLI scenarios;
@@ -89,6 +93,27 @@ same source every golden comes from, so the gates carry over unchanged:
 software emulation would take hours per run. Every runtime claim in §2 is
 proven first in the VM job. Because the work waits for #152 to merge (your
 choice), the first FreeBSD run happens on the PR that follows it.
+
+## 4a. Step a: what the first runs found
+
+The job's first run booted FreeBSD 15.0-RELEASE-p13 as root, then failed
+building the oracle: configure missed pkg's pcre2 under `/usr/local` and fell
+back to the bundled copy, which FreeBSD's lld refuses to link. The fix is to
+pass `--with-libpcre=/usr/local`.
+
+The second run built the port with every feature and ran the whole suite on
+FreeBSD for the first time. Everything passed (rustls's 147 included) except
+three tests. Each is a FreeBSD difference in a test's expectation, not in the
+port:
+
+| test | on FreeBSD | cause | fix |
+|---|---|---|---|
+| `nsefs::paths_resolve_as_the_system_calls_resolve_them` | `ELOOP` is 62, not 40; `ENAMETOOLONG` 63, not 36 | the test wrote Linux's numbers; the port passes the OS's errno through | `libc::ELOOP`, `libc::ENAMETOOLONG` |
+| `cli data_file_tests::a_socket_is_unreadable_with_the_cs_reason` | `open(2)` on a socket gives `EOPNOTSUPP` ("Operation not supported (45)"), not Linux's `ENXIO` | 7.94's `fopen` gets the same there; the port reports what the OS says | the expectation by OS |
+| `nse_exit_differential` | no `unshare` | isolation by Linux user namespace | a VNET jail holding only `lo0` on FreeBSD; the golden regenerated on the VM from the 7.94 oracle |
+
+The privileged e2e tests stay `#[ignore]`d, as on Linux. They run in steps
+c and d, after F1 and F7.
 
 ## 5. Engineering choices (recorded; you may veto)
 
@@ -125,8 +150,10 @@ and FreeBSD has none either.
 
 ### D2 — Oracle
 
-- (a) **C nmap built from this repository in the VM.** It is the same 7.94
-  source as every golden.
+- (a) **C nmap built in the VM from the goldens' source.** That is commit
+  `3be01efb1` (Debian's 7.94 is built from it), not this repository's head,
+  which is 7.99SVN. *Corrected in step a; the premise as first written said
+  "this repository".*
 - (b) FreeBSD's packaged nmap: a different version, so a differential
   against it would mix version drift with port bugs.
 
@@ -154,7 +181,7 @@ and FreeBSD has none either.
 
 | step | delivers | gates |
 |---|---|---|
-| **a — the CI job** (in progress) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
+| **a — the CI job** (in progress, §4a) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
 | **b — data and files** | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
 | **c — datalinks** | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
 | **d — routes and MACs** | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |

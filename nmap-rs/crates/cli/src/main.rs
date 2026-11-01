@@ -2019,7 +2019,9 @@ mod data_file_tests {
     }
 
     /// A socket opens with `ENXIO`, as `fopen` gets it in 7.94: `Unable to open
-    /// F.  ... : No such device or address (6)`.
+    /// F.  ... : No such device or address (6)`. FreeBSD's `open(2)` refuses
+    /// a socket with `EOPNOTSUPP` instead, which 7.94's `fopen` gets there too
+    /// (docs/FREEBSD-ANALYSIS.md).
     #[cfg(unix)]
     #[test]
     fn a_socket_is_unreadable_with_the_cs_reason() {
@@ -2027,7 +2029,12 @@ mod data_file_tests {
         let s = d.join("nmap-mac-prefixes");
         let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
         let (_, error) = unreadable(data_file_at("nmap-mac-prefixes", &s));
-        assert_eq!(error, "No such device or address (6)");
+        let want = if cfg!(target_os = "freebsd") {
+            "Operation not supported (45)"
+        } else {
+            "No such device or address (6)"
+        };
+        assert_eq!(error, want);
         let _ = std::fs::remove_dir_all(&d);
     }
 

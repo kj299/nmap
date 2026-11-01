@@ -242,6 +242,32 @@ pub struct ClientConfig {
     #[cfg(feature = "tls12")]
     pub require_ems: bool,
 
+    /// Whether a TLS 1.2 server must support secure renegotiation
+    /// ([RFC 5746]): its ServerHello must carry an empty
+    /// `renegotiation_info` extension, or the handshake is refused, as
+    /// OpenSSL refuses it without `SSL_OP_LEGACY_SERVER_CONNECT`.
+    ///
+    /// The default is `false`.
+    ///
+    /// [RFC 5746]: https://datatracker.ietf.org/doc/html/rfc5746
+    #[cfg(feature = "tls12")]
+    pub require_secure_renegotiation: bool,
+
+    /// Bytes to send as the `server_name` extension's host name, as they
+    /// are: an IP literal, a trailing dot, any byte OpenSSL would send.
+    /// `None`, the default, sends the connection's `ServerName` when it is
+    /// a DNS name. Ignored when SNI is disabled or ECH is in use.
+    pub raw_server_name: Option<Vec<u8>>,
+
+    /// Whether the ClientHello takes OpenSSL 3.0's shape: its extensions in
+    /// OpenSSL's fixed order rather than a seeded one, no `status_request`,
+    /// the three EC point formats, an empty `session_ticket` when TLS 1.2
+    /// is offered, and the `padding` extension (RFC 7685) that brings a
+    /// hello of 256 to 511 bytes to 512, as `SSL_OP_TLSEXT_PADDING` does.
+    ///
+    /// The default is `false`.
+    pub openssl_client_hello: bool,
+
     /// Provides the current system time
     pub time_provider: Arc<dyn TimeProvider>,
 

@@ -74,6 +74,8 @@ aria = { version = "0.1", default-features = false }
 # HMAC-SHA1 CBC suites (already in the tree through nmap-core).
 camellia = { version = "0.1", default-features = false }
 sha1 = { version = "0.10", default-features = false }
+# SHAKE256, for Ed448 verification (M6.7 step f: 7.94 offers ed448).
+sha3 = { version = "0.10", default-features = false }
 # Constant-time comparison of record MACs and padding (already in the tree
 # through rustls).
 subtle = { version = "2.5", default-features = false }

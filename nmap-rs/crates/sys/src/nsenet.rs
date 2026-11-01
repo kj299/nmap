@@ -38,7 +38,7 @@ use nmap_core::nse::net::{
 };
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::tls::{server_name, PeerLeaf, ReadEvent, TlsStream};
+use crate::tls::{PeerLeaf, ReadEvent, TlsStream};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -277,12 +277,7 @@ async fn handshake(
     if let Ok(mut m) = socks.lock() {
         m.insert(sock, Sock::TlsDown(tcp.clone(), leaf.clone()));
     }
-    let peer = match tcp.peer_addr() {
-        Ok(a) => a.ip(),
-        Err(_) => return Completion::Failed(NetStatus::Error),
-    };
-    let name = server_name(sni.as_deref(), peer);
-    match TlsStream::handshake(tcp, name, leaf).await {
+    match TlsStream::handshake(tcp, sni.as_deref(), leaf).await {
         Ok(stream) => {
             if let Ok(mut m) = socks.lock() {
                 m.insert(

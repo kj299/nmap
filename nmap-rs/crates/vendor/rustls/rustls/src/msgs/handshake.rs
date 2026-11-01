@@ -212,6 +212,9 @@ impl UnknownExtension {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SupportedEcPointFormats {
     pub(crate) uncompressed: bool,
+    /// Also the two compressed formats, after it, as OpenSSL offers them
+    /// (`ClientConfig::openssl_client_hello`). Never set by `read`.
+    pub(crate) compressed: bool,
 }
 
 impl Codec<'_> for SupportedEcPointFormats {
@@ -220,6 +223,10 @@ impl Codec<'_> for SupportedEcPointFormats {
 
         if self.uncompressed {
             ECPointFormat::Uncompressed.encode(inner.buf);
+        }
+        if self.compressed {
+            ECPointFormat::ANSIX962CompressedPrime.encode(inner.buf);
+            ECPointFormat::ANSIX962CompressedChar2.encode(inner.buf);
         }
     }
 
@@ -232,13 +239,19 @@ impl Codec<'_> for SupportedEcPointFormats {
             }
         }
 
-        Ok(Self { uncompressed })
+        Ok(Self {
+            uncompressed,
+            compressed: false,
+        })
     }
 }
 
 impl Default for SupportedEcPointFormats {
     fn default() -> Self {
-        Self { uncompressed: true }
+        Self {
+            uncompressed: true,
+            compressed: false,
+        }
     }
 }
 
@@ -273,6 +286,10 @@ pub(crate) enum ServerNamePayload<'a> {
 
     /// A successfully decoded, but syntactically-invalid value.
     Invalid,
+
+    /// Bytes a client sends as its host name as they are, whatever their
+    /// syntax ([`crate::ClientConfig::raw_server_name`]). Never decoded.
+    Raw(Vec<u8>),
 }
 
 impl ServerNamePayload<'_> {
@@ -281,6 +298,7 @@ impl ServerNamePayload<'_> {
             Self::SingleDnsName(d) => ServerNamePayload::SingleDnsName(d.to_owned()),
             Self::IpAddress => ServerNamePayload::IpAddress,
             Self::Invalid => ServerNamePayload::Invalid,
+            Self::Raw(b) => ServerNamePayload::Raw(b),
         }
     }
 
@@ -301,12 +319,13 @@ impl<'a> Codec<'a> for ServerNamePayload<'a> {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let server_name_list = LengthPrefixedBuffer::new(Self::SIZE_LEN, bytes);
 
-        let ServerNamePayload::SingleDnsName(dns_name) = self else {
-            return;
+        let name_slice = match self {
+            ServerNamePayload::SingleDnsName(dns_name) => dns_name.as_ref().as_bytes(),
+            ServerNamePayload::Raw(raw) => raw.as_slice(),
+            _ => return,
         };
 
         ServerNameType::HostName.encode(server_name_list.buf);
-        let name_slice = dns_name.as_ref().as_bytes();
         (name_slice.len() as u16).encode(server_name_list.buf);
         server_name_list
             .buf
@@ -965,6 +984,10 @@ extension_struct! {
         ExtensionType::RenegotiationInfo =>
             pub(crate) renegotiation_info: Option<PayloadU8>,
 
+        /// Padding (RFC7685), as OpenSSL sends it
+        ExtensionType::Padding =>
+            pub(crate) padding: Option<Payload<'a>>,
+
         /// QUIC transport parameters (RFC9001 prior to draft 33)
         ExtensionType::TransportParametersDraft =>
             pub(crate) transport_parameters_draft: Option<Payload<'a>>,
@@ -1010,6 +1033,7 @@ impl ClientExtensions<'_> {
             transport_parameters,
             ticket_request,
             renegotiation_info,
+            padding,
             transport_parameters_draft,
             encrypted_client_hello,
             encrypted_client_hello_outer,
@@ -1039,6 +1063,7 @@ impl ClientExtensions<'_> {
             transport_parameters: transport_parameters.map(|x| x.into_owned()),
             ticket_request,
             renegotiation_info,
+            padding: padding.map(|x| x.into_owned()),
             transport_parameters_draft: transport_parameters_draft.map(|x| x.into_owned()),
             encrypted_client_hello,
             encrypted_client_hello_outer,
@@ -1733,9 +1758,10 @@ impl TlsListElement for CertificateDer<'_> {
 /// TLS has a 16MB size limit on any handshake message,
 /// plus a 16MB limit on any given certificate.
 ///
-/// We contract that to 64KB to limit the amount of memory allocation
-/// that is directly controllable by the peer.
-pub(crate) const CERTIFICATE_MAX_SIZE_LIMIT: usize = 0x1_0000;
+/// We contract that to OpenSSL's certificate list limit, 102,400 bytes
+/// (`SSL_MAX_CERT_LIST_DEFAULT`, which nmap 7.94 reaches), to limit the
+/// amount of memory allocation that is directly controllable by the peer.
+pub(crate) const CERTIFICATE_MAX_SIZE_LIMIT: usize = 102_400;
 
 extension_struct! {
     pub(crate) struct CertificateExtensions<'a> {

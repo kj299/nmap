@@ -50,10 +50,14 @@ pub(crate) enum PeerKey {
     Ed25519([u8; 32]),
     /// DSA (M6.7 step e): its domain parameters and `y`. TLS 1.2 only.
     Dsa(DsaKey),
-    /// A type OpenSSL's TLS takes as a certificate key (`ssl_cert_lookup_by_pkey`:
-    /// RSA-PSS, DSA, EC on another curve, Ed448) but that no scheme the
-    /// client offers can verify: every signature fails, as the C fails it
-    /// further on (no shared signature algorithm, or a curve it did not offer).
+    /// An RSA-PSS key (`id-RSASSA-PSS`): modulus and exponent. Only the
+    /// `rsa_pss_pss_*` schemes (M6.7 step f).
+    RsaPss(Vec<u8>, Vec<u8>),
+    /// Ed448 (M6.7 step f).
+    Ed448([u8; 57]),
+    /// A type OpenSSL's TLS takes as a certificate key (`ssl_cert_lookup_by_pkey`)
+    /// but that no scheme the client offers can verify (EC on a curve it
+    /// does not offer): every signature fails, as the C fails it further on.
     Unverifiable,
 }
 
@@ -98,7 +102,14 @@ impl PeerKey {
                 Some(d) => PeerKey::Dsa(d.clone()),
                 None => return Err(KeyRefused::Missing),
             },
-            Kind::RsaPss | Kind::Ed448 => PeerKey::Unverifiable,
+            Kind::RsaPss => match &key.rsa {
+                Some((n, e)) => PeerKey::RsaPss(n.clone(), e.clone()),
+                None => return Err(KeyRefused::Missing),
+            },
+            Kind::Ed448 => match <[u8; 57]>::try_from(cert.spki.bits.as_slice()) {
+                Ok(k) => PeerKey::Ed448(k),
+                Err(_) => return Err(KeyRefused::Missing),
+            },
             Kind::Dh | Kind::Dhx | Kind::X25519 | Kind::X448 | Kind::Sm2 => {
                 return Err(KeyRefused::Type)
             }
@@ -121,9 +132,22 @@ fn hash_for(scheme: SignatureScheme) -> Option<HashAlg> {
         SignatureScheme::ECDSA_NISTP521_SHA512
         | SignatureScheme::RSA_PKCS1_SHA512
         | SignatureScheme::RSA_PSS_SHA512 => HashAlg::Sha512,
+        // rsa_pkcs1_sha224, ecdsa_sha224 (TLS 1.2 only).
+        SignatureScheme::Unknown(RSA_PKCS1_SHA224 | ECDSA_SHA224) => HashAlg::Sha224,
+        // rsa_pss_pss_sha256, _sha384, _sha512.
+        SignatureScheme::Unknown(RSA_PSS_PSS_SHA256) => HashAlg::Sha256,
+        SignatureScheme::Unknown(RSA_PSS_PSS_SHA384) => HashAlg::Sha384,
+        SignatureScheme::Unknown(RSA_PSS_PSS_SHA512) => HashAlg::Sha512,
         _ => return None,
     })
 }
+
+/// The code points 7.94 offers that rustls names no constant for.
+pub(crate) const RSA_PKCS1_SHA224: u16 = 0x0301;
+pub(crate) const ECDSA_SHA224: u16 = 0x0303;
+pub(crate) const RSA_PSS_PSS_SHA256: u16 = 0x0809;
+pub(crate) const RSA_PSS_PSS_SHA384: u16 = 0x080a;
+pub(crate) const RSA_PSS_PSS_SHA512: u16 = 0x080b;
 
 /// Why a handshake signature was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,10 +171,13 @@ pub(crate) fn verify(
 ) -> Result<(), SigError> {
     use SigError::{Bad, Mismatch};
     match (scheme, key) {
+        // SHA-224 is TLS 1.2's only (RFC 8446 §4.2.3).
+        (SignatureScheme::Unknown(RSA_PKCS1_SHA224 | ECDSA_SHA224), _) if tls13 => Err(Mismatch),
         (
             SignatureScheme::RSA_PKCS1_SHA256
             | SignatureScheme::RSA_PKCS1_SHA384
-            | SignatureScheme::RSA_PKCS1_SHA512,
+            | SignatureScheme::RSA_PKCS1_SHA512
+            | SignatureScheme::Unknown(RSA_PKCS1_SHA224),
             PeerKey::Rsa(n, e),
         ) => {
             let k = RsaPublicKey::new(n, e).ok_or(Bad)?;
@@ -168,6 +195,24 @@ pub(crate) fn verify(
             k.verify_pss(hash_for(scheme).ok_or(Mismatch)?, msg, sig)
                 .then_some(())
                 .ok_or(Bad)
+        }
+        // An RSA-PSS key signs with rsa_pss_pss_* only, and an rsaEncryption
+        // key with rsa_pss_rsae_* only (RFC 8446 §4.2.3). The salt is the
+        // digest's length, as TLS requires.
+        (
+            SignatureScheme::Unknown(RSA_PSS_PSS_SHA256 | RSA_PSS_PSS_SHA384 | RSA_PSS_PSS_SHA512),
+            PeerKey::RsaPss(n, e),
+        ) => {
+            let k = RsaPublicKey::new(n, e).ok_or(Bad)?;
+            k.verify_pss(hash_for(scheme).ok_or(Mismatch)?, msg, sig)
+                .then_some(())
+                .ok_or(Bad)
+        }
+        (SignatureScheme::ED448, PeerKey::Ed448(k)) => {
+            super::ed448::verify(k, msg, sig).then_some(()).ok_or(Bad)
+        }
+        (SignatureScheme::Unknown(ECDSA_SHA224), PeerKey::Ec(curve, point)) => {
+            ecdsa(*curve, HashAlg::Sha224, point, msg, sig).map_err(|()| Bad)
         }
         (
             SignatureScheme::ECDSA_NISTP256_SHA256

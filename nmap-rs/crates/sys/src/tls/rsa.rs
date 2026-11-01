@@ -30,6 +30,9 @@ pub(crate) struct RsaPublicKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HashAlg {
+    /// TLS 1.2's `rsa_pkcs1_sha224` and `ecdsa_sha224`, which 7.94 offers
+    /// (M6.7 step f).
+    Sha224,
     Sha256,
     Sha384,
     Sha512,
@@ -38,6 +41,11 @@ pub(crate) enum HashAlg {
 impl HashAlg {
     pub(crate) fn digest(self, parts: &[&[u8]]) -> Vec<u8> {
         match self {
+            HashAlg::Sha224 => {
+                let mut h = sha2::Sha224::new();
+                parts.iter().for_each(|p| h.update(p));
+                h.finalize().to_vec()
+            }
             HashAlg::Sha256 => {
                 let mut h = sha2::Sha256::new();
                 parts.iter().for_each(|p| h.update(p));
@@ -58,6 +66,7 @@ impl HashAlg {
 
     fn len(self) -> usize {
         match self {
+            HashAlg::Sha224 => 28,
             HashAlg::Sha256 => 32,
             HashAlg::Sha384 => 48,
             HashAlg::Sha512 => 64,
@@ -67,6 +76,10 @@ impl HashAlg {
     /// The DigestInfo prefix of RFC 8017 §9.2, note 1.
     fn digest_info_prefix(self) -> &'static [u8] {
         match self {
+            HashAlg::Sha224 => &[
+                0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x04, 0x05, 0x00, 0x04, 0x1c,
+            ],
             HashAlg::Sha256 => &[
                 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
                 0x01, 0x05, 0x00, 0x04, 0x20,

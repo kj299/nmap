@@ -36,4 +36,13 @@ sig() { openssl dgst "-$1" -sign "$CERTS/$2.key" "${@:3}" "$W/msg" | od -An -v -
   done
   echo "dsa-sha256-nonminimal DSA_SHA256 $(der dsa2048) $MSG $(sig sha256 dsa2048 | python3 -c 'import sys; h=bytes.fromhex(sys.stdin.read().strip()); r=h[2:]; l=r[1]; b=bytes([0x02,l+1,0])+r[2:2+l]+r[2+l:]; print((bytes([0x30,len(b)])+b).hex())') bad"
   echo "ed25519 ED25519 $(der ed25519) $MSG $(openssl pkeyutl -sign -inkey "$CERTS/ed25519.key" -rawin -in "$W/msg" | od -An -v -tx1 | tr -d ' \n') ok"
+  # M6.7 step f: the rest of 7.94's signature_algorithms.
+  echo "ed448 ED448 $(der ed448) $MSG $(openssl pkeyutl -sign -inkey "$CERTS/ed448.key" -rawin -in "$W/msg" | od -An -v -tx1 | tr -d ' \n') ok"
+  for h in sha256 sha384 sha512; do
+    echo "rsa-pss-pss-$h RSA_PSS_PSS_${h^^} $(der rsapss2048) $MSG $(sig $h rsapss2048 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest) ok"
+  done
+  echo "rsa-pss-pss-as-rsae RSA_PSS_SHA256 $(der rsapss2048) $MSG $(sig sha256 rsapss2048 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest) bad"
+  echo "rsa-rsae-as-pss-pss RSA_PSS_PSS_SHA256 $(der rsa2048) $MSG $(sig sha256 rsa2048 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest) bad"
+  echo "rsa-pkcs1-sha224 RSA_PKCS1_SHA224 $(der rsa2048) $MSG $(sig sha224 rsa2048) tls12"
+  echo "ecdsa-p256-sha224 ECDSA_SHA224 $(der ecp256) $MSG $(sig sha224 ecp256) tls12"
 } > "$HERE/vectors.txt"

@@ -117,6 +117,26 @@ mod server_hello {
                 .encrypt_then_mac_ack
                 .is_some()
                 && suite.aead_alg.mac_key_len() > 0;
+            // Secure renegotiation (RFC 5746 §3.4), when required: the
+            // extension present, and empty in an initial handshake.
+            if config.require_secure_renegotiation {
+                match &server_hello.renegotiation_info {
+                    None => {
+                        return Err(cx.common.send_fatal_alert(
+                            AlertDescription::HandshakeFailure,
+                            PeerIncompatible::SecureRenegotiationRequired,
+                        ));
+                    }
+                    Some(info) if !info.0.is_empty() => {
+                        return Err(cx.common.send_fatal_alert(
+                            AlertDescription::IllegalParameter,
+                            PeerMisbehaved::RenegotiationInfoNotEmpty,
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+
             if config.require_ems && !using_ems {
                 return Err({
                     cx.common.send_fatal_alert(

@@ -747,7 +747,7 @@ pub(super) fn process_client_hello<'m>(
     // [RFC6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
     let sni = match &client_hello.server_name {
         Some(ServerNamePayload::SingleDnsName(dns_name)) => Some(dns_name.to_lowercase_owned()),
-        Some(ServerNamePayload::IpAddress) => None,
+        Some(ServerNamePayload::IpAddress | ServerNamePayload::Raw(_)) => None,
         Some(ServerNamePayload::Invalid) => {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,

@@ -6,20 +6,25 @@
 //! What it is, against 7.94's client (`nsock/src/nsock_ssl.c` at
 //! `3be01efb1`, OpenSSL 3.0.13):
 //!
-//! - TLS 1.3 and 1.2, ECDHE with AES-GCM and ChaCha20-Poly1305, on X25519,
-//!   P-256, P-521 and P-384, in 7.94's order ([`provider`]); no TLS 1.0 or
-//!   1.1, CBC, RSA key exchange, DHE or FFDHE (`nse-tls-modern-only`);
+//! - TLS 1.3 and 1.2 with 7.94's suites, groups and signature algorithms,
+//!   in its order ([`provider`]): since M6.7, RSA key exchange, CBC, DHE in
+//!   RFC 7919's groups and the server's own, DSA, X448 and FFDHE, over the
+//!   vendored rustls and its patch series (`crates/vendor/rustls`); no TLS
+//!   1.0 or 1.1, which 7.94's OpenSSL refuses too;
 //! - no chain verification, but every check OpenSSL makes regardless of the
-//!   verify mode ([`verifier`]);
+//!   verify mode ([`verifier`]), with OpenSSL's alerts;
+//! - OpenSSL's limits: 102,400-byte handshake messages, secure
+//!   renegotiation required of a TLS 1.2 server;
 //! - no session reuse (7.94's NSE never sets a session);
-//! - the server name nmap's rules give it, where rustls can send it
-//!   ([`stream::server_name`]).
+//! - the server name nmap's rules give it, sent as it is
+//!   ([`connection_config`]).
 //!
 //! The randomness is `core`'s one seam (E3). Nothing here is `unsafe`.
 #![forbid(unsafe_code)]
 
 mod aead;
 mod cbc;
+mod ed448;
 mod hash;
 mod hmac;
 mod kx;
@@ -34,7 +39,7 @@ mod x448;
 
 use std::sync::{Arc, OnceLock};
 
-pub use stream::{server_name, ReadEvent, TlsStream};
+pub use stream::{ReadEvent, TlsStream};
 pub use verifier::PeerLeaf;
 
 /// The client configuration every connection shares, but for its verifier
@@ -53,16 +58,25 @@ pub fn client_config() -> Arc<rustls::ClientConfig> {
                     .with_no_client_auth();
             cfg.resumption = rustls::client::Resumption::disabled();
             cfg.enable_sni = true;
+            // 7.94 refuses a TLS 1.2 server without secure renegotiation
+            // (RFC 5746; OpenSSL without SSL_OP_LEGACY_SERVER_CONNECT).
+            cfg.require_secure_renegotiation = true;
+            // 7.94's ClientHello: OpenSSL's extension order and contents,
+            // and its padding (patch 0008).
+            cfg.openssl_client_hello = true;
             Arc::new(cfg)
         })
         .clone()
 }
 
 /// One connection's configuration: [`client_config`] with a verifier that
-/// records the leaf it accepts in `leaf`.
+/// records the leaf it accepts in `leaf`, and `sni` sent as the server name
+/// as it is, as 7.94 sends it (an IP literal, a trailing dot, any bytes;
+/// patch 0007). With no `sni`, no server name is sent.
 #[must_use]
-pub fn connection_config(leaf: &PeerLeaf) -> Arc<rustls::ClientConfig> {
+pub fn connection_config(leaf: &PeerLeaf, sni: Option<&[u8]>) -> Arc<rustls::ClientConfig> {
     let mut cfg = (*client_config()).clone();
+    cfg.raw_server_name = sni.map(<[u8]>::to_vec);
     cfg.dangerous()
         .set_certificate_verifier(Arc::new(verifier::NmapVerifier { leaf: leaf.clone() }));
     Arc::new(cfg)

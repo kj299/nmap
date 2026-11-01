@@ -213,13 +213,15 @@ impl DeframerVecBuffer {
     /// Resize the internal `buf` if necessary for reading more bytes.
     fn prepare_read(&mut self, is_joining_hs: bool) -> Result<(), &'static str> {
         /// TLS allows for handshake messages of up to 16MB.  We
-        /// restrict that to 64KB to limit potential for denial-of-
-        /// service.
-        const MAX_HANDSHAKE_SIZE: u32 = 0xffff;
+        /// restrict that to OpenSSL's certificate list limit, 102,400
+        /// bytes, to limit potential for denial-of-service. The buffer
+        /// also holds the records' headers and the rest of the flight:
+        /// room for two more records.
+        const MAX_HANDSHAKE_SIZE: u32 = 102_400 + 2 * MAX_WIRE_SIZE as u32;
 
         const READ_SIZE: usize = 4096;
 
-        // We allow a maximum of 64k of buffered data for handshake messages only. Enforce this
+        // We allow a maximum of MAX_HANDSHAKE_SIZE of buffered data for handshake messages only. Enforce this
         // by varying the maximum allowed buffer size here based on whether a prefix of a
         // handshake payload is currently being buffered. Given that the first read of such a
         // payload will only ever be 4k bytes, the next time we come around here we allow a

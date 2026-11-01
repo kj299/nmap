@@ -67,11 +67,11 @@ pub(crate) struct NmapVerifier {
 fn entry(der: &[u8]) -> Result<nmap_core::nse::openssl::x509::Cert, Error> {
     match d2i_x509_len(der) {
         None => Err(Error::InvalidCertificate(CertificateError::BadEncoding)),
-        // OpenSSL's alert here is 50, which no certificate error of rustls
-        // sends (`nse-tls-alert-numbers`); 42, as for an undecodable one.
-        Some((_, used)) if used != der.len() => {
-            Err(Error::InvalidCertificate(CertificateError::BadEncoding))
-        }
+        // OpenSSL's "cert length mismatch": alert 50 (decode_error), which
+        // patch 0006 sends for a verifier's `InvalidMessage`.
+        Some((_, used)) if used != der.len() => Err(Error::InvalidMessage(
+            rustls::InvalidMessage::TrailingData("certificate entry"),
+        )),
         Some((c, _)) => Ok(c),
     }
 }
@@ -88,12 +88,10 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Sent as alert 46; OpenSSL's 80 for a missing key is out of the
-/// verifier's reach (`nse-tls-alert-numbers`).
+/// Sent as alert 80 (internal_error), as OpenSSL sends it for a leaf with
+/// no usable key: patch 0006 sends 80 for a verifier's `Error::Other`.
 fn refused(reason: &'static str) -> Error {
-    Error::InvalidCertificate(CertificateError::Other(rustls::OtherError(
-        std::sync::Arc::new(Refusal(reason)),
-    )))
+    Error::Other(rustls::OtherError(std::sync::Arc::new(Refusal(reason))))
 }
 
 fn key_of(cert: &nmap_core::nse::openssl::x509::Cert) -> Result<PeerKey, Error> {

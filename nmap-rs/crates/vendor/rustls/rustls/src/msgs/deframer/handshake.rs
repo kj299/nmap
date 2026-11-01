@@ -373,7 +373,9 @@ const HANDSHAKE_HEADER_LEN: usize = 1 + 3;
 /// TLS allows for handshake messages of up to 16MB.  We
 /// restrict that to 64KB to limit potential for denial-of-
 /// service.
-const MAX_HANDSHAKE_SIZE: usize = 0xffff;
+/// OpenSSL's certificate list limit (`SSL_MAX_CERT_LIST_DEFAULT`), which
+/// nmap 7.94 reaches; upstream's is 0xffff.
+const MAX_HANDSHAKE_SIZE: usize = 102_400;
 
 #[cfg(test)]
 mod tests {
@@ -443,7 +445,8 @@ mod tests {
     #[test]
     fn coalesce_rejects_excess_size_message() {
         const X: u8 = 0xff;
-        let mut input = vec![0x21, 0x01, 0x00, X, 0x00, 0xab, X];
+        // Once coalesced, the size is 0x019100: over the 102,400-byte limit.
+        let mut input = vec![0x21, 0x01, 0x91, X, 0x00, 0xab, X];
         let mut hs = HandshakeDeframer::default();
 
         // split header over multiple messages, which motivates doing

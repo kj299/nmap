@@ -180,6 +180,10 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             enable_early_data: false,
             #[cfg(feature = "tls12")]
             require_ems,
+            #[cfg(feature = "tls12")]
+            require_secure_renegotiation: false,
+            raw_server_name: None,
+            openssl_client_hello: false,
             time_provider: self.time_provider,
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),

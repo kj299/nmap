@@ -81,11 +81,10 @@ fn any_decodable_certificate_with_a_tls_key_is_accepted() {
 fn a_certificate_entry_must_be_exactly_a_certificate() {
     let mut trailing = cert("rsa2048.der");
     trailing.push(0);
+    // OpenSSL's "cert length mismatch": decode_error (50), not
+    // bad_certificate (42).
     let e = verify_leaf(&trailing, &[]).expect_err("a trailing byte is refused");
-    assert_eq!(
-        e,
-        rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-    );
+    assert!(matches!(e, rustls::Error::InvalidMessage(_)), "{e}");
     // ... in an intermediate too.
     assert!(verify_leaf(&cert("rsa2048.der"), &[trailing.clone()]).is_err());
     // An undecodable entry.
@@ -103,6 +102,8 @@ fn keys_tls_refuses_are_refused() {
         assert!(matches!(e, rustls::Error::PeerMisbehaved(_)), "{c}: {e}");
     }
     let e = verify_leaf(&cert("unknownoid.der"), &[]).expect_err("no key");
+    // internal_error (80), as 7.94 sends it.
+    assert!(matches!(e, rustls::Error::Other(_)), "{e}");
     assert!(
         e.to_string()
             .contains("unable to find public key parameters"),
@@ -199,6 +200,12 @@ fn scheme(name: &str) -> SignatureScheme {
         "DSA_SHA256" => SignatureScheme::Unknown(0x0402),
         "DSA_SHA384" => SignatureScheme::Unknown(0x0502),
         "DSA_SHA512" => SignatureScheme::Unknown(0x0602),
+        "ED448" => SignatureScheme::ED448,
+        "RSA_PSS_PSS_SHA256" => SignatureScheme::Unknown(0x0809),
+        "RSA_PSS_PSS_SHA384" => SignatureScheme::Unknown(0x080a),
+        "RSA_PSS_PSS_SHA512" => SignatureScheme::Unknown(0x080b),
+        "RSA_PKCS1_SHA224" => SignatureScheme::Unknown(0x0301),
+        "ECDSA_SHA224" => SignatureScheme::Unknown(0x0303),
         other => panic!("scheme {other}"),
     }
 }
@@ -246,7 +253,7 @@ fn signatures_verify_as_openssl_verifies_them() {
         }
         n += 1;
     }
-    assert_eq!(n, 20);
+    assert_eq!(n, 28);
 }
 
 #[test]
@@ -331,18 +338,47 @@ fn a_key_is_held_to_its_family() {
 // ---- the server name -------------------------------------------------------------
 
 #[test]
-fn the_server_name_is_sent_where_rustls_can_send_it() {
-    let peer = std::net::IpAddr::from([127, 0, 0, 1]);
-    let dns = |n: &[u8]| matches!(server_name(Some(n), peer), ServerName::DnsName(_));
-    assert!(dns(b"localhost"));
-    assert!(dns(b"example.test"));
-    // nse-tls-sni-rustls-names: an IP literal, a name rustls refuses, bytes
-    // that are not UTF-8: no server_name at all.
-    assert!(!dns(b"127.0.0.1"));
-    assert!(!dns(b"::1"));
-    assert!(!dns(b"bad name x"));
-    assert!(!dns(b"\xff\xfe"));
-    assert!(matches!(server_name(None, peer), ServerName::IpAddress(_)));
+fn the_server_name_is_sent_as_it_is() {
+    // 7.94 sends the target's name as OpenSSL takes it: an IP literal, a
+    // name rustls's DnsName refuses, a trailing dot (patch 0007).
+    let leaf = PeerLeaf::default();
+    for n in [
+        &b"localhost"[..],
+        b"127.0.0.1",
+        b"::1",
+        b"bad name x",
+        b"LocalHost.",
+        b"\xff\xfe",
+    ] {
+        assert_eq!(
+            connection_config(&leaf, Some(n)).raw_server_name.as_deref(),
+            Some(n)
+        );
+    }
+    // A host table with no name: none.
+    assert_eq!(connection_config(&leaf, None).raw_server_name, None);
+    // On the wire: server_name first, as OpenSSL puts it, carrying the bytes
+    // as they are.
+    for n in [&b"127.0.0.1"[..], b"LocalHost.", b"bad name x"] {
+        let mut c = ClientConnection::new(
+            connection_config(&leaf, Some(n)),
+            ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into()),
+        )
+        .expect("connection");
+        let mut hello = Vec::new();
+        c.write_tls(&mut hello).expect("hello");
+        let ext = extensions(&hello);
+        assert_eq!(ext[0].0, 0x0000, "server_name first");
+        // list length(2), type host_name(1), name length(2), name
+        assert_eq!(
+            ext[0].1[0..3],
+            [0, u8::try_from(n.len() + 3).expect("short"), 0]
+        );
+        assert_eq!(&ext[0].1[5..], n);
+    }
+    assert!(extensions(&hello_without_sni())
+        .iter()
+        .all(|(t, _)| *t != 0));
 }
 
 // ---- the ClientHello ---------------------------------------------------------------
@@ -445,6 +481,123 @@ fn the_hello_offers_7_94s_groups_in_its_order() {
         usize::from(u16::from_be_bytes([shares[0], shares[1]])),
         4 + 32
     );
+}
+
+/// A connection's ClientHello record with no server name, as the capture
+/// was taken (the probe connects to an address).
+fn hello_without_sni() -> Vec<u8> {
+    let leaf = PeerLeaf::default();
+    let mut c = ClientConnection::new(
+        connection_config(&leaf, None),
+        ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into()),
+    )
+    .expect("connection");
+    let mut out = Vec::new();
+    c.write_tls(&mut out).expect("hello");
+    out
+}
+
+/// The extensions of a ClientHello record, in order: type and body.
+fn extensions(hello: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let mut at = 44 + usize::from(hello[43]);
+    at += 2 + usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    at += 1 + usize::from(hello[at]);
+    let end = at + 2 + usize::from(u16::from_be_bytes([hello[at], hello[at + 1]]));
+    at += 2;
+    let mut out = Vec::new();
+    while at + 4 <= end {
+        let t = u16::from_be_bytes([hello[at], hello[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([hello[at + 2], hello[at + 3]]));
+        out.push((t, hello[at + 4..at + 4 + len].to_vec()));
+        at += 4 + len;
+    }
+    out
+}
+
+/// M6.7 step f: the ClientHello is 7.94's in every field that does not
+/// change between runs (`spikes/m67-legacy-tls/clienthello_794.txt`): its
+/// length, the session id's, the extensions in OpenSSL's order with
+/// OpenSSL's contents, the signature algorithms, and the padding that brings
+/// it to 512 bytes.
+#[test]
+#[cfg_attr(miri, ignore = "X25519 key generation is slow under Miri")]
+fn the_hello_is_7_94s() {
+    let captured = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spikes/m67-legacy-tls/clienthello_794.txt"
+    ));
+    let field = |k: &str| {
+        captured
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(k))
+            .unwrap_or_else(|| panic!("{k}"))
+            .trim()
+            .to_owned()
+    };
+    let hello = hello_without_sni();
+    // record(5), then the handshake message.
+    assert_eq!((hello.len() - 5).to_string(), field("handshake_length "));
+    assert_eq!(hello[43].to_string(), field("session_id_length "));
+    let ext = extensions(&hello);
+    let names: Vec<&str> = ext
+        .iter()
+        .map(|(t, _)| match t {
+            0x000b => "ec_point_formats",
+            0x000a => "supported_groups",
+            0x0023 => "session_ticket",
+            0x0016 => "encrypt_then_mac",
+            0x0017 => "extended_master_secret",
+            0x000d => "signature_algorithms",
+            0x002b => "supported_versions",
+            0x002d => "psk_key_exchange_modes",
+            0x0033 => "key_share",
+            0x0015 => "padding",
+            _ => "other",
+        })
+        .collect();
+    let want: Vec<&str> = captured
+        .lines()
+        .filter_map(|l| l.strip_prefix("ext "))
+        .collect();
+    assert_eq!(names, want);
+    let body = |t: u16| &ext.iter().find(|(x, _)| *x == t).expect("present").1;
+    assert_eq!(hex(&body(0x000b)[1..]), field("formats "));
+    assert!(body(0x0023).is_empty() && body(0x0016).is_empty() && body(0x0017).is_empty());
+    assert_eq!(body(0x0015).len().to_string(), field("length "));
+    assert!(body(0x0015).iter().all(|&b| b == 0));
+    // The signature algorithms by name, in order.
+    let sig_name = |c: u16| match c {
+        0x0403 => "ecdsa_secp256r1_sha256",
+        0x0503 => "ecdsa_secp384r1_sha384",
+        0x0603 => "ecdsa_secp521r1_sha512",
+        0x0807 => "ed25519",
+        0x0808 => "ed448",
+        0x0809 => "rsa_pss_pss_sha256",
+        0x080a => "rsa_pss_pss_sha384",
+        0x080b => "rsa_pss_pss_sha512",
+        0x0804 => "rsa_pss_rsae_sha256",
+        0x0805 => "rsa_pss_rsae_sha384",
+        0x0806 => "rsa_pss_rsae_sha512",
+        0x0401 => "rsa_pkcs1_sha256",
+        0x0501 => "rsa_pkcs1_sha384",
+        0x0601 => "rsa_pkcs1_sha512",
+        0x0303 => "ecdsa_sha224",
+        0x0301 => "rsa_pkcs1_sha224",
+        0x0302 => "dsa_sha224",
+        0x0402 => "dsa_sha256",
+        0x0502 => "dsa_sha384",
+        0x0602 => "dsa_sha512",
+        _ => "other",
+    };
+    let sigs: Vec<&str> = body(0x000d)[2..]
+        .chunks(2)
+        .map(|c| sig_name(u16::from_be_bytes([c[0], c[1]])))
+        .collect();
+    assert_eq!(sigs.join(" "), field("sigalgs "));
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// The body of extension `typ` in a ClientHello handshake message.
@@ -789,4 +942,39 @@ fn dsa_refuses_r_or_s_not_below_q() {
         verify(sch, &key, &msg, &seq(&(&r + &q), &s), false).is_err(),
         "r + q"
     );
+}
+
+/// Ed448's S is taken only below the group's order L, as OpenSSL takes it:
+/// S + L verifies in the arithmetic ([S + L]B = [S]B) and is refused. A
+/// flipped sign bit in R, and an R that is not canonical, are refused too.
+#[test]
+#[cfg_attr(miri, ignore = "Ed448 arithmetic is too slow under Miri")]
+fn ed448_refuses_s_not_below_l_and_a_bent_r() {
+    use num_bigint::BigUint;
+    let vectors = include_str!("testdata/vectors.txt");
+    let f: Vec<&str> = vectors
+        .lines()
+        .find(|l| l.starts_with("ed448 "))
+        .expect("vector")
+        .split(' ')
+        .collect();
+    let (der, msg, sig) = (unhex(f[2]), unhex(f[3]), unhex(f[4]));
+    let key = PeerKey::from_cert(&d2i_x509(&der).expect("decodes")).expect("a TLS key");
+    assert!(verify(SignatureScheme::ED448, &key, &msg, &sig, true).is_ok());
+    let l = BigUint::parse_bytes(
+        b"3fffffffffffffffffffffffffffffffffffffffffffffffffffffff7cca23e9c44edb49aed63690216cc2728dc58f552378c292ab5844f3",
+        16,
+    )
+    .expect("L");
+    let s = BigUint::from_bytes_le(&sig[57..]) + &l;
+    let mut bent = sig[..57].to_vec();
+    let mut sb = s.to_bytes_le();
+    sb.resize(57, 0);
+    bent.extend(sb);
+    assert!(verify(SignatureScheme::ED448, &key, &msg, &bent, true).is_err(), "S + L");
+    let mut flipped = sig.clone();
+    flipped[56] ^= 0x80;
+    assert!(verify(SignatureScheme::ED448, &key, &msg, &flipped, true).is_err(), "R's sign");
+    // Ed448 under any other scheme, and another key under ed448: no.
+    assert!(verify(SignatureScheme::ED25519, &key, &msg, &sig, true).is_err());
 }

@@ -628,6 +628,11 @@ impl CommonState {
             match &err {
                 Error::InvalidCertificate(e) => e.clone().into(),
                 Error::PeerMisbehaved(_) => AlertDescription::IllegalParameter,
+                // A certificate the verifier could not decode as sent, and
+                // one it could not use at all: OpenSSL's decode_error and
+                // internal_error, which no certificate error maps to.
+                Error::InvalidMessage(_) => AlertDescription::DecodeError,
+                Error::Other(_) => AlertDescription::InternalError,
                 _ => AlertDescription::HandshakeFailure,
             },
             err,

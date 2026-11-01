@@ -706,29 +706,30 @@ fn cannot_read_message_hash_from_network() {
 
 #[test]
 fn cannot_decode_huge_certificate() {
-    let mut buf = [0u8; 65 * 1024];
-    // exactly 64KB decodes fine
+    // The limit is OpenSSL's certificate list limit, 102,400 (0x19000).
+    let mut buf = [0u8; 101 * 1024];
+    // exactly 102,400 bytes decodes fine
     buf[0] = 0x0b;
     buf[1] = 0x01;
-    buf[2] = 0x00;
+    buf[2] = 0x90;
     buf[3] = 0x03;
     buf[4] = 0x01;
-    buf[5] = 0x00;
+    buf[5] = 0x90;
     buf[6] = 0x00;
-    buf[7] = 0x00;
-    buf[8] = 0xff;
+    buf[7] = 0x01;
+    buf[8] = 0x8f;
     buf[9] = 0xfd;
-    HandshakeMessagePayload::read_bytes(&buf[..0x10000 + 7]).unwrap();
+    HandshakeMessagePayload::read_bytes(&buf[..0x19000 + 7]).unwrap();
 
-    // however 64KB + 1 byte does not
+    // however 102,400 + 1 bytes does not
     buf[1] = 0x01;
-    buf[2] = 0x00;
+    buf[2] = 0x90;
     buf[3] = 0x04;
     buf[4] = 0x01;
-    buf[5] = 0x00;
+    buf[5] = 0x90;
     buf[6] = 0x01;
     assert_eq!(
-        HandshakeMessagePayload::read_bytes(&buf[..0x10001 + 7]).unwrap_err(),
+        HandshakeMessagePayload::read_bytes(&buf[..0x19001 + 7]).unwrap_err(),
         InvalidMessage::CertificatePayloadTooLarge
     );
 }

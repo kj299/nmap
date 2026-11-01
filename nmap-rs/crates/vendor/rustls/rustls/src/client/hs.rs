@@ -27,6 +27,7 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, ExtensionType};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
@@ -183,6 +184,38 @@ impl ClientHelloInput {
     }
 }
 
+/// The order OpenSSL 3.0 sends a ClientHello's extensions in (`ext_defs`,
+/// ssl/statem/extensions.c), for `ClientConfig::openssl_client_hello`;
+/// padding is last but for the PSK.
+const OPENSSL_EXTENSION_ORDER: &[ExtensionType] = &[
+    ExtensionType::RenegotiationInfo,
+    ExtensionType::ServerName,
+    ExtensionType::MaxFragmentLength,
+    ExtensionType::SRP,
+    ExtensionType::ECPointFormats,
+    ExtensionType::EllipticCurves,
+    ExtensionType::SessionTicket,
+    ExtensionType::StatusRequest,
+    ExtensionType::NextProtocolNegotiation,
+    ExtensionType::ALProtocolNegotiation,
+    ExtensionType::UseSRTP,
+    ExtensionType::EncryptThenMac,
+    ExtensionType::SCT,
+    ExtensionType::ExtendedMasterSecret,
+    ExtensionType::SignatureAlgorithmsCert,
+    ExtensionType::PostHandshakeAuth,
+    ExtensionType::ClientCertificateType,
+    ExtensionType::ServerCertificateType,
+    ExtensionType::SignatureAlgorithms,
+    ExtensionType::SupportedVersions,
+    ExtensionType::PSKKeyExchangeModes,
+    ExtensionType::KeyShare,
+    ExtensionType::Cookie,
+    ExtensionType::EarlyData,
+    ExtensionType::CertificateAuthorities,
+    ExtensionType::Padding,
+];
+
 /// Emits the initial ClientHello or a ClientHello in response to
 /// a HelloRetryRequest.
 ///
@@ -242,7 +275,9 @@ fn emit_client_hello_for_retry(
                     SupportedCipherSuite::Tls13(_) => false,
                 }))
         .then_some(()),
-        certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
+        // OpenSSL sends status_request only when asked to.
+        certificate_status_request: (!config.openssl_client_hello)
+            .then(CertificateStatusRequest::build_ocsp),
         protocols: extra_exts.protocols.clone(),
         ..Default::default()
     });
@@ -277,7 +312,10 @@ fn emit_client_hello_for_retry(
         .iter()
         .any(|skxg| skxg.name().key_exchange_algorithm() == KeyExchangeAlgorithm::ECDHE)
     {
-        exts.ec_point_formats = Some(SupportedEcPointFormats::default());
+        exts.ec_point_formats = Some(SupportedEcPointFormats {
+            compressed: config.openssl_client_hello,
+            ..SupportedEcPointFormats::default()
+        });
     }
 
     exts.server_name = match (ech_state.as_ref(), config.enable_sni) {
@@ -289,8 +327,12 @@ fn emit_client_hello_for_retry(
 
         // If we have no ECH state, and SNI is enabled, try to use the input server_name
         // for the SNI domain name.
-        (None, true) => match &input.server_name {
-            ServerName::DnsName(dns_name) => Some(ServerNamePayload::from(dns_name)),
+        // Bytes the application sends as they are come first.
+        (None, true) => match (&config.raw_server_name, &input.server_name) {
+            (Some(raw), _) if (1..=0xffff).contains(&raw.len()) => {
+                Some(ServerNamePayload::Raw(raw.clone()))
+            }
+            (_, ServerName::DnsName(dns_name)) => Some(ServerNamePayload::from(dns_name)),
             _ => None,
         },
 
@@ -390,6 +432,37 @@ fn emit_client_hello_for_retry(
     // but they also need to keep the same order as the previous ClientHello
     exts.order_seed = input.hello.extension_order_seed;
 
+    if config.openssl_client_hello {
+        // OpenSSL asks for a ticket, with an empty extension, whenever it
+        // offers TLS 1.2 and has none to offer.
+        if supported_versions.tls12 && exts.session_ticket.is_none() {
+            exts.session_ticket = Some(ClientSessionTicket::Request);
+        }
+        // OpenSSL's order (`ext_defs`, ssl/statem/extensions.c), ECH and
+        // PSK left last as rustls puts them; an extension OpenSSL does not
+        // send goes before padding.
+        let rank = |ext: &ExtensionType| {
+            OPENSSL_EXTENSION_ORDER
+                .iter()
+                .position(|o| o == ext)
+                .unwrap_or(OPENSSL_EXTENSION_ORDER.len() - 1)
+        };
+        let mut order: Vec<ExtensionType> = exts
+            .collect_used()
+            .into_iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    ExtensionType::PreSharedKey
+                        | ExtensionType::EncryptedClientHello
+                        | ExtensionType::EncryptedClientHelloOuterExtensions
+                )
+            })
+            .collect();
+        order.sort_by_key(rank);
+        exts.contiguous_extensions = order;
+    }
+
     let mut cipher_suites: Vec<_> = config
         .provider
         .cipher_suites
@@ -452,6 +525,28 @@ fn emit_client_hello_for_retry(
             }
         }
         _ => {}
+    }
+
+    // OpenSSL's padding (RFC 7685, `SSL_OP_TLSEXT_PADDING`): a hello of
+    // 256 to 511 bytes, its handshake header included, is padded to 512 with
+    // an extension of at least one byte. rustls offers no PSK here (none is
+    // padded for), so the extension is last but for ECH.
+    if config.openssl_client_hello
+        && chp_payload
+            .preshared_key_offer
+            .is_none()
+    {
+        let len = chp_payload.get_encoding().len() + 4;
+        if len > 0xff && len < 0x200 {
+            let pad = match 0x200 - len {
+                n if n > 4 => n - 4,
+                _ => 1,
+            };
+            chp_payload.padding = Some(Payload::new(vec![0u8; pad]));
+            chp_payload
+                .contiguous_extensions
+                .push(ExtensionType::Padding);
+        }
     }
 
     // Note what extensions we sent.

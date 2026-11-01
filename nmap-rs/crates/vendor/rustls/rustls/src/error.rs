@@ -313,6 +313,7 @@ pub enum PeerMisbehaved {
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
     UnsolicitedEchExtension,
+    RenegotiationInfoNotEmpty,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -353,6 +354,7 @@ pub enum PeerIncompatible {
     UncompressedEcPointsRequired,
     UnsolicitedCertificateTypeExtension,
     ServerRejectedEncryptedClientHello(Option<Vec<EchConfigPayload>>),
+    SecureRenegotiationRequired,
 }
 
 impl From<PeerIncompatible> for Error {

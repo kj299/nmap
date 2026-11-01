@@ -5749,6 +5749,9 @@ so they are opened now and land, pinned per fixture, with step f1
       nmap never renegotiates, so nothing downstream depends on it; a vendor
       patch of one check would restore the refusal if fidelity is wanted.
       Pinned by step f1: `fake-noreneg`.
+      - **Retired by M6.7 step f** (docs/M6.7-ANALYSIS.md §20): patch 0005's
+        `require_secure_renegotiation`, set by the port, refuses the server
+        with alert 40 as 7.94 does (`fake-noreneg`, `cert-fake-noreneg`).
 - [x] `nse-tls-handshake-64k` — rustls refuses a handshake message over
       65,535 bytes (`msgs/deframer/handshake.rs:376`); OpenSSL's certificate
       list limit is 102,400 (`SSL_MAX_CERT_LIST_DEFAULT`). A chain between
@@ -5756,6 +5759,10 @@ so they are opened now and land, pinned per fixture, with step f1
       certificates, 70,606 bytes, TLS 1.2 and 1.3); over 100 KiB both fail
       (`chain-over100k`). Pinned by step f1: `chain-over64k`,
       `chain13-over64k`.
+      - **Retired by M6.7 step f** (§20): patch 0005 takes handshake
+        messages and certificate lists up to OpenSSL's 102,400 bytes
+        (`chain-over64k`, `chain13-over64k`, `cert-chain-over64k`; over
+        100 KiB both still fail, `chain-over100k`).
 - [x] `nse-tls-sni-rustls-names` — for a string target that is an IP
       literal, 7.94 sends it as SNI (`sni-ip-string`: `server_name` =
       `127.0.0.1` in the server's trace); rustls sends none for an IP
@@ -5766,6 +5773,9 @@ so they are opened now and land, pinned per fixture, with step f1
       label over 63 bytes (`sni-table-255`), and drops a trailing dot
       (`sni-table-upper-dot`: `LocalHost.` is sent as `LocalHost`). Pinned
       by step f1: those three, `sni-ip-string` and `udp-ssl`.
+      - **Retired by M6.7 step f** (§20): patch 0007's `raw_server_name`
+        sends the target's name as it is (`sni-ip-string`, `udp-ssl`,
+        `sni-table-badname`, `sni-table-255`, `sni-table-upper-dot`).
 - [x] `nse-tls-alert-numbers` — where both sides reject, the alert the port
       sends can differ from 7.94's: a certificate entry with trailing bytes
       50 vs 42 (`fake-trail`), an undecodable certificate 42 vs 40
@@ -5783,6 +5793,11 @@ so they are opened now and land, pinned per fixture, with step f1
       certificate with no usable key, 80 and 46 (no error a rustls verifier
       returns is sent as 50 or 80). Pinned: `fake-trail`,
       `fake-unknownoid-cert`.
+      - **Retired by M6.7 step f** (§20): patch 0006 sends a verifier's
+        `InvalidMessage` as 50 and its `Other` as 80, and the verifier
+        returns those for a certificate entry with trailing bytes and a
+        leaf with no usable key (`fake-trail`, `fake-unknownoid-cert`, and
+        their `cert-` rows).
 - [x] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
       (M6.5 step b, `core::nse::openssl::bn`) refuse an operand over a per-operation cap with the
       memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,

@@ -1,0 +1,199 @@
+diff --git a/rustls/src/client/builder.rs b/rustls/src/client/builder.rs
+index ccecde2..43c57af 100644
+--- a/rustls/src/client/builder.rs
++++ b/rustls/src/client/builder.rs
+@@ -180,6 +180,8 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
+             enable_early_data: false,
+             #[cfg(feature = "tls12")]
+             require_ems,
++            #[cfg(feature = "tls12")]
++            require_secure_renegotiation: false,
+             time_provider: self.time_provider,
+             cert_compressors: compress::default_cert_compressors().to_vec(),
+             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
+diff --git a/rustls/src/client/client_conn.rs b/rustls/src/client/client_conn.rs
+index 77b2dc5..a2c251f 100644
+--- a/rustls/src/client/client_conn.rs
++++ b/rustls/src/client/client_conn.rs
+@@ -242,6 +242,17 @@ pub struct ClientConfig {
+     #[cfg(feature = "tls12")]
+     pub require_ems: bool,
+ 
++    /// Whether a TLS 1.2 server must support secure renegotiation
++    /// ([RFC 5746]): its ServerHello must carry an empty
++    /// `renegotiation_info` extension, or the handshake is refused, as
++    /// OpenSSL refuses it without `SSL_OP_LEGACY_SERVER_CONNECT`.
++    ///
++    /// The default is `false`.
++    ///
++    /// [RFC 5746]: https://datatracker.ietf.org/doc/html/rfc5746
++    #[cfg(feature = "tls12")]
++    pub require_secure_renegotiation: bool,
++
+     /// Provides the current system time
+     pub time_provider: Arc<dyn TimeProvider>,
+ 
+diff --git a/rustls/src/client/tls12.rs b/rustls/src/client/tls12.rs
+index 0fc7795..dc8367b 100644
+--- a/rustls/src/client/tls12.rs
++++ b/rustls/src/client/tls12.rs
+@@ -117,6 +117,26 @@ mod server_hello {
+                 .encrypt_then_mac_ack
+                 .is_some()
+                 && suite.aead_alg.mac_key_len() > 0;
++            // Secure renegotiation (RFC 5746 §3.4), when required: the
++            // extension present, and empty in an initial handshake.
++            if config.require_secure_renegotiation {
++                match &server_hello.renegotiation_info {
++                    None => {
++                        return Err(cx.common.send_fatal_alert(
++                            AlertDescription::HandshakeFailure,
++                            PeerIncompatible::SecureRenegotiationRequired,
++                        ));
++                    }
++                    Some(info) if !info.0.is_empty() => {
++                        return Err(cx.common.send_fatal_alert(
++                            AlertDescription::IllegalParameter,
++                            PeerMisbehaved::RenegotiationInfoNotEmpty,
++                        ));
++                    }
++                    Some(_) => {}
++                }
++            }
++
+             if config.require_ems && !using_ems {
+                 return Err({
+                     cx.common.send_fatal_alert(
+diff --git a/rustls/src/error.rs b/rustls/src/error.rs
+index dbd043f..9be9723 100644
+--- a/rustls/src/error.rs
++++ b/rustls/src/error.rs
+@@ -313,6 +313,7 @@ pub enum PeerMisbehaved {
+     UnsolicitedServerHelloExtension,
+     WrongGroupForKeyShare,
+     UnsolicitedEchExtension,
++    RenegotiationInfoNotEmpty,
+ }
+ 
+ impl From<PeerMisbehaved> for Error {
+@@ -353,6 +354,7 @@ pub enum PeerIncompatible {
+     UncompressedEcPointsRequired,
+     UnsolicitedCertificateTypeExtension,
+     ServerRejectedEncryptedClientHello(Option<Vec<EchConfigPayload>>),
++    SecureRenegotiationRequired,
+ }
+ 
+ impl From<PeerIncompatible> for Error {
+diff --git a/rustls/src/msgs/deframer/buffers.rs b/rustls/src/msgs/deframer/buffers.rs
+index bf09874..ef67310 100644
+--- a/rustls/src/msgs/deframer/buffers.rs
++++ b/rustls/src/msgs/deframer/buffers.rs
+@@ -213,13 +213,15 @@ impl DeframerVecBuffer {
+     /// Resize the internal `buf` if necessary for reading more bytes.
+     fn prepare_read(&mut self, is_joining_hs: bool) -> Result<(), &'static str> {
+         /// TLS allows for handshake messages of up to 16MB.  We
+-        /// restrict that to 64KB to limit potential for denial-of-
+-        /// service.
+-        const MAX_HANDSHAKE_SIZE: u32 = 0xffff;
++        /// restrict that to OpenSSL's certificate list limit, 102,400
++        /// bytes, to limit potential for denial-of-service. The buffer
++        /// also holds the records' headers and the rest of the flight:
++        /// room for two more records.
++        const MAX_HANDSHAKE_SIZE: u32 = 102_400 + 2 * MAX_WIRE_SIZE as u32;
+ 
+         const READ_SIZE: usize = 4096;
+ 
+-        // We allow a maximum of 64k of buffered data for handshake messages only. Enforce this
++        // We allow a maximum of MAX_HANDSHAKE_SIZE of buffered data for handshake messages only. Enforce this
+         // by varying the maximum allowed buffer size here based on whether a prefix of a
+         // handshake payload is currently being buffered. Given that the first read of such a
+         // payload will only ever be 4k bytes, the next time we come around here we allow a
+diff --git a/rustls/src/msgs/deframer/handshake.rs b/rustls/src/msgs/deframer/handshake.rs
+index 9849821..7dbcd7d 100644
+--- a/rustls/src/msgs/deframer/handshake.rs
++++ b/rustls/src/msgs/deframer/handshake.rs
+@@ -373,7 +373,9 @@ const HANDSHAKE_HEADER_LEN: usize = 1 + 3;
+ /// TLS allows for handshake messages of up to 16MB.  We
+ /// restrict that to 64KB to limit potential for denial-of-
+ /// service.
+-const MAX_HANDSHAKE_SIZE: usize = 0xffff;
++/// OpenSSL's certificate list limit (`SSL_MAX_CERT_LIST_DEFAULT`), which
++/// nmap 7.94 reaches; upstream's is 0xffff.
++const MAX_HANDSHAKE_SIZE: usize = 102_400;
+ 
+ #[cfg(test)]
+ mod tests {
+@@ -443,7 +445,8 @@ mod tests {
+     #[test]
+     fn coalesce_rejects_excess_size_message() {
+         const X: u8 = 0xff;
+-        let mut input = vec![0x21, 0x01, 0x00, X, 0x00, 0xab, X];
++        // Once coalesced, the size is 0x019100: over the 102,400-byte limit.
++        let mut input = vec![0x21, 0x01, 0x91, X, 0x00, 0xab, X];
+         let mut hs = HandshakeDeframer::default();
+ 
+         // split header over multiple messages, which motivates doing
+diff --git a/rustls/src/msgs/handshake.rs b/rustls/src/msgs/handshake.rs
+index d5330eb..f1490eb 100644
+--- a/rustls/src/msgs/handshake.rs
++++ b/rustls/src/msgs/handshake.rs
+@@ -1733,9 +1733,10 @@ impl TlsListElement for CertificateDer<'_> {
+ /// TLS has a 16MB size limit on any handshake message,
+ /// plus a 16MB limit on any given certificate.
+ ///
+-/// We contract that to 64KB to limit the amount of memory allocation
+-/// that is directly controllable by the peer.
+-pub(crate) const CERTIFICATE_MAX_SIZE_LIMIT: usize = 0x1_0000;
++/// We contract that to OpenSSL's certificate list limit, 102,400 bytes
++/// (`SSL_MAX_CERT_LIST_DEFAULT`, which nmap 7.94 reaches), to limit the
++/// amount of memory allocation that is directly controllable by the peer.
++pub(crate) const CERTIFICATE_MAX_SIZE_LIMIT: usize = 102_400;
+ 
+ extension_struct! {
+     pub(crate) struct CertificateExtensions<'a> {
+diff --git a/rustls/src/msgs/handshake_test.rs b/rustls/src/msgs/handshake_test.rs
+index 91343dd..c87e626 100644
+--- a/rustls/src/msgs/handshake_test.rs
++++ b/rustls/src/msgs/handshake_test.rs
+@@ -706,29 +706,30 @@ fn cannot_read_message_hash_from_network() {
+ 
+ #[test]
+ fn cannot_decode_huge_certificate() {
+-    let mut buf = [0u8; 65 * 1024];
+-    // exactly 64KB decodes fine
++    // The limit is OpenSSL's certificate list limit, 102,400 (0x19000).
++    let mut buf = [0u8; 101 * 1024];
++    // exactly 102,400 bytes decodes fine
+     buf[0] = 0x0b;
+     buf[1] = 0x01;
+-    buf[2] = 0x00;
++    buf[2] = 0x90;
+     buf[3] = 0x03;
+     buf[4] = 0x01;
+-    buf[5] = 0x00;
++    buf[5] = 0x90;
+     buf[6] = 0x00;
+-    buf[7] = 0x00;
+-    buf[8] = 0xff;
++    buf[7] = 0x01;
++    buf[8] = 0x8f;
+     buf[9] = 0xfd;
+-    HandshakeMessagePayload::read_bytes(&buf[..0x10000 + 7]).unwrap();
++    HandshakeMessagePayload::read_bytes(&buf[..0x19000 + 7]).unwrap();
+ 
+-    // however 64KB + 1 byte does not
++    // however 102,400 + 1 bytes does not
+     buf[1] = 0x01;
+-    buf[2] = 0x00;
++    buf[2] = 0x90;
+     buf[3] = 0x04;
+     buf[4] = 0x01;
+-    buf[5] = 0x00;
++    buf[5] = 0x90;
+     buf[6] = 0x01;
+     assert_eq!(
+-        HandshakeMessagePayload::read_bytes(&buf[..0x10001 + 7]).unwrap_err(),
++        HandshakeMessagePayload::read_bytes(&buf[..0x19001 + 7]).unwrap_err(),
+         InvalidMessage::CertificatePayloadTooLarge
+     );
+ }

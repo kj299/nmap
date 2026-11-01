@@ -8,7 +8,6 @@
 //! as they can in nsock.
 
 use std::io::{self, Read, Write};
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustls::pki_types::ServerName;
@@ -48,16 +47,6 @@ pub struct TlsStream {
 
 /// How much is read from the socket at once.
 const CHUNK: usize = 16 * 1024;
-
-/// The server name rustls is given: the `SNI` name when it can carry it,
-/// else the peer's address, for which rustls sends no `server_name`
-/// (`nse-tls-sni-rustls-names`).
-#[must_use]
-pub fn server_name(sni: Option<&[u8]>, peer: IpAddr) -> ServerName<'static> {
-    sni.and_then(|n| std::str::from_utf8(n).ok())
-        .and_then(|n| ServerName::try_from(n.to_owned()).ok())
-        .unwrap_or_else(|| ServerName::IpAddress(peer.into()))
-}
 
 fn lock(m: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
     // A panic while the lock was held leaves rustls's state as it was; the
@@ -119,12 +108,17 @@ impl TlsStream {
     /// The handshake, over `tcp`. On failure, the alert rustls queued is
     /// sent first (best effort), as OpenSSL sends its own. The leaf goes in
     /// `leaf` once its checks pass, whatever happens to the handshake after.
+    /// `sni`, when there is one, is sent as the server name as it is.
     pub async fn handshake(
         tcp: Arc<TcpStream>,
-        name: ServerName<'static>,
+        sni: Option<&[u8]>,
         leaf: PeerLeaf,
     ) -> Result<Self, ()> {
-        let conn = ClientConnection::new(connection_config(&leaf), name).map_err(|_| ())?;
+        // The verifier never looks at the name, and resumption is off: the
+        // peer's address serves rustls, and `sni` is what goes on the wire.
+        let peer = tcp.peer_addr().map_err(|_| ())?.ip();
+        let name = ServerName::IpAddress(peer.into());
+        let conn = ClientConnection::new(connection_config(&leaf, sni), name).map_err(|_| ())?;
         let s = Self {
             tcp,
             leaf,

@@ -20,7 +20,7 @@ use rustls::{CipherSuite, Error, NamedGroup, SignatureScheme, SupportedCipherSui
 use rustls::{CipherSuiteCommon, Tls12CipherSuite, Tls13CipherSuite};
 use std::sync::Arc;
 
-use super::{aead, cbc, hash, hmac, kx, rand};
+use super::{aead, cbc, hash, hmac, kx, rand, sigs};
 
 pub(crate) static SHA256: hash::Sha256 = hash::Sha256;
 pub(crate) static SHA384: hash::Sha384 = hash::Sha384;
@@ -96,6 +96,11 @@ static TLS12_RSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PKCS1_SHA256,
     SignatureScheme::RSA_PKCS1_SHA384,
     SignatureScheme::RSA_PKCS1_SHA512,
+    // An RSA-PSS key's, and SHA-224 (M6.7 step f).
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA256),
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA384),
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA512),
+    SignatureScheme::Unknown(sigs::RSA_PKCS1_SHA224),
 ];
 /// dsa_sha224 to dsa_sha512, as 7.94 offers them (M6.7 step e).
 static TLS12_DSA_SCHEMES: &[SignatureScheme] = &[
@@ -109,6 +114,9 @@ static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ECDSA_NISTP384_SHA384,
     SignatureScheme::ECDSA_NISTP521_SHA512,
     SignatureScheme::ED25519,
+    // Ed448 and SHA-224 (M6.7 step f).
+    SignatureScheme::ED448,
+    SignatureScheme::Unknown(sigs::ECDSA_SHA224),
 ];
 
 macro_rules! tls12 {
@@ -917,21 +925,27 @@ static NO_WEBPKI_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
     mapping: &[],
 };
 
-/// The signature_algorithms extension, in 7.94's order (OpenSSL's default
-/// client list, minus what the provider cannot verify: Ed448, rsa_pss_pss_*,
-/// ecdsa_sha224 and rsa_pkcs1_sha224). DSA with SHA-224 to SHA-512 since M6.7
-/// step e.
+/// The signature_algorithms extension: 7.94's, OpenSSL 3.0's default client
+/// list, in its order (`spikes/m67-legacy-tls/clienthello_794.txt`). DSA
+/// since M6.7 step e; Ed448, rsa_pss_pss_* and the two SHA-224 schemes since
+/// step f.
 pub(crate) static CLIENT_SIG_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ECDSA_NISTP256_SHA256,
     SignatureScheme::ECDSA_NISTP384_SHA384,
     SignatureScheme::ECDSA_NISTP521_SHA512,
     SignatureScheme::ED25519,
+    SignatureScheme::ED448,
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA256),
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA384),
+    SignatureScheme::Unknown(sigs::RSA_PSS_PSS_SHA512),
     SignatureScheme::RSA_PSS_SHA256,
     SignatureScheme::RSA_PSS_SHA384,
     SignatureScheme::RSA_PSS_SHA512,
     SignatureScheme::RSA_PKCS1_SHA256,
     SignatureScheme::RSA_PKCS1_SHA384,
     SignatureScheme::RSA_PKCS1_SHA512,
+    SignatureScheme::Unknown(sigs::ECDSA_SHA224),
+    SignatureScheme::Unknown(sigs::RSA_PKCS1_SHA224),
     // dsa_sha224, dsa_sha256, dsa_sha384, dsa_sha512 (M6.7 step e).
     SignatureScheme::Unknown(0x0302),
     SignatureScheme::Unknown(0x0402),

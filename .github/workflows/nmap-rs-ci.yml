@@ -821,3 +821,48 @@ jobs:
       # denial-of-service rows at --script-timeout 2, which have no oracle
       # (nmap hangs in each).
       - run: cargo test -p nmap-cli --test nse_exit_differential
+
+  # The FreeBSD backend (docs/FREEBSD-ANALYSIS.md; D1-D4 decided 2026-11-01):
+  # the port built and tested on FreeBSD 15.0, the release the repository's C
+  # FreeBSD job builds on (build.yml), against C nmap built from THIS
+  # repository in the same VM (D2: the source every golden comes from, not
+  # FreeBSD's packaged nmap). The container this port is developed in has no
+  # KVM, so this job is where every FreeBSD runtime claim is proven.
+  #
+  # vmactions/freebsd-vm is third-party, so it is pinned by commit (v1.5.9),
+  # not by a moving tag. The VM runs as root, so the raw/BPF paths are
+  # reachable (FreeBSD has no capabilities; F10). The repository is synced in
+  # and NOT copied back: the target directory is gigabytes. Rust comes from
+  # rustup, so the toolchain is the one nmap-rs/rust-toolchain.toml pins;
+  # FreeBSD's packaged Rust is older.
+  freebsd:
+    name: FreeBSD 15.0 (build + test + differential vs C nmap)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.0"
+          mem: 8192
+          cpu: 4
+          copyback: false
+          prepare: |
+            # libpcap is in base; gmake, pcre2 and libnet build the C oracle
+            # (as build.yml's FreeBSD job does); bash and python3 run the
+            # differential harness.
+            pkg install -y curl gmake pcre2 libnet pkgconf bash python3
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            id; freebsd-version -ku; uname -m
+            # The oracle: C nmap from this repository (D2).
+            ./configure --without-zenmap --without-ndiff --without-ncat --without-nping >/dev/null
+            gmake -j4 >/dev/null
+            ./nmap --version | head -1
+            cd nmap-rs
+            rustc --version
+            cargo build --release --all-features
+            cargo test --all --all-features --no-fail-fast
+            NMAP="$PWD/../nmap" bash tests/differential/run_differential.sh

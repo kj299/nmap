@@ -119,7 +119,7 @@ choice), the first FreeBSD run happens on the PR that follows it.
   the L2 path. IPv6 comes last, so (a) and IPv4 are not held up by it.
 - (c) (b) without raw IPv6, ledgered.
 
-**Recommended: (b).** F1's fix serves IPv4 and IPv6 alike. The IPv6 send
+**Decided (2026-11-01): (b)**, as recommended. F1's fix serves IPv4 and IPv6 alike. The IPv6 send
 path is already layer 2 on Linux for the same reason (no `IPV6_HDRINCL`),
 and FreeBSD has none either.
 
@@ -130,7 +130,7 @@ and FreeBSD has none either.
 - (b) FreeBSD's packaged nmap: a different version, so a differential
   against it would mix version drift with port bugs.
 
-**Recommended: (a).**
+**Decided: (a)**, as recommended.
 
 ### D3 — FreeBSD release
 
@@ -138,7 +138,7 @@ and FreeBSD has none either.
 - (b) 14.3, the older supported branch.
 - (c) Both: twice the CI time.
 
-**Recommended: (a).** The C job already proves the oracle builds there.
+**Decided: (a)**, as recommended. The C job already proves the oracle builds there.
 
 ### D4 — When the VM job runs
 
@@ -148,13 +148,13 @@ and FreeBSD has none either.
   change. Faster, but a path-filtered job cannot be a required check.
 - (c) Nightly only.
 
-**Recommended: (a).**
+**Decided: (a)**, as recommended.
 
 ## 7. Proposed build order
 
 | step | delivers | gates |
 |---|---|---|
-| **a — the CI job** | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
+| **a — the CI job** (in progress) | the VM job: build, `cargo test --workspace`, the C oracle built beside it | the existing suite green on FreeBSD; failures recorded, not fixed, in this step |
 | **b — data and files** | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
 | **c — datalinks** | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
 | **d — routes and MACs** | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |

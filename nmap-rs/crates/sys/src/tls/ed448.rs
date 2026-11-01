@@ -237,6 +237,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "two 446-bit scalar multiplications take hours under Miri"
+    )]
     fn the_base_point_is_on_the_curve_and_of_order_l() {
         let f = Field::new();
         let b = Point {

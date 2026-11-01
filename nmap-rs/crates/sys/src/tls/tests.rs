@@ -338,6 +338,7 @@ fn a_key_is_held_to_its_family() {
 // ---- the server name -------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore = "X25519 key generation is slow under Miri")]
 fn the_server_name_is_sent_as_it_is() {
     // 7.94 sends the target's name as OpenSSL takes it: an IP literal, a
     // name rustls's DnsName refuses, a trailing dot (patch 0007).

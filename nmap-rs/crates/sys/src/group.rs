@@ -166,6 +166,10 @@ where
     // (host_idx, port, tryno) -> (send_us, deadline_us).
     let mut outstanding: HashMap<(usize, u16, u32), (i64, i64)> = HashMap::new();
     let mut ipid: u16 = base_port;
+    // Once the capture has ended (a pcap read error), `recv` is ready at once
+    // with `None` forever: polling it would spin this loop until the next
+    // probe deadline. The error is kept for `-d`.
+    let mut capture_live = true;
 
     loop {
         // Launch every probe the group window + each host's own window permit.
@@ -252,7 +256,15 @@ where
             .unwrap_or(IDLE_WAIT);
 
         tokio::select! {
-            frame = capture.recv() => {
+            frame = capture.recv(), if capture_live => {
+                if frame.is_none() {
+                    capture_live = false;
+                    nmap_core::debug!(
+                        1,
+                        "packet capture ended: {}",
+                        capture.error().unwrap_or_else(|| "closed".into())
+                    );
+                }
                 if let Some(f) = frame {
                     if let Some(reply) = kind.match_reply(&f.data, eth_included, &match_params) {
                         if let Some(&idx) = by_ip.get(&reply.src_ip) {
@@ -891,6 +903,47 @@ mod tests {
         for h in &hosts {
             let p = h.ports.iter().find(|p| p.number == 9).unwrap();
             assert_eq!(p.state, PortState::Filtered);
+        }
+    }
+
+    /// A capture that fails on its first read.
+    struct FailingSource;
+    impl PacketSource for FailingSource {
+        fn next_frame(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+            Err(std::io::Error::other("the BPF device went away"))
+        }
+    }
+
+    /// A capture that fails ends the scan as silence does: every port times
+    /// out, within the template's bound. (Its `recv` is then ready with `None`
+    /// at once, every time; the loop stops polling it rather than spin on it
+    /// until the next probe deadline.)
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn a_capture_that_fails_does_not_hang_the_scan() {
+        let targets = [Ipv4Addr::new(127, 0, 0, 2)];
+        let scan = group_scan(
+            Ipv4Addr::from(US),
+            &targets,
+            &[9, 10],
+            MockSender::default(),
+            FailingSource,
+            &SynKind { seqmask: 1 },
+            TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
+            0,
+            40000,
+            true,
+            Default::default(),
+        );
+        let hosts = tokio::time::timeout(Duration::from_secs(30), scan)
+            .await
+            .expect("the scan ends");
+        for port in [9, 10] {
+            assert_eq!(port_of(&hosts, 0, port).state, PortState::Filtered);
         }
     }
 

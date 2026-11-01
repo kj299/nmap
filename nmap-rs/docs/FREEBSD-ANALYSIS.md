@@ -259,8 +259,11 @@ the VM (§4c).
   path (`net.inet.ip.random_id: 0`) and RFC 6864's zero ID for DF datagrams
   (`net.inet.ip.rfc6864: 1`, hence `TI=Z` and `CI=Z` from both programs).
   The four 7.94 runs printed nothing, each over in milliseconds, so the
-  variation of `II` without the port is still unshown; the diagnostic now
-  keeps nmap's exit code and output.
+  variation of `II` without the port is still unshown. The next run showed
+  why: 7.94 quit with "cannot find nmap-os-db file". The oracle is not
+  installed, and run as a bare `nmap` it cannot find the data files beside
+  its binary, which it locates through `argv[0]`; the gates pass it by full
+  path. The diagnostic now does too.
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range

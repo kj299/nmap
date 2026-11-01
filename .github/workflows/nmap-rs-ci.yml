@@ -921,12 +921,13 @@ jobs:
             # counters, so II should vary between I and RI from run to run
             # (os_project.py, PER_CPU_IPID).
             sysctl net.inet.ip.random_id net.inet.ip.rfc6864 || true
-            # (The first version of this ran nmap inside $(...) and printed
-            # nothing, each run over in milliseconds; this one keeps the
-            # output, and shows it whenever no II comes out.)
+            # By full path: the oracle is not installed, and 7.94 finds its
+            # data files beside the binary only through a path in argv[0]
+            # (run bare, it quit with "cannot find nmap-os-db file").
+            oracle="$(command -v nmap)"
             for i in 1 2 3 4; do
               t0=$(date +%s)
-              nmap -O -d -Pn -p 22,9999 127.0.0.1 >/tmp/ii.out 2>&1 && rc=0 || rc=$?
+              "$oracle" -O -d -Pn -p 22,9999 127.0.0.1 >/tmp/ii.out 2>&1 && rc=0 || rc=$?
               ii=$(tr -d '\n' </tmp/ii.out | sed 's/OS://g' | grep -oE 'II=[A-Z]+' | tail -1 || true)
               echo "== diag [7.94 -O lo0 #$i]: rc=$rc after $(( $(date +%s) - t0 )) s: ${ii:-no II}"
               [ -n "$ii" ] || head -20 /tmp/ii.out

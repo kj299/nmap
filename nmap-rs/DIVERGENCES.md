@@ -145,6 +145,15 @@ narrower *rendering* of the same result.
       takes `--debug=N` (`{"debug", optional_argument, 0, 'd'}`,
       `nmap.cc:531`); the port refuses it, fail-closed, and takes `--debug`
       and `-dN`. Found by the lfs step's review.
+- [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
+      `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
+      privileged (`isr00t`: root, or `--privileged`) and connect-scans
+      otherwise; the port always connect-scans (`ScanKind`'s default). Port
+      states and reasons agree on loopback (an open port is `syn-ack` either
+      way), so the M1 matrix, run as root in the FreeBSD VM, did not show it.
+      It showed through a fixture instead: the connect probe's reset fails
+      `accept()` on FreeBSD (`ECONNABORTED`), which 7.94's SYN probe never
+      reaches. Found in FreeBSD step d.
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets

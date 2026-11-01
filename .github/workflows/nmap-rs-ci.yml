@@ -124,7 +124,7 @@ jobs:
       # root, and until FreeBSD step d no CI job ran them. The runner makes cargo run
       # the test binaries it already built under sudo, so nothing is rebuilt as root.
       - run: >
-          cargo test -p nmap-sys --all-features
+          cargo test -p nmap-sys --all-features --no-fail-fast
           --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e
           --test flagscan_e2e --test group_e2e -- --ignored
         env:
@@ -907,7 +907,7 @@ jobs:
             # names (F7). 127.0.0.2 answers on lo0 only as an alias, where
             # Linux routes all of 127/8 to lo.
             ifconfig lo0 alias 127.0.0.2/32
-            gate cargo test -p nmap-sys --all-features --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e -- --ignored
+            gate cargo test -p nmap-sys --all-features --no-fail-fast --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e -- --ignored
             # F5: netdev's gateway is the one `route get default` gives.
             gate cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
             # Raw scans and -O of the VM's own address (over lo0, as the C
@@ -916,26 +916,9 @@ jobs:
             gate env TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
             gate env TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
             gate bash tests/differential/m5/run_os_differential.sh
-            # Diagnostic, not a gate (step c): sv-ssh-banner exactly as the
-            # M1 matrix runs it (its banner fixture, the probe database
-            # loaded), timed for each tool; nmap-rs again under truss, with
-            # every syscall that follows a gap of half a second or more.
-            python3 -c '
-            import socket, time
-            s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("127.0.0.1", 18022)); s.listen(64)
-            while True:
-                c, _ = s.accept(); c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n"); time.sleep(0.05); c.close()
-            ' &
-            banner=$!; sleep 1
-            for tool in "nmap --datadir $PWD/.." ./target/release/nmap-rs; do
-              t0=$(date +%s)
-              NMAP_RS_DATADIR="$PWD/.." timeout 120 $tool -d -sV -Pn -n -p 18022 127.0.0.1 >/tmp/sv.out 2>&1 && rc=0 || rc=$?
-              echo "== diag [$tool -sV]: rc=$rc after $(( $(date +%s) - t0 )) s"; tail -12 /tmp/sv.out
-            done
-            NMAP_RS_DATADIR="$PWD/.." timeout 120 truss -f -d -o /tmp/truss.out ./target/release/nmap-rs -sV -Pn -n -p 18022 127.0.0.1 >/dev/null 2>&1 || true
-            awk '{ split($2, t, " "); if ($2 + 0 - prev >= 0.5) print "gap " ($2 - prev) ": " $0; prev = $2 + 0 }' /tmp/truss.out | head -40
-            tail -30 /tmp/truss.out
-            kill $banner
+            # The M1 matrix. As root, 7.94 SYN-scans by default and nmap-rs
+            # connect-scans (`default-scan-connect-even-privileged`), and on
+            # FreeBSD the connect probe's reset fails the fixture's accept()
+            # (ECONNABORTED), which the fixture now survives (step d).
             gate env NMAP="$(command -v nmap)" bash tests/differential/run_differential.sh
             [ -z "$failed" ] || { echo "failed gates: $failed"; exit 1; }

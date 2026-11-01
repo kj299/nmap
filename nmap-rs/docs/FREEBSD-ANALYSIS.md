@@ -157,8 +157,18 @@ the VM (§4c).
   0.01 s, port 22 open on a SYN-ACK, so the raw path on `lo0` works. Its
   `-sV` runs connect-scanned and skipped version detection, for want of the
   probe database the matrix loads. So the timeout is in version detection
-  with the database loaded, not in capture. Step d's run times that case for
-  both programs and traces the port's system calls (`truss`).
+  with the database loaded, not in capture.
+- **The cause** (step d's first run, which timed the case for both programs):
+  not the port at all, but the M1 fixture. As root, 7.94 SYN-scans by default
+  and nmap-rs connect-scans (`default-scan-connect-even-privileged`, newly
+  ledgered); the port's connect probe closes with linger 0, as nmap's does.
+  FreeBSD fails `accept()` for a connection reset while queued
+  (`ECONNABORTED`, as in step a's `net` test), and the fixture's banner
+  thread took any `accept()` error as the end: every later `-sV` connection
+  queued with no banner until the case's 15 s ran out. In the diagnostic the
+  fixture, which caught nothing, died outright, and the port's `-sV` found
+  the port closed. The fixtures now take `ECONNABORTED` as one lost client
+  (the M1 banner and drain threads, the raw differential's listener).
 
 ## 4c. Step d: routes and MACs
 
@@ -203,6 +213,22 @@ the VM (§4c).
   CI jobs run the raw differential on the own address and on 127.0.0.1, and
   the OS differential on the own address. On the development host (Linux):
   8 of 8 scans match on both targets, and `-O` matches (13 tests, 0 hops).
+- **The first VM run of step d.** The raw differential matched 7.94 on
+  all 8 scans, on the VM's own `192.168.122.10` and on `127.0.0.1`; F5
+  passed (`vtnet0`, gateway `192.168.122.2` with its MAC). Three things
+  failed, none in the port:
+  - `flagscan_e2e`'s on-the-wire test found the IP checksum invalid. On
+    `lo0` it is 0: FreeBSD's `ip_output` zeroes `ip_sum` and computes it only
+    for an interface without `CSUM_IP` in `if_hwassist`, and `lo0` claims it.
+    The port builds a valid checksum, as nmap does; the kernel discards it.
+    The three on-the-wire tests now accept a valid checksum, or 0 on FreeBSD
+    (`tests/common`). cargo stopped at that binary, so the other four e2e
+    files had not run; both jobs now pass `--no-fail-fast`.
+  - The OS differential: nmap-rs found no `nmap-os-db`. The VM's oracle is
+    not installed, so its data files sit beside its binary. nmap-rs now
+    reads the directory 7.94 reports reading (`-d`'s "Read from"); this
+    tree's own `nmap-os-db` is newer than 7.94, which aborts on it.
+  - `sv-ssh-banner`: the fixture (§4b).
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range

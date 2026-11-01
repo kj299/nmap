@@ -13,7 +13,6 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::build::Ipv4Spec;
-use nmap_core::checksum::in_cksum;
 use nmap_core::classify::ScanType;
 use nmap_core::flagscan::{build_flag_probe, flags_for};
 use nmap_core::model::{PortState, Reason};
@@ -87,11 +86,8 @@ async fn transmitted_flag_probe_matches_core_build_on_the_wire() {
 
     assert_eq!(wire[9], IPPROTO_TCP, "protocol changed");
     assert_eq!(&wire[16..20], &intended[16..20], "dest IP changed");
-    assert_eq!(
-        in_cksum(&wire[..wire_ihl]),
-        0,
-        "invalid IP checksum on the wire"
-    );
+    // The IP checksum is the kernel's: valid, or left to an offloading lo0.
+    common::assert_ip_checksum_is_the_kernels(&wire[..wire_ihl], "flag probe");
     assert_eq!(
         &wire[wire_ihl..],
         &intended[intended_ihl..],

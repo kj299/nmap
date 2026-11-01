@@ -15,7 +15,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::build::Ipv4Spec;
-use nmap_core::checksum::{in_cksum, ipv4_pseudoheader_cksum};
+use nmap_core::checksum::ipv4_pseudoheader_cksum;
 use nmap_core::model::{PortState, Reason};
 use nmap_core::packet_parser::{parse_packet, Header};
 use nmap_core::udpscan::{build_udp_probe, build_udp_probe_with};
@@ -82,11 +82,8 @@ async fn assert_wire_matches_build(
 
     assert_eq!(wire[9], IPPROTO_UDP, "{label}: protocol changed");
     assert_eq!(&wire[16..20], &intended[16..20], "{label}: dest IP changed");
-    assert_eq!(
-        in_cksum(&wire[..wire_ihl]),
-        0,
-        "{label}: invalid IP checksum on the wire"
-    );
+    // The IP checksum is the kernel's: valid, or left to an offloading lo0.
+    common::assert_ip_checksum_is_the_kernels(&wire[..wire_ihl], label);
 
     // The kernel does not touch the UDP segment for IP_HDRINCL: byte-identical.
     let wire_udp = &wire[wire_ihl..];

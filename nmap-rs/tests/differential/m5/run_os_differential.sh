@@ -86,8 +86,15 @@ PORTS="$(IFS=,; echo "${OPEN_PORTS[*]}"),$CLOSED_PORT"
 echo "== running C nmap -O =="
 # A run still going after 300 s has hung; it then fails on an empty projection.
 timeout 300 "$NMAP" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/c.out" 2>&1 || true
-echo "== running nmap-rs -O =="
-timeout 300 "$NMAP_RS" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
+# nmap-rs reads the data files C nmap read, which -d names ("Read from DIR:
+# nmap-os-db ..."): one database for both (LESSONS #029). The tree's own
+# nmap-os-db is newer than 7.94, which aborts on it, and the FreeBSD VM's oracle
+# is not installed, so its files sit beside its binary, where nmap-rs does not look.
+DATADIR="$(sed -n 's/^Read from \(.*\): .*nmap-os-db.*/\1/p' "$WORK/c.out" | head -1)"
+echo "== running nmap-rs -O (data files from ${DATADIR:-its own search}) =="
+rs_env=()
+[[ -n "$DATADIR" ]] && rs_env=("NMAP_RS_DATADIR=$DATADIR")
+env "${rs_env[@]}" timeout 300 "$NMAP_RS" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
 
 python3 "$HERE/os_project.py" <"$WORK/c.out"  >"$WORK/c.proj"
 python3 "$HERE/os_project.py" <"$WORK/rs.out" >"$WORK/rs.proj"

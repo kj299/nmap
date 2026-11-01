@@ -59,7 +59,10 @@ u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 u.bind(("0.0.0.0", int(sys.argv[2])))
 def drain():
     while True:
-        c, _ = t.accept()
+        try:
+            c, _ = t.accept()
+        except ConnectionAbortedError:
+            continue  # FreeBSD: a connection reset while queued
         c.close()
 threading.Thread(target=drain, daemon=True).start()
 time.sleep(900)

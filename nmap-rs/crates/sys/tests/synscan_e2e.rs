@@ -20,7 +20,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::build::Ipv4Spec;
-use nmap_core::checksum::{in_cksum, ipv4_pseudoheader_cksum};
+use nmap_core::checksum::ipv4_pseudoheader_cksum;
 use nmap_core::model::{HostState, PortState, Reason};
 use nmap_core::packet_parser::{parse_packet, Header};
 use nmap_core::synscan::build_syn_probe;
@@ -112,12 +112,8 @@ async fn transmitted_syn_matches_core_build_on_the_wire() {
         "IP id not preserved under IP_HDRINCL"
     );
 
-    // The IP checksum on the wire must be valid (kernel recomputes it).
-    assert_eq!(
-        in_cksum(&wire[..wire_ihl]),
-        0,
-        "invalid IP checksum on the wire"
-    );
+    // The IP checksum is the kernel's: valid, or left to an offloading lo0.
+    common::assert_ip_checksum_is_the_kernels(&wire[..wire_ihl], "SYN probe");
 
     // The kernel does NOT touch the TCP segment for IP_HDRINCL: the exact bytes
     // core::build produced (proven == nmap's C build_tcp_raw) must reach the wire.

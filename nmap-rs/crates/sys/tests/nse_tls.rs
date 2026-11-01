@@ -205,6 +205,10 @@ fn hello_capture_server() -> (u16, Log) {
 }
 
 /// The host name in a ClientHello handshake message, or `-`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "offsets into a ClientHello the client under test just wrote; a bad one panics the test"
+)]
 fn hello_sni(hs: &[u8]) -> String {
     let mut at = 4 + 2 + 32;
     at += 1 + usize::from(hs[at]);

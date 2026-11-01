@@ -916,6 +916,14 @@ jobs:
             gate env TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
             gate env TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
             gate bash tests/differential/m5/run_os_differential.sh
+            # Diagnostic, not a gate: 7.94 alone, four -O runs of lo0, and the
+            # SEQ II each reports. FreeBSD numbers datagrams from per-CPU IP-ID
+            # counters, so II should vary between I and RI from run to run
+            # (os_project.py, PER_CPU_IPID).
+            sysctl net.inet.ip.random_id net.inet.ip.rfc6864 || true
+            for i in 1 2 3 4; do
+              echo "== diag [7.94 -O lo0 #$i]: $(nmap -O -d -Pn -p 22,9999 127.0.0.1 2>&1 | tr -d '\n' | sed 's/OS://g' | grep -oE 'II=[A-Z]+' | tail -1)"
+            done
             # The M1 matrix. As root, 7.94 SYN-scans by default and nmap-rs
             # connect-scans (`default-scan-connect-even-privileged`), and on
             # FreeBSD the connect probe's reset fails the fixture's accept()

@@ -117,6 +117,10 @@ if [[ ! -s "$WORK/rs.proj" ]]; then
   sed -n '1,40p' "$WORK/rs.out"; exit 1
 fi
 
+# FreeBSD numbers datagrams from per-CPU IP-ID counters, so SEQ's II samples which CPUs
+# answered (os_project.py, PER_CPU_IPID).
+if [[ "$(uname -s)" == "FreeBSD" ]]; then export OS_PROJECT_PER_CPU_IPID=1; fi
+
 # The comparison is not a plain diff: a few IP-ID attributes are present only when the run
 # happened to collect enough samples (see PRESENCE_OPTIONAL in os_project.py), so their
 # presence is not comparable between the tools while their values still are.

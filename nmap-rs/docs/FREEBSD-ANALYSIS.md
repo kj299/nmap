@@ -243,6 +243,17 @@ the VM (§4c).
   - the M1 matrix, 20 of 20, `sv-ssh-banner` included.
   
   **Step d is complete.**
+- **The third run** (`1778645c2`, documentation only) failed the OS
+  differential on `127.0.0.1`, on one attribute: `SEQ`'s `II`, `RI` from
+  7.94 and `I` from the port. `II` classifies the IP IDs of the two ICMP
+  echo replies. FreeBSD fills a datagram without DF from a counter per CPU,
+  each started at random (`ip_fillid`, `sys/netinet/ip_id.c`), so two
+  replies from one CPU step by one (`I`) and from two CPUs by a random
+  amount (`RI`). That samples the scheduler, like `SP`. On FreeBSD only,
+  `os_project.py` now takes `II`'s counter classes (`I`, `RI`, `BI`, `RD`)
+  as equal; `Z`, a constant, and `TI`/`CI` are still compared, and Linux
+  stays strict (self-tests for each). The VM job runs 7.94 alone four times
+  on `lo0` and prints its `II`, to show the variation without the port.
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range

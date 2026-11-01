@@ -921,8 +921,15 @@ jobs:
             # counters, so II should vary between I and RI from run to run
             # (os_project.py, PER_CPU_IPID).
             sysctl net.inet.ip.random_id net.inet.ip.rfc6864 || true
+            # (The first version of this ran nmap inside $(...) and printed
+            # nothing, each run over in milliseconds; this one keeps the
+            # output, and shows it whenever no II comes out.)
             for i in 1 2 3 4; do
-              echo "== diag [7.94 -O lo0 #$i]: $(nmap -O -d -Pn -p 22,9999 127.0.0.1 2>&1 | tr -d '\n' | sed 's/OS://g' | grep -oE 'II=[A-Z]+' | tail -1)"
+              t0=$(date +%s)
+              nmap -O -d -Pn -p 22,9999 127.0.0.1 >/tmp/ii.out 2>&1 && rc=0 || rc=$?
+              ii=$(tr -d '\n' </tmp/ii.out | sed 's/OS://g' | grep -oE 'II=[A-Z]+' | tail -1 || true)
+              echo "== diag [7.94 -O lo0 #$i]: rc=$rc after $(( $(date +%s) - t0 )) s: ${ii:-no II}"
+              [ -n "$ii" ] || head -20 /tmp/ii.out
             done
             # The M1 matrix. As root, 7.94 SYN-scans by default and nmap-rs
             # connect-scans (`default-scan-connect-even-privileged`), and on

@@ -254,6 +254,13 @@ the VM (§4c).
   as equal; `Z`, a constant, and `TI`/`CI` are still compared, and Linux
   stays strict (self-tests for each). The VM job runs 7.94 alone four times
   on `lo0` and prints its `II`, to show the variation without the port.
+- **The fourth run** (`e9669ab07`) passed every job, Miri included, with
+  both OS differentials matching. Its `sysctl` lines confirm the counter
+  path (`net.inet.ip.random_id: 0`) and RFC 6864's zero ID for DF datagrams
+  (`net.inet.ip.rfc6864: 1`, hence `TI=Z` and `CI=Z` from both programs).
+  The four 7.94 runs printed nothing, each over in milliseconds, so the
+  variation of `II` without the port is still unshown; the diagnostic now
+  keeps nmap's exit code and output.
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range

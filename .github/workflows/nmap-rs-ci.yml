@@ -857,8 +857,11 @@ jobs:
             set -e
             . "$HOME/.cargo/env"
             id; freebsd-version -ku; uname -m
-            # The oracle: C nmap from this repository (D2).
-            ./configure --without-zenmap --without-ndiff --without-ncat --without-nping >/dev/null
+            # The oracle: C nmap from this repository (D2). pkg's pcre2 is in
+            # /usr/local, outside cc's default search path, and nmap's bundled
+            # copy does not link under FreeBSD's lld (its version script names
+            # JIT symbols the build leaves out), so it is pointed there.
+            ./configure --with-libpcre=/usr/local --without-zenmap --without-ndiff --without-ncat --without-nping >/dev/null
             gmake -j4 >/dev/null
             ./nmap --version | head -1
             cd nmap-rs

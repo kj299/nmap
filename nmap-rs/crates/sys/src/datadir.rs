@@ -20,8 +20,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// nmap's compiled-in `NMAPDATADIR`, as distributions build it.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "freebsd")))]
 pub const NMAPDATADIR: &str = "/usr/share/nmap";
+
+/// nmap's compiled-in `NMAPDATADIR` on FreeBSD: the ports tree and pkg build
+/// with `--prefix=/usr/local`, configure's default (docs/FREEBSD-ANALYSIS.md,
+/// F4).
+#[cfg(target_os = "freebsd")]
+pub const NMAPDATADIR: &str = "/usr/local/share/nmap";
 
 /// The directories data files are looked for in, in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

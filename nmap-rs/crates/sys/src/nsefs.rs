@@ -535,9 +535,13 @@ impl ScriptFs for PolicyFs {
             o.custom_flags(libc::O_NOFOLLOW);
         }
         let file = o.open(&target).map_err(|e| {
-            // A link swapped in at the final name since the check.
+            // A link swapped in at the final name since the check: `ELOOP`,
+            // or `EMLINK` on FreeBSD, whose `open(2)` reports a symlink
+            // under `O_NOFOLLOW` so (docs/FREEBSD-ANALYSIS.md, F3).
             #[cfg(unix)]
-            if e.raw_os_error() == Some(libc::ELOOP) {
+            if e.raw_os_error() == Some(libc::ELOOP)
+                || (cfg!(target_os = "freebsd") && e.raw_os_error() == Some(libc::EMLINK))
+            {
                 return if writes {
                     FsError::denied()
                 } else {

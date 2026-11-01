@@ -1,0 +1,16 @@
+diff --git a/rustls/src/enums.rs b/rustls/src/enums.rs
+index f6675ca..b4dfb54 100644
+--- a/rustls/src/enums.rs
++++ b/rustls/src/enums.rs
+@@ -535,6 +535,11 @@ impl SignatureScheme {
+             | Self::ECDSA_NISTP256_SHA256
+             | Self::ECDSA_NISTP384_SHA384
+             | Self::ECDSA_NISTP521_SHA512 => Some(SignatureAlgorithm::ECDSA),
++            // rsa_pkcs1_sha224, and rsa_pss_pss_sha256 to _sha512 (an
++            // RSA-PSS key; RFC 8446 §4.2.3): RSA, as the RSA suites take them.
++            Self::Unknown(0x0301 | 0x0809 | 0x080a | 0x080b) => Some(SignatureAlgorithm::RSA),
++            // ecdsa_sha224 (RFC 5246 §7.4.1.4.1).
++            Self::Unknown(0x0303) => Some(SignatureAlgorithm::ECDSA),
+             Self::ED25519 => Some(SignatureAlgorithm::ED25519),
+             Self::ED448 => Some(SignatureAlgorithm::ED448),
+             // dsa_sha1, dsa_sha224, dsa_sha256, dsa_sha384, dsa_sha512

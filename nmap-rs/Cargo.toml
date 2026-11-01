@@ -12,7 +12,13 @@
 #   cli  : thin — parse -> core -> render
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/sys", "crates/cli", "crates/vendor/piccolo"]
+members = [
+    "crates/core",
+    "crates/sys",
+    "crates/cli",
+    "crates/vendor/piccolo",
+    "crates/vendor/rustls/rustls",
+]
 
 # `crates/vendor/` holds third-party source we ship, currently just the Lua VM.
 # It is a workspace MEMBER and sits under `crates/` for one reason each, both

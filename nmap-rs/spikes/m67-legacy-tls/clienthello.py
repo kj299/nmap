@@ -12,8 +12,9 @@ change between runs: the record and client versions, the cipher suites in
 order, the compression methods, the extensions in order (by name or number),
 and the contents of supported_versions, supported_groups,
 signature_algorithms, ec_point_formats, psk_key_exchange_modes and the groups
-of key_share. The random, the session id, the key shares themselves and the
-SNI are left out. With OUTDIR, each program's lines go to
+of key_share; the ClientHello's length (handshake header included), the
+session id's, and the padding's (since M6.7 step f). The random, the session
+id, the key shares themselves and the SNI are left out. With OUTDIR, each program's lines go to
 OUTDIR/clienthello_<program>.txt.
 """
 import os
@@ -65,7 +66,9 @@ def parse(rec):
     hs = rec[5:]
     body = hs[4:4 + int.from_bytes(hs[1:4], "big")]
     out.append("client_version 0x%04x" % struct.unpack(">H", body[0:2])[0])
+    out.append("handshake_length %d" % (4 + len(body)))
     at = 2 + 32
+    out.append("session_id_length %d" % body[at])
     at += 1 + body[at]
     n = struct.unpack(">H", body[at:at + 2])[0]
     suites = u16s(body[at + 2:at + 2 + n])
@@ -99,8 +102,10 @@ def parse(rec):
                 shares.append(name(GROUP, g))
                 i += 4 + kl
             out.append("  shares " + " ".join(shares))
-        elif t == 22 or t == 23:
+        elif t == 22 or t == 23 or t == 35:
             out.append("  empty %s" % (ln == 0))
+        elif t == 21:
+            out.append("  length %d" % ln)
     return out
 
 

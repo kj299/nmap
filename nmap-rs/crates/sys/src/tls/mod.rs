@@ -6,25 +6,32 @@
 //! What it is, against 7.94's client (`nsock/src/nsock_ssl.c` at
 //! `3be01efb1`, OpenSSL 3.0.13):
 //!
-//! - TLS 1.3 and 1.2, ECDHE with AES-GCM and ChaCha20-Poly1305, on X25519,
-//!   P-256, P-521 and P-384, in 7.94's order ([`provider`]); no TLS 1.0 or
-//!   1.1, CBC, RSA key exchange, DHE or FFDHE (`nse-tls-modern-only`);
+//! - TLS 1.3 and 1.2 with 7.94's suites, groups and signature algorithms,
+//!   in its order ([`provider`]): since M6.7, RSA key exchange, CBC, DHE in
+//!   RFC 7919's groups and the server's own, DSA, X448 and FFDHE, over the
+//!   vendored rustls and its patch series (`crates/vendor/rustls`); no TLS
+//!   1.0 or 1.1, which 7.94's OpenSSL refuses too;
 //! - no chain verification, but every check OpenSSL makes regardless of the
-//!   verify mode ([`verifier`]);
+//!   verify mode ([`verifier`]), with OpenSSL's alerts;
+//! - OpenSSL's limits: 102,400-byte handshake messages, secure
+//!   renegotiation required of a TLS 1.2 server;
 //! - no session reuse (7.94's NSE never sets a session);
-//! - the server name nmap's rules give it, where rustls can send it
-//!   ([`stream::server_name`]).
+//! - the server name nmap's rules give it, sent as it is
+//!   ([`connection_config`]).
 //!
 //! The randomness is `core`'s one seam (E3). Nothing here is `unsafe`.
 #![forbid(unsafe_code)]
 
 mod aead;
+mod cbc;
+mod ed448;
 mod hash;
 mod hmac;
 mod kx;
 pub mod provider;
 mod rand;
 mod rsa;
+mod seed;
 mod sigs;
 pub mod stream;
 mod verifier;
@@ -32,7 +39,7 @@ mod x448;
 
 use std::sync::{Arc, OnceLock};
 
-pub use stream::{server_name, ReadEvent, TlsStream};
+pub use stream::{ReadEvent, TlsStream};
 pub use verifier::PeerLeaf;
 
 /// The client configuration every connection shares, but for its verifier
@@ -51,16 +58,25 @@ pub fn client_config() -> Arc<rustls::ClientConfig> {
                     .with_no_client_auth();
             cfg.resumption = rustls::client::Resumption::disabled();
             cfg.enable_sni = true;
+            // 7.94 refuses a TLS 1.2 server without secure renegotiation
+            // (RFC 5746; OpenSSL without SSL_OP_LEGACY_SERVER_CONNECT).
+            cfg.require_secure_renegotiation = true;
+            // 7.94's ClientHello: OpenSSL's extension order and contents,
+            // and its padding (patch 0008).
+            cfg.openssl_client_hello = true;
             Arc::new(cfg)
         })
         .clone()
 }
 
 /// One connection's configuration: [`client_config`] with a verifier that
-/// records the leaf it accepts in `leaf`.
+/// records the leaf it accepts in `leaf`, and `sni` sent as the server name
+/// as it is, as 7.94 sends it (an IP literal, a trailing dot, any bytes;
+/// patch 0007). With no `sni`, no server name is sent.
 #[must_use]
-pub fn connection_config(leaf: &PeerLeaf) -> Arc<rustls::ClientConfig> {
+pub fn connection_config(leaf: &PeerLeaf, sni: Option<&[u8]>) -> Arc<rustls::ClientConfig> {
     let mut cfg = (*client_config()).clone();
+    cfg.raw_server_name = sni.map(<[u8]>::to_vec);
     cfg.dangerous()
         .set_certificate_verifier(Arc::new(verifier::NmapVerifier { leaf: leaf.clone() }));
     Arc::new(cfg)
@@ -129,9 +145,37 @@ pub mod fuzzing {
         kx.complete_for_tls_version(peer, version).is_ok()
     }
 
-    /// A TLS 1.2 record of `body` through the decrypter of one of the step-a
-    /// AEADs (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM), keyed
-    /// with fixed bytes. Whether it opened.
+    /// Key agreement in a server's own DH group (M6.7 step e): `params` is
+    /// p's length (two bytes), p, g's length (two bytes), g, then the
+    /// server's share. Whether the group passed OpenSSL's checks and the
+    /// share was taken.
+    #[must_use]
+    pub fn own_dh(params: &[u8]) -> bool {
+        use rustls::crypto::CustomDhGroups;
+        /// A two-byte length, then that many bytes; and the rest.
+        fn field(b: &[u8]) -> Option<(&[u8], &[u8])> {
+            let (len, rest) = b.split_first_chunk::<2>()?;
+            let n = usize::from(u16::from_be_bytes(*len));
+            (rest.len() >= n).then(|| rest.split_at(n))
+        }
+        let Some((p, rest)) = field(params) else {
+            return false;
+        };
+        let Some((g, y)) = field(rest) else {
+            return false;
+        };
+        let Ok(kx) = super::provider::OWN_DH.start(p, g) else {
+            return false;
+        };
+        kx.complete_for_tls_version(y, &rustls::version::TLS12)
+            .is_ok()
+    }
+
+    /// A TLS 1.2 record of `body` through one of the decrypters of steps a
+    /// and d (`selector`: AES-128/256-CCM, -CCM-8, ARIA-128/256-GCM; then
+    /// CBC with AES-128 and HMAC-SHA1, Camellia-256 and HMAC-SHA384, SEED and
+    /// HMAC-SHA1, each with MAC-then-encrypt and with encrypt-then-MAC),
+    /// keyed with fixed bytes. Whether it opened.
     #[must_use]
     pub fn open_tls12(selector: u8, body: &mut [u8]) -> bool {
         use super::aead::{
@@ -140,13 +184,37 @@ pub mod fuzzing {
         use rustls::crypto::cipher::InboundOpaqueMessage;
         let key = [0x42u8; 32];
         let salt = [1, 2, 3, 4];
-        let dec = match selector % 6 {
+        use super::cbc::{Cbc12, Sha1, Sha384};
+        use rustls::crypto::cipher::Tls12AeadAlgorithm;
+        let mac = [0x24u8; 48];
+        let etm = selector & 0x40 != 0;
+        let dec = match selector % 9 {
             0 => decrypter12::<Aes128Ccm>(&key[..16], salt),
             1 => decrypter12::<Aes256Ccm>(&key, salt),
             2 => decrypter12::<Aes128Ccm8>(&key[..16], salt),
             3 => decrypter12::<Aes256Ccm8>(&key, salt),
             4 => decrypter12::<Aria128Gcm>(&key[..16], salt),
-            _ => decrypter12::<Aria256Gcm>(&key, salt),
+            5 => decrypter12::<Aria256Gcm>(&key, salt),
+            6 => Some(Cbc12::<aes::Aes128, Sha1>::new().decrypter_with_mac(
+                &mac[..20],
+                &key[..16],
+                &[],
+                etm,
+            )),
+            7 => Some(
+                Cbc12::<camellia::Camellia256, Sha384>::new().decrypter_with_mac(
+                    &mac,
+                    &key,
+                    &[],
+                    etm,
+                ),
+            ),
+            _ => Some(Cbc12::<super::seed::Seed, Sha1>::new().decrypter_with_mac(
+                &mac[..20],
+                &key[..16],
+                &[],
+                etm,
+            )),
         };
         let Some(mut dec) = dec else {
             return false;

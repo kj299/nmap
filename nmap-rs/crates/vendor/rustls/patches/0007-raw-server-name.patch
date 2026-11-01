@@ -1,0 +1,101 @@
+diff --git a/rustls/src/client/builder.rs b/rustls/src/client/builder.rs
+index 43c57af..5cdd5a9 100644
+--- a/rustls/src/client/builder.rs
++++ b/rustls/src/client/builder.rs
+@@ -182,6 +182,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
+             require_ems,
+             #[cfg(feature = "tls12")]
+             require_secure_renegotiation: false,
++            raw_server_name: None,
+             time_provider: self.time_provider,
+             cert_compressors: compress::default_cert_compressors().to_vec(),
+             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
+diff --git a/rustls/src/client/client_conn.rs b/rustls/src/client/client_conn.rs
+index a2c251f..4d58888 100644
+--- a/rustls/src/client/client_conn.rs
++++ b/rustls/src/client/client_conn.rs
+@@ -253,6 +253,12 @@ pub struct ClientConfig {
+     #[cfg(feature = "tls12")]
+     pub require_secure_renegotiation: bool,
+ 
++    /// Bytes to send as the `server_name` extension's host name, as they
++    /// are: an IP literal, a trailing dot, any byte OpenSSL would send.
++    /// `None`, the default, sends the connection's `ServerName` when it is
++    /// a DNS name. Ignored when SNI is disabled or ECH is in use.
++    pub raw_server_name: Option<Vec<u8>>,
++
+     /// Provides the current system time
+     pub time_provider: Arc<dyn TimeProvider>,
+ 
+diff --git a/rustls/src/client/hs.rs b/rustls/src/client/hs.rs
+index beb972e..abc3586 100644
+--- a/rustls/src/client/hs.rs
++++ b/rustls/src/client/hs.rs
+@@ -289,8 +289,12 @@ fn emit_client_hello_for_retry(
+ 
+         // If we have no ECH state, and SNI is enabled, try to use the input server_name
+         // for the SNI domain name.
+-        (None, true) => match &input.server_name {
+-            ServerName::DnsName(dns_name) => Some(ServerNamePayload::from(dns_name)),
++        // Bytes the application sends as they are come first.
++        (None, true) => match (&config.raw_server_name, &input.server_name) {
++            (Some(raw), _) if (1..=0xffff).contains(&raw.len()) => {
++                Some(ServerNamePayload::Raw(raw.clone()))
++            }
++            (_, ServerName::DnsName(dns_name)) => Some(ServerNamePayload::from(dns_name)),
+             _ => None,
+         },
+ 
+diff --git a/rustls/src/msgs/handshake.rs b/rustls/src/msgs/handshake.rs
+index f1490eb..5b295af 100644
+--- a/rustls/src/msgs/handshake.rs
++++ b/rustls/src/msgs/handshake.rs
+@@ -273,6 +273,10 @@ pub(crate) enum ServerNamePayload<'a> {
+ 
+     /// A successfully decoded, but syntactically-invalid value.
+     Invalid,
++
++    /// Bytes a client sends as its host name as they are, whatever their
++    /// syntax ([`crate::ClientConfig::raw_server_name`]). Never decoded.
++    Raw(Vec<u8>),
+ }
+ 
+ impl ServerNamePayload<'_> {
+@@ -281,6 +285,7 @@ impl ServerNamePayload<'_> {
+             Self::SingleDnsName(d) => ServerNamePayload::SingleDnsName(d.to_owned()),
+             Self::IpAddress => ServerNamePayload::IpAddress,
+             Self::Invalid => ServerNamePayload::Invalid,
++            Self::Raw(b) => ServerNamePayload::Raw(b),
+         }
+     }
+ 
+@@ -301,12 +306,13 @@ impl<'a> Codec<'a> for ServerNamePayload<'a> {
+     fn encode(&self, bytes: &mut Vec<u8>) {
+         let server_name_list = LengthPrefixedBuffer::new(Self::SIZE_LEN, bytes);
+ 
+-        let ServerNamePayload::SingleDnsName(dns_name) = self else {
+-            return;
++        let name_slice = match self {
++            ServerNamePayload::SingleDnsName(dns_name) => dns_name.as_ref().as_bytes(),
++            ServerNamePayload::Raw(raw) => raw.as_slice(),
++            _ => return,
+         };
+ 
+         ServerNameType::HostName.encode(server_name_list.buf);
+-        let name_slice = dns_name.as_ref().as_bytes();
+         (name_slice.len() as u16).encode(server_name_list.buf);
+         server_name_list
+             .buf
+diff --git a/rustls/src/server/hs.rs b/rustls/src/server/hs.rs
+index 3cb7963..39579c9 100644
+--- a/rustls/src/server/hs.rs
++++ b/rustls/src/server/hs.rs
+@@ -747,7 +747,7 @@ pub(super) fn process_client_hello<'m>(
+     // [RFC6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
+     let sni = match &client_hello.server_name {
+         Some(ServerNamePayload::SingleDnsName(dns_name)) => Some(dns_name.to_lowercase_owned()),
+-        Some(ServerNamePayload::IpAddress) => None,
++        Some(ServerNamePayload::IpAddress | ServerNamePayload::Raw(_)) => None,
+         Some(ServerNamePayload::Invalid) => {
+             return Err(cx.common.send_fatal_alert(
+                 AlertDescription::IllegalParameter,

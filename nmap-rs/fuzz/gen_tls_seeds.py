@@ -13,8 +13,10 @@ a second is the seed.
 
 nse_tls_kx_aead (M6.7 step a): a selector byte, then a peer's key share
 (X448's base point and a real share and the range edges 0, 1, p - 1 of each
-FFDHE group, in both TLS versions' forms) or a TLS 1.2 record (each AEAD,
-lengths about the nonce-and-tag minimum).
+FFDHE group, in both TLS versions' forms), a server's own DH group and a
+share in it (step e: a good group and the edges OpenSSL refuses), or a TLS
+1.2 record (each AEAD and CBC protection, lengths about the nonce-and-tag
+minimum).
 
 nse_tls_verifier: flags, scheme, then length-prefixed certificates (leaf
 first, an empty one ends them), message and signature, as the target reads
@@ -119,6 +121,8 @@ FLIGHTS = {
     "tls12-ccm8": s_server("ecp256", "-tls1_2", "-cipher", "ECDHE-ECDSA-AES128-CCM8"),
     "tls12-aria": s_server("rsa2048", "-tls1_2", "-cipher", "ECDHE-ARIA128-GCM-SHA256"),
     "tls13-x448-hrr": s_server("rsa2048", "-tls1_3", "-groups", "X448"),
+    # M6.7 step c: RSA key exchange, a TLS 1.2 flight with no ServerKeyExchange.
+    "tls12-rsa-kx": s_server("rsa2048", "-tls1_2", "-cipher", "AES128-GCM-SHA256:@SECLEVEL=0"),
     "tls13-ffdhe2048-hrr": s_server("rsa2048", "-tls1_3", "-groups", "ffdhe2048"),
     "fake-ok": fake("ok"),
     "fake-badsig": fake("badsig"),
@@ -137,6 +141,10 @@ SCHEMES = {
     "RSA_PSS_SHA256": 0x0804, "RSA_PSS_SHA384": 0x0805, "RSA_PSS_SHA512": 0x0806,
     "ECDSA_NISTP256_SHA256": 0x0403, "ECDSA_NISTP384_SHA384": 0x0503,
     "ECDSA_NISTP521_SHA512": 0x0603, "ED25519": 0x0807,
+    "DSA_SHA224": 0x0302, "DSA_SHA256": 0x0402, "DSA_SHA384": 0x0502,
+    "DSA_SHA512": 0x0602,
+    "ED448": 0x0808, "RSA_PSS_PSS_SHA256": 0x0809, "RSA_PSS_PSS_SHA384": 0x080a,
+    "RSA_PSS_PSS_SHA512": 0x080b, "RSA_PKCS1_SHA224": 0x0301, "ECDSA_SHA224": 0x0303,
 }
 
 
@@ -184,7 +192,21 @@ def kx_aead_seeds():
             yb = y.to_bytes(n, "big")
             write(KX_AEAD, "ffdhe%d-%s-13" % (bits, tag), bytes([i]) + yb)
             write(KX_AEAD, "ffdhe%d-%s-12" % (bits, tag), bytes([i | 8]) + yb.lstrip(b"\0"))
-    for sel in range(6):
+    # A server's own DH group (selector 0x40, M6.7 step e): p's length, p,
+    # g's length (each two bytes), g, the share. A good group and the edges OpenSSL refuses.
+    p2048 = ffdhe_prime(2048)
+    own = lambda p, g, y: (bytes([0x40]) + struct.pack(">H", len(p)) + p
+                           + struct.pack(">H", len(g)) + g + y)
+    pb = p2048.to_bytes(256, "big")
+    share = pow(2, 0x1234567, p2048).to_bytes(256, "big")
+    write(KX_AEAD, "own2048-share", own(pb, b"\x02", share))
+    write(KX_AEAD, "own2048-gpm1", own(pb, (p2048 - 1).to_bytes(256, "big"), share))
+    write(KX_AEAD, "own2048-even", own(pb[:-1] + bytes([pb[-1] & 0xfe]), b"\x02", share))
+    write(KX_AEAD, "own2048-ypm1", own(pb, b"\x02", (p2048 - 1).to_bytes(256, "big")))
+    write(KX_AEAD, "own1024", own(b"\xff" * 127 + b"\xfd", b"\x02", b"\x05"))
+    # The AEADs (0-5) and, since M6.7 step d, the CBC suites (6-8), each CBC
+    # one with MAC-then-encrypt and with encrypt-then-MAC (bit 0x40).
+    for sel in list(range(6)) + [6, 7, 8, 0x40 | 6, 0x40 | 7, 0x40 | 8]:
         for n in (0, 15, 16, 24, 64):
             write(KX_AEAD, "aead%d-len%d" % (sel, n), bytes([0x80 | sel]) + bytes(range(n)))
 

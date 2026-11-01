@@ -183,61 +183,144 @@ pub(crate) struct Ffdhe {
     pub(crate) exp_bits: u32,
 }
 
-impl Ffdhe {
-    fn params(&self) -> BoxedMontyParams {
-        let p = BoxedUint::from_be_slice_vartime(self.group.p);
-        // The modulus is public: its parameters may be computed in
-        // variable time.
-        BoxedMontyParams::new_vartime(Odd::new(p).expect("an RFC 7919 prime is odd"))
+/// Montgomery parameters for the odd modulus `p` (public: computed in
+/// variable time). `None` for an even `p`.
+fn monty(p: &[u8]) -> Option<BoxedMontyParams> {
+    Option::from(Odd::new(BoxedUint::from_be_slice_vartime(p))).map(BoxedMontyParams::new_vartime)
+}
+
+/// A DH exchange over (`p`, `g`) with private exponent `x` (big-endian, kept
+/// to `exp_bits` bits): g^x mod p, constant time in x.
+fn dh_start(
+    name: NamedGroup,
+    group: Option<FfdheGroup<'static>>,
+    p: &[u8],
+    g: &[u8],
+    exp_bits: u32,
+    mut x: Vec<u8>,
+) -> Result<DhActive, Error> {
+    let bad = || Error::from(PeerMisbehaved::InvalidKeyShare);
+    let len = p.len();
+    let params = monty(p).ok_or_else(bad)?;
+    let bits_precision = params.bits_precision();
+    let x_bits = u32::try_from(x.len().saturating_mul(8)).unwrap_or(u32::MAX);
+    let extra = x_bits.saturating_sub(exp_bits);
+    if let Some(first) = x.first_mut() {
+        *first &= 0xffu8.checked_shr(extra).unwrap_or(0);
     }
+    let xb = BoxedUint::from_be_slice(&x, bits_precision).map_err(|_| bad())?;
+    zeroize::Zeroize::zeroize(&mut x);
+    let g = BoxedUint::from_be_slice(g, bits_precision).map_err(|_| bad())?;
+    let y = BoxedMontyForm::new(g, &params)
+        .pow_bounded_exp(&xb, exp_bits)
+        .retrieve();
+    Ok(DhActive {
+        name,
+        group,
+        p: p.to_vec(),
+        params,
+        x: xb,
+        exp_bits,
+        public: pad(&y.to_be_bytes(), len),
+    })
+}
+
+/// A fresh private exponent of `exp_bits` bits: x in [0, 2^exp_bits), as
+/// OpenSSL draws it.
+fn draw(exp_bits: u32) -> Result<Vec<u8>, Error> {
+    let mut x = vec![0u8; (exp_bits as usize).div_ceil(8)];
+    if !nmap_core::nse::openssl::rand::fill(&mut x) {
+        return Err(GetRandomFailed.into());
+    }
+    Ok(x)
 }
 
 impl Ffdhe {
-    /// The exchange with private exponent `x` (big-endian, kept to
-    /// `exp_bits` bits): g^x mod p, constant time in x.
-    fn active(&self, mut x: Vec<u8>) -> Result<FfdheActive, Error> {
-        let len = self.group.p.len();
-        let bits_precision =
-            u32::try_from(len.saturating_mul(8)).map_err(|_| Error::from(GetRandomFailed))?;
-        let x_bits = u32::try_from(x.len().saturating_mul(8)).unwrap_or(u32::MAX);
-        let extra = x_bits.saturating_sub(self.exp_bits);
-        if let Some(first) = x.first_mut() {
-            *first &= 0xffu8.checked_shr(extra).unwrap_or(0);
-        }
-        let xb = BoxedUint::from_be_slice(&x, bits_precision)
-            .map_err(|_| Error::from(GetRandomFailed))?;
-        zeroize::Zeroize::zeroize(&mut x);
-        let params = self.params();
-        let g = BoxedUint::from_be_slice(self.group.g, bits_precision)
-            .map_err(|_| Error::from(GetRandomFailed))?;
-        let y = BoxedMontyForm::new(g, &params)
-            .pow_bounded_exp(&xb, self.exp_bits)
-            .retrieve();
-        Ok(FfdheActive {
-            name: self.name,
-            group: self.group,
-            params,
-            x: xb,
-            exp_bits: self.exp_bits,
-            public: pad(&y.to_be_bytes(), len),
-        })
+    fn active(&self, x: Vec<u8>) -> Result<DhActive, Error> {
+        dh_start(
+            self.name,
+            Some(self.group),
+            self.group.p,
+            self.group.g,
+            self.exp_bits,
+            x,
+        )
     }
 }
 
 impl SupportedKxGroup for Ffdhe {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-        // x in [0, 2^exp_bits), as OpenSSL draws it.
-        let mut x = vec![0u8; (self.exp_bits as usize).div_ceil(8)];
-        if !nmap_core::nse::openssl::rand::fill(&mut x) {
-            return Err(GetRandomFailed.into());
-        }
-        Ok(Box::new(self.active(x)?))
+        Ok(Box::new(self.active(draw(self.exp_bits)?)?))
     }
     fn ffdhe_group(&self) -> Option<FfdheGroup<'static>> {
         Some(self.group)
     }
     fn name(&self) -> NamedGroup {
         self.name
+    }
+}
+
+/// TLS 1.2 DHE over a group of the server's own (M6.7 step e; the vendored
+/// rustls's patch 0004), checked as OpenSSL 3.0's client checks it
+/// (`tls_process_ske_dhe`, `statem_clnt.c`), in its order:
+/// - `p` or `g` zero: illegal_parameter (`SSL_R_BAD_DH_VALUE`);
+/// - `EVP_PKEY_param_check_quick` (`ossl_dh_check_params`): `p` odd, of 512
+///   to 10,000 bits (`DH_MIN_MODULUS_BITS`, `OPENSSL_DH_MAX_MODULUS_BITS`),
+///   and 1 < g < p - 1: illegal_parameter;
+/// - `ssl_security(SSL_SECOP_TMP_DH)`: the group's security bits
+///   (`BN_security_bits`) at least security level 2's 112, the level the
+///   oracle runs at: handshake_failure (`SSL_R_DH_KEY_TOO_SMALL`).
+///
+/// The peer's value is checked later, at the exchange (1 < y < p - 1). The
+/// cost is bounded by the 10,000-bit cap: one exponentiation of that size per
+/// handshake (docs/M6.7-ANALYSIS.md §6).
+#[derive(Debug)]
+pub(crate) struct OwnDh;
+
+/// `BN_security_bits(L, -1)` (`bn_lib.c`): the security of a `bits`-bit
+/// finite-field group with no known subgroup order.
+fn security_bits(bits: u64) -> u32 {
+    match bits {
+        15360.. => 256,
+        7680.. => 192,
+        3072.. => 128,
+        2048.. => 112,
+        1024.. => 80,
+        _ => 0,
+    }
+}
+
+impl rustls::crypto::CustomDhGroups for OwnDh {
+    fn start(&self, p: &[u8], g: &[u8]) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        let bad = || Error::from(PeerMisbehaved::InvalidKeyShare);
+        let pn = num_bigint::BigUint::from_bytes_be(p);
+        let gn = num_bigint::BigUint::from_bytes_be(g);
+        let one = num_bigint::BigUint::from(1u8);
+        if pn.bits() == 0 || gn.bits() == 0 {
+            return Err(bad());
+        }
+        // p is odd once the first test passes, so p - 1 is p with bit 0 clear.
+        let mut pm1 = pn.clone();
+        pm1.set_bit(0, false);
+        if !pn.bit(0) || !(512..=10_000).contains(&pn.bits()) || gn <= one || gn >= pm1 {
+            return Err(bad());
+        }
+        let sec = security_bits(pn.bits());
+        if sec < 112 {
+            return Err(rustls::PeerIncompatible::NoKxGroupsInCommon.into());
+        }
+        // Twice the security strength, as for the named groups.
+        let exp_bits = sec.saturating_mul(2);
+        let p = pn.to_bytes_be();
+        let g = gn.to_bytes_be();
+        Ok(Box::new(dh_start(
+            NamedGroup::Unknown(0x01ff),
+            None,
+            &p,
+            &g,
+            exp_bits,
+            draw(exp_bits)?,
+        )?))
     }
 }
 
@@ -254,32 +337,34 @@ fn pad(bytes: &[u8], len: usize) -> Vec<u8> {
     }
 }
 
-struct FfdheActive {
+struct DhActive {
     name: NamedGroup,
-    group: FfdheGroup<'static>,
+    /// The RFC 7919 group, or `None` for a group of the server's own.
+    group: Option<FfdheGroup<'static>>,
+    p: Vec<u8>,
     params: BoxedMontyParams,
     x: BoxedUint,
     exp_bits: u32,
     public: Vec<u8>,
 }
 
-impl Drop for FfdheActive {
+impl Drop for DhActive {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.x);
     }
 }
 
-impl FfdheActive {
+impl DhActive {
     /// y^x mod p for the peer's y, which must satisfy 1 < y < p - 1 (RFC
     /// 7919 §5.1, OpenSSL's `DH_check_pub_key`). The check is on public data.
     fn agree(&self, peer: &[u8]) -> Result<SharedSecret, Error> {
-        let len = self.group.p.len();
+        let len = self.p.len();
         let bad = || Error::from(PeerMisbehaved::InvalidKeyShare);
         if peer.len() > len {
             return Err(bad());
         }
         let bits = self.params.bits_precision();
-        let p = BoxedUint::from_be_slice(self.group.p, bits).map_err(|_| bad())?;
+        let p = BoxedUint::from_be_slice(&self.p, bits).map_err(|_| bad())?;
         let y = BoxedUint::from_be_slice(&pad(peer, len), bits).map_err(|_| bad())?;
         let one = BoxedUint::one_with_precision(bits);
         let p_minus_1 = p.wrapping_sub(&one);
@@ -302,11 +387,11 @@ impl FfdheActive {
     }
 }
 
-impl ActiveKeyExchange for FfdheActive {
+impl ActiveKeyExchange for DhActive {
     /// TLS 1.3 (RFC 8446 §4.2.8.1): the share is exactly as long as p, and
     /// so is the secret.
     fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
-        if peer.len() != self.group.p.len() {
+        if peer.len() != self.p.len() {
             return Err(PeerMisbehaved::InvalidKeyShare.into());
         }
         self.agree(peer)
@@ -324,7 +409,7 @@ impl ActiveKeyExchange for FfdheActive {
         self.agree_tls12(peer)
     }
     fn ffdhe_group(&self) -> Option<FfdheGroup<'static>> {
-        Some(self.group)
+        self.group
     }
     fn pub_key(&self) -> &[u8] {
         &self.public
@@ -458,6 +543,51 @@ mod tests {
             break;
         }
         assert!(found, "no secret with a leading zero in 4,096 exponents");
+    }
+
+    /// A group of the server's own (step e): OpenSSL's checks, in its
+    /// order and with its alerts' kinds, then an exchange that agrees with an
+    /// independent modpow. ffdhe2048's prime stands in for "a 2,048-bit
+    /// group of the server's own": the hook sees only `p` and `g`.
+    #[test]
+    #[cfg_attr(miri, ignore = "2,048-bit exponentiations take minutes under Miri")]
+    fn own_dh_groups_are_checked_as_openssl_checks_them() {
+        use rustls::crypto::CustomDhGroups;
+        let is = |r: Result<Box<dyn ActiveKeyExchange>, Error>, incompatible: bool| match r {
+            Err(Error::PeerIncompatible(_)) => assert!(incompatible),
+            Err(_) => assert!(!incompatible),
+            Ok(_) => panic!("accepted"),
+        };
+        let p = G2048.group.p;
+        let pn = BigUint::from_bytes_be(p);
+        // Zero p or g; an even p; g of 1, p - 1, p; p over 10,000 bits:
+        // illegal_parameter.
+        is(OwnDh.start(&[0], &[2]), false);
+        is(OwnDh.start(p, &[0]), false);
+        let mut even = p.to_vec();
+        *even.last_mut().expect("p") &= 0xfe;
+        is(OwnDh.start(&even, &[2]), false);
+        is(OwnDh.start(p, &[1]), false);
+        is(OwnDh.start(p, &(&pn - 1u8).to_bytes_be()), false);
+        is(OwnDh.start(p, p), false);
+        let mut huge = vec![0xffu8; 1251];
+        huge[0] = 1; // 10,001 bits, odd
+        is(OwnDh.start(&huge, &[2]), false);
+        // 1,024 bits (80 bits of security), below security level 2:
+        // handshake_failure, as 7.94 sends it (`legacy-dhe-rsa-gcm-own1024`).
+        let mut small = vec![0xffu8; 128];
+        small[127] = 0xfd;
+        is(OwnDh.start(&small, &[2]), true);
+        // A good group: our share and the agreed secret check out.
+        let a = OwnDh.start(p, &[2]).expect("2,048 bits");
+        let ya = BigUint::from_bytes_be(a.pub_key());
+        assert!(ya > BigUint::from(1u8) && ya < pn);
+        let yb = BigUint::from(2u8).modpow(&BigUint::from(0x1234_5678u32), &pn);
+        let secret = a
+            .complete_for_tls_version(&yb.to_bytes_be(), &rustls::version::TLS12)
+            .expect("agrees");
+        assert!(!secret.secret_bytes().is_empty());
+        assert_ne!(secret.secret_bytes()[0], 0, "TLS 1.2 strips leading zeros");
     }
 
     /// X448 refuses a low-order share (the all-zero result) and a share of

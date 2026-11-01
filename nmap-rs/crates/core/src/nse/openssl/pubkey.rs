@@ -64,6 +64,18 @@ pub struct PubKey {
     pub rsa: Option<(Vec<u8>, Vec<u8>)>,
     /// An EC key's group.
     pub ec: Option<EcInfo>,
+    /// A DSA key's `p`, `q`, `g` and `y`, big-endian magnitudes (M6.7 step
+    /// e: the TLS client verifies DSA signatures with them).
+    pub dsa: Option<DsaKey>,
+}
+
+/// A DSA public key: the domain parameters and `y`, big-endian magnitudes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DsaKey {
+    pub p: Vec<u8>,
+    pub q: Vec<u8>,
+    pub g: Vec<u8>,
+    pub y: Vec<u8>,
 }
 
 /// What `lua_push_ecdhparams` can say of a group.
@@ -200,6 +212,7 @@ fn rsa(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
         bits: n.bits(),
         rsa: Some((n.to_bytes_be(), e.to_bytes_be())),
         ec: None,
+        dsa: None,
     })
 }
 
@@ -264,19 +277,26 @@ fn dsa(alg: &Algor, key: &[u8]) -> Res<PubKey> {
             let raw = seq_param(alg).ok_or(DECODE)?;
             let mut s = Seq::open(raw, None, false)?.ok_or(DECODE)?;
             let p = s.req(false, bignum)?;
-            s.req(false, bignum)?;
-            s.req(true, bignum)?;
+            let q = s.req(false, bignum)?;
+            let g = s.req(true, bignum)?;
             s.finish()?;
-            p
+            (p, q, g)
         }
         _ => return Err(DECODE),
     };
-    asn1_integer(key)?;
+    let (p, q, g) = p;
+    let y = asn1_integer(key)?;
     Ok(PubKey {
         kind: Kind::Dsa,
         bits: p.bits(),
         rsa: None,
         ec: None,
+        dsa: Some(DsaKey {
+            p: p.to_bytes_be(),
+            q: q.to_bytes_be(),
+            g: g.to_bytes_be(),
+            y: y.to_bytes_be(),
+        }),
     })
 }
 
@@ -306,6 +326,7 @@ fn dh(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
         bits: p.bits(),
         rsa: None,
         ec: None,
+        dsa: None,
     })
 }
 
@@ -360,6 +381,7 @@ fn ec_key(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
         bits: group.order_bits(),
         rsa: None,
         ec: Some(info),
+        dsa: None,
     })
 }
 
@@ -681,5 +703,6 @@ fn ecx(kind: Kind, alg: &Algor, key: &[u8]) -> Res<PubKey> {
         bits,
         rsa: None,
         ec: None,
+        dsa: None,
     })
 }

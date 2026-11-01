@@ -48,7 +48,9 @@ socket2 = "0.6.5"
 # crates follow, the lock holds both generations of their support crates
 # (digest, sha2, hmac, signature, rand_core, ...), which deny.toml reports as
 # duplicate warnings; the TLS seam implements both rand_core versions.
-rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
+# Vendored since M6.7 step b (crates/vendor/rustls/PROVENANCE.md): 0.23.46 plus
+# a numbered patch series, for what the provider interface cannot carry.
+rustls = { path = "../vendor/rustls/rustls", default-features = false, features = ["std", "tls12"] }
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
@@ -67,6 +69,16 @@ num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 aes = { version = "0.8", default-features = false }
 ccm = { version = "0.5", default-features = false }
 aria = { version = "0.1", default-features = false }
+# M6.7 step d: Camellia-CBC (measured in step 0; not constant-time, under the
+# ledger entry nse-tls-table-ciphers, as ARIA above), and SHA-1 for the
+# HMAC-SHA1 CBC suites (already in the tree through nmap-core).
+camellia = { version = "0.1", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+# SHAKE256, for Ed448 verification (M6.7 step f: 7.94 offers ed448).
+sha3 = { version = "0.10", default-features = false }
+# Constant-time comparison of record MACs and padding (already in the tree
+# through rustls).
+subtle = { version = "2.5", default-features = false }
 crypto-bigint = { version = "0.7.10", default-features = false, features = ["alloc"] }
 zeroize = { version = "1", default-features = false }
 rand_core = { version = "0.6", default-features = false }

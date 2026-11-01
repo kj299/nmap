@@ -5660,7 +5660,9 @@ so they are opened now and land, pinned per fixture, with step f1
       only such suites (`starttls-legacy`: 7.94 reconnects with AES128-SHA,
       the port gets `HandshakeFailure`). Where both fail: TLS 1.0 and 1.1
       only, a SHA-1-only signature algorithm, a secp256k1 certificate (neither
-      ClientHello offers an ECDSA signature algorithm for that curve). Retired by M6.7, legacy TLS.
+      ClientHello offers an ECDSA signature algorithm for that curve).
+      **Retired by M6.7 step e** (docs/M6.7-ANALYSIS.md §19), with DSA
+      certificates, the last of it: no row is pinned to it.
       Pinned by step f1 (`gen_m65_tls.py`, `PORT_PINS`): `tls12-rsa-kx-gcm`,
       `tls12-ecdhe-cbc`, `tls12-dhe2048`, `dsa-dhe`, `tls13-x448`,
       `tls13-ffdhe2048`, `starttls-legacy`, and `dual-tls12-clientpref` (the
@@ -5672,6 +5674,21 @@ so they are opened now and land, pinned per fixture, with step f1
         does (`tls13-x448`, `tls13-ffdhe2048`, and seven `legacy-*` rows
         unpinned). DHE with the server's own group moved to
         `nse-tls-dhe-own-group`.
+      - **M6.7 step d** retires CBC: AES, Camellia and SEED with HMAC-SHA1,
+        -SHA256 and -SHA384, MAC-then-encrypt and encrypt-then-MAC (patch
+        0003). `tls12-ecdhe-cbc`, `starttls-legacy` (the fixture gate and
+        the M6.4 CLI scenario) and seven `legacy-*` CBC rows reach as 7.94
+        does. Of this entry, only DSA certificates remain (`dsa-dhe`,
+        `legacy-dhe-dss-gcm-ffdhe2048`), for step e.
+      - **M6.7 step e** retires DSA certificates (`dsa_sha224` to
+        `dsa_sha512`, verified first-party over public values, and the 13
+        DHE-DSS suites): `dsa-dhe` and `legacy-dhe-dss-gcm-ffdhe2048` reach
+        as 7.94 does.
+      - **M6.7 step c** retires RSA key exchange with the AEAD suites
+        (patch 0002 of the vendored rustls): `tls12-rsa-kx-gcm`,
+        `cert-tls12-rsa-kx`, `legacy-rsa-kx-aes128-ccm` and
+        `legacy-rsa-kx-aria128-gcm` reach as 7.94 does. With CBC it waits for
+        step d.
       - **Since step g, a regression for legacy STARTTLS.** With `openssl`
         registered, sslcert retrieves a STARTTLS certificate as 7.94 does,
         by STARTTLS then `reconnect_ssl`, and the port's client cannot
@@ -5695,6 +5712,35 @@ so they are opened now and land, pinned per fixture, with step f1
         Step e (the server's own group, with OpenSSL's checks) closes it;
         the RFC 7919 groups, and every server that prefers ECDHE or honours
         the client's order, are unaffected.
+      - **Retired by M6.7 step e** (docs/M6.7-ANALYSIS.md §19). Patch 0004
+        gives rustls a `CustomDhGroups` hook for a group that is not RFC
+        7919's, and the provider applies OpenSSL's checks (an odd `p` of 512
+        to 10,000 bits, 1 < g < p - 1, then security level 2: under 112 bits
+        of security is handshake_failure). `tls12-dhe2048`,
+        `dhe-own2048-serverpref`, `dual-tls12-clientpref` (7.94's exact suite
+        order is back) and `legacy-dhe-rsa-gcm-own1024` (now alert 40 on
+        both sides) reach as 7.94 does.
+- [x] `nse-tls-table-ciphers` — the TLS provider's ARIA (`aria`, M6.7
+      step a), Camellia (`camellia`, step d) and SEED (first-party,
+      `sys::tls::seed`, step d) index their S-box tables with key- and
+      data-dependent bytes, so they are not constant-time. That is what
+      M6.5's rule kept DES and CAST5 out of the provider for. The rule is
+      narrowed for these three with the user's agreement (2026-10-31;
+      docs/M6.7-ANALYSIS.md §18), for three reasons:
+      - each runs only when the server chose such a suite;
+      - the TLS peer cannot use the leak, since it holds the session keys;
+      - exploiting it needs an attacker running code on the scanning host.
+      7.94's OpenSSL implements all three with tables too. AES (AES-NI or
+      fixsliced), ChaCha20, the GHASH/POLYVAL MACs and HMAC are unaffected.
+- [x] `nse-tls-cbc-lucky13` — with MAC-then-encrypt (the default unless
+      the server acknowledges encrypt-then-MAC), how long the port's CBC
+      record check takes depends on the padding length, through how much
+      the MAC covers (Lucky 13, CVE-2013-0169). The padding and the MAC are
+      themselves compared without branches (`sys::tls::cbc`). OpenSSL
+      instead equalises the digest's work (`ssl3_cbc_digest_record`). The
+      timing is visible only to the server, which holds the keys already
+      (docs/M6.7-ANALYSIS.md §6). Encrypt-then-MAC, which OpenSSL servers
+      negotiate by default, checks the MAC first and has no such leak.
 - [x] `nse-tls-no-reneg-info-accepted` — 7.94 aborts the handshake (alert
       40) when the server sends no `renegotiation_info` extension (RFC 5746,
       OpenSSL without `SSL_OP_LEGACY_SERVER_CONNECT`); rustls only tolerates
@@ -5703,6 +5749,9 @@ so they are opened now and land, pinned per fixture, with step f1
       nmap never renegotiates, so nothing downstream depends on it; a vendor
       patch of one check would restore the refusal if fidelity is wanted.
       Pinned by step f1: `fake-noreneg`.
+      - **Retired by M6.7 step f** (docs/M6.7-ANALYSIS.md §20): patch 0005's
+        `require_secure_renegotiation`, set by the port, refuses the server
+        with alert 40 as 7.94 does (`fake-noreneg`, `cert-fake-noreneg`).
 - [x] `nse-tls-handshake-64k` — rustls refuses a handshake message over
       65,535 bytes (`msgs/deframer/handshake.rs:376`); OpenSSL's certificate
       list limit is 102,400 (`SSL_MAX_CERT_LIST_DEFAULT`). A chain between
@@ -5710,6 +5759,10 @@ so they are opened now and land, pinned per fixture, with step f1
       certificates, 70,606 bytes, TLS 1.2 and 1.3); over 100 KiB both fail
       (`chain-over100k`). Pinned by step f1: `chain-over64k`,
       `chain13-over64k`.
+      - **Retired by M6.7 step f** (§20): patch 0005 takes handshake
+        messages and certificate lists up to OpenSSL's 102,400 bytes
+        (`chain-over64k`, `chain13-over64k`, `cert-chain-over64k`; over
+        100 KiB both still fail, `chain-over100k`).
 - [x] `nse-tls-sni-rustls-names` — for a string target that is an IP
       literal, 7.94 sends it as SNI (`sni-ip-string`: `server_name` =
       `127.0.0.1` in the server's trace); rustls sends none for an IP
@@ -5720,6 +5773,9 @@ so they are opened now and land, pinned per fixture, with step f1
       label over 63 bytes (`sni-table-255`), and drops a trailing dot
       (`sni-table-upper-dot`: `LocalHost.` is sent as `LocalHost`). Pinned
       by step f1: those three, `sni-ip-string` and `udp-ssl`.
+      - **Retired by M6.7 step f** (§20): patch 0007's `raw_server_name`
+        sends the target's name as it is (`sni-ip-string`, `udp-ssl`,
+        `sni-table-badname`, `sni-table-255`, `sni-table-upper-dot`).
 - [x] `nse-tls-alert-numbers` — where both sides reject, the alert the port
       sends can differ from 7.94's: a certificate entry with trailing bytes
       50 vs 42 (`fake-trail`), an undecodable certificate 42 vs 40
@@ -5737,6 +5793,11 @@ so they are opened now and land, pinned per fixture, with step f1
       certificate with no usable key, 80 and 46 (no error a rustls verifier
       returns is sent as 50 or 80). Pinned: `fake-trail`,
       `fake-unknownoid-cert`.
+      - **Retired by M6.7 step f** (§20): patch 0006 sends a verifier's
+        `InvalidMessage` as 50 and its `Other` as 80, and the verifier
+        returns those for a certificate entry with trailing bytes and a
+        leaf with no usable key (`fake-trail`, `fake-unknownoid-cert`, and
+        their `cert-` rows).
 - [x] `nse-bignum-operand-cap` (resources) — the `openssl` module's bignums
       (M6.5 step b, `core::nse::openssl::bn`) refuse an operand over a per-operation cap with the
       memory budget's error: 8,192 bits for `is_prime` and `is_safe_prime`,

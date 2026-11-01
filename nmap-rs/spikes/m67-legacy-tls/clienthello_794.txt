@@ -1,5 +1,7 @@
 record_version 0x0301
 client_version 0x0303
+handshake_length 512
+session_id_length 32
 suites 78
 suite 0x1302
 suite 0x1303
@@ -85,6 +87,7 @@ ext ec_point_formats
 ext supported_groups
   groups x25519 secp256r1 x448 secp521r1 secp384r1 ffdhe2048 ffdhe3072 ffdhe4096 ffdhe6144 ffdhe8192
 ext session_ticket
+  empty True
 ext encrypt_then_mac
   empty True
 ext extended_master_secret
@@ -98,3 +101,4 @@ ext psk_key_exchange_modes
 ext key_share
   shares x25519
 ext padding
+  length 126

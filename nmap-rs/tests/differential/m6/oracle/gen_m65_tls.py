@@ -297,6 +297,20 @@ FIXTURES = [
     # DHE; the port, offering DHE since step a and refusing any group but RFC 7919's, fails
     # where before step a it took ECDHE (nse-tls-dhe-own-group, until step e).
     ("dhe-own2048-serverpref", "s_server", "rsa2048 -tls1_2 -serverpref -cipher DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256 -dhparam CERTS/dh2048.pem", "host", "", ()),
+    # M6.7 step d: CBC with MAC-then-encrypt (the server refuses encrypt-then-MAC, which
+    # OpenSSL otherwise negotiates): HMAC-SHA1, HMAC-SHA384 and SEED.
+    ("cbc-mte-ecdhe-aes128-sha", "s_server", "rsa2048 -tls1_2 -no_etm -cipher ECDHE-RSA-AES128-SHA", "host", "", ()),
+    ("cbc-mte-ecdhe-aes256-sha384", "s_server", "rsa2048 -tls1_2 -no_etm -cipher ECDHE-RSA-AES256-SHA384", "host", "", ()),
+    ("cbc-mte-rsa-kx-seed-sha", "s_server", "rsa2048 -tls1_2 -no_etm -cipher SEED-SHA:@SECLEVEL=0 -provider legacy -provider default", "host", "", ()),
+    # M6.7 step f: the rest of 7.94's signature_algorithms. An Ed448 and an
+    # RSA-PSS leaf (certs/gen_m67f.sh) in each version, and a server that
+    # signs only with SHA-224.
+    ("sig-ed448-tls13", "s_server", "ed448 -tls1_3", "host", "", ()),
+    ("sig-ed448-tls12", "s_server", "ed448 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256", "host", "", ()),
+    ("sig-rsapss-tls13", "s_server", "rsapss2048 -tls1_3", "host", "", ()),
+    ("sig-rsapss-tls12", "s_server", "rsapss2048 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256", "host", "", ()),
+    ("sig-ecdsa-sha224", "s_server", "ecp256 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256 -sigalgs ECDSA+SHA224", "host", "", ()),
+    ("sig-rsa-pkcs1-sha224", "s_server", "rsa2048 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -sigalgs RSA+SHA224", "host", "", ()),
 ]
 
 # SERVER fields that timing decides, written `*` for both programs: on the
@@ -806,72 +820,13 @@ def generate(outdir, twice, carry):
 # Where the port differs from 7.94, by fixture: (ledger id in DIVERGENCES.md,
 # the port's RESULT, the port's SERVER). None keeps the golden's field; a
 # dict for SERVER replaces those `key=value` fields of the golden's.
-_NO_LEGACY = ("fail ERROR", "hello=1 sni=- serverhello=none alerts=sent:handshake_failure(40) "
-              "error=tls_post_process_client_hello:no_shared_cipher")
-# Since M6.7 step a the port offers DHE and takes the server's flight, then
-# refuses a group that is not one of RFC 7919's (rustls matches none other).
-_OWN_DH = ("fail ERROR", "hello=1 sni=- version=TLSv1.2 suite=TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 "
-           "group=DHE sigalg=rsa_pss_rsae_sha256 alerts=rcvd:illegal_parameter(47) "
-           "error=ssl3_read_bytes:sslv3_alert_illegal_parameter")
 _SCRIPT_ERROR = "fail no-result port=open"
 PORT_PINS = {
-    # rustls: no RSA key exchange, CBC or DSA. The servers' own refusal.
-    "tls12-rsa-kx-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls12-ecdhe-cbc": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "tls12-dhe2048": ("nse-tls-dhe-own-group",) + _OWN_DH,
-    "dsa-dhe": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "starttls-legacy": ("nse-tls-modern-only", "fail ERROR", "tls failed: NO_SHARED_CIPHER"),
-    # The same RSA leaf, which is what the suite order is for; 7.94's DHE-RSA
-    # CBC suite is not the port's to offer.
-    "dual-tls12-clientpref": ("nse-tls-modern-only", None,
-                              {"suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-                               "group": "ecdh_x25519"}),
-    # rustls refuses a handshake message over 64 KiB; the server sent it all.
-    "chain-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
-    "chain13-over64k": ("nse-tls-handshake-64k", "fail ERROR", None),
-    # rustls sends no server_name for an IP literal or a name it cannot
-    # encode, and drops a trailing dot.
-    "sni-ip-string": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
-    "udp-ssl": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
-    "sni-table-badname": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
-    "sni-table-255": ("nse-tls-sni-rustls-names", None, {"sni": "-"}),
-    "sni-table-upper-dot": ("nse-tls-sni-rustls-names", None, {"sni": "LocalHost"}),
-    # Alerts rustls cannot send from a verifier (7.94: 50 and 80).
-    "fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
-    "fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
-    # rustls goes on without renegotiation_info.
-    "fake-noreneg": ("nse-tls-no-reneg-info-accepted", None, "client ClientKeyExchange"),
     # 7.94 aborts (assert) or quits (fatal); the port raises in the script,
     # before it connects.
     "udp-reconnect": ("nse-reconnect-ssl-udp-abort", _SCRIPT_ERROR, None),
     "sni-table-empty": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
     "sni-table-256": ("nse-ssl-sni-fatal", _SCRIPT_ERROR, {"error": "-"}),
-    # Step f2's rows on the same servers: no handshake, no table; the same
-    # alerts; and where rustls goes on without renegotiation_info, the leaf.
-    "cert-tls12-rsa-kx": ("nse-tls-modern-only", "cert ssl=nil,ERROR table=nil", _NO_LEGACY[1]),
-    "cert-chain-over64k": ("nse-tls-handshake-64k", "cert ssl=nil,ERROR table=nil", None),
-    "cert-fake-trail": ("nse-tls-alert-numbers", None, "client alert 42"),
-    "cert-fake-unknownoid-cert": ("nse-tls-alert-numbers", None, "client alert 46"),
-    # M6.7 step 0's rows: what M6.7 brings in (docs/M6.7-ANALYSIS.md §11).
-    "legacy-rsa-kx-aes128-cbc-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aes256-cbc-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aes128-ccm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-aria128-gcm": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-camellia128-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-rsa-kx-seed-sha": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-rsa-aes256-cbc-sha384": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-ecdhe-rsa-camellia128-sha256": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-rsa-cbc-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    "legacy-dhe-dss-gcm-ffdhe2048": ("nse-tls-modern-only",) + _NO_LEGACY,
-    # Both refuse the 1,024-bit group after the server's flight: 7.94 with
-    # alert 40 (security level 2), the port with 47 (not an RFC 7919 group).
-    "legacy-dhe-rsa-gcm-own1024": ("nse-tls-dhe-own-group",) + _OWN_DH,
-    # The server prefers DHE with its own group: 7.94 takes it, the port
-    # fails where before step a it took ECDHE.
-    "dhe-own2048-serverpref": ("nse-tls-dhe-own-group",) + _OWN_DH,
-    "cert-fake-noreneg": ("nse-tls-no-reneg-info-accepted",
-                          "cert ssl=nil,ERROR table=2506:143fd02de66aed6d cn=m65-rsa2048",
-                          "client ClientKeyExchange"),
 }
 
 

@@ -77,7 +77,11 @@ timeout 300 "$NMAP" -6 -O -ddd -Pn -n -p "$PORTS" "$TARGET" >"$WORK/c.out" 2>&1 
 echo "== running nmap-rs -6 -O =="
 timeout 300 "$NMAP_RS" -6 -O -d -Pn -n -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
 
-c_verdict="$(grep -m1 -E '^(OS details: |No OS matches for host)' "$WORK/c.out" || true)"
+# 7.94 follows "No OS matches for host" with a submission invitation, " (If you know
+# what OS is running on it, see https://nmap.org/submit/ )."; the verdict is the words
+# before it.
+c_verdict="$(grep -m1 -E '^(OS details: |No OS matches for host)' "$WORK/c.out" \
+  | sed -E 's/^(No OS matches for host).*/\1/' || true)"
 c_top="$(sed -n -E 's/^ *[0-9]+\.[0-9]{4} +[0-9]+\.[0-9]{4} +[0-9]+ (.+)$/\1/p' "$WORK/c.out" | head -1)"
 c_dist="$(sed -n -E 's/^Network Distance: ([0-9]+) hops?$/\1/p' "$WORK/c.out" | head -1)"
 rs_verdict="$(sed -n 's/^IPv6 verdict: //p' "$WORK/rs.out" | head -1)"

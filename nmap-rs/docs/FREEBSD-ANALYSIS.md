@@ -326,6 +326,26 @@ ledgered and made to say so. Their driver is a milestone of its own.
   removed. Two things only CI can catch: FreeBSD's 28 (the unit test asserts
   it there), and the loopback's skipped neighbor discovery (the wire gate:
   `-6 -O ::1` on Linux failed without it).
+- **The first wire runs** (`fcf3d7a80`). On Linux, `-6 -O ::1` agreed with
+  7.94 on all three compared things, the first time the port's IPv6 OS
+  detection ran against the C anywhere, but the gate failed on its own
+  reading: 7.94 follows "No OS matches for host" with a submission
+  invitation, and the script compared the whole line. In the VM, nmap-rs
+  skipped `-O` for want of `nmap-os-db`, the oracle not being installed (as
+  for IPv4 in step d). Both were the harness; both are fixed. The same run
+  confirmed FreeBSD's `DLT_NULL` family (28) and matched `-6 -sT` on both
+  addresses.
+- **The second run** (`a8de35b4e`) passed every IPv6 gate, against 7.94,
+  on both OSes:
+
+  | | Linux | FreeBSD 15.0 |
+  |---|---|---|
+  | `-6 -O` of `::1` and of the host's own ULA | No OS matches; top class "Linux 3.7 - 4.15"; distance 0 | No OS matches; top class "FreeBSD 12.0 - 12.1"; distance 0 |
+  | `-6 -sT` of both | 3 of 3 ports | 3 of 3 ports |
+
+  On FreeBSD that is the port's `DLT_NULL` framing reaching `lo0`'s IPv6
+  stack: the battery's replies arrived and classified as 7.94's did.
+  **Step e is complete.**
 
 ## 5. Engineering choices (recorded; you may veto)
 
@@ -397,6 +417,6 @@ and FreeBSD has none either.
 | **b — data and files** (fixes in; the gate not yet run in the VM) | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
 | **c — datalinks** (done for capture, §4b; its gates pass in the VM since step d) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
 | **d — routes and MACs** (done, §4c) | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
-| **e — IPv6** (D1 (b); in progress, §4d) | F1 for sending: the L2 sender framing `DLT_NULL`; loopback and own-address IPv6 routes; `-6` raw scans warn and connect-scan | `-6 -O` (verdict, top class, distance) and `-6 -sT` of `::1` and the VM's own IPv6 address against the C; `-6 -sS` ledgered, not gated (§4d) |
+| **e — IPv6** (D1 (b); done, §4d) | F1 for sending: the L2 sender framing `DLT_NULL`; loopback and own-address IPv6 routes; `-6` raw scans warn and connect-scan | `-6 -O` (verdict, top class, distance) and `-6 -sT` of `::1` and the VM's own IPv6 address against the C; `-6 -sS` ledgered, not gated (§4d) |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7.

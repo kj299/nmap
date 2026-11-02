@@ -74,8 +74,16 @@ PORTS="$OPEN_PORT,$CLOSED_PORT"
 echo "target : $TARGET"
 echo "== running C nmap -6 -O =="
 timeout 300 "$NMAP" -6 -O -ddd -Pn -n -p "$PORTS" "$TARGET" >"$WORK/c.out" 2>&1 || true
-echo "== running nmap-rs -6 -O =="
-timeout 300 "$NMAP_RS" -6 -O -d -Pn -n -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
+# nmap-rs reads the data files 7.94 read, which -d names ("Read from DIR: nmap-os-db
+# ..."), as run_os_differential.sh does: the FreeBSD VM's oracle is not installed,
+# and -O needs nmap-os-db there too.
+DATADIR="$(sed -n 's/^Read from \(.*\): .*nmap-os-db.*/\1/p' "$WORK/c.out" | head -1)"
+# At -ddd 7.94 also names each file it finds ("Fetchfile found DIR/nmap-services").
+[[ -n "$DATADIR" ]] || DATADIR="$(sed -n 's|^Fetchfile found \(.*\)/nmap-services$|\1|p' "$WORK/c.out" | head -1)"
+rs_env=()
+[[ -n "$DATADIR" ]] && rs_env=("NMAP_RS_DATADIR=$DATADIR")
+echo "== running nmap-rs -6 -O (data files from ${DATADIR:-its own search}) =="
+env "${rs_env[@]}" timeout 300 "$NMAP_RS" -6 -O -d -Pn -n -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
 
 # 7.94 follows "No OS matches for host" with a submission invitation, " (If you know
 # what OS is running on it, see https://nmap.org/submit/ )."; the verdict is the words

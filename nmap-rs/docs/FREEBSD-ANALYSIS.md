@@ -264,6 +264,15 @@ the VM (§4c).
   installed, and run as a bare `nmap` it cannot find the data files beside
   its binary, which it locates through `argv[0]`; the gates pass it by full
   path. The diagnostic now does too.
+- **What 7.94's own `II` does on this host** (`0ecd8af6f`): four runs of
+  `-O` on `lo0`, all `II=I`. Together with the third run, where 7.94 said
+  `RI`, 7.94 has given both values on the same VM and kernel: `II` varies
+  from run to run without the port, and `RI` is the rare one. That is the
+  property the tolerance relies on. The four agreeing runs are weak
+  evidence on their own, and the cause (per-CPU counters, a reply sent
+  after a CPU migration) is read from FreeBSD's source rather than
+  measured. The tolerance stays, scoped as before; the diagnostic is
+  removed from the job.
 - **Sabotage**, 7 variants, each caught: the own-address rule removed (two
   unit tests), and again against the raw differential alone (every scan
   diverges, each port `filtered`); `is_localhost` back to the loopback range

@@ -141,6 +141,24 @@ pub fn is_localhost(target: Ipv4Addr) -> bool {
     is_local(&netif::interfaces().unwrap_or_default(), target)
 }
 
+/// Whether `target` is this machine, as `islocalhost` decides it for IPv6:
+/// `::`, `::1`, or an address on one of `ifaces`.
+#[must_use]
+pub fn is_local6(ifaces: &[netif::Interface], target: Ipv6Addr) -> bool {
+    target.is_loopback()
+        || target.is_unspecified()
+        || ifaces
+            .iter()
+            .any(|i| i.ipv6.iter().any(|n| n.addr == target))
+}
+
+/// [`is_local6`] against the host's interfaces; an enumeration error leaves
+/// only the address tests.
+#[must_use]
+pub fn is_localhost6(target: Ipv6Addr) -> bool {
+    is_local6(&netif::interfaces().unwrap_or_default(), target)
+}
+
 /// The reachability scope of an IPv6 address. Unlike IPv4, a source address may not
 /// be paired with a destination of a different scope: a link-local destination must be
 /// answered from a link-local source, and a global destination from a global one. nmap
@@ -219,6 +237,9 @@ pub struct Route6 {
     /// Whether the target is on the same link. Gates the `NS` probe in the
     /// OS-detection battery (`Build6Params::directly_connected`).
     pub directly_connected: bool,
+    /// Whether the route goes over a loopback interface: the target is this host.
+    /// There is no neighbor to discover there, and no MAC to frame with.
+    pub loopback: bool,
 }
 
 /// Pick a source address on `iface` matching `scope`.
@@ -238,16 +259,18 @@ fn source_for_scope(iface: &netif::Interface, scope: Scope6) -> Option<Ipv6Addr>
 ///
 /// Order mirrors [`route_for`], with the C's `direct_connect` rule (`route_dst_generic`
 /// treats a route as direct when its gateway is unset, equals the device address, or
-/// equals the destination): a loopback target → the loopback interface; else an
-/// interface with a **same-scope** prefix containing the target (on-link, next hop is
-/// the target); else the first up, non-loopback interface holding an IPv6 default
-/// gateway (off-link, next hop is that gateway).
+/// equals the destination): a loopback target → the loopback interface; one of the
+/// host's own addresses → the loopback interface too, with the target as source
+/// (`route_dst`); else an interface with a **same-scope** prefix containing the
+/// target (on-link, next hop is the target); else the first up, non-loopback
+/// interface holding an IPv6 default gateway (off-link, next hop is that gateway).
 #[must_use]
 pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Route6> {
     let scope = scope_of(target);
+    let loopback = ifaces.iter().find(|i| i.is_loopback && i.is_up);
 
     if scope == Scope6::Loopback {
-        if let Some(i) = ifaces.iter().find(|i| i.is_loopback && i.is_up) {
+        if let Some(i) = loopback {
             return Some(Route6 {
                 iface: i.name.clone(),
                 src: source_for_scope(i, Scope6::Loopback).unwrap_or(Ipv6Addr::LOCALHOST),
@@ -255,6 +278,28 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                 next_hop: target,
                 next_hop_mac: None,
                 directly_connected: true,
+                loopback: true,
+            });
+        }
+    }
+
+    // The host's own address goes over a loopback device with itself as the
+    // source, as `route_dst` sends it (one loop for both families; see
+    // [`choose_route`]). With no loopback up, the C moves on, and so do we.
+    let own = ifaces
+        .iter()
+        .find(|i| i.ipv6.iter().any(|n| n.addr == target));
+    if let Some(i) = own {
+        let lo = if i.is_loopback { Some(i) } else { loopback };
+        if let Some(lo) = lo.filter(|l| l.is_up) {
+            return Some(Route6 {
+                iface: lo.name.clone(),
+                src: target,
+                src_mac: lo.mac,
+                next_hop: target,
+                next_hop_mac: None,
+                directly_connected: true,
+                loopback: true,
             });
         }
     }
@@ -278,6 +323,7 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                     next_hop: target,
                     next_hop_mac: None,
                     directly_connected: true,
+                    loopback: false,
                 });
             }
         }
@@ -309,6 +355,7 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                 next_hop,
                 next_hop_mac: gw.mac,
                 directly_connected: false,
+                loopback: false,
             });
         }
     }
@@ -647,6 +694,42 @@ mod tests {
     fn no_gateway_and_no_matching_prefix_means_no_route() {
         let ifaces = vec![iface("eth0", Some(MAC), &[("2001:db8:1::5", 64)], None)];
         assert_eq!(choose_route6(&ifaces, v6("2001:db8:ffff::1")), None);
+    }
+
+    // route_dst, for IPv6 as for IPv4: the host's own address goes over the
+    // loopback with itself as the source, with no neighbor to discover.
+    #[test]
+    fn the_hosts_own_ipv6_address_takes_the_loopback() {
+        for own in ["2001:db8:1::5", "fe80::20c:29ff:fe1a:2b3c"] {
+            let r = choose_route6(&topology(), v6(own)).expect("a route");
+            assert_eq!(r.iface, "lo", "{own}");
+            assert_eq!(r.src, v6(own));
+            assert_eq!(r.next_hop, v6(own));
+            assert!(r.loopback && r.directly_connected);
+            assert_eq!(r.src_mac, None, "the loopback has no MAC");
+        }
+        // A neighbour on the same prefix is still on-link, over eth0.
+        let r = choose_route6(&topology(), v6("2001:db8:1::99")).expect("a route");
+        assert_eq!(r.iface, "eth0");
+        assert!(!r.loopback);
+        // ::1 is loopback too; with no loopback up, the own address is on-link.
+        assert!(choose_route6(&topology(), v6("::1")).expect("::1").loopback);
+        let mut no_lo = topology();
+        no_lo[0].is_up = false;
+        let r = choose_route6(&no_lo, v6("2001:db8:1::5")).expect("a route");
+        assert_eq!(r.iface, "eth0");
+        assert!(!r.loopback);
+    }
+
+    #[test]
+    fn localhost6_is_loopback_unspecified_or_our_own() {
+        let ifaces = topology();
+        for a in ["::1", "::", "2001:db8:1::5", "fe80::20c:29ff:fe1a:2b3c"] {
+            assert!(is_local6(&ifaces, v6(a)), "{a}");
+        }
+        for a in ["2001:db8:1::99", "::2", "fe80::1"] {
+            assert!(!is_local6(&ifaces, v6(a)), "{a}");
+        }
     }
 
     #[test]

@@ -10,10 +10,14 @@
 # port filtered, which nmap-rs did until FreeBSD step d. TARGET=127.0.0.1
 # runs the same matrix over the loopback.
 #
+# An IPv6 TARGET runs with -6, and only the scans SCANS names (default for
+# IPv6: -sT). nmap-rs has no raw IPv6 port scans (`ipv6-raw-port-scans-unported`):
+# it connect-scans instead, and says so, so its raw rows would not compare.
+#
 # Requires root (raw sockets, BPF) and a --features pcap build; SKIPs without
 # them, as run_os_differential.sh does.
 #
-# Usage: [TARGET=addr] [NMAP=...] [NMAP_RS=...] run_raw_differential.sh
+# Usage: [TARGET=addr] [SCANS="-sS ..."] [NMAP=...] [NMAP_RS=...] run_raw_differential.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +44,11 @@ if [[ -z "$NMAP_RS" || ! -f "$NMAP_RS" || ! -x "$NMAP_RS" ]]; then
 fi
 
 TARGET="${TARGET:-$(python3 "$HERE/own_address.py")}"
+if [[ "$TARGET" == *:* ]]; then
+  FAMILY=6; SIX=(-6); SCANS="${SCANS:--sT}"
+else
+  FAMILY=4; SIX=(); SCANS="${SCANS:--sS -sF -sN -sX -sA -sW -sM -sU}"
+fi
 echo "target : $TARGET"
 echo "oracle : $NMAP ($("$NMAP" --version | head -1))"
 echo "rust   : $NMAP_RS"
@@ -49,14 +58,15 @@ trap 'rm -rf "$WORK"; [[ -n "${FIXTURE_PID:-}" ]] && kill "$FIXTURE_PID" 2>/dev/
 
 # The fixture, on every address: a TCP listener that accepts and drains, a
 # UDP socket that never answers (open|filtered), nothing on $CLOSED.
-python3 - "$OPEN_TCP" "$OPEN_UDP" <<'PY' &
+python3 - "$OPEN_TCP" "$OPEN_UDP" "$FAMILY" <<'PY' &
 import socket, sys, threading, time
-t = socket.socket()
+fam, anyaddr = (socket.AF_INET6, "::") if sys.argv[3] == "6" else (socket.AF_INET, "0.0.0.0")
+t = socket.socket(fam)
 t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-t.bind(("0.0.0.0", int(sys.argv[1])))
+t.bind((anyaddr, int(sys.argv[1])))
 t.listen(64)
-u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-u.bind(("0.0.0.0", int(sys.argv[2])))
+u = socket.socket(fam, socket.SOCK_DGRAM)
+u.bind((anyaddr, int(sys.argv[2])))
 def drain():
     while True:
         try:
@@ -73,18 +83,18 @@ sleep 1
 # tools agreeing on that would pass vacuously. Check it answers on $TARGET.
 python3 -c "
 import socket, sys
-s = socket.socket(); s.settimeout(2)
+s = socket.socket(socket.AF_INET6 if $FAMILY == 6 else socket.AF_INET); s.settimeout(2)
 sys.exit(0 if s.connect_ex(('$TARGET', $OPEN_TCP)) == 0 else 1)
 " || { echo "FAIL: the fixture is not listening on $TARGET:$OPEN_TCP"; exit 1; }
 
 PORTS="$OPEN_TCP,$OPEN_UDP,$CLOSED"
 fail=0
-for scan in -sS -sF -sN -sX -sA -sW -sM -sU; do
+for scan in $SCANS; do
   # Three ports take seconds; a run still going after 120 s has hung, and
   # fails on its empty projection rather than stalling the job.
   rm -f "$WORK/c.xml" "$WORK/rs.xml"
-  timeout 120 "$NMAP" "$scan" -Pn -n --reason -p "$PORTS" "$TARGET" -oX "$WORK/c.xml" >/dev/null 2>"$WORK/c.err" || true
-  timeout 120 "$NMAP_RS" "$scan" -Pn -n --reason -p "$PORTS" "$TARGET" -oX "$WORK/rs.xml" >"$WORK/rs.out" 2>&1 || true
+  timeout 120 "$NMAP" "${SIX[@]}" "$scan" -Pn -n --reason -p "$PORTS" "$TARGET" -oX "$WORK/c.xml" >/dev/null 2>"$WORK/c.err" || true
+  timeout 120 "$NMAP_RS" "${SIX[@]}" "$scan" -Pn -n --reason -p "$PORTS" "$TARGET" -oX "$WORK/rs.xml" >"$WORK/rs.out" 2>&1 || true
   touch "$WORK/c.xml" "$WORK/rs.xml"
   if grep -q "lacks raw-scan support" "$WORK/rs.out"; then
     echo "SKIP: nmap-rs lacks the pcap feature (build with --features pcap)"; exit 0

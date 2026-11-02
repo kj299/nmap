@@ -281,6 +281,52 @@ the VM (§4c).
   ignored (`link_mac`'s tests); `is_local` ignoring the interfaces (its
   test).
 
+## 4d. Step e: IPv6
+
+**Scope, decided 2026-11-02.** Phase 0 wrote step e's gate as `-6 -sS` and
+`-6 -O` against the C, believing the Linux build raw-scanned IPv6. It does
+not, on any OS: every raw port-scan driver sends IPv4, and `-6 -sS` sent
+nothing and reported the host with no ports and no warning. `-6 -O` has its
+own layer-2 driver, but no job had compared it with the C on the wire. You
+chose to scope step e to what exists: `-6 -O` on FreeBSD, its first wire
+differential (both OSes), and `-6 -sT` in the VM, with raw IPv6 port scans
+ledgered and made to say so. Their driver is a milestone of its own.
+
+- **F1 for sending.** The IPv6 battery is framed for the link it leaves on,
+  by the send handle's datalink, as `send_ip_packet_eth` frames
+  (`rawio::LinkFraming`): Ethernet; `DLT_NULL`'s 4-byte family in host
+  order, with libpcap's `AF_INET6` (28 on FreeBSD, 30 on Darwin, 24
+  elsewhere, the values the C writes); or `DLT_RAW`'s bare packet. Any other
+  datalink is refused, as the C refuses it.
+- **Loopback routes.** `Route6` says when a route goes over a loopback; there
+  is then no neighbor to discover, and Linux's `lo` takes Ethernet with zero
+  MACs. Before this, `-6 -O ::1` failed on Linux too ("egress interface has
+  no MAC"). The C sends to a loopback through a raw socket instead
+  (`raw_socket_or_eth`), which on the BSDs cannot set the flow label; that
+  shows only in its submission fingerprint (ledgered under
+  `ipv6-send-is-layer-2-only`).
+- **The host's own IPv6 address** goes over the loopback with itself as the
+  source (`choose_route6`, `route_dst`'s rule for both families), and `-6 -O`
+  takes distance 0 there (`route::is_localhost6`, `islocalhost`).
+- **`-6` with a raw scan type** warns "raw IPv6 port scans are not ported
+  yet" and connect-scans (`ipv6-raw-port-scans-unported`, newly ledgered;
+  `cli/tests/ipv6_raw_fallback.rs`).
+- **The gate.** `tests/differential/m5/run_os6_differential.sh` runs `-6 -O`
+  with both programs as root and compares what the classifier decides: the
+  verdict (`OS details: <class>`, or `No OS matches for host`; nmap-rs now
+  prints its own at `-d`), the top-ranked class, and the distance. The
+  responses carry sequence numbers and times, so they are not compared. Both
+  CI jobs run it on `::1` and on a ULA added to the default interface (the
+  host's own address), and the raw differential runs `-6 -sT` on both
+  addresses. This container has no IPv6, so CI is where these run first.
+- **Sabotage**, 7 variants, each caught here: the `DLT_NULL` family in
+  network order, and with the wrong number; `DLT_LOOP` sent as `DLT_NULL`;
+  the own-address rule removed; `is_local6` ignoring the interfaces; the
+  loopback flag dropped from an own-address route; the CLI's IPv6 fallback
+  removed. Two things only CI can catch: FreeBSD's 28 (the unit test asserts
+  it there), and the loopback's skipped neighbor discovery (the wire gate:
+  `-6 -O ::1` on Linux failed without it).
+
 ## 5. Engineering choices (recorded; you may veto)
 
 - **The datalink travels with the capture.** `PcapSource` reports
@@ -351,6 +397,6 @@ and FreeBSD has none either.
 | **b — data and files** (fixes in; the gate not yet run in the VM) | F4 (`NMAPDATADIR`), F3 (`EMLINK`) | the NSE corpus and CLI scenarios in the VM against the VM's C nmap |
 | **c — datalinks** (done for capture, §4b; its gates pass in the VM since step d) | F1 and F2 for capture: a link type from `pcap_datalink`, parsers by offset; fuzz targets over `DLT_NULL`/`DLT_RAW` | raw IPv4 scans and `-O` of `lo0` as root, against the C; unit tests for each framing (on Linux too) |
 | **d — routes and MACs** (done, §4c) | F5 checked in the VM, fixed if `netdev` falls short; F7 (the e2e tests by route); F8 (`AF_LINK` in `raw-ffi`) | raw scans of the VM's own non-loopback address; the `raw-ffi` cross-check agreeing with `netdev` |
-| **e — IPv6** (D1 (b)) | F1 for sending: the L2 sender framing `DLT_NULL` | `-6 -sS` and `-6 -O` of `::1` and the VM's IPv6 address against the C |
+| **e — IPv6** (D1 (b); in progress, §4d) | F1 for sending: the L2 sender framing `DLT_NULL`; loopback and own-address IPv6 routes; `-6` raw scans warn and connect-scan | `-6 -O` (verdict, top class, distance) and `-6 -sT` of `::1` and the VM's own IPv6 address against the C; `-6 -sS` ledgered, not gated (§4d) |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7.

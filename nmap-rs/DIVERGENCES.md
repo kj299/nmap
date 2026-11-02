@@ -145,6 +145,15 @@ narrower *rendering* of the same result.
       takes `--debug=N` (`{"debug", optional_argument, 0, 'd'}`,
       `nmap.cc:531`); the port refuses it, fail-closed, and takes `--debug`
       and `-dN`. Found by the lfs step's review.
+- [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
+      IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
+      over IPv6; every raw driver here sends IPv4 only (the IPv6 receive
+      validation and ICMPv6 classification are ledgered above as deferred). With
+      `-6`, a raw scan type prints "raw IPv6 port scans are not ported yet;
+      running a connect scan (-sT)" and connect-scans, as a raw scan without
+      privilege does. Until FreeBSD step e it sent nothing and reported the host
+      with no ports and no word of why. `-6 -O` is unaffected: it has its own
+      layer-2 driver. Pinned by `cli/tests/ipv6_raw_fallback.rs`.
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans
@@ -463,7 +472,8 @@ the driver-specific choices.
       scan of the host's own address captured on that address's interface, saw no
       reply, and reported every port filtered, on Linux as on FreeBSD; `-O` also
       reported one hop where the C, by `islocalhost`, reports 0
-      (`route::is_localhost`). IPv6's own-address rule is FreeBSD step e's. Whether the
+      (`route::is_localhost`). IPv6 has the same rule since FreeBSD step e
+      (`choose_route6`, `route::is_localhost6`). Whether the
       capture carries a link header is its datalink's to say (FreeBSD step c).
 - [x] `route6-explicit-source-scope-selection` (`sys::route::choose_route6`, the IPv6
       counterpart of the entry above): nmap picks the source address by reading the OS
@@ -1455,13 +1465,26 @@ variance, and a wrong scaling formula.
       would simply send. The framing itself is a thin generic wrapper over any
       [`RawSender`], so it is exercised against a mock in CI and only the injection
       beneath it needs privilege. *(Introduced at M5 item 12b-ii-b-3.)*
+      Since FreeBSD step e the frame follows the send handle's datalink, as
+      `send_ip_packet_eth` does (`sys::rawio::LinkFraming`): Ethernet, `DLT_NULL`'s
+      4-byte family (libpcap's `AF_INET6`: 28 on FreeBSD), or `DLT_RAW`'s bare packet;
+      and a route over a loopback (`::1`, or the host's own address) needs no neighbor
+      discovery. One difference from the C remains there: 7.94 sends to a loopback
+      through a raw socket (`raw_socket_or_eth` forces it off Ethernet), where on the
+      BSDs the kernel writes the IPv6 header and the flow label cannot be set, so its
+      submission fingerprint says `EXTRA(FL=00000)`. The port frames on every link and
+      sets the flow label; it prints no submission fingerprint, and the classifier
+      does not read the label.
 - [x] `ipv6-os-detection-is-a-classifier-not-a-database` (`cli`, `-6 -O`): the IPv4 `-O`
       output is a fingerprint-database match, with a submission invitation, a distance
       attribution and a `SEQ` report. IPv6 `-O` is a different engine end to end — the
       battery is scored into a 695-feature vector and run through nmap's **trained
       model** — so the CLI reports the model's ranked guesses with their logistic
       accuracies instead. No fingerprint is offered for submission, because there is no
-      database to submit one to. *(Introduced at M5 item 12b-ii-b-3.)*
+      database to submit one to. *(Introduced at M5 item 12b-ii-b-3.)* At `-d`, an
+      `IPv6 verdict:` line gives 7.94's own conclusion (`OS details: <class>` or `No OS
+      matches for host`), which `run_os6_differential.sh` compares on the wire
+      (FreeBSD step e).
 
 ### Faithfully reproduced C quirks (deliberately *not* fixed)
 

@@ -266,8 +266,10 @@ where
 
 /// Run IPv6 OS detection against one host, end to end — the privileged entry point.
 ///
-/// Resolves the route, resolves the next hop's MAC by neighbor discovery, frames the
-/// battery at layer 2 and runs a round. **The IPv6 path has no L3 raw-socket option**:
+/// Resolves the route, frames the battery for the link it leaves on (on Ethernet, to
+/// the next hop's MAC, resolved by neighbor discovery; on a loopback, with no neighbor
+/// to resolve: FreeBSD's `lo0` takes a 4-byte `DLT_NULL` family, Linux's `lo` Ethernet
+/// with zero MACs) and runs a round. **The IPv6 path has no L3 raw-socket option**:
 /// Linux offers no `IPV6_HDRINCL`, so a caller-built IPv6 packet cannot be handed to the
 /// kernel to route the way the IPv4 driver does. Everything below the seams here —
 /// `build6`, `fp6_match`, `fp6`, `fpmodel`, `core::ndp`, `route::choose_route6`,
@@ -277,8 +279,8 @@ where
 /// # Errors
 /// Returns `PermissionDenied` without raw-socket/capture privilege, `AddrNotAvailable`
 /// when no route exists or the next hop never answers, or another OS error if the
-/// capture cannot be opened. Returns `Unsupported` for an interface with no MAC, which
-/// cannot originate an Ethernet frame.
+/// capture cannot be opened. Returns `Unsupported` for an Ethernet interface with no
+/// MAC, which cannot originate a frame, and for a datalink nmap does not send on.
 #[cfg(feature = "pcap")]
 pub async fn os_scan_host6(
     target: std::net::Ipv6Addr,
@@ -287,32 +289,60 @@ pub async fn os_scan_host6(
 ) -> std::io::Result<(Fp6Observation, Fp6Results, Build6Params)> {
     use crate::capture::pcap_source::PcapSource;
     use crate::rawio::pcap_sender::PcapSender;
-    use crate::rawio::EthFramingSender;
+    use crate::rawio::{FramingSender, LinkFraming};
     use crate::route::route_for6;
     use std::io::{Error, ErrorKind};
 
     let route = route_for6(target)?
         .ok_or_else(|| Error::new(ErrorKind::AddrNotAvailable, "no IPv6 route to target"))?;
-    let src_mac = route.src_mac.ok_or_else(|| {
+
+    // The link decides the framing (`send_ip_packet_eth` frames by the handle's
+    // datalink): FreeBSD's lo0 is DLT_NULL, with no MACs at all.
+    let link = PcapSender::open(&route.iface)?;
+    let dlt = link.datalink();
+    let framing = match dlt {
+        // A loopback has no neighbor to discover: Linux's `lo` is Ethernet with
+        // zero MACs, and takes any frame.
+        1 if route.loopback => Some(LinkFraming::Ethernet {
+            src: route.src_mac.unwrap_or_default(),
+            dst: [0; 6],
+        }),
+        1 => {
+            let src_mac = route.src_mac.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unsupported,
+                    "egress interface has no MAC; cannot frame an IPv6 probe at layer 2",
+                )
+            })?;
+            // Resolve the next hop before anything else: without its MAC no probe
+            // can be framed.
+            let nd_filter = crate::ndp::bpf_filter(src_mac);
+            let mut nd_sender = PcapSender::open(&route.iface)?;
+            let nd_iface = route.iface.clone();
+            let next_hop_mac = crate::ndp::next_hop_mac(
+                &mut nd_sender,
+                PcapSource::open(&nd_iface, 65535, 25, Some(&nd_filter))?,
+                src_mac,
+                route.src.octets(),
+                route.next_hop.octets(),
+                route.next_hop_mac,
+            )
+            .await?;
+            Some(LinkFraming::Ethernet {
+                src: src_mac,
+                dst: next_hop_mac,
+            })
+        }
+        other => {
+            LinkFraming::for_datalink(other, || Err(Error::other("Ethernet is handled above")))?
+        }
+    }
+    .ok_or_else(|| {
         Error::new(
             ErrorKind::Unsupported,
-            "egress interface has no MAC; cannot frame an IPv6 probe at layer 2",
+            format!("{}: unsupported datalink {dlt} for sending", route.iface),
         )
     })?;
-
-    // Resolve the next hop before anything else: without its MAC no probe can be framed.
-    let nd_filter = crate::ndp::bpf_filter(src_mac);
-    let mut nd_sender = PcapSender::open(&route.iface)?;
-    let nd_iface = route.iface.clone();
-    let next_hop_mac = crate::ndp::next_hop_mac(
-        &mut nd_sender,
-        PcapSource::open(&nd_iface, 65535, 25, Some(&nd_filter))?,
-        src_mac,
-        route.src.octets(),
-        route.next_hop.octets(),
-        route.next_hop_mac,
-    )
-    .await?;
 
     let selected = nmap_core::osscan::select_probe_ports(ports, crate::route::random_scan_keys().0);
     let rand = || crate::route::random_scan_keys().0;
@@ -335,13 +365,14 @@ pub async fn os_scan_host6(
         directly_connected: route.directly_connected,
     };
 
-    // The battery goes out framed to the resolved next hop.
-    let mut sender = EthFramingSender::new(PcapSender::open(&route.iface)?, src_mac, next_hop_mac);
+    // The battery goes out framed for the link: to the resolved next hop on Ethernet.
+    let mut sender = FramingSender::new(link, framing);
     let filter = bpf_filter(&params);
     let iface = route.iface.clone();
     let source = PcapSource::open(&iface, 65535, 100, Some(&filter))?;
 
-    let locality = if target.is_loopback() {
+    // `islocalhost`: ::1, or one of this host's own addresses (C: distance 0).
+    let locality = if crate::route::is_localhost6(target) {
         Locality::Localhost
     } else if route.directly_connected {
         Locality::DirectlyConnected

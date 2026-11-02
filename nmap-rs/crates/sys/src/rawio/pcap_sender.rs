@@ -26,6 +26,13 @@ impl PcapSender {
             .map_err(to_io)?;
         Ok(PcapSender { cap })
     }
+
+    /// The handle's datalink (`pcap_datalink`), which decides how a packet is
+    /// framed for it ([`super::LinkFraming::for_datalink`]).
+    #[must_use]
+    pub fn datalink(&self) -> i32 {
+        self.cap.get_datalink().0
+    }
 }
 
 impl RawSender for PcapSender {

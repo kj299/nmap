@@ -399,7 +399,7 @@
     "cli": {
       "unsafe_audited": {
         "files": 2,
-        "sha256": "249bdecd3370698fe9c4fca70b711b8e3ec5967228d5d6725bafad21de5d5519"
+        "sha256": "d82862bdec7f2c0d1e3b71df98f81851e2434de406dac17af1e5975c0243a2f2"
       }
     },
     "core::nse::fspolicy": {

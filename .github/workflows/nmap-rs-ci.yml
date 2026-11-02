@@ -567,6 +567,16 @@ jobs:
       - run: sudo -E env "PATH=$PATH" bash tests/differential/raw/run_raw_differential.sh
       - run: sudo -E env "PATH=$PATH" TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
       - run: sudo -E env "PATH=$PATH" TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
+      # FreeBSD step e: IPv6. -6 -O of ::1 and of an address of the host's own (a ULA
+      # added to the default interface, without DAD), against C nmap, on what the
+      # classifier decides (verdict, top class, distance); then -6 -sT there. nmap-rs
+      # has no raw IPv6 port scans (`ipv6-raw-port-scans-unported`). Until step e no
+      # job compared -6 -O on the wire at all.
+      - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 bash tests/differential/m5/run_os6_differential.sh
+      - run: sudo ip -6 addr add fd00:5ca1::10/64 dev "$(ip -o -4 route show default | awk '{print $5}')" nodad
+      - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 TARGET=fd00:5ca1::10 bash tests/differential/m5/run_os6_differential.sh
+      - run: sudo -E env "PATH=$PATH" TARGET=::1 bash tests/differential/raw/run_raw_differential.sh
+      - run: sudo -E env "PATH=$PATH" TARGET=fd00:5ca1::10 bash tests/differential/raw/run_raw_differential.sh
       # M4/M5 packet-walk differential: rebuild the C PacketParser oracle and
       # regenerate the committed corpus + golden, then require them to be unchanged.
       # The cargo test compares against the committed golden, so without this step a
@@ -916,6 +926,18 @@ jobs:
             gate env TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
             gate env TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
             gate bash tests/differential/m5/run_os_differential.sh
+            # Step e: IPv6, on lo0 and on an address of the VM's own. FreeBSD
+            # keeps IPv6 off an interface rc.conf did not configure (ND6
+            # IFDISABLED), so it is enabled and a ULA added; DAD takes a moment.
+            ifc="$(route -n get default | awk '/interface:/ {print $2}')"
+            ifconfig "$ifc" inet6 -ifdisabled || true
+            gate ifconfig "$ifc" inet6 fd00:5ca1::10/64 alias
+            sleep 3
+            ifconfig "$ifc" inet6 | sed -n '/inet6/p'
+            gate env REQUIRE_IPV6=1 bash tests/differential/m5/run_os6_differential.sh
+            gate env REQUIRE_IPV6=1 TARGET=fd00:5ca1::10 bash tests/differential/m5/run_os6_differential.sh
+            gate env TARGET=::1 bash tests/differential/raw/run_raw_differential.sh
+            gate env TARGET=fd00:5ca1::10 bash tests/differential/raw/run_raw_differential.sh
             # The M1 matrix. As root, 7.94 SYN-scans by default and nmap-rs
             # connect-scans (`default-scan-connect-even-privileged`), and on
             # FreeBSD the connect probe's reset fails the fixture's accept()

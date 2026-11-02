@@ -26,7 +26,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
 
@@ -47,6 +47,14 @@ pub trait PacketSource: Send + 'static {
     /// # Errors
     /// Propagates a fatal error from the underlying capture handle.
     fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>>;
+
+    /// Whether each frame starts with a 14-byte Ethernet header (`true`) or at
+    /// the network header (`false`). A live capture knows from its datalink
+    /// (`pcap_datalink`, as nmap's `datalink_offset` does); a source that
+    /// says nothing delivers Ethernet frames.
+    fn eth_included(&self) -> bool {
+        true
+    }
 }
 
 /// One captured frame delivered to the async side.
@@ -63,6 +71,8 @@ pub struct AsyncCapture {
     rx: mpsc::Receiver<CapturedFrame>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    /// The error that ended the capture, if one did.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl AsyncCapture {
@@ -74,6 +84,8 @@ impl AsyncCapture {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let error = Arc::new(Mutex::new(None));
+        let error_thread = Arc::clone(&error);
         let join = std::thread::Builder::new()
             .name("nmap-capture".to_string())
             .spawn(move || {
@@ -88,8 +100,14 @@ impl AsyncCapture {
                         }
                         // Read timeout: loop back to re-check the stop flag.
                         Ok(None) => {}
-                        // Fatal capture error: end the capture.
-                        Err(_) => break,
+                        // Fatal capture error: end the capture, and keep the
+                        // reason for [`AsyncCapture::error`].
+                        Err(e) => {
+                            if let Ok(mut slot) = error_thread.lock() {
+                                *slot = Some(e.to_string());
+                            }
+                            break;
+                        }
                     }
                 }
             })
@@ -98,7 +116,17 @@ impl AsyncCapture {
             rx,
             stop,
             join: Some(join),
+            error,
         }
+    }
+
+    /// The error that ended the capture early, if one did. Once it has,
+    /// [`AsyncCapture::recv`] returns `None` at once, every time: a caller that
+    /// waits on it alongside a timer must stop polling it, or the timer never
+    /// fires.
+    #[must_use]
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|e| e.clone())
     }
 
     /// Await the next captured frame. Returns `None` once the capture has stopped and

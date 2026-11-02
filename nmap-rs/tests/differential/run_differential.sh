@@ -84,6 +84,11 @@ def drain(sock):
         try:
             c, _ = sock.accept()
             c.close()
+        except ConnectionAbortedError:
+            # FreeBSD fails accept() itself for a connection reset while it
+            # waited in the queue, which is what a connect scan's probe is
+            # (closed with linger 0, as nmap closes it). Linux hands it over.
+            continue
         except OSError:
             break
 
@@ -108,11 +113,20 @@ def serve():
     while True:
         try:
             c, _ = bs.accept()
-            c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
-            time.sleep(0.05)
-            c.close()
+        except ConnectionAbortedError:
+            # As in drain(): on FreeBSD a connect scan's reset probe fails
+            # accept(). Breaking here once left every later -sV connection
+            # queued with no banner, until the case timed out (FreeBSD step d).
+            continue
         except OSError:
             break
+        try:
+            c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            time.sleep(0.05)
+        except OSError:
+            pass  # that client has gone; serve the next
+        finally:
+            c.close()
 
 threading.Thread(target=serve, daemon=True).start()
 # Hold the listeners open long enough for both scans; the parent kills us.

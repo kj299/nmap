@@ -20,14 +20,16 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::build::Ipv4Spec;
-use nmap_core::checksum::{in_cksum, ipv4_pseudoheader_cksum};
+use nmap_core::checksum::ipv4_pseudoheader_cksum;
 use nmap_core::model::{HostState, PortState, Reason};
 use nmap_core::packet_parser::{parse_packet, Header};
 use nmap_core::synscan::build_syn_probe;
 
-use nmap_sys::capture::AsyncCapture;
+use nmap_sys::capture::{AsyncCapture, PacketSource};
 use nmap_sys::group::{group_scan, SynKind};
 use nmap_sys::rawio::{RawIpv4Sender, RawSender};
+
+mod common;
 
 const IPPROTO_TCP: u8 = 6;
 
@@ -44,9 +46,9 @@ fn raw_sender_or_skip(what: &str) -> Option<RawIpv4Sender> {
 }
 
 /// Locate the IPv4 header offset within a captured (link-framed) frame.
-fn ipv4_offset(frame: &[u8]) -> Option<usize> {
+fn ipv4_offset(frame: &[u8], eth: bool) -> Option<usize> {
     let mut off = 0usize;
-    for h in parse_packet(frame, true) {
+    for h in parse_packet(frame, eth) {
         if matches!(h, Header::Ipv4(_)) {
             return Some(off);
         }
@@ -72,12 +74,13 @@ async fn transmitted_syn_matches_core_build_on_the_wire() {
 
     // Capture only our outgoing probe (destination = the scanned port).
     let source = nmap_sys::capture::pcap_source::PcapSource::open(
-        "lo",
+        &common::loopback(),
         65535,
         200,
         Some(&format!("tcp and dst host 127.0.0.1 and dst port {dport}")),
     )
-    .expect("open lo capture");
+    .expect("open the loopback capture");
+    let eth = source.eth_included();
     let mut cap = AsyncCapture::spawn(source, 64);
 
     sender.send(&intended).expect("send raw SYN");
@@ -88,7 +91,7 @@ async fn transmitted_syn_matches_core_build_on_the_wire() {
         .expect("capture stream stayed open");
     cap.stop();
 
-    let ip_off = ipv4_offset(&frame.data).expect("frame has an IPv4 layer");
+    let ip_off = ipv4_offset(&frame.data, eth).expect("frame has an IPv4 layer");
     let wire = &frame.data[ip_off..];
     let intended_ihl = usize::from(intended[0] & 0x0F) * 4;
     let wire_ihl = usize::from(wire[0] & 0x0F) * 4;
@@ -109,12 +112,8 @@ async fn transmitted_syn_matches_core_build_on_the_wire() {
         "IP id not preserved under IP_HDRINCL"
     );
 
-    // The IP checksum on the wire must be valid (kernel recomputes it).
-    assert_eq!(
-        in_cksum(&wire[..wire_ihl]),
-        0,
-        "invalid IP checksum on the wire"
-    );
+    // The IP checksum is the kernel's: valid, or left to an offloading lo0.
+    common::assert_ip_checksum_is_the_kernels(&wire[..wire_ihl], "SYN probe");
 
     // The kernel does NOT touch the TCP segment for IP_HDRINCL: the exact bytes
     // core::build produced (proven == nmap's C build_tcp_raw) must reach the wire.
@@ -164,8 +163,14 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
         base_port,
         base_port + 16
     );
-    let source = nmap_sys::capture::pcap_source::PcapSource::open("lo", 65535, 100, Some(&bpf))
-        .expect("open lo capture");
+    let source = nmap_sys::capture::pcap_source::PcapSource::open(
+        &common::loopback(),
+        65535,
+        100,
+        Some(&bpf),
+    )
+    .expect("open the loopback capture");
+    let eth = source.eth_included();
 
     let hosts = tokio::time::timeout(
         Duration::from_secs(10),
@@ -184,7 +189,7 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
             ),
             0,
             base_port,
-            true,
+            eth,
             Default::default(),
         ),
     )

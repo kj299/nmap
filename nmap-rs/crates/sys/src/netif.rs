@@ -210,23 +210,94 @@ mod tests {
         }
     }
 
+    /// The OS's own default IPv4 route, `(interface, gateway)`: from
+    /// `/proc/net/route` on Linux, `route -n get default` elsewhere.
+    fn os_default_route() -> Option<(String, Ipv4Addr)> {
+        if cfg!(target_os = "linux") {
+            let table = std::fs::read_to_string("/proc/net/route").ok()?;
+            return table.lines().skip(1).find_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                if f.get(1) != Some(&"00000000") || f.get(7) != Some(&"00000000") {
+                    return None;
+                }
+                // The gateway is a host-order hex word: little-endian here.
+                let gw = u32::from_str_radix(f.get(2)?, 16).ok()?;
+                Some(((*f.first()?).to_string(), Ipv4Addr::from(gw.to_le_bytes())))
+            });
+        }
+        let out = std::process::Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let field = |name: &str| {
+            text.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                (k.trim() == name).then(|| v.trim().to_string())
+            })
+        };
+        Some((field("interface")?, field("gateway")?.parse().ok()?))
+    }
+
+    // F5: the gateway `netdev` reports (from routing sockets on the BSDs) is
+    // the one the OS routes by, and an off-link target is routed out of that
+    // interface. Ignored by default: a sandbox may have no default route.
+    #[test]
+    #[ignore = "needs a default route; the Linux CI and the FreeBSD VM run it"]
+    fn the_default_gateway_is_the_one_the_os_routes_by() {
+        let (os_iface, os_gw) = os_default_route().expect("the OS reports a default route");
+        let ifaces = interfaces().unwrap();
+        let i = ifaces
+            .iter()
+            .find(|i| i.name == os_iface)
+            .unwrap_or_else(|| panic!("no interface {os_iface} in {ifaces:?}"));
+        let gw = i
+            .gateway
+            .as_ref()
+            .unwrap_or_else(|| panic!("{os_iface} has no gateway: {i:?}"));
+        assert!(
+            gw.ipv4.contains(&os_gw),
+            "{os_iface}: {gw:?}, the OS says {os_gw}"
+        );
+        eprintln!("{os_iface}: gateway {os_gw}, MAC {:?}", gw.mac);
+        // TEST-NET-2: off-link anywhere but a host that numbers itself in it.
+        let r = crate::route::route_for(Ipv4Addr::new(198, 51, 100, 1))
+            .unwrap()
+            .expect("an off-link route");
+        assert_eq!(r.iface, os_iface);
+    }
+
     // With the escape hatch compiled in, the raw getifaddrs backend must agree with
-    // `netdev` on the set of interface names and their IPv4 addresses — proving the
-    // fallback stays consistent with the default.
+    // `netdev` on every interface's name, IPv4 addresses (with prefixes) and MAC —
+    // proving the fallback stays consistent with the default, and checking
+    // `netdev`'s MACs against the OS's own (`AF_PACKET` on Linux, `AF_LINK` on
+    // the BSDs; FreeBSD's F5/F8).
     #[cfg(all(feature = "raw-ffi", unix))]
     #[test]
-    fn ffi_backend_agrees_with_netdev_on_names_and_v4() {
-        use std::collections::BTreeSet;
-        let netdev_names: BTreeSet<String> =
-            interfaces().unwrap().into_iter().map(|i| i.name).collect();
-        let ffi_names: BTreeSet<String> = interfaces_ffi()
-            .unwrap()
-            .into_iter()
-            .map(|i| i.name)
-            .collect();
+    fn ffi_backend_agrees_with_netdev_on_names_v4_and_macs() {
+        use std::collections::BTreeMap;
+        type View = (Vec<(Ipv4Addr, u8)>, Option<[u8; 6]>);
+        fn view(ifaces: Vec<Interface>) -> BTreeMap<String, View> {
+            ifaces
+                .into_iter()
+                .map(|i| {
+                    let mut v4: Vec<_> = i.ipv4.iter().map(|n| (n.addr, n.prefix_len)).collect();
+                    v4.sort_unstable();
+                    (i.name, (v4, i.mac))
+                })
+                .collect()
+        }
+        let netdev = view(interfaces().unwrap());
+        let ffi = view(interfaces_ffi().unwrap());
         assert_eq!(
-            netdev_names, ffi_names,
-            "backends disagree on interface set"
+            netdev, ffi,
+            "backends disagree (netdev left, getifaddrs right)"
+        );
+        // Not vacuous: some interface has a MAC to compare, on any host with
+        // a network card (the CI runners and the FreeBSD VM all have one).
+        assert!(
+            ffi.values().any(|(_, mac)| mac.is_some()),
+            "no interface reported a MAC: {ffi:?}"
         );
     }
 }

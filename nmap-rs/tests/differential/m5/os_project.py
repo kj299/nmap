@@ -20,6 +20,7 @@ diff pass:
 Everything else — OPS, WIN, ECN, T1-T7, U1, IE, and SEQ's classification attributes —
 must match exactly. Those are the fields that carry the identifying signal.
 """
+import os
 import re
 import sys
 
@@ -57,6 +58,17 @@ RESPONSE_OPTIONAL_TESTS = {"U1"}
 STABLE_TS = {"U", "0"}
 # Attributes stripped from every test.
 VOLATILE_ANY = {"T", "TG"}
+# `SEQ`'s `II` on a host whose IP IDs come from per-CPU counters. FreeBSD fills a
+# datagram without DF from a counter per CPU, each started at random (`ip_fillid`,
+# sys/netinet/ip_id.c, with net.inet.ip.random_id at its default 0). `II` classifies
+# the two IE replies' IDs: from one CPU they step by one (`I`); from two the step is
+# random (`RI`, or `BI`). Which it is samples the scheduler, run to run, like `SP`.
+# What is not a sample is whether the IDs are a counter at all, so a counter class
+# against `Z` or a constant is still a divergence. run_os_differential.sh turns this
+# on for FreeBSD only, through OS_PROJECT_PER_CPU_IPID=1; Linux stays strict.
+PER_CPU_IPID = os.environ.get("OS_PROJECT_PER_CPU_IPID") == "1"
+COUNTER_CLASSES = {"I", "RI", "BI", "RD"}
+
 # Tests to compare. SCAN is metadata about the run, not the target.
 SKIP_TESTS = {"SCAN"}
 
@@ -155,6 +167,14 @@ def self_test():
     assert compare("U1(R=Y%DF=N%IPL=164)", "U1(R=Y%DF=N%IPL=164)") == []
     # The response-race tolerance is U1-only: a T-test response mismatch is still a divergence.
     assert compare("T4(R=Y%DF=Y)", "T4(R=N)") != []
+    # Per-CPU IP-ID counters (FreeBSD): II's counter classes are a sample...
+    assert compare("SEQ(II=RI)", "SEQ(II=I)", per_cpu_ipid=True) == []
+    assert compare("SEQ(II=I)", "SEQ(II=BI)", per_cpu_ipid=True) == []
+    # ...but a counter against zeros is still a divergence, and so is TI or CI...
+    assert compare("SEQ(II=Z)", "SEQ(II=I)", per_cpu_ipid=True) != []
+    assert compare("SEQ(TI=RI)", "SEQ(TI=I)", per_cpu_ipid=True) != []
+    # ...and without the flag (Linux) II is compared exactly.
+    assert compare("SEQ(II=RI)", "SEQ(II=I)", per_cpu_ipid=False) != []
     print("os_project.py self-test OK")
 
 
@@ -172,8 +192,10 @@ def parse(text):
     return out
 
 
-def compare(c_text, rs_text):
+def compare(c_text, rs_text, per_cpu_ipid=None):
     """Differences that represent a fidelity divergence. Empty list means agreement."""
+    if per_cpu_ipid is None:
+        per_cpu_ipid = PER_CPU_IPID
     c, rs = parse(c_text), parse(rs_text)
     problems = []
 
@@ -190,6 +212,12 @@ def compare(c_text, rs_text):
         for attr in sorted(set(c[name]) | set(rs[name])):
             in_c, in_rs = attr in c[name], attr in rs[name]
             if in_c and in_rs:
+                if (
+                    per_cpu_ipid
+                    and (name, attr) == ("SEQ", "II")
+                    and {c[name][attr], rs[name][attr]} <= COUNTER_CLASSES
+                ):
+                    continue  # which CPUs answered, not fidelity: see PER_CPU_IPID
                 if c[name][attr] != rs[name][attr]:
                     problems.append(
                         f"{name}.{attr}: C nmap={c[name][attr]!r} nmap-rs={rs[name][attr]!r}"

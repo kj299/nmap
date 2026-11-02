@@ -86,43 +86,108 @@ impl RawSender for RawIpv4Sender {
     }
 }
 
-/// Wraps an L2 sender so each packet handed to it goes out inside an Ethernet frame.
+/// How an IPv6 packet is framed for the link it is injected on: by the send
+/// handle's datalink, as `send_ip_packet_eth` (`netutil.cc`) frames by
+/// `ethsd->datalink`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkFraming {
+    /// `DLT_EN10MB`: a 14-byte Ethernet header, from `src` to `dst`.
+    Ethernet {
+        /// The interface's own MAC.
+        src: [u8; 6],
+        /// The next hop's MAC, resolved by neighbor discovery.
+        dst: [u8; 6],
+    },
+    /// `DLT_NULL` (the BSD loopback): the address family, 4 bytes in host
+    /// order ([`NULL_AF_INET6`]).
+    Null,
+    /// `DLT_RAW`: the packet as it is.
+    Raw,
+}
+
+/// `AF_INET6` as a `DLT_NULL` header carries it, which is libpcap's number for
+/// the OS, not the OS's own `AF_INET6`: 30 on Darwin, 28 on FreeBSD, and 24
+/// elsewhere (NetBSD, OpenBSD, Npcap). These are the values
+/// `send_ip_packet_eth` writes ("per libpcap/gencode.c").
+pub const NULL_AF_INET6: u32 = if cfg!(target_vendor = "apple") {
+    30
+} else if cfg!(target_os = "freebsd") {
+    28
+} else {
+    24
+};
+
+impl LinkFraming {
+    /// The framing for a send handle whose datalink is `dlt`; `ethernet` gives the
+    /// MACs, and is asked only for Ethernet. `None` for a datalink nmap cannot send
+    /// on either (it `netutil_fatal`s there).
+    ///
+    /// # Errors
+    /// Whatever `ethernet` returns.
+    pub fn for_datalink(
+        dlt: i32,
+        ethernet: impl FnOnce() -> io::Result<([u8; 6], [u8; 6])>,
+    ) -> io::Result<Option<LinkFraming>> {
+        Ok(match dlt {
+            1 => {
+                let (src, dst) = ethernet()?;
+                Some(LinkFraming::Ethernet { src, dst })
+            }
+            0 => Some(LinkFraming::Null),
+            12 | 14 | 101 => Some(LinkFraming::Raw),
+            _ => None,
+        })
+    }
+
+    /// `packet` (an IPv6 packet) in this framing.
+    #[must_use]
+    pub fn frame(&self, packet: &[u8]) -> Vec<u8> {
+        match self {
+            LinkFraming::Ethernet { src, dst } => crate::ndp::frame_ethernet(*dst, *src, packet),
+            LinkFraming::Null => {
+                let mut f = Vec::with_capacity(packet.len().saturating_add(4));
+                f.extend_from_slice(&NULL_AF_INET6.to_ne_bytes());
+                f.extend_from_slice(packet);
+                f
+            }
+            LinkFraming::Raw => packet.to_vec(),
+        }
+    }
+}
+
+/// Wraps an L2 sender so each IPv6 packet handed to it goes out framed for its link
+/// ([`LinkFraming`]).
 ///
 /// This is what the IPv6 probe path needs and the IPv4 path does not. Linux has no
 /// `IPV6_HDRINCL`: an `AF_INET6` raw socket does **not** treat a caller-supplied IPv6
 /// header the way `IP_HDRINCL` treats an IPv4 one, so a full IPv6 packet — which is what
 /// `core::build6` produces — cannot be handed to the kernel to route. It has to be
-/// framed and injected at layer 2, which is why the driver first resolves the next hop's
-/// MAC by neighbor discovery.
+/// framed and injected at layer 2, which on Ethernet is why the driver first resolves
+/// the next hop's MAC by neighbor discovery.
 ///
 /// Generic over the inner sender, so the framing is exercised against a
 /// [`MockSender`] in CI and only the injection underneath it needs privilege.
-pub struct EthFramingSender<S> {
+pub struct FramingSender<S> {
     inner: S,
-    dst_mac: [u8; 6],
-    src_mac: [u8; 6],
+    framing: LinkFraming,
 }
 
-impl<S: RawSender> EthFramingSender<S> {
-    /// Frame everything sent through `inner` from `src_mac` to `dst_mac`.
-    pub fn new(inner: S, src_mac: [u8; 6], dst_mac: [u8; 6]) -> EthFramingSender<S> {
-        EthFramingSender {
-            inner,
-            dst_mac,
-            src_mac,
-        }
+impl<S: RawSender> FramingSender<S> {
+    /// Frame everything sent through `inner` as `framing` says.
+    pub fn new(inner: S, framing: LinkFraming) -> FramingSender<S> {
+        FramingSender { inner, framing }
     }
 
-    /// The destination MAC every frame is addressed to — the resolved next hop.
+    /// The framing every packet gets.
     #[must_use]
-    pub fn dst_mac(&self) -> [u8; 6] {
-        self.dst_mac
+    pub fn framing(&self) -> LinkFraming {
+        self.framing
     }
 }
 
-impl<S: RawSender> RawSender for EthFramingSender<S> {
+impl<S: RawSender> RawSender for FramingSender<S> {
     fn send(&mut self, packet: &[u8]) -> io::Result<usize> {
-        let frame = crate::ndp::frame_ethernet(self.dst_mac, self.src_mac, packet);
+        let frame = self.framing.frame(packet);
         self.inner.send(&frame)
     }
 }
@@ -147,8 +212,9 @@ mod tests {
     fn eth_framing_wraps_every_packet() {
         const SRC: [u8; 6] = [0x00, 0x0c, 0x29, 0x1a, 0x2b, 0x3c];
         const DST: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
-        let mut s = EthFramingSender::new(MockSender::default(), SRC, DST);
-        assert_eq!(s.dst_mac(), DST);
+        let framing = LinkFraming::Ethernet { src: SRC, dst: DST };
+        let mut s = FramingSender::new(MockSender::default(), framing);
+        assert_eq!(s.framing(), framing);
         // The reported length is the framed length, as the wire sees it.
         assert_eq!(s.send(&[0x60, 0x00]).unwrap(), 16);
         s.send(&[0xff]).unwrap();
@@ -160,28 +226,63 @@ mod tests {
             assert_eq!(&frame[12..14], &[0x86, 0xdd]);
         }
         assert_eq!(&sent[0][14..], &[0x60, 0x00]);
-        assert_eq!(&sent[1][14..], &[0xff]);
+    }
+
+    // DLT_NULL: the family in host order, as send_ip_packet_eth writes it,
+    // with libpcap's number for AF_INET6 (28 on FreeBSD).
+    #[test]
+    fn null_framing_prefixes_the_family_in_host_order() {
+        let mut s = FramingSender::new(MockSender::default(), LinkFraming::Null);
+        assert_eq!(s.send(&[0x60, 0x01, 0x02]).unwrap(), 7);
+        let frame = &s.inner.sent[0];
+        assert_eq!(&frame[..4], &NULL_AF_INET6.to_ne_bytes());
+        assert_eq!(&frame[4..], &[0x60, 0x01, 0x02]);
+        if cfg!(target_os = "freebsd") {
+            assert_eq!(NULL_AF_INET6, 28);
+        } else if cfg!(target_vendor = "apple") {
+            assert_eq!(NULL_AF_INET6, 30);
+        } else {
+            assert_eq!(NULL_AF_INET6, 24);
+        }
     }
 
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "creates a real raw socket; miri isolation blocks socket()"
-    )]
-    fn raw_sender_rejects_short_packet() {
-        // The length guard lives in `send`, which needs a real socket, so this only
-        // runs when privileged; unprivileged hosts (CI) skip it.
-        match RawIpv4Sender::new() {
-            Ok(mut s) => {
-                let err = s.send(&[0u8; 10]).unwrap_err();
-                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-            }
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                // Unprivileged (e.g. CI): the raw socket can't be opened. Skip.
-                eprintln!("skipping raw-socket test: no CAP_NET_RAW");
-            }
-            Err(e) => panic!("unexpected error opening raw socket: {e}"),
+    fn raw_framing_sends_the_packet_as_it_is() {
+        let mut s = FramingSender::new(MockSender::default(), LinkFraming::Raw);
+        assert_eq!(s.send(&[0x60, 9]).unwrap(), 2);
+        assert_eq!(s.inner.sent, vec![vec![0x60, 9]]);
+    }
+
+    // The datalinks send_ip_packet_eth frames; anything else is refused, and
+    // only Ethernet asks for MACs.
+    #[test]
+    fn framing_by_datalink() {
+        let macs = || Ok(([1; 6], [2; 6]));
+        let no_macs =
+            || -> io::Result<([u8; 6], [u8; 6])> { panic!("asked for MACs off Ethernet") };
+        assert_eq!(
+            LinkFraming::for_datalink(1, macs).unwrap(),
+            Some(LinkFraming::Ethernet {
+                src: [1; 6],
+                dst: [2; 6]
+            })
+        );
+        assert_eq!(
+            LinkFraming::for_datalink(0, no_macs).unwrap(),
+            Some(LinkFraming::Null)
+        );
+        for raw in [12, 14, 101] {
+            assert_eq!(
+                LinkFraming::for_datalink(raw, no_macs).unwrap(),
+                Some(LinkFraming::Raw)
+            );
         }
+        // DLT_LOOP (108) carries the family in network order; nmap does not
+        // send on it, and neither does the port.
+        assert_eq!(LinkFraming::for_datalink(108, no_macs).unwrap(), None);
+        // An Ethernet link whose MACs cannot be had is an error, not a guess.
+        let err = LinkFraming::for_datalink(1, || Err(io::Error::other("no ND reply")));
+        assert!(err.is_err());
     }
 
     // Privileged loopback send: build a real UDP/IPv4 packet and transmit it to

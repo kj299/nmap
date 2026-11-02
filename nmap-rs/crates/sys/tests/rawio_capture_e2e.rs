@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use nmap_core::build::{build_udp_raw, Ipv4Spec};
 use nmap_core::packet_parser::{parse_packet, Header};
-use nmap_sys::capture::{pcap_source::PcapSource, AsyncCapture};
+use nmap_sys::capture::{pcap_source::PcapSource, AsyncCapture, PacketSource};
 use nmap_sys::rawio::{RawIpv4Sender, RawSender};
+
+mod common;
 
 #[tokio::test]
 #[ignore = "needs pcap feature + CAP_NET_RAW + loopback; run with --ignored"]
@@ -26,8 +28,9 @@ async fn build_send_capture_parse_roundtrip() {
     };
 
     // Capture UDP/5353 on loopback via a BPF filter.
-    let source = PcapSource::open("lo", 65535, 100, Some("udp and port 5353"))
+    let source = PcapSource::open(&common::loopback(), 65535, 100, Some("udp and port 5353"))
         .expect("open loopback capture");
+    let eth = source.eth_included();
     let mut cap = AsyncCapture::spawn(source, 64);
 
     // Build and send a UDP datagram to 127.0.0.1:5353.
@@ -35,14 +38,15 @@ async fn build_send_capture_parse_roundtrip() {
     let pkt = build_udp_raw(&spec, 40000, 5353, b"nmap-rs-e2e").unwrap();
     sender.send(&pkt).expect("raw send");
 
-    // Await the captured frame (loopback on Linux is DLT_EN10MB => Ethernet-framed).
+    // Await the captured frame: Ethernet-framed on Linux's `lo` (DLT_EN10MB),
+    // behind a 4-byte family on the BSDs' `lo0` (DLT_NULL), which the capture strips.
     let frame = tokio::time::timeout(Duration::from_secs(3), cap.recv())
         .await
         .expect("capture timed out")
         .expect("capture closed");
 
     // Parse; find the UDP layer and confirm our port + payload survived the round trip.
-    let headers = parse_packet(&frame.data, true);
+    let headers = parse_packet(&frame.data, eth);
     let kinds: Vec<&str> = headers.iter().map(Header::kind_str).collect();
     eprintln!("captured layers: {kinds:?} ({} bytes)", frame.data.len());
     let has_udp = headers

@@ -15,14 +15,16 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nmap_core::build::Ipv4Spec;
-use nmap_core::checksum::{in_cksum, ipv4_pseudoheader_cksum};
+use nmap_core::checksum::ipv4_pseudoheader_cksum;
 use nmap_core::model::{PortState, Reason};
 use nmap_core::packet_parser::{parse_packet, Header};
 use nmap_core::udpscan::{build_udp_probe, build_udp_probe_with};
 
-use nmap_sys::capture::AsyncCapture;
+use nmap_sys::capture::{AsyncCapture, PacketSource};
 use nmap_sys::group::{group_scan, UdpKind};
 use nmap_sys::rawio::{RawIpv4Sender, RawSender};
+
+mod common;
 
 const IPPROTO_UDP: u8 = 17;
 
@@ -37,9 +39,9 @@ fn raw_sender_or_skip(what: &str) -> Option<RawIpv4Sender> {
     }
 }
 
-fn ipv4_offset(frame: &[u8]) -> Option<usize> {
+fn ipv4_offset(frame: &[u8], eth: bool) -> Option<usize> {
     let mut off = 0usize;
-    for h in parse_packet(frame, true) {
+    for h in parse_packet(frame, eth) {
         if matches!(h, Header::Ipv4(_)) {
             return Some(off);
         }
@@ -57,12 +59,13 @@ async fn assert_wire_matches_build(
     label: &str,
 ) {
     let source = nmap_sys::capture::pcap_source::PcapSource::open(
-        "lo",
+        &common::loopback(),
         65535,
         200,
         Some(&format!("udp and dst host 127.0.0.1 and dst port {dport}")),
     )
-    .expect("open lo capture");
+    .expect("open the loopback capture");
+    let eth = source.eth_included();
     let mut cap = AsyncCapture::spawn(source, 64);
 
     sender.send(intended).expect("send raw UDP");
@@ -72,18 +75,15 @@ async fn assert_wire_matches_build(
         .expect("capture stream stayed open");
     cap.stop();
 
-    let ip_off = ipv4_offset(&frame.data).expect("frame has an IPv4 layer");
+    let ip_off = ipv4_offset(&frame.data, eth).expect("frame has an IPv4 layer");
     let wire = &frame.data[ip_off..];
     let wire_ihl = usize::from(wire[0] & 0x0F) * 4;
     let intended_ihl = usize::from(intended[0] & 0x0F) * 4;
 
     assert_eq!(wire[9], IPPROTO_UDP, "{label}: protocol changed");
     assert_eq!(&wire[16..20], &intended[16..20], "{label}: dest IP changed");
-    assert_eq!(
-        in_cksum(&wire[..wire_ihl]),
-        0,
-        "{label}: invalid IP checksum on the wire"
-    );
+    // The IP checksum is the kernel's: valid, or left to an offloading lo0.
+    common::assert_ip_checksum_is_the_kernels(&wire[..wire_ihl], label);
 
     // The kernel does not touch the UDP segment for IP_HDRINCL: byte-identical.
     let wire_udp = &wire[wire_ihl..];
@@ -163,8 +163,14 @@ async fn udp_scan_resolves_closed_on_loopback() {
         base_port,
         base_port + 16
     );
-    let source = nmap_sys::capture::pcap_source::PcapSource::open("lo", 65535, 100, Some(&bpf))
-        .expect("open lo capture");
+    let source = nmap_sys::capture::pcap_source::PcapSource::open(
+        &common::loopback(),
+        65535,
+        100,
+        Some(&bpf),
+    )
+    .expect("open the loopback capture");
+    let eth = source.eth_included();
 
     let hosts = tokio::time::timeout(
         Duration::from_secs(10),
@@ -181,7 +187,7 @@ async fn udp_scan_resolves_closed_on_loopback() {
             ),
             0,
             base_port,
-            true,
+            eth,
             Default::default(),
         ),
     )

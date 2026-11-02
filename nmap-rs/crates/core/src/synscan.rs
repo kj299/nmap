@@ -436,6 +436,29 @@ mod tests {
         }
     }
 
+    /// A capture with no Ethernet header (FreeBSD's `lo0`, `DLT_NULL`, with its
+    /// 4-byte family stripped by the capture; any `DLT_RAW` link) matches as
+    /// the same frame with one does: a SYN-ACK and an ICMP error alike.
+    #[test]
+    fn a_reply_without_its_ethernet_header_matches_the_same() {
+        let our_sport = 40000u16; // tryno 0 encodes the base port
+        for frame in [
+            reply_frame(443, our_sport, 0x12, 0xABCD_1234u32.wrapping_add(1)),
+            icmp_quoting_our_syn(TARGET, 3, 3, OUR_IP, TARGET, 443, 0),
+        ] {
+            let with = match_syn_response(&frame, true, &ctx());
+            let without = match_syn_response(&frame[14..], false, &ctx());
+            assert!(with.is_some());
+            assert_eq!(
+                format!("{with:?}"),
+                format!("{without:?}"),
+                "the same reply either way"
+            );
+            // And the link-framed bytes are not a bare IP packet.
+            assert!(match_syn_response(&frame, false, &ctx()).is_none());
+        }
+    }
+
     #[test]
     fn icmp_error_relayed_by_a_router_still_lands_on_the_target() {
         let frame = icmp_quoting_our_syn(ROUTER, 3, 1, OUR_IP, TARGET, 443, 0);

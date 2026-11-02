@@ -4,6 +4,10 @@
 //! module exists to cross-check `netdev` against the raw OS call and to reach a field
 //! `netdev` might not expose. It is the only `unsafe` in the interface layer, and the
 //! `getifaddrs` list is owned by an RAII guard that frees it exactly once.
+//!
+//! MACs come from `AF_PACKET` on Linux and from `AF_LINK` on the BSDs, where
+//! the `sockaddr_dl` is read through its own length and parsed by the safe
+//! [`link_mac`].
 
 use super::{Interface, Ipv4Net, Ipv6Net};
 use std::collections::BTreeMap;
@@ -132,9 +136,106 @@ pub(super) fn interfaces() -> std::io::Result<Vec<Interface>> {
                     }
                 }
             }
+            #[cfg(any(
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_vendor = "apple"
+            ))]
+            libc::AF_LINK => {
+                // SAFETY: on the BSDs every `sockaddr` begins with its own
+                // length, `sa_len`, and `getifaddrs` hands back the whole
+                // `sockaddr_dl` that length counts (its name and address run
+                // past the struct's nominal `sdl_data`). The bytes live as
+                // long as `_guard` and are only read here.
+                let sa = unsafe {
+                    std::slice::from_raw_parts(
+                        ifa.ifa_addr.cast::<u8>(),
+                        usize::from((*ifa.ifa_addr).sa_len),
+                    )
+                };
+                if let Some(mac) = link_mac(sa) {
+                    entry.mac = Some(mac);
+                }
+            }
             _ => {}
         }
     }
 
     Ok(by_name.into_values().collect())
+}
+
+/// The Ethernet address in an `AF_LINK` `sockaddr_dl`, laid out alike on
+/// every BSD: `sdl_len`, `sdl_family`, `sdl_index` (2 bytes), `sdl_type`,
+/// `sdl_nlen`, `sdl_alen`, `sdl_slen`, then `sdl_data`, which holds the
+/// interface name (`sdl_nlen` bytes) and then the address (`sdl_alen`).
+/// `None` unless the address is 6 bytes, inside `sa`, and not all zero.
+#[cfg(any(
+    test,
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_vendor = "apple"
+))]
+fn link_mac(sa: &[u8]) -> Option<[u8; 6]> {
+    const SDL_DATA: usize = 8;
+    let nlen = usize::from(*sa.get(5)?);
+    if *sa.get(6)? != 6 {
+        return None;
+    }
+    let start = SDL_DATA.checked_add(nlen)?;
+    let mac: [u8; 6] = sa.get(start..start.checked_add(6)?)?.try_into().ok()?;
+    (mac != [0u8; 6]).then_some(mac)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::link_mac;
+
+    /// A `sockaddr_dl` as FreeBSD's `getifaddrs` gives it: the header, the
+    /// name, the address, padded to `sdl_len`.
+    fn sdl(name: &[u8], addr: &[u8]) -> Vec<u8> {
+        let mut v = vec![0, 18, 1, 0, 6, 0, 0, 0];
+        v[5] = u8::try_from(name.len()).expect("short name");
+        v[6] = u8::try_from(addr.len()).expect("short address");
+        v.extend_from_slice(name);
+        v.extend_from_slice(addr);
+        v.resize(v.len().max(20), 0);
+        v[0] = u8::try_from(v.len()).expect("short sockaddr");
+        v
+    }
+
+    const MAC: [u8; 6] = [0x58, 0x9c, 0xfc, 0x00, 0x12, 0x34];
+
+    #[test]
+    fn the_address_follows_the_name() {
+        assert_eq!(link_mac(&sdl(b"em0", &MAC)), Some(MAC));
+        // A name long enough to run past macOS's 12-byte `sdl_data`.
+        assert_eq!(link_mac(&sdl(b"bridge100", &MAC)), Some(MAC));
+    }
+
+    #[test]
+    fn no_ethernet_address_is_none() {
+        // lo0: no link address at all.
+        assert_eq!(link_mac(&sdl(b"lo0", &[])), None);
+        // An all-zero address, as an interface without one reports.
+        assert_eq!(link_mac(&sdl(b"em0", &[0; 6])), None);
+        // A link address that is not Ethernet's 6 bytes (FireWire's 8).
+        assert_eq!(link_mac(&sdl(b"fwe0", &[1; 8])), None);
+    }
+
+    #[test]
+    fn a_short_sockaddr_is_none() {
+        let full = sdl(b"em0", &MAC);
+        // Cut anywhere before the address ends: never a read past `sa`.
+        for cut in 0..8 + 3 + 6 {
+            assert_eq!(link_mac(&full[..cut]), None, "cut at {cut}");
+        }
+        // A name length that points the address past the end.
+        let mut lying = full;
+        lying[5] = 200;
+        assert_eq!(link_mac(&lying), None);
+    }
 }

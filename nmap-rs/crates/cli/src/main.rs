@@ -450,6 +450,13 @@ async fn run_scan(
     overrides: PacketOverrides,
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
+    // Raw port scans over IPv6 are not ported (`ipv6-raw-port-scans-unported`):
+    // every raw driver sends IPv4. Say so and connect-scan, as a raw scan
+    // without privilege does, rather than send nothing and report no ports.
+    if !matches!(cfg.scan, ScanKind::List | ScanKind::Connect) && ips.iter().any(IpAddr::is_ipv6) {
+        eprintln!("nmap-rs: raw IPv6 port scans are not ported yet; running a connect scan (-sT)");
+        return connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await;
+    }
     match cfg.scan {
         // `-sL` sends nothing at all. C sets listscan + noportscan +
         // PINGTYPE_NONE (nmap.cc:1307), so the targets are expanded, reported
@@ -868,7 +875,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String 
         });
 
         let facts = HostFacts {
-            is_localhost: v4.is_loopback(),
+            is_localhost: nmap_sys::route::is_localhost(v4),
             has_mac_address: false,
         };
         let distance = attribute_distance(facts, observation.distance);
@@ -1032,6 +1039,15 @@ async fn run_os_detection6(
         }
     }
     if cfg.debugging > 0 || cfg.verbose > 1 {
+        // The verdict as 7.94 reaches it (`classify`, FPEngine.cc) and prints it
+        // (`printosscanoutput`): a single class within 90% of the top, and below
+        // the novelty threshold, is "OS details"; anything else "No OS matches".
+        // The on-the-wire differential compares it.
+        let verdict = match (results.success, results.matches.first()) {
+            (true, Some(m)) => format!("OS details: {}", m.os_name),
+            _ => "No OS matches for host".to_string(),
+        };
+        out.push_str(&format!("IPv6 verdict: {verdict}\n"));
         out.push_str(&format!(
             "IPv6 observation: distance {} ({:?})\n",
             observation.distance, observation.distance_method
@@ -2019,7 +2035,9 @@ mod data_file_tests {
     }
 
     /// A socket opens with `ENXIO`, as `fopen` gets it in 7.94: `Unable to open
-    /// F.  ... : No such device or address (6)`.
+    /// F.  ... : No such device or address (6)`. FreeBSD's `open(2)` refuses
+    /// a socket with `EOPNOTSUPP` instead, which 7.94's `fopen` gets there too
+    /// (docs/FREEBSD-ANALYSIS.md).
     #[cfg(unix)]
     #[test]
     fn a_socket_is_unreadable_with_the_cs_reason() {
@@ -2027,7 +2045,12 @@ mod data_file_tests {
         let s = d.join("nmap-mac-prefixes");
         let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
         let (_, error) = unreadable(data_file_at("nmap-mac-prefixes", &s));
-        assert_eq!(error, "No such device or address (6)");
+        let want = if cfg!(target_os = "freebsd") {
+            "Operation not supported (45)"
+        } else {
+            "No such device or address (6)"
+        };
+        assert_eq!(error, want);
         let _ = std::fs::remove_dir_all(&d);
     }
 

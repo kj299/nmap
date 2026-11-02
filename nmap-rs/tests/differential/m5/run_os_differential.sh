@@ -14,13 +14,17 @@
 #
 # Requires root (raw sockets) and a --features pcap build. SKIPs cleanly otherwise, the
 # same way the M1 harness does when C nmap is absent.
+#
+# TARGET (default 127.0.0.1) picks the address scanned and the listeners' address. The
+# FreeBSD job also runs it against the VM's own non-loopback address, which C nmap scans
+# over the loopback (`route_dst`) and reports at distance 0 (`islocalhost`).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_ROOT="$(cd "$HERE/../../.." && pwd)"
 OPEN_PORTS=(8022 8080)
 CLOSED_PORT=9999
-TARGET=127.0.0.1
+TARGET="${TARGET:-127.0.0.1}"
 
 NMAP="${NMAP:-$(command -v nmap || true)}"
 if [[ -z "$NMAP" || ! -x "$NMAP" ]]; then
@@ -44,13 +48,13 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"; [[ -n "${FIXTURE_PID:-}" ]] && kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
 
 # --- Fixture: loopback listeners so the open/closed set is deterministic -----
-python3 - "${OPEN_PORTS[@]}" <<'PY' &
+python3 - "$TARGET" "${OPEN_PORTS[@]}" <<'PY' &
 import socket, sys, time
 socks = []
-for p in (int(a) for a in sys.argv[1:]):
+for p in (int(a) for a in sys.argv[2:]):
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", p))
+    s.bind((sys.argv[1], p))
     s.listen(16)
     socks.append(s)
 time.sleep(600)
@@ -66,7 +70,7 @@ for p in "${OPEN_PORTS[@]}"; do
   if ! python3 -c "
 import socket, sys
 s = socket.socket(); s.settimeout(2)
-sys.exit(0 if s.connect_ex(('127.0.0.1', $p)) == 0 else 1)
+sys.exit(0 if s.connect_ex(('$TARGET', $p)) == 0 else 1)
 "; then
     echo "FAIL: fixture port $p is not listening (something else may be holding it)"
     exit 1
@@ -80,9 +84,17 @@ PORTS="$(IFS=,; echo "${OPEN_PORTS[*]}"),$CLOSED_PORT"
 # fidelity — under load either tool may decide its own timing was poor and withhold the
 # fingerprint, and two withheld fingerprints would "agree" vacuously.
 echo "== running C nmap -O =="
-"$NMAP" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/c.out" 2>&1 || true
-echo "== running nmap-rs -O =="
-"$NMAP_RS" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
+# A run still going after 300 s has hung; it then fails on an empty projection.
+timeout 300 "$NMAP" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/c.out" 2>&1 || true
+# nmap-rs reads the data files C nmap read, which -d names ("Read from DIR:
+# nmap-os-db ..."): one database for both (LESSONS #029). The tree's own
+# nmap-os-db is newer than 7.94, which aborts on it, and the FreeBSD VM's oracle
+# is not installed, so its files sit beside its binary, where nmap-rs does not look.
+DATADIR="$(sed -n 's/^Read from \(.*\): .*nmap-os-db.*/\1/p' "$WORK/c.out" | head -1)"
+echo "== running nmap-rs -O (data files from ${DATADIR:-its own search}) =="
+rs_env=()
+[[ -n "$DATADIR" ]] && rs_env=("NMAP_RS_DATADIR=$DATADIR")
+env "${rs_env[@]}" timeout 300 "$NMAP_RS" -O -d -Pn -p "$PORTS" "$TARGET" >"$WORK/rs.out" 2>&1 || true
 
 python3 "$HERE/os_project.py" <"$WORK/c.out"  >"$WORK/c.proj"
 python3 "$HERE/os_project.py" <"$WORK/rs.out" >"$WORK/rs.proj"
@@ -105,11 +117,22 @@ if [[ ! -s "$WORK/rs.proj" ]]; then
   sed -n '1,40p' "$WORK/rs.out"; exit 1
 fi
 
+# FreeBSD numbers datagrams from per-CPU IP-ID counters, so SEQ's II samples which CPUs
+# answered (os_project.py, PER_CPU_IPID).
+if [[ "$(uname -s)" == "FreeBSD" ]]; then export OS_PROJECT_PER_CPU_IPID=1; fi
+
 # The comparison is not a plain diff: a few IP-ID attributes are present only when the run
 # happened to collect enough samples (see PRESENCE_OPTIONAL in os_project.py), so their
 # presence is not comparable between the tools while their values still are.
+# The distance too: 0 for the host itself, whichever of its addresses is scanned. The
+# fingerprint projection strips T/TG, which depend on it, so it is compared here.
+c_dist="$(grep -m1 '^Network Distance' "$WORK/c.out" || true)"
+rs_dist="$(grep -m1 '^Network Distance' "$WORK/rs.out" || true)"
 if python3 "$HERE/os_project.py" "$WORK/c.out" "$WORK/rs.out" >"$WORK/diff"; then
-  echo "MATCH: $(wc -l <"$WORK/c.proj") fingerprint tests agree with C nmap"
+  if [[ "$c_dist" != "$rs_dist" ]]; then
+    echo "DIVERGENCE: C nmap says '$c_dist', nmap-rs says '$rs_dist'"; exit 1
+  fi
+  echo "MATCH: $(wc -l <"$WORK/c.proj") fingerprint tests agree with C nmap ($c_dist)"
   exit 0
 fi
 

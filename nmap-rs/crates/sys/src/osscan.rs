@@ -447,12 +447,12 @@ impl OsScanResult {
 /// [`nmap_core::osscan`] and are called here rather than re-derived.
 ///
 /// `open_source` is called once per round to obtain a fresh capture — a round consumes its
-/// capture, so it cannot be shared.
+/// capture, so it cannot be shared. Whether its frames carry an Ethernet header is the
+/// capture's to say ([`PacketSource::eth_included`]): `lo0` on FreeBSD does not.
 pub async fn scan_host_rounds<S, P, F>(
     sender: &mut S,
     mut open_source: F,
     params: &ProbeParams,
-    eth_included: bool,
     db: &FingerPrintDb,
     max_tries: usize,
     scan_epoch: Option<i64>,
@@ -472,6 +472,7 @@ where
 
     for _ in 0..max_tries.max(1) {
         let Ok(source) = open_source() else { break };
+        let eth_included = source.eth_included();
         let (observation, capture) = scan_host(sender, source, params, eth_included).await;
 
         // Recorded per round: the ratio describes how far the SEQ probes drifted from
@@ -571,7 +572,6 @@ pub async fn os_scan_host(
         &mut sender,
         || PcapSource::open(&iface, 65535, 100, Some(&filter)),
         &params,
-        route.eth_included,
         db,
         max_tries,
         scan_epoch,

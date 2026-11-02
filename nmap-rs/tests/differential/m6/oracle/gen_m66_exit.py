@@ -15,8 +15,9 @@ data directory, never a fixture one, with SEL `-sC`, `--script default`,
 `openssl`, `--script vuln`, `exploit`, `intrusive` and `all`. `safe` and
 `all` run their scripts, broadcast ones among them, so every load block
 runs, for both programs, in a network namespace of its own holding only
-loopback (`unshare -rn`, `isolated`), which is checked before the program
-starts: nothing it sends leaves the host. Without user namespaces the blocks fail; they are never
+loopback (`unshare -rn`, `isolated`; on FreeBSD a VNET jail holding only
+lo0), which is checked before the program starts: nothing it sends leaves
+the host. Without user namespaces the blocks fail; they are never
 skipped. (The `run` blocks talk to this process's listeners, so they run
 on the host's loopback.) nmap 7.94 cannot run `-A` with this repository's
 nmap-os-db (written for 7.94.2 and later: an assertion abort in
@@ -165,7 +166,26 @@ LO_UP = (
 )
 
 
+# FreeBSD has no user namespaces; its counterpart is a VNET jail, which gets a
+# network stack of its own holding only lo0, down and unaddressed, as a new
+# Linux namespace holds only lo, down. It runs as root (the FreeBSD CI job
+# runs as root), and raw sockets are allowed in it as a user namespace's root
+# has CAP_NET_RAW over its own namespace (docs/FREEBSD-ANALYSIS.md).
+LO_UP_FREEBSD = (
+    "import os, subprocess, sys\n"
+    "names = subprocess.run(['ifconfig', '-l'], capture_output=True, text=True).stdout.split()\n"
+    "if names != ['lo0']:\n"
+    "    sys.exit('not a loopback-only VNET jail: %r' % names)\n"
+    "subprocess.run(['ifconfig', 'lo0', 'inet', '127.0.0.1/8', 'up'], check=True)\n"
+    "subprocess.run(['ifconfig', 'lo0', 'inet6', '::1', 'prefixlen', '128'], check=True)\n"
+    "os.execvp(sys.argv[1], sys.argv[1:])\n"
+)
+
+
 def isolated(cmd):
+    if sys.platform.startswith("freebsd"):
+        return ["jail", "-c", "path=/", "vnet", "allow.raw_sockets",
+                "command=" + sys.executable, "-c", LO_UP_FREEBSD] + cmd
     return ["unshare", "-rn", sys.executable, "-c", LO_UP] + cmd
 
 RIAK_PORT, BITCOIN_PORT, HTTP_PORT = 8098, 8332, 8180
@@ -255,7 +275,8 @@ def load_run(binary, datadir, sel, netns=True):
         probe = subprocess.run(isolated(["true"]), capture_output=True)
         if probe.returncode != 0:
             sys.exit("FAIL: %s needs a loopback-only network namespace, and `unshare -rn` "
-                     "failed: %s (on Ubuntu, sysctl kernel.apparmor_restrict_unprivileged_userns=0)"
+                     "(a VNET jail on FreeBSD, as root) failed: %s "
+                     "(on Ubuntu, sysctl kernel.apparmor_restrict_unprivileged_userns=0)"
                      % (" ".join(sel), probe.stderr.decode("latin-1").strip()))
         cmd = isolated(cmd)
     r = subprocess.run(cmd, capture_output=True, timeout=600)

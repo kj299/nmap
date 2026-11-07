@@ -34,7 +34,8 @@
 //!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
-//! * Inherits `recv-validate-ipv4-only-for-now` from [`crate::recv_validate`].
+//! * Matches IPv4 replies only: IPv6 scans are `ipv6-raw-port-scans-unported` until
+//!   their matchers land (IPv6 scans step b).
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_icmp, classify_tcp, PortState, ScanType, TH_ACK};

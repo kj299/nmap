@@ -676,6 +676,24 @@
         "sha256": "8a63a7499dd531042fc05010151968dda0eb723f6d8fbbcd9d1dc6f88fddd518"
       }
     },
+    "core::recv_validate": {
+      "differential": {
+        "files": 1,
+        "sha256": "7aacdef0675a01bac8eb6904b701d9f7422711cc510a81616e4d146bda92f924"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "7aacdef0675a01bac8eb6904b701d9f7422711cc510a81616e4d146bda92f924"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "7aacdef0675a01bac8eb6904b701d9f7422711cc510a81616e4d146bda92f924"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "7aacdef0675a01bac8eb6904b701d9f7422711cc510a81616e4d146bda92f924"
+      }
+    },
     "sys::nsefs": {
       "unsafe_audited": {
         "files": 1,

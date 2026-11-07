@@ -5,3 +5,4 @@ pcap.h
 validate_oracle
 classify_oracle
 ipid_oracle
+validate_ipv6_walk.inc

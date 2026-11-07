@@ -1,22 +1,43 @@
 // M4 receive-validation oracle — the C side of the core::recv_validate differential.
 //
 // `validatepkt()` and `validateTCPhdr()` are `static` in tcpip.cc and cannot be
-// linked, so this is a faithful byte-level transcription of their IPv4 path, with
-// each block annotated by its tcpip.cc source line for review. The debug-only
-// `error()` calls (guarded by o.debugging) are omitted — they do not affect the
-// accept/reject result. Reads a hex packet on stdin; prints the canonical projection:
+// linked, so this is a faithful byte-level transcription of them, with each block
+// annotated by its tcpip.cc source line for review. The debug-only `error()` calls
+// (guarded by o.debugging) are omitted — they do not affect the accept/reject
+// result.
+//
+// The IPv6 path's extension-header walk is not transcribed: build_validate_oracle.sh
+// copies nmap's own `ipv6_is_extension_header`, `ipv6_is_upperlayer`,
+// `ipv6_get_data_primitive` and both `ipv6_get_data` overloads out of
+// libnetutil/netutil.cc into validate_ipv6_walk.inc (gitignored), and they are
+// compiled here unchanged against libdnet's own headers. So the walk the IPv6 scan
+// milestone fixes (docs/IPV6-SCAN-ANALYSIS.md D3, Q4) is the C's, byte for byte.
+//
+//   validate_oracle          one hex packet on stdin
+//   validate_oracle lines    one hex packet per stdin line, one projection per line
+//
+// The canonical projection:
 //   accept caplen=<n> proto=<p> doff=<n>
 //   reject
 //
-// Build: see build_validate_oracle.sh (no libnetutil link needed — self-contained).
+// Build: see build_validate_oracle.sh (no libnetutil link needed).
 
 #include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <string>
 #include <vector>
 
-typedef unsigned char u8;
-typedef unsigned short u16;
+#include <stdint.h>
+#include <dnet/os.h>
+#include <dnet/ip.h>
+#include <dnet/ip6.h>
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+
+// netutil.cc's walk, extracted verbatim at build time.
+#include "validate_ipv6_walk.inc"
 
 static std::vector<u8> unhex(const std::string &s) {
   std::vector<u8> out;
@@ -73,14 +94,15 @@ static bool validateTCPhdr(const u8 *tcpc, unsigned len) {
   return true;                                        // optlen == 0
 }
 
-// Transcription of validatepkt() (tcpip.cc:1274), IPv4 path only. Returns the
-// accept/reject decision and, on accept, the capped length via *out_caplen.
+// Transcription of validatepkt() (tcpip.cc:1274). Returns the accept/reject
+// decision and, on accept, the capped length via *out_caplen.
 static bool validatepkt(const u8 *ipc, unsigned len, unsigned *out_caplen,
                         u8 *out_proto, unsigned *out_doff) {
   if (len < 20) return false;                        // len < sizeof(ip) (1276)
   u8 ver = ipc[0] >> 4;
   unsigned datalen, iplen;
   u8 hdr;
+  const u8 *data;
   if (ver == 4) {                                    // (1283)
     // ipv4_get_data: IHL bounds + L4 data length (netutil.cc:789).
     unsigned header_len = (ipc[0] & 0x0f) * 4;
@@ -88,39 +110,41 @@ static bool validatepkt(const u8 *ipc, unsigned len, unsigned *out_caplen,
     if (header_len < 20) return false;
     if (header_len > len) return false;
     datalen = len - header_len;
-    const u8 *data = ipc + header_len;
+    data = ipc + header_len;
 
     iplen = (ipc[2] << 8) | ipc[3];                  // ntohs(ip_len) (1294)
     unsigned fragoff = 8 * (((ipc[6] << 8) | ipc[7]) & IP_OFFMASK); // (1296)
     if (fragoff) return false;                       // (1297)
     if (len > iplen) len = iplen;                    // cap (1306)
     hdr = ipc[9];                                    // ip_p (1309)
-
-    switch (hdr) {                                   // (1333)
-    case 6: // TCP
-      if (datalen < 20) return false;               // (1335)
-      if (!validateTCPhdr(data, datalen)) return false; // (1340)
-      break;
-    case 17: // UDP
-      if (datalen < 8) return false;                // (1347)
-      break;
-    default: break;
-    }
-    *out_caplen = len;
-    *out_proto = hdr;
-    *out_doff = header_len;
-    return true;
+  } else if (ver == 6) {                             // (1310)
+    if (len < sizeof(struct ip6_hdr)) return false;  // (1312)
+    datalen = len;                                   // (1316)
+    data = ipv6_get_data(ipc, &datalen, &hdr);       // netutil.cc's own (1317)
+    if (data == NULL) return false;                  // (1318)
+    iplen = (ipc[4] << 8) | ipc[5];                  // ntohs(ip6_plen) (1324)
+    if (datalen > iplen) len -= datalen - iplen;     // (1325-1326)
   } else {
-    // IPv6 (ver==6) and bogus versions: this oracle only covers the IPv4 path the
-    // port implements; the Rust side rejects them, so they are not in the corpus.
-    return false;
+    return false;                                    // bad version (1327-1330)
   }
+
+  switch (hdr) {                                     // (1333)
+  case 6: // TCP
+    if (datalen < 20) return false;                  // (1335)
+    if (!validateTCPhdr(data, datalen)) return false; // (1340)
+    break;
+  case 17: // UDP
+    if (datalen < 8) return false;                   // (1347)
+    break;
+  default: break;
+  }
+  *out_caplen = len;
+  *out_proto = hdr;
+  *out_doff = (unsigned)(data - ipc);
+  return true;
 }
 
-int main(void) {
-  std::string in;
-  { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
-  std::vector<u8> pkt = unhex(in);
+static void project(const std::vector<u8> &pkt) {
   unsigned caplen = 0, doff = 0;
   u8 proto = 0;
   if (validatepkt(pkt.data(), (unsigned)pkt.size(), &caplen, &proto, &doff)) {
@@ -128,5 +152,16 @@ int main(void) {
   } else {
     printf("reject\n");
   }
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1 && std::string(argv[1]) == "lines") {
+    std::string line;
+    while (std::getline(std::cin, line)) project(unhex(line));
+    return 0;
+  }
+  std::string in;
+  { int c; while ((c = getchar()) != EOF) in.push_back((char)c); }
+  project(unhex(in));
   return 0;
 }

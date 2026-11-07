@@ -583,6 +583,11 @@ jobs:
       # hand-edited golden would prove agreement with a paraphrase of the C rather
       # than with nmap itself.
       - run: bash tests/differential/m4/regen_pkt_golden.sh --check
+      # Receive validation (IPv6 scans step a): rebuild validate_oracle, which compiles
+      # netutil.cc's own IPv6 extension-header walk, regenerate the hand and random
+      # corpora with their golden, and require them unchanged. validate_differential
+      # (in the test job) compares against that golden and pins the two IPv6 fixes.
+      - run: bash tests/differential/m4/regen_validate_golden.sh --check
       # M5 IPv6 probe battery: rebuild the C FPHost6::build_probe_list() oracle,
       # regenerate the committed corpus + golden, and require them unchanged, then run
       # the byte-exact differential. Same anti-paraphrase guard as the other goldens.

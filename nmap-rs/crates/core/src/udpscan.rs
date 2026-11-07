@@ -35,7 +35,8 @@
 //! * Protocol-specific probe payloads live in [`crate::payload`]; pass one to
 //!   [`build_udp_probe_with`]. [`build_udp_probe`] keeps the bare, zero-length datagram
 //!   for callers that have no payload table (and for the on-the-wire differential).
-//! * Inherits `recv-validate-ipv4-only-for-now`.
+//! * Matches IPv4 replies only: IPv6 scans are `ipv6-raw-port-scans-unported` until
+//!   their matchers land (IPv6 scans step b).
 
 use crate::build::{build_udp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_icmp, classify_udp_response, PortState, ScanType};

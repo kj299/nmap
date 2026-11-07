@@ -42,6 +42,14 @@ scope here.
 - ✅ **The packet-walk golden is re-derived in CI** — `regen_pkt_golden.sh --check`
   rebuilds `oracle/parse_oracle`, regenerates the vectors and golden, and fails
   if the committed files differ, so a hand-edited golden cannot pass.
+- ✅ **So is the receive-validation golden** (IPv6 scans step a) —
+  `regen_validate_golden.sh --check` rebuilds `oracle/validate_oracle`, whose IPv6
+  path compiles netutil.cc's own extension-header walk (copied out by name at
+  build time, `oracle/build_validate_oracle.sh`), and regenerates `validate_*`
+  and the 4,000-packet `validate_random_*` IPv6 corpus. Five hand vectors and two
+  classes of the random corpus are where the port fixes the C
+  (`recv-validate6-non-initial-fragment`, `recv-validate6-trailer-trim`); their
+  golden stays the C's and `validate_differential.rs` pins the port's answer.
 
 ## Projection format (the canonical shape both sides emit)
 

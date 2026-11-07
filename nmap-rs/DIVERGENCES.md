@@ -147,8 +147,9 @@ narrower *rendering* of the same result.
       and `-dN`. Found by the lfs step's review.
 - [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
       IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
-      over IPv6; every raw driver here sends IPv4 only (the IPv6 receive
-      validation and ICMPv6 classification are ledgered above as deferred). With
+      over IPv6; every raw driver here sends IPv4 only (ICMPv6 classification is
+      ledgered above as deferred; IPv6 receive validation landed in IPv6 scans
+      step a, `docs/IPV6-SCAN-ANALYSIS.md`). With
       `-6`, a raw scan type prints "raw IPv6 port scans are not ported yet;
       running a connect scan (-sT)" and connect-scans, as a raw scan without
       privilege does. Until FreeBSD step e it sent nothing and reported the host
@@ -402,17 +403,40 @@ lands, `[x]` = confirmed by that module's gates.
       an unset `newstate` become total functions returning `Option<PortState>`, so an
       unhandled response is an explicit `None`, never an accidental stale state.
       *(Introduced at M4 `core::classify`.)*
-- [x] `recv-validate-ipv4-only-for-now` (`core::recv_validate`, ports `validatepkt`):
-      the C `validatepkt` validates both IPv4 and IPv6 (the latter walking the
-      extension-header chain via `ipv6_get_data`). This port validates the IPv4 path
-      and rejects IPv6 with `Reject::Ipv6Unsupported`, deferring IPv6
-      receive-validation to the IPv6 scan path. (The extension-header parser it was
-      waiting on has since landed as `core::headers::ipv6ext`, so this is now a scope
-      boundary rather than a missing dependency; it closes with the IPv6 driver.) The
-      IPv4 accept/reject decision — including the security-critical `validateTCPhdr`
-      option walk — matches nmap byte-for-byte (differential 18/18 + a 6000-packet
-      randomized C-vs-Rust cross-check, 0 mismatches). *(Introduced at M4
-      `core::recv_validate`.)*
+- [x] ~~`recv-validate-ipv4-only-for-now`~~ — **resolved** at IPv6 scans step a:
+      `validate_packet` validates IPv6 as `validatepkt` does, walking the
+      extension-header chain as `ipv6_get_data` does (`recv_validate::ipv6_payload`),
+      with the two fixes below. The differential compiles netutil.cc's own walk into
+      the oracle: 50 hand vectors match the C and 5 are pinned where the port fixes
+      it; of 4,000 random IPv6 packets, 2,903 match the C exactly and the rest fall in
+      the two classes below, each checked against its rule. The IPv4 decision,
+      including the security-critical `validateTCPhdr` option walk, still matches
+      nmap byte for byte. The scan matchers pass only IPv4 replies to it until step b
+      (`ipv6-raw-port-scans-unported`). *(Introduced at M4 `core::recv_validate`.)*
+- [x] `recv-validate6-non-initial-fragment` (`core::recv_validate::ipv6_payload`,
+      ports `ipv6_get_data_primitive`, `netutil.cc:689`): the C walks a fragment
+      header like any extension, by `(p[1] + 1) * 8`, where `p[1]` is the fragment
+      header's reserved byte, and never looks at the offset. So a later fragment's
+      payload, mid-segment bytes, is validated (and, in the scan, matched) as a TCP
+      or UDP header, and a fragment header with a nonzero reserved byte sends the
+      walk into the next header's middle. The port takes a fragment header as its
+      fixed 8 bytes and rejects one with a nonzero offset (`Reject::Fragment`), as the
+      C's own IPv4 path rejects a nonzero `ip_off`. A first fragment (offset 0, with
+      or without more to come) is walked, as before. Decided D3 (b),
+      `docs/IPV6-SCAN-ANALYSIS.md`. Of the random corpus's 608 later fragments, the
+      C accepted 331. Pinned: `v6_frag_later_tcp`, `v6_frag_later_udp`,
+      `v6_frag_reserved_tcp` (`validate_differential.rs`). *(Introduced at IPv6 scans
+      step a.)*
+- [x] `recv-validate6-trailer-trim` (`core::recv_validate`, ports `validatepkt`,
+      `tcpip.cc:1324`): the C trims a link-layer trailer by comparing the bytes after
+      the extension headers with `ip6_plen`, which counts the extension headers too.
+      With extension headers present it trims too little, or (when the trailer is
+      shorter than they are) nothing. The port ends the packet at 40 + `ip6_plen`,
+      which is where it ends. Without extension headers the two agree. Only the
+      reported length differs, never accept/reject, since the C checks the transport
+      header before it trims. Q4, `docs/IPV6-SCAN-ANALYSIS.md`. 489 of the random
+      corpus. Pinned: `v6_hop_tcp_trailer_untrimmed`, `v6_hop_tcp_trailer_short`.
+      *(Introduced at IPv6 scans step a.)*
 - [x] `send-payload-no-silent-truncation` (`core::build`, ports `build_icmp_raw`/
       `build_igmp_raw`): the C copies an oversized data payload into fixed
       `pingpkt.data[1500]`/`igmp.data[1500]` buffers via `MIN(dlen,datalen)`
@@ -459,7 +483,8 @@ the driver-specific choices.
 
   Inherits `build-explicit-fields-no-magic` (the driver passes `window=1024` and the
   encoded `seq` explicitly, since `build_tcp_raw` carries no magic defaults) and
-  `recv-validate-ipv4-only-for-now` (IPv6 SYN scan awaits the IPv6 receive path).
+  `ipv6-raw-port-scans-unported` (the IPv6 receive path is in, since IPv6 scans step
+  a; the IPv6 SYN scan awaits its matchers and driver).
 
 - [x] `route-minimal-onlink-then-gateway` (`sys::route::choose_route`, minimal port of
       `nmap_route_dst`): source/interface selection tries loopback → one of the host's

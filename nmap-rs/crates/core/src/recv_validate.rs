@@ -4,19 +4,30 @@
 //!
 //! This is a pure predicate over **untrusted network input** (a captured packet an
 //! attacker fully controls), so it is the highest-value fuzz/differential target of
-//! the receive path. It answers: is this a well-formed, non-fragmented IPv4 packet
-//! whose L4 header (and, for TCP, its option list) is structurally sound — and if so,
-//! how many bytes are really packet (capping the link-layer CRC trailer that pcap
-//! also captures)?
+//! the receive path. It answers: is this a well-formed, non-fragmented IPv4 or IPv6
+//! packet whose L4 header (and, for TCP, its option list) is structurally sound —
+//! and if so, where the L4 header starts and how many bytes are really packet
+//! (capping the link-layer CRC trailer that pcap also captures)?
 //!
-//! ## Scope / divergence
+//! ## IPv6
 //!
-//! `recv-validate-ipv4-only-for-now` — the C `validatepkt` also validates IPv6 (walking
-//! the extension-header chain via `ipv6_get_data`). This port handles IPv4 and rejects
-//! IPv6 with [`Reject::Ipv6Unsupported`], deferring IPv6 receive-validation to the IPv6
-//! scan path. The extension-header parser it once waited on has landed
-//! (`core::headers::ipv6ext`), so this is a scope boundary that closes with the IPv6
-//! driver. Ledgered in `DIVERGENCES.md`.
+//! The IPv6 path walks the extension headers as `ipv6_get_data` does
+//! (`netutil.cc:689`, [`ipv6_payload`]): hop-by-hop, destination options and
+//! routing headers are skipped by their `(Hdr Ext Len + 1) * 8` bytes, and the
+//! chain must end in a protocol the C knows as upper-layer (TCP, UDP, ICMP,
+//! ICMPv6, SCTP, no-next-header). Two things are fixed rather than reproduced,
+//! as decided for the IPv6 scan milestone (`docs/IPV6-SCAN-ANALYSIS.md` D3, Q4):
+//!
+//! - **Fragments.** The C walks a fragment header like any other extension, by
+//!   the `(reserved + 1) * 8` its length rule reads from the reserved byte, and
+//!   never rejects a fragment, so a later fragment's payload, mid-segment bytes,
+//!   is read as a transport header. Here a fragment header is its fixed 8 bytes,
+//!   and one with a nonzero offset is rejected, as the IPv4 path rejects it
+//!   (`recv-validate6-non-initial-fragment`).
+//! - **The trailer.** The C trims the length by comparing the upper-layer bytes
+//!   with `ip6_plen`, which also counts the extension headers, so with extension
+//!   headers present a link-layer trailer is trimmed short or not at all. Here
+//!   the packet ends at 40 + `ip6_plen` (`recv-validate6-trailer-trim`).
 //!
 //! Total on all input: every path returns; no panic, no unchecked index, no unsigned
 //! underflow (the exact class the C `OPTLEN_IS` macro guards against by hand).
@@ -31,6 +42,20 @@ const UDP_HEADER_LEN: usize = 8;
 const IP_OFFMASK: u16 = 0x1FFF;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+/// IPv6 fixed header length (`sizeof(struct ip6_hdr)`).
+const IPV6_HEADER_LEN: usize = 40;
+/// An extension header's smallest size, and the unit of its length field.
+const IPV6_EXT_UNIT: usize = 8;
+// The extension headers `ipv6_is_extension_header` walks (`netutil.cc:650`).
+const IP_PROTO_HOPOPTS: u8 = 0;
+const IP_PROTO_ROUTING: u8 = 43;
+const IP_PROTO_FRAGMENT: u8 = 44;
+const IP_PROTO_DSTOPTS: u8 = 60;
+// The rest of `ipv6_is_upperlayer`'s set (`netutil.cc:671`), with TCP and UDP.
+const IP_PROTO_ICMP: u8 = 1;
+const IP_PROTO_ICMPV6: u8 = 58;
+const IP_PROTO_NONE: u8 = 59;
+const IP_PROTO_SCTP: u8 = 132;
 
 /// Why a captured packet was rejected. Mirrors the `validatepkt`/`validateTCPhdr`
 /// rejection points (the C only distinguishes them in `--debug` logging).
@@ -40,12 +65,16 @@ pub enum Reject {
     TooShort,
     /// IP version was neither 4 nor 6.
     BadVersion(u8),
-    /// IPv6 receive-validation is not yet ported (see the module scope note).
-    Ipv6Unsupported,
     /// The IHL field is < 5 words or runs past the captured bytes.
     BadIpHeaderLen,
-    /// A non-initial fragment (fragment offset != 0) — the C drops these.
+    /// A non-initial fragment (fragment offset != 0). The C drops these for IPv4;
+    /// for IPv6 it does not, and the port does (module docs).
     Fragment,
+    /// An IPv6 extension header runs past the captured bytes, or nothing follows
+    /// the chain (`ipv6_get_data` returns NULL).
+    Ipv6ChainTruncated,
+    /// The IPv6 chain ends in a protocol `ipv6_is_upperlayer` does not know.
+    Ipv6UnknownPayload(u8),
     /// A TCP packet whose payload is shorter than the fixed TCP header.
     IncompleteTcpHeader,
     /// A TCP option list that is malformed (bad length, overrun, wrong fixed size).
@@ -57,26 +86,34 @@ pub enum Reject {
 /// A captured packet that passed validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validated {
-    /// IP version (always 4 in this port).
+    /// IP version: 4 or 6.
     pub version: u8,
-    /// Upper-layer protocol number (`ip_p`).
+    /// Upper-layer protocol number (`ip_p`; for IPv6, the last next-header).
     pub proto: u8,
-    /// IP header length in bytes (`ihl * 4`), i.e. where the L4 header begins.
+    /// Where the L4 header begins: the IPv4 header length (`ihl * 4`), or the
+    /// IPv6 header plus its extension headers.
     pub data_offset: usize,
-    /// The real packet length: `min(captured, ip_total_length)`. The C caps the
-    /// caller's length here so a link-layer CRC trailer counted by pcap is not
-    /// mistaken for packet data.
+    /// The real packet length: `min(captured, ip_total_length)` for IPv4,
+    /// `min(captured, 40 + ip6_plen)` for IPv6. The C caps the caller's length
+    /// here so a link-layer CRC trailer counted by pcap is not mistaken for
+    /// packet data. A length field that ends the packet inside its own headers
+    /// can put this below `data_offset`; the transport checks above ran on the
+    /// captured bytes, as the C's do.
     pub captured_len: usize,
 }
 
-/// Validate a captured IPv4 packet. Ports `validatepkt()` for the IPv4 path.
+/// Validate a captured IPv4 or IPv6 packet. Ports `validatepkt()`
+/// (`tcpip.cc:1274`), with the IPv6 fixes the module docs describe.
+///
+/// # Errors
+/// The [`Reject`] naming why the packet is refused.
 pub fn validate_packet(buf: &[u8]) -> Result<Validated, Reject> {
     if buf.len() < IP_HEADER_LEN {
         return Err(Reject::TooShort);
     }
     let version = buf[0] >> 4;
     if version == 6 {
-        return Err(Reject::Ipv6Unsupported);
+        return validate_ipv6(buf);
     }
     if version != 4 {
         return Err(Reject::BadVersion(version));
@@ -101,7 +138,40 @@ pub fn validate_packet(buf: &[u8]) -> Result<Validated, Reject> {
     let captured_len = buf.len().min(iplen);
 
     let proto = buf[9];
-    let data = &buf[header_len..];
+    validate_l4(proto, &buf[header_len..], datalen)?;
+
+    Ok(Validated {
+        version: 4,
+        proto,
+        data_offset: header_len,
+        captured_len,
+    })
+}
+
+/// `validatepkt`'s IPv6 path (`tcpip.cc:1310`).
+fn validate_ipv6(buf: &[u8]) -> Result<Validated, Reject> {
+    if buf.len() < IPV6_HEADER_LEN {
+        return Err(Reject::TooShort);
+    }
+    let (proto, data_offset) = ipv6_payload(buf)?;
+    let data = buf.get(data_offset..).ok_or(Reject::Ipv6ChainTruncated)?;
+    // The packet ends at its header plus the payload length; anything captured
+    // past that is a link-layer trailer (`recv-validate6-trailer-trim`).
+    let plen = usize::from(u16::from_be_bytes([buf[4], buf[5]]));
+    let captured_len = buf.len().min(IPV6_HEADER_LEN.saturating_add(plen));
+    validate_l4(proto, data, data.len())?;
+    Ok(Validated {
+        version: 6,
+        proto,
+        data_offset,
+        captured_len,
+    })
+}
+
+/// The transport checks `validatepkt` makes after either IP version
+/// (`tcpip.cc:1333`): a TCP header and a sound option list, or a UDP header.
+/// `datalen` is the captured length after the IP header(s), as the C measures it.
+fn validate_l4(proto: u8, data: &[u8], datalen: usize) -> Result<(), Reject> {
     match proto {
         IPPROTO_TCP => {
             if datalen < TCP_HEADER_LEN {
@@ -116,13 +186,72 @@ pub fn validate_packet(buf: &[u8]) -> Result<Validated, Reject> {
         }
         _ => {}
     }
+    Ok(())
+}
 
-    Ok(Validated {
-        version: 4,
-        proto,
-        data_offset: header_len,
-        captured_len,
-    })
+/// Walk an IPv6 packet's extension headers to its upper-layer payload: the
+/// payload's protocol and where it starts. Ports `ipv6_get_data`
+/// (`netutil.cc:689`, `ipv6_get_data_primitive` with `upperlayer_only`), with
+/// the fragment rule fixed (module docs).
+///
+/// The walk is bounded by the buffer: each step moves at least 8 bytes, and a
+/// header that claims more than is left ends it.
+///
+/// # Errors
+/// [`Reject::TooShort`] under 40 bytes; [`Reject::Fragment`] for a non-initial
+/// fragment; [`Reject::Ipv6ChainTruncated`] when a header runs past the buffer or
+/// nothing follows the chain; [`Reject::Ipv6UnknownPayload`] when the chain ends
+/// in a protocol the C does not take as upper-layer.
+pub fn ipv6_payload(buf: &[u8]) -> Result<(u8, usize), Reject> {
+    if buf.len() < IPV6_HEADER_LEN {
+        return Err(Reject::TooShort);
+    }
+    let end = buf.len();
+    let mut nxt = buf[6];
+    let mut p = IPV6_HEADER_LEN;
+    while p < end && is_extension_header(nxt) {
+        // Every extension header carries at least its next-header and length
+        // bytes in its first 8 (`if (p + 8 > end) return NULL`).
+        let ext = buf
+            .get(p..p.saturating_add(IPV6_EXT_UNIT))
+            .ok_or(Reject::Ipv6ChainTruncated)?;
+        let len = if nxt == IP_PROTO_FRAGMENT {
+            // Offset in 8-byte units: the top 13 bits of bytes 2..4.
+            if u16::from_be_bytes([ext[2], ext[3]]) >> 3 != 0 {
+                return Err(Reject::Fragment);
+            }
+            IPV6_EXT_UNIT
+        } else {
+            usize::from(ext[1])
+                .saturating_add(1)
+                .saturating_mul(IPV6_EXT_UNIT)
+        };
+        nxt = ext[0];
+        p = p.saturating_add(len);
+    }
+    if p >= end {
+        return Err(Reject::Ipv6ChainTruncated);
+    }
+    if !is_upper_layer(nxt) {
+        return Err(Reject::Ipv6UnknownPayload(nxt));
+    }
+    Ok((nxt, p))
+}
+
+/// `ipv6_is_extension_header` (`netutil.cc:650`).
+fn is_extension_header(nxt: u8) -> bool {
+    matches!(
+        nxt,
+        IP_PROTO_HOPOPTS | IP_PROTO_DSTOPTS | IP_PROTO_ROUTING | IP_PROTO_FRAGMENT
+    )
+}
+
+/// `ipv6_is_upperlayer` (`netutil.cc:671`).
+fn is_upper_layer(nxt: u8) -> bool {
+    matches!(
+        nxt,
+        IP_PROTO_NONE | IPPROTO_TCP | IPPROTO_UDP | IP_PROTO_ICMP | IP_PROTO_ICMPV6 | IP_PROTO_SCTP
+    )
 }
 
 /// Validate a TCP header including its option list. Ports `validateTCPhdr()`.
@@ -308,11 +437,218 @@ mod tests {
         assert_eq!(validate_packet(&pkt), Err(Reject::BadVersion(7)));
     }
 
+    // ---- IPv6 ----
+
+    /// An IPv6 packet: header (payload length from `plen`, or the payload's own),
+    /// then `chain` (extension headers, already encoded), then `payload`.
+    fn ipv6(first_nxt: u8, chain: &[u8], payload: &[u8], plen: Option<u16>) -> Vec<u8> {
+        let body = chain.len().saturating_add(payload.len());
+        let plen = plen.unwrap_or_else(|| u16::try_from(body).expect("short test packet"));
+        let mut p = vec![0x60, 0, 0, 0];
+        p.extend_from_slice(&plen.to_be_bytes());
+        p.push(first_nxt);
+        p.push(64);
+        p.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        p.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        p.extend_from_slice(chain);
+        p.extend_from_slice(payload);
+        p
+    }
+
+    /// An options-style extension header (hop-by-hop, destination options,
+    /// routing): `units` of 8 bytes, `Hdr Ext Len` = units - 1, padded with zeros.
+    fn ext(next: u8, units: u8) -> Vec<u8> {
+        let mut h = vec![0u8; usize::from(units) * 8];
+        h[0] = next;
+        h[1] = units.saturating_sub(1);
+        h
+    }
+
+    /// A fragment header: `offset` in 8-byte units, `more` the M flag.
+    fn frag(next: u8, reserved: u8, offset: u16, more: bool) -> Vec<u8> {
+        let word = (offset << 3) | u16::from(more);
+        let mut h = vec![next, reserved];
+        h.extend_from_slice(&word.to_be_bytes());
+        h.extend_from_slice(&[0, 0, 0x12, 0x34]);
+        h
+    }
+
     #[test]
-    fn rejects_ipv6() {
-        let mut pkt = vec![0u8; 40];
-        pkt[0] = 0x60;
-        assert_eq!(validate_packet(&pkt), Err(Reject::Ipv6Unsupported));
+    fn ipv6_tcp_udp_icmpv6_are_accepted_after_the_header() {
+        let tcp = tcp_hdr(5, &[]);
+        let v = validate_packet(&ipv6(IPPROTO_TCP, &[], &tcp, None)).unwrap();
+        assert_eq!(
+            (v.version, v.proto, v.data_offset, v.captured_len),
+            (6, 6, 40, 60)
+        );
+        let v = validate_packet(&ipv6(IPPROTO_UDP, &[], &[0; 8], None)).unwrap();
+        assert_eq!((v.proto, v.data_offset), (17, 40));
+        let v = validate_packet(&ipv6(IP_PROTO_ICMPV6, &[], &[128, 0, 0, 0], None)).unwrap();
+        assert_eq!((v.proto, v.data_offset), (58, 40));
+    }
+
+    #[test]
+    fn ipv6_walks_hop_by_hop_destination_and_routing_headers() {
+        let mut chain = ext(IP_PROTO_DSTOPTS, 1);
+        chain.extend(ext(IP_PROTO_ROUTING, 2));
+        chain.extend(ext(IPPROTO_TCP, 3));
+        let v = validate_packet(&ipv6(IP_PROTO_HOPOPTS, &chain, &tcp_hdr(5, &[]), None)).unwrap();
+        assert_eq!((v.proto, v.data_offset), (6, 40 + 8 + 16 + 24));
+    }
+
+    // D3: a first fragment (offset 0) carries the transport header and is
+    // walked; any later one is refused, as the IPv4 path refuses it. The header
+    // is 8 bytes whatever its reserved byte says.
+    #[test]
+    fn ipv6_first_fragments_pass_and_later_ones_are_refused() {
+        let tcp = tcp_hdr(5, &[]);
+        for more in [true, false] {
+            let pkt = ipv6(
+                IP_PROTO_FRAGMENT,
+                &frag(IPPROTO_TCP, 0, 0, more),
+                &tcp,
+                None,
+            );
+            assert_eq!(
+                validate_packet(&pkt).unwrap().data_offset,
+                48,
+                "more={more}"
+            );
+        }
+        for offset in [1, 185, 0x1fff] {
+            let pkt = ipv6(
+                IP_PROTO_FRAGMENT,
+                &frag(IPPROTO_TCP, 0, offset, false),
+                &tcp,
+                None,
+            );
+            assert_eq!(
+                validate_packet(&pkt),
+                Err(Reject::Fragment),
+                "offset {offset}"
+            );
+        }
+        // The C would skip (reserved + 1) * 8 = 24 bytes here, into the TCP header.
+        let pkt = ipv6(
+            IP_PROTO_FRAGMENT,
+            &frag(IPPROTO_TCP, 2, 0, true),
+            &tcp,
+            None,
+        );
+        assert_eq!(validate_packet(&pkt).unwrap().data_offset, 48);
+        // Behind another extension header too.
+        let mut chain = ext(IP_PROTO_FRAGMENT, 1);
+        chain.extend(frag(IPPROTO_UDP, 0, 3, false));
+        let pkt = ipv6(IP_PROTO_HOPOPTS, &chain, &[0; 8], None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::Fragment));
+    }
+
+    #[test]
+    fn ipv6_chains_that_run_out_are_refused() {
+        // Under 40 bytes.
+        assert_eq!(
+            validate_packet(&ipv6(IPPROTO_TCP, &[], &[], None)[..39]),
+            Err(Reject::TooShort)
+        );
+        // No payload at all, even with no-next-header.
+        assert_eq!(
+            validate_packet(&ipv6(IP_PROTO_NONE, &[], &[], None)),
+            Err(Reject::Ipv6ChainTruncated)
+        );
+        // An extension header with fewer than 8 bytes left.
+        let pkt = ipv6(IP_PROTO_HOPOPTS, &[IPPROTO_TCP, 0, 0, 0], &[], None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::Ipv6ChainTruncated));
+        // One whose length runs past the end.
+        let mut long = ext(IPPROTO_TCP, 1);
+        long[1] = 9;
+        let pkt = ipv6(IP_PROTO_DSTOPTS, &long, &tcp_hdr(5, &[]), None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::Ipv6ChainTruncated));
+        // The chain ends exactly at the end of the packet.
+        let pkt = ipv6(IP_PROTO_DSTOPTS, &ext(IPPROTO_TCP, 1), &[], None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::Ipv6ChainTruncated));
+    }
+
+    #[test]
+    fn ipv6_chain_must_end_in_an_upper_layer_protocol() {
+        for nxt in [
+            IPPROTO_TCP,
+            IPPROTO_UDP,
+            IP_PROTO_ICMP,
+            IP_PROTO_ICMPV6,
+            IP_PROTO_SCTP,
+            IP_PROTO_NONE,
+        ] {
+            let pkt = ipv6(nxt, &[], &tcp_hdr(5, &[]), None);
+            assert!(validate_packet(&pkt).is_ok(), "{nxt}");
+        }
+        // ESP, AH, IPv6-in-IPv6, mobility: not upper-layer to the C.
+        for nxt in [50, 51, 41, 135] {
+            let pkt = ipv6(nxt, &[], &[0; 24], None);
+            assert_eq!(
+                validate_packet(&pkt),
+                Err(Reject::Ipv6UnknownPayload(nxt)),
+                "{nxt}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_transport_checks_are_the_ipv4_ones() {
+        let pkt = ipv6(IPPROTO_TCP, &[], &[0; 10], None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::IncompleteTcpHeader));
+        let pkt = ipv6(IPPROTO_UDP, &[], &[0; 4], None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::IncompleteUdpHeader));
+        // MSS with a wrong length byte, behind a destination-options header.
+        let tcp = tcp_hdr(6, &[0x02, 0x05, 0x05, 0xb4]);
+        let pkt = ipv6(IP_PROTO_DSTOPTS, &ext(IPPROTO_TCP, 1), &tcp, None);
+        assert_eq!(validate_packet(&pkt), Err(Reject::BadTcpOptions));
+    }
+
+    // Q4: the packet ends at 40 + ip6_plen, extension headers or not; the C
+    // trims short of that when extension headers are present.
+    #[test]
+    fn ipv6_trailer_is_trimmed_to_the_payload_length() {
+        let mut tcp = tcp_hdr(5, &[]);
+        tcp.extend_from_slice(&[0xee; 6]); // a 6-byte link-layer trailer
+        let v = validate_packet(&ipv6(IPPROTO_TCP, &[], &tcp, Some(20))).unwrap();
+        assert_eq!(v.captured_len, 60);
+        let v = validate_packet(&ipv6(
+            IP_PROTO_HOPOPTS,
+            &ext(IPPROTO_TCP, 2),
+            &tcp,
+            Some(36),
+        ))
+        .unwrap();
+        assert_eq!((v.data_offset, v.captured_len), (56, 76));
+        // A payload length larger than what was captured leaves the capture as is.
+        let v = validate_packet(&ipv6(IPPROTO_TCP, &[], &tcp_hdr(5, &[]), Some(1000))).unwrap();
+        assert_eq!(v.captured_len, 60);
+    }
+
+    #[test]
+    fn ipv6_walk_is_total() {
+        let mut chain = ext(IP_PROTO_ROUTING, 2);
+        chain.extend(frag(IP_PROTO_DSTOPTS, 0, 0, true));
+        chain.extend(ext(IPPROTO_TCP, 1));
+        let base = ipv6(
+            IP_PROTO_HOPOPTS,
+            &chain,
+            &tcp_hdr(6, &[2, 4, 5, 0xb4]),
+            None,
+        );
+        for n in 0..=base.len() {
+            let _ = validate_packet(&base[..n]);
+        }
+        // Every byte of the chain at every value.
+        for i in 40..72 {
+            for b in [0u8, 1, 43, 44, 59, 60, 0x7f, 0xff] {
+                let mut p = base.clone();
+                p[i] = b;
+                if let Ok(v) = validate_packet(&p) {
+                    assert!(v.data_offset >= 40 && v.data_offset < p.len());
+                }
+            }
+        }
     }
 
     #[test]

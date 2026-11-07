@@ -1,8 +1,8 @@
 # IPv6 raw port scans — Phase 0
 
-Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).**
-Step a is next. PR #153 (FreeBSD) has merged, so per D5 this milestone has
-its own PR.
+Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).
+Step a (receive) done (§11).** Step b is next. Per D5 this milestone lands in
+its own PRs, after #153 (FreeBSD).
 
 ## 0. Value
 
@@ -228,7 +228,7 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
 
 | step | delivers | gates |
 |---|---|---|
-| **a — receive** | the IPv6 walk (`ipv6_get_data`), `validate_packet`'s IPv6 path (D3, Q4) | the validate oracle extended (vectors per header and fragment shape; randomized cross-check); fuzz target; Miri |
+| **a — receive** ✅ (§11) | the IPv6 walk (`ipv6_get_data`), `validate_packet`'s IPv6 path (D3, Q4) | the validate oracle extended (vectors per header and fragment shape; randomized cross-check); fuzz target; Miri |
 | **b — match and classify** | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
 | **c — build** | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
 | **d — the engine on loopback** | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
@@ -246,3 +246,53 @@ steps.
 - Whether GitHub's Linux runners allow a network namespace with IPv6 on a veth
   pair (D4 (b)) is untested; the exit differential already uses unprivileged
   namespaces there, so it is likely.
+
+## 11. Step a — results
+
+`validate_packet` validates IPv6 (`core::recv_validate`): the header, the
+extension-header walk (`ipv6_payload`, a port of `ipv6_get_data`), then the
+IPv4 path's TCP and UDP checks, shared (`validate_l4`). D3 and Q4 are fixed as
+decided: a fragment header is its fixed 8 bytes and a nonzero offset is
+refused (`recv-validate6-non-initial-fragment`); the packet ends at
+40 + `ip6_plen` (`recv-validate6-trailer-trim`). `recv-validate-ipv4-only-for-now`
+is resolved. The matchers still hand it only IPv4 replies; step b changes that.
+
+- **Oracle.** `validate_oracle` now has validatepkt's IPv6 branch
+  (`tcpip.cc:1310`), and the walk inside it is not a transcription: the build
+  copies `ipv6_is_extension_header`, `ipv6_is_upperlayer`,
+  `ipv6_get_data_primitive` and both `ipv6_get_data` overloads out of
+  `netutil.cc` by name and compiles them against libdnet's headers. If one is
+  missing the build fails.
+- **Hand corpus.** 36 IPv6 vectors, one per extension header, fragment shape
+  (first, atomic, later, behind another header, nonzero reserved byte),
+  way a chain runs out (under 40 bytes, header only, under 8 bytes left, a
+  length past the end, ending at the end, ending in an extension header),
+  unknown last protocol, and transport failure. With the IPv4 ones, 50 of 55
+  match the C. The other 5 are pinned in `validate_differential.rs` with the
+  C's answer next to the port's.
+- **Random corpus.** 4,000 IPv6 packets (`gen_validate_random.py`, fixed
+  seed): chains of up to five headers in any order, lying lengths, every
+  ending, payload lengths short, exact and long, truncation. 2,903 match the
+  C exactly. 489 are Q4's class: the same protocol and offset, a different
+  length, and the C's length is checked against the C's rule. 608 cross a later
+  fragment (tagged by a mirror of the C walk) and the port refuses each as a
+  fragment. The C accepted 331 of those, so D3 changes real behavior.
+- **CI.** `regen_validate_golden.sh --check` rebuilds the oracle and both
+  corpora in the differential job and fails on drift, so a change to
+  netutil.cc's walk shows up there.
+- **Fuzz.** The `validate_packet` target checks, for an IPv6 accept, that the
+  offset falls inside the buffer past 40, that the protocol is upper-layer and
+  that the walk agrees with it. It also runs the walk alone and checks that it
+  can only refuse in the walk's own ways. Five IPv6 seeds; 79M runs here, no
+  failure.
+- **Miri.** The 19 unit tests, 8 of them IPv6, pass.
+- **Sabotage, 16, all caught.** In the port: the offset check removed; the
+  fragment length taken from the reserved byte; the offset read from the
+  flag bits; the C's trim; the trim without the fixed header; an extension
+  length one unit long; SCTP or ICMP missing from the upper-layer set; the
+  `p >= end` check dropped; routing headers not walked; the first next header
+  read from the hop limit; the transport checks skipped; an unknown ending
+  accepted (each caught by the unit tests and the differential). In the C,
+  through `--check`: the walk's step changed, SCTP removed from the
+  upper-layer set, the walk function renamed.
+

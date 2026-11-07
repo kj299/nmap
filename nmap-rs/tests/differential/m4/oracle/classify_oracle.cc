@@ -9,6 +9,7 @@
 //   default <scan> <defeat_icmp_ratelimit 0|1>
 //   tcp     <scan> <flags u8> <window u16>
 //   icmp    <scan> <type u8> <code u8> <from_target 0|1>
+//   icmp6   <scan> <type u8> <code u8> <from_target 0|1>
 //   sctp    <scan> <chunk u8>
 // Scans: syn connect ack window maimon fin null xmas udp ipproto sctpinit sctpcookie
 // Output: open closed filtered unfiltered openfiltered closedfiltered unknown none
@@ -23,6 +24,18 @@ enum State { OPEN, CLOSED, FILTERED, UNFILTERED, OPENFILTERED, CLOSEDFILTERED, U
 #define TH_SYN 0x02
 #define TH_RST 0x04
 #define TH_ACK 0x10
+// dnet/icmpv6.h
+#define ICMPV6_UNREACH 1
+#define ICMPV6_UNREACH_NOROUTE 0
+#define ICMPV6_UNREACH_PROHIB 1
+#define ICMPV6_UNREACH_SCOPE 2
+#define ICMPV6_UNREACH_ADDR 3
+#define ICMPV6_UNREACH_PORT 4
+#define ICMPV6_UNREACH_FILTER_PROHIB 5
+#define ICMPV6_UNREACH_REJECT_ROUTE 6
+#define ICMPV6_PARAMPROBLEM 4
+#define ICMPV6_PARAMPROBLEM_FIELD 0
+#define ICMPV6_PARAMPROBLEM_NEXTHEADER 1
 #define SCTP_INIT_ACK 0x02
 #define SCTP_ABORT 0x06
 
@@ -101,6 +114,44 @@ static State classify_icmp(Scan scan, unsigned type, unsigned code, int from_tar
   return NONE;
 }
 
+// ICMPv6 response branch (scan_engine_raw.cc:1933). Only the two types the type
+// filter keeps reach the switch (:1944); `newstate` starts at PORT_UNKNOWN and an
+// unexpected code leaves it there (error + hexdump, then `if (newstate ==
+// PORT_UNKNOWN) break;`), which is "none" here.
+static State classify_icmp6(Scan scan, unsigned type, unsigned code, int from_target) {
+  if (!(type == ICMPV6_UNREACH || type == ICMPV6_PARAMPROBLEM))
+    return NONE;                                          // continue (:1944)
+  State newstate = NONE;
+  if (type == ICMPV6_UNREACH) {                           // (:2016)
+    switch (code) {
+    case ICMPV6_UNREACH_NOROUTE: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_PROHIB: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_SCOPE: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_ADDR: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_FILTER_PROHIB: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_REJECT_ROUTE: newstate = FILTERED; break;
+    case ICMPV6_UNREACH_PORT:                             // (:2042)
+      if (from_target && scan == UDP) newstate = CLOSED;
+      else if (from_target && scan == IPPROT) newstate = OPEN;
+      else newstate = FILTERED;
+      break;
+    default: break;                                       // error + hexdump (:2051)
+    }
+  } else if (type == ICMPV6_PARAMPROBLEM) {               // (:2057)
+    switch (code) {
+    case ICMPV6_PARAMPROBLEM_FIELD:                       // (:2059)
+      newstate = OPEN;
+      break;
+    case ICMPV6_PARAMPROBLEM_NEXTHEADER:                  // (:2064)
+      if (from_target && scan == IPPROT) newstate = CLOSED;
+      else newstate = FILTERED;
+      break;
+    default: break;                                       // error + hexdump (:2070)
+    }
+  }
+  return newstate;
+}
+
 // SCTP response branch (scan_engine_raw.cc:1779)
 static State classify_sctp(Scan scan, unsigned chunk) {
   if (scan == SCTPINIT) {
@@ -126,6 +177,7 @@ int main(void) {
     if (strcmp(kind, "default") == 0) st = default_state(scan, (int)a);
     else if (strcmp(kind, "tcp") == 0) st = classify_tcp(scan, a, b);
     else if (strcmp(kind, "icmp") == 0) st = classify_icmp(scan, a, b, (int)c);
+    else if (strcmp(kind, "icmp6") == 0) st = classify_icmp6(scan, a, b, (int)c);
     else if (strcmp(kind, "sctp") == 0) st = classify_sctp(scan, a);
     printf("%s\n", state_str(st));
   }

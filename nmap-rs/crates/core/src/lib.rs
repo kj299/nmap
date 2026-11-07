@@ -23,6 +23,7 @@ pub mod fp6_match;
 pub mod fpmodel;
 pub mod headers;
 pub mod icmp_quote;
+pub mod ipfamily;
 pub mod ipid;
 pub mod log;
 pub mod logfile;

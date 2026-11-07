@@ -105,6 +105,14 @@ pub enum Reason {
     AdminProhibited,
     /// ICMP time-exceeded → filtered (`ER_TIMEEXCEEDED`).
     TimeExceeded,
+    /// ICMPv6 unreachable, no route to destination, code 0 (`ER_NOROUTE`).
+    NoRoute,
+    /// ICMPv6 unreachable, beyond scope of source address, code 2 (`ER_BEYONDSCOPE`).
+    BeyondScope,
+    /// ICMPv6 unreachable, reject route to destination, code 6 (`ER_REJECTROUTE`).
+    RejectRoute,
+    /// ICMPv6 parameter problem, any code (`ER_PARAMPROBLEM`).
+    ParamProblem,
     /// The operator asserted it (`ER_USER`, "user-set"). `-Pn` marks every host
     /// up without probing, so this is the only honest host reason there is:
     /// nothing was received, the liveness was declared.
@@ -132,6 +140,10 @@ impl Reason {
             Reason::HostProhibited => "host-prohibited",
             Reason::AdminProhibited => "admin-prohibited",
             Reason::TimeExceeded => "time-exceeded",
+            Reason::NoRoute => "no-route",
+            Reason::BeyondScope => "beyond-scope",
+            Reason::RejectRoute => "reject-route",
+            Reason::ParamProblem => "param-problem",
             Reason::Localhost => "localhost-response",
             Reason::Unknown => "unknown",
         }

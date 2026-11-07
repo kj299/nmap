@@ -82,6 +82,10 @@ pub const TH_RST: u8 = 0x04;
 /// ACK flag.
 pub const TH_ACK: u8 = 0x10;
 
+// ICMPv6 error types that give a port-scan verdict (dnet/icmpv6.h).
+const ICMPV6_UNREACH: u8 = 1;
+const ICMPV6_PARAMPROBLEM: u8 = 4;
+
 // SCTP chunk types (dnet/sctp.h).
 const SCTP_INIT_ACK: u8 = 0x02;
 const SCTP_ABORT: u8 = 0x06;
@@ -169,6 +173,64 @@ pub fn classify_icmp(
             _ => None,
         },
         11 => Some(PortState::Filtered), // time exceeded
+        _ => None,
+    }
+}
+
+/// Classify a matched ICMPv6 error. `from_target` is true when the error came from
+/// the host the quoted probe was sent to. Ports `scan_engine_raw.cc:2016`, with the
+/// type filter before it (`:1944`): only Destination Unreachable (1) and Parameter
+/// Problem (4) give a verdict. Returns `None` for everything else.
+///
+/// Three things here differ from the ICMPv4 table, all as in the C except the first:
+///
+/// - **Parameter Problem, code 0** ("erroneous header field") is *filtered*, where
+///   the C says *open* for every scan type. The C's comment reads it as "it was
+///   understood, just invalid", which holds for `-sO`; for a TCP or UDP probe it
+///   only says some node objected to a field of our packet, and any node on the
+///   path can send it (`classify6-param-problem-field-filtered`, D2 in
+///   `docs/IPV6-SCAN-ANALYSIS.md`). The C's *open* is kept for `-sO`.
+/// - **Time Exceeded (3) and Packet Too Big (2)** give no verdict, where ICMPv4's
+///   time-exceeded is *filtered*: the C does not take them (Q5, reproduced).
+/// - **An unexpected code** gives no verdict, as in the C, which also prints the
+///   packet to stderr at any verbosity (`classify6-unexpected-code-silent`).
+#[must_use]
+pub fn classify_icmpv6(
+    scan: ScanType,
+    icmp_type: u8,
+    icmp_code: u8,
+    from_target: bool,
+) -> Option<PortState> {
+    match icmp_type {
+        ICMPV6_UNREACH => match icmp_code {
+            // no route, administratively prohibited, beyond scope, address
+            // unreachable, failed ingress/egress policy, reject route
+            0..=3 | 5 | 6 => Some(PortState::Filtered),
+            // port unreachable
+            4 => Some(if from_target && scan == ScanType::Udp {
+                PortState::Closed
+            } else if from_target && scan == ScanType::IpProto {
+                PortState::Open
+            } else {
+                PortState::Filtered
+            }),
+            _ => None,
+        },
+        ICMPV6_PARAMPROBLEM => match icmp_code {
+            // erroneous header field: open only for an IP-protocol scan (D2)
+            0 => Some(if scan == ScanType::IpProto {
+                PortState::Open
+            } else {
+                PortState::Filtered
+            }),
+            // unrecognized next header
+            1 => Some(if from_target && scan == ScanType::IpProto {
+                PortState::Closed
+            } else {
+                PortState::Filtered
+            }),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -293,6 +355,99 @@ mod tests {
         );
         // Unhandled ICMP type => ignored.
         assert_eq!(classify_icmp(ScanType::Syn, 8, 0, true), None);
+    }
+
+    const ALL_SCANS: [ScanType; 12] = [
+        ScanType::Syn,
+        ScanType::Connect,
+        ScanType::Ack,
+        ScanType::Window,
+        ScanType::Maimon,
+        ScanType::Fin,
+        ScanType::Null,
+        ScanType::Xmas,
+        ScanType::Udp,
+        ScanType::IpProto,
+        ScanType::SctpInit,
+        ScanType::SctpCookieEcho,
+    ];
+
+    #[test]
+    fn icmpv6_unreachable_is_filtered_but_port_unreachable_depends() {
+        for code in [0u8, 1, 2, 3, 5, 6] {
+            for ft in [true, false] {
+                assert_eq!(
+                    classify_icmpv6(ScanType::Syn, 1, code, ft),
+                    Some(PortState::Filtered),
+                    "1/{code}"
+                );
+            }
+        }
+        assert_eq!(
+            classify_icmpv6(ScanType::Udp, 1, 4, true),
+            Some(PortState::Closed)
+        );
+        assert_eq!(
+            classify_icmpv6(ScanType::Udp, 1, 4, false),
+            Some(PortState::Filtered)
+        );
+        assert_eq!(
+            classify_icmpv6(ScanType::IpProto, 1, 4, true),
+            Some(PortState::Open)
+        );
+        assert_eq!(
+            classify_icmpv6(ScanType::Syn, 1, 4, true),
+            Some(PortState::Filtered)
+        );
+    }
+
+    // D2: an erroneous-header-field Parameter Problem says nothing about a port.
+    #[test]
+    fn icmpv6_parameter_problem_field_is_filtered_except_for_ip_protocol_scans() {
+        for scan in ALL_SCANS {
+            for ft in [true, false] {
+                let want = if scan == ScanType::IpProto {
+                    PortState::Open
+                } else {
+                    PortState::Filtered
+                };
+                assert_eq!(classify_icmpv6(scan, 4, 0, ft), Some(want), "{scan:?}");
+            }
+        }
+        assert_eq!(
+            classify_icmpv6(ScanType::IpProto, 4, 1, true),
+            Some(PortState::Closed)
+        );
+        assert_eq!(
+            classify_icmpv6(ScanType::IpProto, 4, 1, false),
+            Some(PortState::Filtered)
+        );
+        assert_eq!(
+            classify_icmpv6(ScanType::Udp, 4, 1, true),
+            Some(PortState::Filtered)
+        );
+    }
+
+    // Q5 and Q6: no verdict from Time Exceeded, Packet Too Big, informational
+    // messages, or a code the C does not expect.
+    #[test]
+    fn icmpv6_without_a_verdict() {
+        for scan in ALL_SCANS {
+            for (t, c) in [
+                (2, 0),
+                (3, 0),
+                (3, 1),
+                (1, 7),
+                (1, 255),
+                (4, 2),
+                (4, 3),
+                (128, 0),
+                (129, 0),
+                (0, 0),
+            ] {
+                assert_eq!(classify_icmpv6(scan, t, c, true), None, "{scan:?} {t}/{c}");
+            }
+        }
     }
 
     #[test]

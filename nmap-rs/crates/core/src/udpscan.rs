@@ -35,17 +35,16 @@
 //! * Protocol-specific probe payloads live in [`crate::payload`]; pass one to
 //!   [`build_udp_probe_with`]. [`build_udp_probe`] keeps the bare, zero-length datagram
 //!   for callers that have no payload table (and for the on-the-wire differential).
-//! * Matches IPv4 replies only: IPv6 scans are `ipv6-raw-port-scans-unported` until
-//!   their matchers land (IPv6 scans step b).
+//! * Matches IPv4 and IPv6 replies: [`match_udp_response`] is generic over the
+//!   [`IpFamily`]. Nothing sends IPv6 UDP probes until the engine does
+//!   (`ipv6-raw-port-scans-unported`, step d).
 
 use crate::build::{build_udp_raw, BuildError, Ipv4Spec};
-use crate::classify::{classify_icmp, classify_udp_response, PortState, ScanType};
-use crate::icmp_quote::{icmp_to_reason, ipv4_offset, parse_icmp_error, IPPROTO_UDP};
+use crate::classify::{classify_udp_response, PortState, ScanType};
+use crate::icmp_quote::IPPROTO_UDP;
+use crate::ipfamily::IpFamily;
 use crate::model::Reason;
-use crate::recv_validate::validate_packet;
 use crate::synscan::sport_encode;
-
-const IPPROTO_ICMP: u8 = 1;
 /// Bytes of a UDP header we read (source + dest ports).
 const UDP_PORTS_LEN: usize = 4;
 
@@ -89,13 +88,14 @@ pub fn build_udp_probe_with(
 }
 
 /// The per-scan constants a captured reply is matched against. Deliberately carries no
-/// target address — see the module docs on which host a reply is about.
+/// target address — see the module docs on which host a reply is about. `A` is the
+/// address family ([`IpFamily`]).
 #[derive(Debug, Clone, Copy)]
-pub struct UdpMatchCtx {
+pub struct UdpMatchCtx<A = [u8; 4]> {
     /// Our own source address. An ICMP error is only about a probe of ours if the packet
     /// it quotes was sent *from* here — the C's "If it didn't come from us, we don't
     /// care."
-    pub our_ip: [u8; 4],
+    pub our_ip: A,
     /// Base UDP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Highest attempt number in flight.
@@ -104,10 +104,10 @@ pub struct UdpMatchCtx {
 
 /// A captured packet matched to an outstanding UDP probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UdpReply {
+pub struct UdpReply<A = [u8; 4]> {
     /// The scanned host this reply is about: the sender for a direct datagram, or the
     /// destination of the quoted probe for an ICMP error.
-    pub src_ip: [u8; 4],
+    pub src_ip: A,
     /// The scanned port that answered.
     pub port: u16,
     /// Which attempt this reply answers.
@@ -120,22 +120,23 @@ pub struct UdpReply {
 
 /// Decide whether a captured frame answers one of our UDP probes, and to what state.
 ///
-/// Handles a direct UDP datagram (→ open) and an ICMP unreachable/time-exceeded whose
-/// embedded packet is one of our probes (port-unreach → closed, else filtered).
-/// Returns `None` for anything else. Total on all input — the primary fuzz target of
-/// the UDP receive path.
+/// Handles a direct UDP datagram (→ open) and an ICMP error whose embedded packet is
+/// one of our probes (port-unreach from the target → closed, else filtered, by the
+/// family's classifier). The family is the context's. Returns `None` for anything
+/// else. Total on all input — the primary fuzz target of the UDP receive path.
 #[must_use]
-pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -> Option<UdpReply> {
-    let ip_off = ipv4_offset(frame, eth_included)?;
-    let ip = frame.get(ip_off..)?;
-    let v = validate_packet(ip).ok()?;
-    let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
+pub fn match_udp_response<A: IpFamily>(
+    frame: &[u8],
+    eth_included: bool,
+    ctx: &UdpMatchCtx<A>,
+) -> Option<UdpReply<A>> {
+    let r = A::received(frame, eth_included)?;
 
-    match v.proto {
+    match r.v.proto {
         IPPROTO_UDP => {
             // A direct datagram: its source port is the scanned port, its destination
             // is our encoded source port (→ the attempt).
-            let udp = ip.get(v.data_offset..)?;
+            let udp = r.transport()?;
             if udp.len() < UDP_PORTS_LEN {
                 return None;
             }
@@ -143,15 +144,15 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
             let our_sport = u16::from_be_bytes([udp[2], udp[3]]);
             let tryno = attempt_from_sport(our_sport, ctx)?;
             Some(UdpReply {
-                src_ip,
+                src_ip: r.src,
                 port: scanned,
                 tryno,
                 state: classify_udp_response(),
                 reason: Reason::UdpResponse,
             })
         }
-        IPPROTO_ICMP => {
-            let quote = parse_icmp_error(frame, eth_included)?;
+        p if p == A::ICMP => {
+            let quote = A::quote(&r)?;
             if quote.proto != IPPROTO_UDP {
                 return None; // an error about something other than our UDP probe
             }
@@ -160,19 +161,14 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
                 return None;
             }
             let tryno = attempt_from_sport(quote.sport, ctx)?;
-            let state = classify_icmp(
-                ScanType::Udp,
-                quote.icmp_type,
-                quote.icmp_code,
-                quote.from_target(),
-            )?;
+            let state = A::classify_error(ScanType::Udp, &quote)?;
             Some(UdpReply {
                 // The verdict belongs to the host we probed, not to whoever relayed it.
                 src_ip: quote.quoted_dst,
                 port: quote.dport,
                 tryno,
                 state,
-                reason: icmp_to_reason(quote.icmp_type, quote.icmp_code),
+                reason: A::error_reason(&quote),
             })
         }
         _ => None,
@@ -181,7 +177,7 @@ pub fn match_udp_response(frame: &[u8], eth_included: bool, ctx: &UdpMatchCtx) -
 
 /// Recover the attempt number from an encoded source port, rejecting ports outside our
 /// range.
-fn attempt_from_sport(sport: u16, ctx: &UdpMatchCtx) -> Option<u32> {
+fn attempt_from_sport<A>(sport: u16, ctx: &UdpMatchCtx<A>) -> Option<u32> {
     let tryno = u32::from(sport.wrapping_sub(ctx.base_port));
     (tryno <= ctx.max_tryno).then_some(tryno)
 }
@@ -189,6 +185,9 @@ fn attempt_from_sport(sport: u16, ctx: &UdpMatchCtx) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recv_validate::validate_packet;
+
+    const IPPROTO_ICMP: u8 = 1;
     use crate::build::build_tcp_raw;
 
     fn ctx() -> UdpMatchCtx {
@@ -327,5 +326,130 @@ mod tests {
         let tspec = Ipv4Spec::new([10, 0, 0, 2], [10, 0, 0, 1], 64, 0x1);
         let tcp = build_tcp_raw(&tspec, 53, 40000, 1, 0, 0, 0x02, 1024, 0, &[], &[]).unwrap();
         assert!(match_udp_response(&framed(&tcp), true, &ctx()).is_none());
+    }
+
+    // ---- IPv6 ----
+
+    mod v6 {
+        use super::super::*;
+        use crate::ipfamily::test6::*;
+
+        fn ctx6() -> UdpMatchCtx<[u8; 16]> {
+            UdpMatchCtx {
+                our_ip: US6,
+                base_port: 40000,
+                max_tryno: 11,
+            }
+        }
+
+        fn our_probe(src: [u8; 16], port: u16, tryno: u16) -> Vec<u8> {
+            ipv6(
+                src,
+                TARGET6,
+                17,
+                &[],
+                &udp(40000u16.wrapping_add(tryno), port, b"\x00\x01"),
+            )
+        }
+
+        #[test]
+        fn a_datagram_back_is_open() {
+            let pkt = ipv6(TARGET6, US6, 17, &[], &udp(53, 40002, b"answer"));
+            let m = match_udp_response(&eth(&pkt), true, &ctx6()).unwrap();
+            assert_eq!(
+                (m.src_ip, m.port, m.tryno, m.state, m.reason),
+                (TARGET6, 53, 2, PortState::Open, Reason::UdpResponse)
+            );
+            // Behind a destination-options header too.
+            let pkt = ipv6(TARGET6, US6, 60, &dstopts(17), &udp(53, 40000, b""));
+            assert!(match_udp_response(&pkt, false, &ctx6()).is_some());
+            // Not to one of our ports.
+            let pkt = ipv6(TARGET6, US6, 17, &[], &udp(53, 39999, b""));
+            assert!(match_udp_response(&pkt, false, &ctx6()).is_none());
+        }
+
+        #[test]
+        fn port_unreachable_is_closed_from_the_target_and_filtered_from_a_router() {
+            let probe = our_probe(US6, 161, 1);
+            let err = icmpv6_error(TARGET6, 1, 4, None, &[], &probe);
+            let m = match_udp_response(&err, false, &ctx6()).unwrap();
+            assert_eq!(
+                (m.src_ip, m.port, m.tryno, m.state, m.reason),
+                (TARGET6, 161, 1, PortState::Closed, Reason::PortUnreach)
+            );
+            let err = icmpv6_error(ROUTER6, 1, 4, None, &[], &probe);
+            let m = match_udp_response(&err, false, &ctx6()).unwrap();
+            assert_eq!((m.src_ip, m.state), (TARGET6, PortState::Filtered));
+        }
+
+        #[test]
+        fn other_errors_are_filtered_or_ignored() {
+            let probe = our_probe(US6, 161, 0);
+            for (c, reason) in [
+                (0, Reason::NoRoute),
+                (1, Reason::AdminProhibited),
+                (2, Reason::BeyondScope),
+                (3, Reason::HostUnreach),
+                (5, Reason::AdminProhibited),
+                (6, Reason::RejectRoute),
+            ] {
+                let err = icmpv6_error(TARGET6, 1, c, None, &[], &probe);
+                let m = match_udp_response(&err, false, &ctx6()).unwrap();
+                assert_eq!((m.state, m.reason), (PortState::Filtered, reason), "1/{c}");
+            }
+            // D2: an erroneous-header-field report from the target is not open.
+            let err = icmpv6_error(TARGET6, 4, 0, None, &[], &probe);
+            let m = match_udp_response(&err, false, &ctx6()).unwrap();
+            assert_eq!(
+                (m.state, m.reason),
+                (PortState::Filtered, Reason::ParamProblem)
+            );
+            let err = icmpv6_error(TARGET6, 4, 1, None, &[], &probe);
+            assert_eq!(
+                match_udp_response(&err, false, &ctx6()).unwrap().state,
+                PortState::Filtered
+            );
+            // Q5, Q6.
+            for (t, c) in [(3, 0), (2, 0), (1, 9), (4, 2)] {
+                let err = icmpv6_error(TARGET6, t, c, None, &[], &probe);
+                assert!(
+                    match_udp_response(&err, false, &ctx6()).is_none(),
+                    "{t}/{c}"
+                );
+            }
+        }
+
+        #[test]
+        fn quotes_must_be_of_our_udp_probes() {
+            // A quoted TCP segment.
+            let tcp = ipv6(US6, TARGET6, 6, &[], &tcp(40000, 161, 1, 0, 0x02, 1024));
+            let err = icmpv6_error(TARGET6, 1, 4, None, &[], &tcp);
+            assert!(match_udp_response(&err, false, &ctx6()).is_none());
+            // From someone else.
+            let err = icmpv6_error(TARGET6, 1, 4, None, &[], &our_probe(ROUTER6, 161, 0));
+            assert!(match_udp_response(&err, false, &ctx6()).is_none());
+            // Behind extension headers on both sides.
+            let probe = ipv6(US6, TARGET6, 60, &dstopts(17), &udp(40003, 161, b""));
+            let err = icmpv6_error(TARGET6, 1, 4, Some(60), &dstopts(58), &probe);
+            let m = match_udp_response(&err, false, &ctx6()).unwrap();
+            assert_eq!((m.port, m.tryno, m.state), (161, 3, PortState::Closed));
+            // An IPv4 context does not read it.
+            assert!(match_udp_response(&err, false, &super::ctx()).is_none());
+        }
+
+        #[test]
+        fn every_truncation_is_handled() {
+            let err = eth(&icmpv6_error(
+                TARGET6,
+                1,
+                4,
+                Some(60),
+                &dstopts(58),
+                &our_probe(US6, 161, 0),
+            ));
+            for n in 0..=err.len() {
+                let _ = match_udp_response(&err[..n], true, &ctx6());
+            }
+        }
     }
 }

@@ -9,6 +9,11 @@
     "core::headers::ipv6ext": [
       "parse_packet"
     ],
+    "core::ipfamily": [
+      "match_flag",
+      "match_syn",
+      "match_udp"
+    ],
     "core::macvendor": [
       "macvendor_parse"
     ],
@@ -180,6 +185,9 @@
     "congestion": {
       "fuzzed": "AIMD congestion-window arithmetic over our own scheduler state. Replies are classified and validated by core before any number reaches here, so no attacker-controlled bytes are parsed."
     },
+    "core::ipfamily": {
+      "differential": "A per-family adapter with no C function of its own: get_pcap_result's family split is reproduced by the matchers built on it. Its IPv4 side is the code the IPv4 matchers ran before it existed, compared with 7.94 on the wire by the raw differential; its IPv6 side meets 7.94 when the engine sends IPv6 probes (IPv6 scans step d), and until then is covered by the matchers' unit tests over crafted IPv6 replies and the classify differential."
+    },
     "core::log": {
       "fuzzed": "Verbosity-level accessors (init, verbosity, debugging). Holds no attacker data and renders no strings."
     },
@@ -288,6 +296,7 @@
     "core::headers::tcp": "unsafe_audited",
     "core::headers::udp": "unsafe_audited",
     "core::icmp_quote": "unsafe_audited",
+    "core::ipfamily": "unsafe_audited",
     "core::ipid": "unsafe_audited",
     "core::log": "unsafe_audited",
     "core::macvendor": "unsafe_audited",
@@ -400,6 +409,66 @@
       "unsafe_audited": {
         "files": 2,
         "sha256": "d82862bdec7f2c0d1e3b71df98f81851e2434de406dac17af1e5975c0243a2f2"
+      }
+    },
+    "core::classify": {
+      "differential": {
+        "files": 1,
+        "sha256": "90ccee2e98c4047c4f5b2c9b3183ad58f48afcbd0621b822b127ca43d06fb38d"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "90ccee2e98c4047c4f5b2c9b3183ad58f48afcbd0621b822b127ca43d06fb38d"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "90ccee2e98c4047c4f5b2c9b3183ad58f48afcbd0621b822b127ca43d06fb38d"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "90ccee2e98c4047c4f5b2c9b3183ad58f48afcbd0621b822b127ca43d06fb38d"
+      }
+    },
+    "core::flagscan": {
+      "fuzzed": {
+        "files": 1,
+        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+      }
+    },
+    "core::icmp_quote": {
+      "fuzzed": {
+        "files": 1,
+        "sha256": "b2104edede7b73beffe2896fd93114652799a799f2119e2a6acb648816a0d0f1"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "b2104edede7b73beffe2896fd93114652799a799f2119e2a6acb648816a0d0f1"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "b2104edede7b73beffe2896fd93114652799a799f2119e2a6acb648816a0d0f1"
+      }
+    },
+    "core::ipfamily": {
+      "fuzzed": {
+        "files": 1,
+        "sha256": "ca1be595ff47c51a9dd17d4ac8a6a85e0a9db230c49dcf9734f192a44c1c3cc1"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "ca1be595ff47c51a9dd17d4ac8a6a85e0a9db230c49dcf9734f192a44c1c3cc1"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "ca1be595ff47c51a9dd17d4ac8a6a85e0a9db230c49dcf9734f192a44c1c3cc1"
       }
     },
     "core::nse::fspolicy": {
@@ -692,6 +761,34 @@
       "unsafe_audited": {
         "files": 1,
         "sha256": "7aacdef0675a01bac8eb6904b701d9f7422711cc510a81616e4d146bda92f924"
+      }
+    },
+    "core::synscan": {
+      "fuzzed": {
+        "files": 1,
+        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+      }
+    },
+    "core::udpscan": {
+      "fuzzed": {
+        "files": 1,
+        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
       }
     },
     "sys::nsefs": {

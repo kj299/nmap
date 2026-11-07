@@ -1,8 +1,8 @@
 # IPv6 raw port scans — Phase 0
 
 Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).
-Step a (receive) done (§11).** Step b is next. Per D5 this milestone lands in
-its own PRs, after #153 (FreeBSD).
+Steps a (receive, §11) and b (match and classify, §12) done.** Step c is next.
+Per D5 this milestone lands in its own PRs, after #153 (FreeBSD).
 
 ## 0. Value
 
@@ -229,7 +229,7 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
 | step | delivers | gates |
 |---|---|---|
 | **a — receive** ✅ (§11) | the IPv6 walk (`ipv6_get_data`), `validate_packet`'s IPv6 path (D3, Q4) | the validate oracle extended (vectors per header and fragment shape; randomized cross-check); fuzz target; Miri |
-| **b — match and classify** | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
+| **b — match and classify** ✅ (§12) | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
 | **c — build** | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
 | **d — the engine on loopback** | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
 | **e — Ethernet** (D4) | ND per next hop; down/`no-route` when it fails | the same differential across a veth pair (Linux) and an epair (FreeBSD), plus a silent neighbor |
@@ -295,4 +295,72 @@ is resolved. The matchers still hand it only IPv4 replies; step b changes that.
   accepted (each caught by the unit tests and the differential). In the C,
   through `--check`: the walk's step changed, SCTP removed from the
   upper-layer set, the walk function renamed.
+
+## 12. Step b — results
+
+- **Classification.** `classify_icmpv6` ports the ICMPv6 branch
+  (`scan_engine_raw.cc:1933`): unreachable codes 0–3, 5 and 6 are filtered;
+  port unreachable is closed for `-sU` from the target, open for `-sO` from the
+  target, otherwise filtered; next-header parameter problem is closed for `-sO`
+  from the target, otherwise filtered. D2 is applied: parameter problem 0 is
+  filtered, except for `-sO` where it stays open
+  (`classify6-param-problem-field-filtered`). Q5 is reproduced: Time Exceeded and
+  Packet Too Big give no verdict. Q6: an unexpected code gives no verdict and
+  prints nothing (`classify6-unexpected-code-silent`; the `-d` line comes with
+  the engine). The reasons are `icmpv6_to_reason`'s (`no-route`, `beyond-scope`,
+  `reject-route`, `param-problem`, new in `model::Reason`).
+  `classify-ipv4-icmp-only-for-now` is resolved.
+- **Matching.** The SYN, UDP and flag-scan matchers are generic over the address
+  family (`core::ipfamily::IpFamily`, implemented by `[u8; 4]` and `[u8; 16]`).
+  The TCP and UDP checks exist once, and the IPv4 path behaves as before. The
+  context, reply and quote types default to IPv4, so `sys::group` is unchanged
+  until step d. IPv6 replies are taken only when IPv6 is the frame's first
+  network header (never tunnelled). An ICMPv6 error is read up to the packet's own
+  end, and its quote is walked like a received packet
+  (`icmp_quote::parse_icmpv6_error`), so a quoted later fragment matches nothing.
+- **Classify oracle.** `classify_oracle.cc` gains the ICMPv6 branch, transcribed
+  with line references. The matrix now covers every code of unreachable and
+  parameter problem, plus 15 other types over a spread of codes, for every scan
+  and both senders: 28,032 cases (15,528 of them new). All match the C except the
+  22 parameter-problem-0 cases (11 scans × 2 senders), which are pinned with the
+  C's `open` beside the port's `filtered`. `regen_classify_golden.sh --check` now
+  runs in CI. The classify golden had not been re-derived in CI before.
+- **Matcher tests.** 18 new unit tests over crafted IPv6 replies, bare and
+  Ethernet-framed (and 3 for the classifier):
+  - SYN/ACK, RST, a datagram back, and each flag scan's RST.
+  - Every ICMPv6 code with its reason, from the target and from a router.
+  - Quotes behind destination options, under an error behind hop-by-hop
+    options.
+  - Refused: a later fragment, a quote not from us, a foreign sequence, a
+    7-byte quote, an IPv4 quote inside ICMPv6, and each family's packets offered
+    to the other's context.
+  - Every truncation of an error and of a reply.
+- **Fuzz.** `match_syn`, `match_udp` and `match_flag` run every input through
+  both families and assert that only a direct reply can say open; no ICMP error
+  can. `classify` asserts that no ICMPv6 error says open except to `-sO`. There
+  are 7 new IPv6 seeds, each checked to reach a match. About 71M runs here, no
+  failure.
+- **Miri.** The unit tests of all six touched modules pass.
+- **Sabotage, 15, all caught.** Five in the classifier, each caught by the unit
+  tests and the differential:
+  - D2 undone;
+  - Time Exceeded read as in ICMPv4;
+  - port unreachable closed from anyone;
+  - unexpected unreachable codes filtered;
+  - next-header problem closed from anyone.
+
+  Ten in the matchers, each caught by the unit tests:
+  - no-route reported as `net-unreach`;
+  - the quote read past the packet's end;
+  - quoted extension headers not walked;
+  - the quote's source not checked;
+  - the Ethernet type not checked;
+  - the source read from the destination field;
+  - ICMPv6 classified by the ICMPv4 table;
+  - ICMPv6 taken as protocol 1;
+  - `from_target` against the quoted source;
+  - the quoted sequence dropped.
+- **For step d.** The engine's capture filter has to admit IPv6 TCP and UDP
+  behind extension headers. libpcap's `tcp` primitive only checks the first next
+  header, so a filter written as for IPv4 would drop what the matchers accept.
 

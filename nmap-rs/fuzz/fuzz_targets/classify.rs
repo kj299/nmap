@@ -6,7 +6,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use nmap_core::classify::{
-    classify_icmp, classify_sctp, classify_tcp, classify_udp_response, default_port_state, ScanType,
+    classify_icmp, classify_icmpv6, classify_sctp, classify_tcp, classify_udp_response,
+    default_port_state, PortState, ScanType,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -24,6 +25,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = default_port_state(sc, ft);
     let _ = classify_tcp(sc, a, win);
     let _ = classify_icmp(sc, a, b, ft);
+    // D2: no ICMPv6 error says open, except to an IP-protocol scan.
+    if classify_icmpv6(sc, a, b, ft) == Some(PortState::Open) {
+        assert_eq!(sc, ScanType::IpProto, "{a}/{b} open for {sc:?}");
+    }
     let _ = classify_sctp(sc, a);
     let _ = classify_udp_response();
 });

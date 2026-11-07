@@ -34,21 +34,21 @@
 //!
 //! ## Scope / divergences (ledgered in `DIVERGENCES.md`)
 //!
-//! * Matches IPv4 replies only: IPv6 scans are `ipv6-raw-port-scans-unported` until
-//!   their matchers land (IPv6 scans step b).
+//! * Matches IPv4 and IPv6 replies: [`match_syn_response`] is generic over the
+//!   [`IpFamily`], so the TCP checks are the same code for both. ICMPv6 errors are
+//!   classified by [`crate::classify::classify_icmpv6`]. Nothing sends IPv6 SYN
+//!   probes until the engine does (`ipv6-raw-port-scans-unported`, step d).
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
-use crate::classify::{classify_icmp, classify_tcp, PortState, ScanType, TH_ACK};
-use crate::icmp_quote::{icmp_to_reason, ipv4_offset, parse_icmp_error, IPPROTO_TCP as QUOTED_TCP};
+use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
+use crate::icmp_quote::IPPROTO_TCP as QUOTED_TCP;
+use crate::ipfamily::{IpFamily, Received};
 use crate::model::Reason;
-use crate::recv_validate::validate_packet;
 
 /// TCP flag for a bare SYN probe.
 const TH_SYN: u8 = 0x02;
 /// IP protocol number for TCP — a direct reply to our probe.
 const IPPROTO_TCP: u8 = 6;
-/// IP protocol number for ICMP — an error quoting our probe.
-const IPPROTO_ICMP: u8 = 1;
 /// Minimum bytes of a TCP header we must read (ports/seq/ack/flags/window).
 const TCP_MIN: usize = 20;
 
@@ -131,12 +131,13 @@ pub fn build_syn_probe(
     )
 }
 
-/// The per-scan constants a captured reply is matched against.
+/// The per-scan constants a captured reply is matched against. `A` is the address
+/// family: `[u8; 4]` or `[u8; 16]` ([`IpFamily`]).
 #[derive(Debug, Clone, Copy)]
-pub struct MatchCtx {
+pub struct MatchCtx<A = [u8; 4]> {
     /// Our own source address. An ICMP error only concerns us if the packet it quotes was
     /// sent from here — the C's "If it didn't come from us, we don't care."
-    pub our_ip: [u8; 4],
+    pub our_ip: A,
     /// Base TCP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Per-scan random sequence mask.
@@ -147,9 +148,10 @@ pub struct MatchCtx {
 
 /// A captured packet matched to an outstanding SYN probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SynReply {
-    /// The host that answered (the reply's IPv4 source address), for multi-host demux.
-    pub src_ip: [u8; 4],
+pub struct SynReply<A = [u8; 4]> {
+    /// The host the reply is about, for multi-host demux: the reply's source address,
+    /// or for an ICMP error the destination of the probe it quotes.
+    pub src_ip: A,
     /// The scanned port that answered (the reply's TCP source port).
     pub port: u16,
     /// Which attempt this reply answers (for RTT accounting / retransmit bookkeeping).
@@ -164,21 +166,23 @@ pub struct SynReply {
 /// Decide whether a captured frame answers one of our SYN probes, and to what state.
 ///
 /// `eth_included` is `true` when the capture delivers a link-layer header (pcap on a
-/// loopback/Ethernet device) — the frame is walked to the IPv4 layer either way.
-/// Returns `None` for anything that is not a well-formed IPv4/TCP reply decoding to
-/// an in-range attempt (malformed, fragment, IPv6, ICMP, or a stray packet). Total on
-/// all input — the primary fuzz target of the receive path.
+/// loopback/Ethernet device). The family is the context's: an IPv4 context matches
+/// IPv4 replies and ICMPv4 errors, an IPv6 one IPv6 replies and ICMPv6 errors.
+/// Returns `None` for anything that is not a well-formed TCP reply decoding to an
+/// in-range attempt, or an ICMP error quoting one of our probes (malformed,
+/// fragment, the other family, or a stray packet). Total on all input — the primary
+/// fuzz target of the receive path.
 #[must_use]
-pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> Option<SynReply> {
-    // Locate the IPv4 header within the (possibly link-framed) capture.
-    let ip_off = ipv4_offset(frame, eth_included)?;
-    let ip = frame.get(ip_off..)?;
-
-    // Validate the IPv4 packet as untrusted input (bounds, fragment, TCP options).
-    let v = validate_packet(ip).ok()?;
-    if v.proto == IPPROTO_ICMP {
+pub fn match_syn_response<A: IpFamily>(
+    frame: &[u8],
+    eth_included: bool,
+    ctx: &MatchCtx<A>,
+) -> Option<SynReply<A>> {
+    // Locate and validate the packet as untrusted input (bounds, fragment, options).
+    let r = A::received(frame, eth_included)?;
+    if r.v.proto == A::ICMP {
         // An ICMP error quoting our SYN: the port is filtered somewhere on the path.
-        let m = match_tcp_icmp_error(frame, eth_included, ScanType::Syn, ctx)?;
+        let m = tcp_icmp_error(&r, ScanType::Syn, ctx)?;
         return Some(SynReply {
             src_ip: m.src_ip,
             port: m.port,
@@ -187,13 +191,13 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
             reason: m.reason,
         });
     }
-    if v.proto != IPPROTO_TCP {
+    if r.v.proto != IPPROTO_TCP {
         return None;
     }
 
     // The TCP header begins at `data_offset`; `validate_packet` guarantees >= 20
     // bytes of it are present for a TCP packet.
-    let tcp = ip.get(v.data_offset..)?;
+    let tcp = r.transport()?;
     if tcp.len() < TCP_MIN {
         return None;
     }
@@ -218,7 +222,6 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
         }
     }
 
-    let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
     let state = classify_tcp(ScanType::Syn, flags, window)?;
     let reason = match state {
         PortState::Open => Reason::ConnAccept, // "syn-ack"
@@ -226,7 +229,7 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
         _ => Reason::Unknown,
     };
     Some(SynReply {
-        src_ip,
+        src_ip: r.src,
         port: resp_sport,
         tryno,
         state,
@@ -236,9 +239,9 @@ pub fn match_syn_response(frame: &[u8], eth_included: bool, ctx: &MatchCtx) -> O
 
 /// An ICMP error matched to one of our outstanding **TCP** probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TcpIcmpMatch {
+pub struct TcpIcmpMatch<A = [u8; 4]> {
     /// The scanned host the verdict belongs to: the destination of the quoted probe.
-    pub src_ip: [u8; 4],
+    pub src_ip: A,
     /// The scanned port, from the quoted probe's destination port.
     pub port: u16,
     /// Which attempt the quoted probe was.
@@ -250,8 +253,9 @@ pub struct TcpIcmpMatch {
 }
 
 /// Match an ICMP error that quotes one of our TCP probes — shared by the SYN scan and
-/// every stateless flag scan, which differ only in the [`ScanType`] passed to
-/// [`classify_icmp`].
+/// every stateless flag scan, which differ only in the [`ScanType`] the family's
+/// classifier is given ([`crate::classify::classify_icmp`] or
+/// [`crate::classify::classify_icmpv6`]).
 ///
 /// Ports the ICMP arm of nmap's `scan_engine_raw.cc` probe search:
 ///   * the quote must be TCP, and its **source must be us** ("If it didn't come from us,
@@ -266,13 +270,26 @@ pub struct TcpIcmpMatch {
 /// Returns `None` for anything that is not an ICMP error about one of our probes, or
 /// whose type/code carries no verdict. Total on all input.
 #[must_use]
-pub fn match_tcp_icmp_error(
+pub fn match_tcp_icmp_error<A: IpFamily>(
     frame: &[u8],
     eth_included: bool,
     scan: ScanType,
-    ctx: &MatchCtx,
-) -> Option<TcpIcmpMatch> {
-    let quote = parse_icmp_error(frame, eth_included)?;
+    ctx: &MatchCtx<A>,
+) -> Option<TcpIcmpMatch<A>> {
+    let r = A::received(frame, eth_included)?;
+    if r.v.proto != A::ICMP {
+        return None;
+    }
+    tcp_icmp_error(&r, scan, ctx)
+}
+
+/// [`match_tcp_icmp_error`] on a packet already received as ICMP.
+pub(crate) fn tcp_icmp_error<A: IpFamily>(
+    r: &Received<'_, A>,
+    scan: ScanType,
+    ctx: &MatchCtx<A>,
+) -> Option<TcpIcmpMatch<A>> {
+    let quote = A::quote(r)?;
     if quote.proto != QUOTED_TCP || quote.quoted_src != ctx.our_ip {
         return None;
     }
@@ -284,19 +301,22 @@ pub fn match_tcp_icmp_error(
     if quote.seq != Some(seq32_encode(ctx.seqmask, tryno)) {
         return None;
     }
-    let state = classify_icmp(scan, quote.icmp_type, quote.icmp_code, quote.from_target())?;
+    let state = A::classify_error(scan, &quote)?;
     Some(TcpIcmpMatch {
         src_ip: quote.quoted_dst,
         port: quote.dport,
         tryno,
         state,
-        reason: icmp_to_reason(quote.icmp_type, quote.icmp_code),
+        reason: A::error_reason(&quote),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recv_validate::validate_packet;
+
+    const IPPROTO_ICMP: u8 = 1;
     use crate::packet_parser::{parse_packet, Header};
 
     /// Our address in these tests; replies and quotes are built around it.
@@ -595,5 +615,208 @@ mod tests {
         assert!(match_syn_response(&[0u8; 8], true, &ctx()).is_none());
         // An Ethernet header with no IP payload.
         assert!(match_syn_response(&[0u8; 14], true, &ctx()).is_none());
+    }
+
+    // ---- IPv6 ----
+
+    mod v6 {
+        use super::super::*;
+        use crate::ipfamily::test6::*;
+
+        const SEQMASK: u32 = 0xABCD_1234;
+
+        fn ctx6() -> MatchCtx<[u8; 16]> {
+            MatchCtx {
+                our_ip: US6,
+                base_port: 40000,
+                seqmask: SEQMASK,
+                max_tryno: 11,
+            }
+        }
+
+        /// The target's reply to attempt `tryno` of a probe to `port`.
+        fn reply(port: u16, tryno: u32, flags: u8) -> Vec<u8> {
+            let ack = seq32_encode(SEQMASK, tryno).wrapping_add(1);
+            let tcp = tcp(
+                port,
+                40000u16.wrapping_add(u16::try_from(tryno).unwrap()),
+                7,
+                ack,
+                flags,
+                65535,
+            );
+            ipv6(TARGET6, US6, 6, &[], &tcp)
+        }
+
+        /// Our SYN to `port`, attempt `tryno`, from `src`, with `chain` headers.
+        fn our_syn(src: [u8; 16], port: u16, tryno: u32, first: u8, chain: &[u8]) -> Vec<u8> {
+            let seq = seq32_encode(SEQMASK, tryno);
+            let sport = 40000u16.wrapping_add(u16::try_from(tryno).unwrap());
+            ipv6(
+                src,
+                TARGET6,
+                first,
+                chain,
+                &tcp(sport, port, seq, 0, TH_SYN, 1024),
+            )
+        }
+
+        #[test]
+        fn synack_is_open_and_rst_closed_bare_or_framed() {
+            let m = match_syn_response(&reply(443, 2, 0x12), false, &ctx6()).unwrap();
+            assert_eq!(
+                (m.src_ip, m.port, m.tryno, m.state, m.reason),
+                (TARGET6, 443, 2, PortState::Open, Reason::ConnAccept)
+            );
+            let m = match_syn_response(&eth(&reply(22, 0, 0x14)), true, &ctx6()).unwrap();
+            assert_eq!(
+                (m.port, m.state, m.reason),
+                (22, PortState::Closed, Reason::Reset)
+            );
+        }
+
+        #[test]
+        fn a_reply_behind_extension_headers_is_matched() {
+            let ack = seq32_encode(SEQMASK, 1).wrapping_add(1);
+            let mut chain = vec![60, 0, 1, 4, 0, 0, 0, 0]; // hop-by-hop, then dst opts
+            chain.extend(dstopts(6));
+            let pkt = ipv6(TARGET6, US6, 0, &chain, &tcp(80, 40001, 7, ack, 0x12, 1));
+            let m = match_syn_response(&pkt, false, &ctx6()).unwrap();
+            assert_eq!((m.port, m.tryno, m.state), (80, 1, PortState::Open));
+        }
+
+        #[test]
+        fn foreign_replies_are_not_matched() {
+            // An ACK that does not reflect our sequence.
+            let pkt = ipv6(TARGET6, US6, 6, &[], &tcp(80, 40000, 7, 12345, 0x12, 1));
+            assert!(match_syn_response(&pkt, false, &ctx6()).is_none());
+            // An attempt past the ones in flight.
+            assert!(match_syn_response(&reply(80, 12, 0x12), false, &ctx6()).is_none());
+            // A later fragment, even one whose bytes look like our reply.
+            let pkt = reply(80, 0, 0x12);
+            let mut fragged = ipv6(TARGET6, US6, 44, &fragment(6, 3), &pkt[40..]);
+            assert!(match_syn_response(&fragged, false, &ctx6()).is_none());
+            fragged[42..44].copy_from_slice(&0u16.to_be_bytes()); // a first fragment
+            assert!(match_syn_response(&fragged, false, &ctx6()).is_some());
+        }
+
+        #[test]
+        fn each_family_matches_only_its_own_replies() {
+            let v6 = reply(80, 0, 0x12);
+            assert!(
+                match_syn_response(&v6, false, &super::ctx()).is_none(),
+                "IPv4 context"
+            );
+            assert!(match_syn_response(&eth(&v6), true, &super::ctx()).is_none());
+            let ack = seq32_encode(SEQMASK, 0).wrapping_add(1);
+            let v4 = super::reply_frame(80, 40000, 0x12, ack);
+            assert!(match_syn_response(&v4, true, &super::ctx()).is_some());
+            assert!(
+                match_syn_response(&v4, true, &ctx6()).is_none(),
+                "IPv6 context"
+            );
+        }
+
+        #[test]
+        fn icmpv6_errors_quoting_our_syn_are_matched_and_classified() {
+            let probe = our_syn(US6, 8080, 3, 6, &[]);
+            for (t, c, reason) in [
+                (1, 0, Reason::NoRoute),
+                (1, 1, Reason::AdminProhibited),
+                (1, 2, Reason::BeyondScope),
+                (1, 3, Reason::HostUnreach),
+                (1, 4, Reason::PortUnreach),
+                (1, 5, Reason::AdminProhibited),
+                (1, 6, Reason::RejectRoute),
+                (4, 0, Reason::ParamProblem), // filtered, not the C's open (D2)
+                (4, 1, Reason::ParamProblem),
+            ] {
+                let err = icmpv6_error(ROUTER6, t, c, None, &[], &probe);
+                let m = match_syn_response(&err, false, &ctx6()).unwrap();
+                assert_eq!(
+                    (m.src_ip, m.port, m.tryno, m.state, m.reason),
+                    (TARGET6, 8080, 3, PortState::Filtered, reason),
+                    "{t}/{c}"
+                );
+            }
+        }
+
+        // Q5, Q6: Time Exceeded, Packet Too Big and unexpected codes leave the port.
+        #[test]
+        fn icmpv6_errors_without_a_verdict_are_not_matched() {
+            let probe = our_syn(US6, 8080, 0, 6, &[]);
+            for (t, c) in [(3, 0), (3, 1), (2, 0), (1, 7), (4, 2), (128, 0), (135, 0)] {
+                let err = icmpv6_error(TARGET6, t, c, None, &[], &probe);
+                assert!(
+                    match_syn_response(&err, false, &ctx6()).is_none(),
+                    "{t}/{c}"
+                );
+            }
+        }
+
+        #[test]
+        fn quotes_behind_extension_headers_are_matched() {
+            // Destination options on the quoted probe, hop-by-hop on the error.
+            let probe = our_syn(US6, 25, 1, 60, &dstopts(6));
+            let err = icmpv6_error(TARGET6, 1, 1, Some(0), &[58, 0, 1, 4, 0, 0, 0, 0], &probe);
+            let m = match_syn_response(&eth(&err), true, &ctx6()).unwrap();
+            assert_eq!((m.port, m.tryno, m.state), (25, 1, PortState::Filtered));
+            assert_eq!(
+                match_tcp_icmp_error(&err, false, ScanType::Syn, &ctx6()),
+                Some(TcpIcmpMatch {
+                    src_ip: TARGET6,
+                    port: 25,
+                    tryno: 1,
+                    state: PortState::Filtered,
+                    reason: Reason::AdminProhibited,
+                })
+            );
+            // A quoted later fragment is refused (recv-validate6-non-initial-fragment).
+            let probe = our_syn(US6, 25, 1, 44, &fragment(6, 9));
+            let err = icmpv6_error(TARGET6, 1, 1, None, &[], &probe);
+            assert!(match_syn_response(&err, false, &ctx6()).is_none());
+        }
+
+        #[test]
+        fn quotes_of_other_packets_are_not_matched() {
+            // Not from us.
+            let err = icmpv6_error(TARGET6, 1, 1, None, &[], &our_syn(ROUTER6, 25, 0, 6, &[]));
+            assert!(match_syn_response(&err, false, &ctx6()).is_none());
+            // Our ports but not our sequence.
+            let mut probe = our_syn(US6, 25, 0, 6, &[]);
+            probe[44..48].copy_from_slice(&[1, 2, 3, 4]);
+            let err = icmpv6_error(TARGET6, 1, 1, None, &[], &probe);
+            assert!(match_syn_response(&err, false, &ctx6()).is_none());
+            // Seven bytes of transport header quoted: one short of the C's 8.
+            let probe = our_syn(US6, 25, 0, 6, &[]);
+            let mut short = probe[..47].to_vec();
+            short[4..6].copy_from_slice(&7u16.to_be_bytes());
+            let err = icmpv6_error(TARGET6, 1, 1, None, &[], &short);
+            assert!(match_syn_response(&err, false, &ctx6()).is_none());
+            // An IPv4 quote inside ICMPv6.
+            let spec = Ipv4Spec::new(super::OUR_IP, super::TARGET, 64, 1);
+            let v4 = build_syn_probe(&spec, 40000, 25, 0, SEQMASK).unwrap();
+            let err = icmpv6_error(TARGET6, 1, 1, None, &[], &v4);
+            assert!(match_syn_response(&err, false, &ctx6()).is_none());
+        }
+
+        #[test]
+        fn every_truncation_is_handled() {
+            let err = eth(&icmpv6_error(
+                ROUTER6,
+                1,
+                4,
+                Some(0),
+                &[58, 0, 0, 0, 0, 0, 0, 0],
+                &our_syn(US6, 25, 0, 60, &dstopts(6)),
+            ));
+            for n in 0..=err.len() {
+                let _ = match_syn_response(&err[..n], true, &ctx6());
+            }
+            let r = eth(&reply(80, 0, 0x12));
+            for n in 0..=r.len() {
+                let _ = match_syn_response(&r[..n], true, &ctx6());
+            }
+        }
     }
 }

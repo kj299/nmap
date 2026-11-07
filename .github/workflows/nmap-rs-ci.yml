@@ -593,6 +593,12 @@ jobs:
       # unchanged. classify_differential (in the test job) checks every case and pins
       # the one ICMPv6 answer the port fixes (D2).
       - run: bash tests/differential/m4/regen_classify_golden.sh --check
+      # IPv6 scan probes (IPv6 scans step c): rebuild the oracle from nmap's own
+      # build_tcp_raw_ipv6 / build_udp_raw_ipv6 and the scan engine's encoders,
+      # regenerate the cases and golden, and require them unchanged.
+      # scanprobe6_differential (in the test job) requires the port's packets to be
+      # byte-identical to that golden.
+      - run: bash tests/differential/m4/regen_scanprobe6_golden.sh --check
       # M5 IPv6 probe battery: rebuild the C FPHost6::build_probe_list() oracle,
       # regenerate the committed corpus + golden, and require them unchanged, then run
       # the byte-exact differential. Same anti-paraphrase guard as the other goldens.

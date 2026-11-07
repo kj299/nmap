@@ -1,7 +1,18 @@
 //! Packet construction — the raw send path. Ports nmap's `build_*_raw` family
 //! (`tcpip.cc`): assemble a complete IPv4 wire packet (IP header + options + L4
 //! header + options + payload) with correct checksums, ready to hand to the raw
-//! socket / Npcap injector.
+//! socket / Npcap injector. [`build_tcp_raw_ipv6`] and [`build_udp_raw_ipv6`] do the
+//! same behind an IPv6 header, for the IPv6 port scans (`build_tcp_raw_ipv6`,
+//! `build_udp_raw_ipv6`, `tcpip.cc:657`, `:786`).
+//!
+//! ## IPv6
+//!
+//! [`Ipv6Spec::new`] is what nmap's scan engine sends (`scan_engine_raw.cc:1235`,
+//! `:1278`): traffic class 0, flow label 0, no extension headers, and hop limit
+//! **255**. That last is a C quirk reproduced on purpose (`build6-scan-hop-limit-255`):
+//! the engine passes `o.ttl`, whose unset value is -1, to a `u8` parameter, so it
+//! arrives as 255 and `build_ipv6_raw`'s random 37–59 branch never runs. `--ttl`
+//! sets it as for IPv4.
 //!
 //! ## What this fixes about the C
 //!
@@ -37,6 +48,12 @@ const IPPROTO_ICMP: u8 = 1;
 
 /// Largest value the IPv4 total-length field can hold.
 const MAX_IP_TOTAL_LEN: usize = u16::MAX as usize;
+/// Largest value the IPv6 payload-length field can hold (no jumbograms).
+const MAX_IPV6_PAYLOAD_LEN: usize = u16::MAX as usize;
+/// IPv6 fixed header length.
+const IPV6_HEADER_LEN: usize = 40;
+/// The hop limit nmap's IPv6 scan probes carry when `--ttl` is not given.
+pub const SCAN_HOP_LIMIT: u8 = 255;
 
 /// Why a packet could not be built. Every variant is a case the C handled by
 /// aborting, silently truncating, or silently wrapping.
@@ -223,11 +240,28 @@ pub fn build_ip_raw(spec: &Ipv4Spec, proto: u8, payload: &[u8]) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Apply the `--badsum` corruption: decrement the checksum by one (wrapping),
-/// exactly as `build_icmp_raw` does. A zero-then-corrupt still differs from a valid sum.
+/// Apply the `--badsum` corruption as the C does it. Every `o.badsum` site in
+/// `tcpip.cc` runs `--sum` on the checksum as a host-order `u16`, though the field
+/// holds network-order bytes. On the little-endian machines nmap runs on, that takes
+/// one from the checksum's **first byte on the wire**, borrowing from the second
+/// when it is 0: a valid 0x3260 goes out as 0x3160, not 0x325F. The port does what
+/// such a machine does, on every host (`build-badsum-host-order-decrement`).
 fn apply_bad_sum(sum: u16, bad: bool) -> u16 {
     if bad {
-        sum.wrapping_sub(1)
+        let host = u16::from_le_bytes(sum.to_be_bytes()).wrapping_sub(1);
+        u16::from_be_bytes(host.to_le_bytes())
+    } else {
+        sum
+    }
+}
+
+/// `--badsum` for a TCP or UDP checksum, as `ipv4_cksum` and `ipv6_cksum` apply it
+/// (`tcpip.cc:445`, `:462`): decrement ([`apply_bad_sum`]), and for UDP send a zero
+/// as `0xFFFF`, since a zero UDP checksum means "none" and would not be bad at all.
+fn apply_bad_l4_sum(sum: u16, bad: bool, proto: u8) -> u16 {
+    let sum = apply_bad_sum(sum, bad);
+    if bad && proto == IPPROTO_UDP && sum == 0 {
+        0xFFFF
     } else {
         sum
     }
@@ -272,9 +306,10 @@ pub fn build_tcp_raw(
         urgent_ptr: urp,
         options: tcpopt.to_vec(),
     };
-    tcp.checksum = apply_bad_sum(
+    tcp.checksum = apply_bad_l4_sum(
         tcp.computed_checksum(spec.src, spec.dst, data),
         spec.bad_sum,
+        IPPROTO_TCP,
     );
 
     let mut segment = tcp.serialize();
@@ -300,14 +335,267 @@ pub fn build_udp_raw(
         length,
         checksum: 0,
     };
-    udp.checksum = apply_bad_sum(
+    udp.checksum = apply_bad_l4_sum(
         udp.computed_checksum(spec.src, spec.dst, data),
         spec.bad_sum,
+        IPPROTO_UDP,
     );
 
     let mut segment = udp.serialize();
     segment.extend_from_slice(data);
     build_ip_raw(spec, IPPROTO_UDP, &segment)
+}
+
+/// The IPv6-header parameters of a scan probe: `build_ipv6_raw`'s arguments
+/// (`tcpip.cc:549`) and `ipv6_cksum`'s `--badsum`. Concrete values only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6Spec {
+    /// Source address.
+    pub src: [u8; 16],
+    /// Destination address.
+    pub dst: [u8; 16],
+    /// Traffic class (the scan engine sends 0).
+    pub traffic_class: u8,
+    /// Flow label, the low 20 bits (the scan engine sends 0).
+    pub flow_label: u32,
+    /// Hop limit.
+    pub hop_limit: u8,
+    /// Corrupt the L4 checksum by one (nmap `--badsum`).
+    pub bad_sum: bool,
+}
+
+impl Ipv6Spec {
+    /// What nmap's IPv6 scan probes carry: traffic class 0, flow label 0, hop limit
+    /// [`SCAN_HOP_LIMIT`] (module docs), valid checksums.
+    #[must_use]
+    pub fn new(src: [u8; 16], dst: [u8; 16]) -> Ipv6Spec {
+        Ipv6Spec {
+            src,
+            dst,
+            traffic_class: 0,
+            flow_label: 0,
+            hop_limit: SCAN_HOP_LIMIT,
+            bad_sum: false,
+        }
+    }
+
+    /// Apply `--ttl` (as the hop limit) and `--badsum`. `-S` names an IPv4 source
+    /// in [`PacketOverrides`] and does not apply here.
+    #[must_use]
+    pub fn with_overrides(mut self, o: PacketOverrides) -> Ipv6Spec {
+        if let Some(ttl) = o.ttl {
+            self.hop_limit = ttl;
+        }
+        if o.bad_sum {
+            self.bad_sum = true;
+        }
+        self
+    }
+}
+
+/// Put an IPv6 header in front of an already-built upper-layer packet. Ports
+/// `build_ipv6_raw` (`tcpip.cc:549`, `ip6_pack_hdr`), with the hop limit concrete.
+///
+/// # Errors
+/// [`BuildError::PayloadTooLarge`] when `payload` is longer than the payload-length
+/// field can say (the C narrows it to a `u16` without a word).
+pub fn build_ipv6_raw(
+    spec: &Ipv6Spec,
+    next_header: u8,
+    payload: &[u8],
+) -> Result<Vec<u8>, BuildError> {
+    let Ok(plen) = u16::try_from(payload.len()) else {
+        return Err(BuildError::PayloadTooLarge(payload.len()));
+    };
+    let vtf =
+        (6u32 << 28) | (u32::from(spec.traffic_class) << 20) | (spec.flow_label & 0x000F_FFFF);
+    let mut out = Vec::with_capacity(IPV6_HEADER_LEN.saturating_add(payload.len()));
+    out.extend_from_slice(&vtf.to_be_bytes());
+    out.extend_from_slice(&plen.to_be_bytes());
+    out.push(next_header);
+    out.push(spec.hop_limit);
+    out.extend_from_slice(&spec.src);
+    out.extend_from_slice(&spec.dst);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+/// Build a complete raw TCP/IPv6 packet. Ports `build_tcp_raw_ipv6` (+ `build_tcp`,
+/// `ipv6_cksum`). `tcpopt` must be a multiple of 4 bytes (at most 40).
+///
+/// # Errors
+/// As [`build_tcp_raw`] for the options; [`BuildError::PayloadTooLarge`] past the
+/// payload-length field.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tcp_raw_ipv6(
+    spec: &Ipv6Spec,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    reserved: u8,
+    flags: u8,
+    window: u16,
+    urp: u16,
+    tcpopt: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, BuildError> {
+    let segment = tcp_segment(
+        sport, dport, seq, ack, reserved, flags, window, urp, tcpopt, data,
+    )?;
+    let segment = checksummed(segment, spec, IPPROTO_TCP, 16);
+    build_ipv6_raw(spec, IPPROTO_TCP, &segment)
+}
+
+/// Build a complete raw UDP/IPv6 packet. Ports `build_udp_raw_ipv6` (+ `build_udp`,
+/// `ipv6_cksum`, which never sends a zero UDP checksum).
+///
+/// # Errors
+/// [`BuildError::PayloadTooLarge`] past the UDP length or payload-length field.
+pub fn build_udp_raw_ipv6(
+    spec: &Ipv6Spec,
+    sport: u16,
+    dport: u16,
+    data: &[u8],
+) -> Result<Vec<u8>, BuildError> {
+    let length = match UDP_HEADER_LEN.checked_add(data.len()) {
+        Some(t) if t <= MAX_IPV6_PAYLOAD_LEN => u16::try_from(t).unwrap_or(u16::MAX),
+        _ => return Err(BuildError::PayloadTooLarge(usize::MAX)),
+    };
+    let mut segment = UdpHeader {
+        sport,
+        dport,
+        length,
+        checksum: 0,
+    }
+    .serialize();
+    segment.extend_from_slice(data);
+    let segment = checksummed(segment, spec, IPPROTO_UDP, 6);
+    build_ipv6_raw(spec, IPPROTO_UDP, &segment)
+}
+
+/// The IP layer of a scan probe: [`Ipv4Spec`] or [`Ipv6Spec`]. The SYN, UDP and
+/// flag-scan probe builders are generic over it, so what they put in the TCP or UDP
+/// header is the same code for both families, as it is in the C
+/// (`sendIPScanProbe`, `scan_engine_raw.cc:1166`).
+pub trait ProbeSpec {
+    /// A TCP probe: no reserved bits, no urgent pointer, as the scan engine sends.
+    ///
+    /// # Errors
+    /// The family builder's [`BuildError`].
+    #[allow(clippy::too_many_arguments)]
+    fn tcp_probe(
+        &self,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        window: u16,
+        tcpopt: &[u8],
+        data: &[u8],
+    ) -> Result<Vec<u8>, BuildError>;
+
+    /// A UDP probe carrying `data`.
+    ///
+    /// # Errors
+    /// The family builder's [`BuildError`].
+    fn udp_probe(&self, sport: u16, dport: u16, data: &[u8]) -> Result<Vec<u8>, BuildError>;
+}
+
+impl ProbeSpec for Ipv4Spec {
+    fn tcp_probe(
+        &self,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        window: u16,
+        tcpopt: &[u8],
+        data: &[u8],
+    ) -> Result<Vec<u8>, BuildError> {
+        build_tcp_raw(
+            self, sport, dport, seq, ack, 0, flags, window, 0, tcpopt, data,
+        )
+    }
+
+    fn udp_probe(&self, sport: u16, dport: u16, data: &[u8]) -> Result<Vec<u8>, BuildError> {
+        build_udp_raw(self, sport, dport, data)
+    }
+}
+
+impl ProbeSpec for Ipv6Spec {
+    fn tcp_probe(
+        &self,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        window: u16,
+        tcpopt: &[u8],
+        data: &[u8],
+    ) -> Result<Vec<u8>, BuildError> {
+        build_tcp_raw_ipv6(
+            self, sport, dport, seq, ack, 0, flags, window, 0, tcpopt, data,
+        )
+    }
+
+    fn udp_probe(&self, sport: u16, dport: u16, data: &[u8]) -> Result<Vec<u8>, BuildError> {
+        build_udp_raw_ipv6(self, sport, dport, data)
+    }
+}
+
+/// A TCP header (checksum zero) and its data, as `build_tcp` lays it out.
+#[allow(clippy::too_many_arguments)]
+fn tcp_segment(
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    reserved: u8,
+    flags: u8,
+    window: u16,
+    urp: u16,
+    tcpopt: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, BuildError> {
+    let optn = tcpopt.len();
+    if !optn.is_multiple_of(4) {
+        return Err(BuildError::TcpOptionsNotAligned(optn));
+    }
+    if optn > 40 {
+        return Err(BuildError::TcpOptionsTooLong(optn));
+    }
+    let data_offset = u8::try_from(5usize.saturating_add(optn / 4)).unwrap_or(5);
+    let mut segment = TcpHeader {
+        sport,
+        dport,
+        seq,
+        ack,
+        data_offset,
+        reserved: reserved & 0x0F,
+        flags,
+        window,
+        checksum: 0,
+        urgent_ptr: urp,
+        options: tcpopt.to_vec(),
+    }
+    .serialize();
+    segment.extend_from_slice(data);
+    Ok(segment)
+}
+
+/// Fill a segment's checksum (at `at`) over the IPv6 pseudo-header, as `ipv6_cksum`
+/// does, `--badsum` included.
+fn checksummed(mut segment: Vec<u8>, spec: &Ipv6Spec, proto: u8, at: usize) -> Vec<u8> {
+    let sum = checksum::ipv6_pseudoheader_cksum(spec.src, spec.dst, proto, &segment);
+    let sum = apply_bad_l4_sum(sum, spec.bad_sum, proto);
+    if let Some(slot) = segment.get_mut(at..at.saturating_add(2)) {
+        slot.copy_from_slice(&sum.to_be_bytes());
+    }
+    segment
 }
 
 /// Build a complete raw ICMPv4/IPv4 packet. Ports `build_icmp_raw` for the three
@@ -596,5 +884,189 @@ mod tests {
             build_udp_raw(&spec(), 1, 2, &huge),
             Err(BuildError::PayloadTooLarge(_))
         ));
+    }
+
+    // ---- IPv6 ----
+
+    const SRC6: [u8; 16] = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const DST6: [u8; 16] = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+
+    /// The sum over the pseudo-header and a segment whose checksum is filled in:
+    /// 0 when the checksum is right (the folded sum is all ones).
+    fn residue6(pkt: &[u8], nxt: u8) -> u16 {
+        let mut acc = checksum::Accumulator::new();
+        let len = u32::try_from(pkt.len().saturating_sub(40)).unwrap();
+        acc.add(&pkt[8..40]);
+        acc.add(&len.to_be_bytes());
+        acc.add(&[0, 0, 0, nxt]);
+        acc.add(&pkt[40..]);
+        acc.finish()
+    }
+
+    #[test]
+    fn scan_probes_carry_hop_limit_255_and_no_class_or_label() {
+        let spec = Ipv6Spec::new(SRC6, DST6);
+        assert_eq!(spec.hop_limit, SCAN_HOP_LIMIT);
+        let pkt = build_tcp_raw_ipv6(
+            &spec,
+            40000,
+            80,
+            7,
+            0,
+            0,
+            0x02,
+            1024,
+            0,
+            &[2, 4, 5, 0xb4],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(&pkt[0..4], &[0x60, 0, 0, 0], "version 6, class 0, label 0");
+        assert_eq!(u16::from_be_bytes([pkt[4], pkt[5]]), 24, "payload length");
+        assert_eq!((pkt[6], pkt[7]), (6, 255), "next header, hop limit");
+        assert_eq!((&pkt[8..24], &pkt[24..40]), (&SRC6[..], &DST6[..]));
+        let v = crate::recv_validate::validate_packet(&pkt).unwrap();
+        assert_eq!(
+            (v.version, v.proto, v.data_offset, v.captured_len),
+            (6, 6, 40, 64)
+        );
+        assert_eq!(
+            residue6(&pkt, 6),
+            0,
+            "TCP checksum over the IPv6 pseudo-header"
+        );
+        // Class and label are placed where the header puts them, if ever set.
+        let mut s = spec;
+        s.traffic_class = 0xAB;
+        s.flow_label = 0xF_FFFF;
+        let pkt = build_ipv6_raw(&s, 59, &[]).unwrap();
+        assert_eq!(&pkt[0..4], &[0x6A, 0xBF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn udp_over_ipv6_has_a_checksum_and_a_length() {
+        let spec = Ipv6Spec::new(SRC6, DST6);
+        let pkt = build_udp_raw_ipv6(&spec, 40000, 53, b"payload").unwrap();
+        assert_eq!(u16::from_be_bytes([pkt[44], pkt[45]]), 15, "UDP length");
+        assert_eq!(u16::from_be_bytes([pkt[4], pkt[5]]), 15, "payload length");
+        assert_eq!(residue6(&pkt, 17), 0);
+        assert_ne!(&pkt[46..48], &[0, 0], "IPv6 UDP always carries a checksum");
+    }
+
+    #[test]
+    fn ttl_and_badsum_apply_to_ipv6_probes() {
+        let base = Ipv6Spec::new(SRC6, DST6);
+        assert_eq!(base.with_overrides(PacketOverrides::default()), base);
+        let s = base.with_overrides(PacketOverrides {
+            ttl: Some(0),
+            bad_sum: true,
+            spoof_src: Some([192, 0, 2, 9]),
+        });
+        assert_eq!(
+            (s.hop_limit, s.bad_sum, s.src),
+            (0, true, SRC6),
+            "no IPv4 -S here"
+        );
+        let good = build_tcp_raw_ipv6(&base, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], b"x").unwrap();
+        let bad = build_tcp_raw_ipv6(&s, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], b"x").unwrap();
+        assert_eq!(bad[7], 0);
+        // The first checksum byte on the wire is one less (module docs).
+        let host = |p: &[u8]| u16::from_le_bytes([p[56], p[57]]);
+        assert_eq!(host(&bad), host(&good).wrapping_sub(1));
+        assert_eq!(&good[40..56], &bad[40..56]);
+    }
+
+    /// `--badsum` takes one from the checksum's first byte on the wire, borrowing
+    /// from the second, as the C does on a little-endian host.
+    #[test]
+    fn badsum_decrements_the_checksum_in_host_order() {
+        assert_eq!(apply_bad_sum(0x3260, true), 0x3160);
+        assert_eq!(apply_bad_sum(0x0060, true), 0xFF5F, "borrow");
+        assert_eq!(apply_bad_sum(0x0001, true), 0xFF00);
+        assert_eq!(apply_bad_sum(0x0100, true), 0x0000);
+        assert_eq!(apply_bad_l4_sum(0x0100, true, IPPROTO_TCP), 0x0000);
+        assert_eq!(apply_bad_l4_sum(0x0100, true, IPPROTO_UDP), 0xFFFF);
+        assert_eq!(apply_bad_sum(0x3260, false), 0x3260);
+    }
+
+    /// As in the C, `--badsum` on a TCP checksum of 0x0000 sends 0xFFFF, the other
+    /// ones'-complement zero, so that one packet in 65,536 still verifies.
+    #[test]
+    #[cfg_attr(miri, ignore = "searches up to 65,536 checksums")]
+    fn badsum_on_a_zero_tcp_checksum_still_verifies_as_in_the_c() {
+        let mut v6 = Ipv6Spec::new(SRC6, DST6);
+        for n in 0u16..=u16::MAX {
+            v6.bad_sum = false;
+            let data = n.to_be_bytes();
+            let good = build_tcp_raw_ipv6(&v6, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], &data).unwrap();
+            if good[56..58] == [0, 0] {
+                v6.bad_sum = true;
+                let bad =
+                    build_tcp_raw_ipv6(&v6, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], &data).unwrap();
+                assert_eq!(&bad[56..58], &[0xFF, 0xFF]);
+                assert_eq!(residue6(&bad, 6), 0, "still verifies");
+                return;
+            }
+        }
+        panic!("no payload gave a zero TCP checksum");
+    }
+
+    /// `--badsum` on UDP never yields 0 ("no checksum"), in either family: the C
+    /// sends 0xFFFF instead (`ipv4_cksum`, `ipv6_cksum`). The decrement reaches 0
+    /// from a valid checksum whose wire bytes are `01 00`.
+    #[test]
+    #[cfg_attr(miri, ignore = "searches up to 65,536 checksums")]
+    fn badsum_never_sends_a_zero_udp_checksum() {
+        let mut v4 = spec();
+        let mut v6 = Ipv6Spec::new(SRC6, DST6);
+        let at4 = 26;
+        let at6 = 46;
+        let mut seen = (false, false);
+        for n in 0u16..=u16::MAX {
+            let data = n.to_be_bytes();
+            v4.bad_sum = false;
+            let p4 = build_udp_raw(&v4, 1, 2, &data).unwrap();
+            if !seen.0 && u16::from_be_bytes([p4[at4], p4[at4 + 1]]) == 0x0100 {
+                v4.bad_sum = true;
+                let b = build_udp_raw(&v4, 1, 2, &data).unwrap();
+                assert_eq!(&b[at4..at4 + 2], &[0xFF, 0xFF], "IPv4");
+                seen.0 = true;
+            }
+            v6.bad_sum = false;
+            let p6 = build_udp_raw_ipv6(&v6, 1, 2, &data).unwrap();
+            if !seen.1 && u16::from_be_bytes([p6[at6], p6[at6 + 1]]) == 0x0100 {
+                v6.bad_sum = true;
+                let b = build_udp_raw_ipv6(&v6, 1, 2, &data).unwrap();
+                assert_eq!(&b[at6..at6 + 2], &[0xFF, 0xFF], "IPv6");
+                seen.1 = true;
+            }
+            if seen == (true, true) {
+                return;
+            }
+        }
+        panic!("no payload gave a checksum of 0x0100: {seen:?}");
+    }
+
+    #[test]
+    fn ipv6_builders_refuse_what_the_c_would_truncate() {
+        let spec = Ipv6Spec::new(SRC6, DST6);
+        assert!(matches!(
+            build_tcp_raw_ipv6(&spec, 1, 2, 3, 4, 0, 2, 1, 0, &[1, 1, 1], &[]),
+            Err(BuildError::TcpOptionsNotAligned(3))
+        ));
+        assert!(matches!(
+            build_tcp_raw_ipv6(&spec, 1, 2, 3, 4, 0, 2, 1, 0, &[1; 44], &[]),
+            Err(BuildError::TcpOptionsTooLong(44))
+        ));
+        let huge = vec![0u8; 65_536];
+        assert!(matches!(
+            build_udp_raw_ipv6(&spec, 1, 2, &huge),
+            Err(BuildError::PayloadTooLarge(_))
+        ));
+        assert!(matches!(
+            build_tcp_raw_ipv6(&spec, 1, 2, 3, 4, 0, 2, 1, 0, &[], &huge[..65_516]),
+            Err(BuildError::PayloadTooLarge(_))
+        ));
+        assert!(build_tcp_raw_ipv6(&spec, 1, 2, 3, 4, 0, 2, 1, 0, &[], &huge[..65_515]).is_ok());
     }
 }

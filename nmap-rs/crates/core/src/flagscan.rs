@@ -31,11 +31,11 @@
 //! [`IpFamily`]. Nothing sends IPv6 flag probes until the engine does
 //! (`ipv6-raw-port-scans-unported`, step d).
 
-use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
+use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
 use crate::ipfamily::IpFamily;
 use crate::model::Reason;
-use crate::synscan::{seq32_encode, sport_encode, tcp_icmp_error, MatchCtx};
+use crate::synscan::{probe_seq_ack, sport_encode, tcp_icmp_error, MatchCtx};
 
 // TCP flag bits not already exported by `classify`.
 const TH_FIN: u8 = 0x01;
@@ -64,37 +64,42 @@ pub fn flags_for(scan: ScanType) -> Option<u8> {
     })
 }
 
-/// Build a raw TCP flag-scan probe for `(dport, tryno)` with the given `flags`. Carries
-/// no TCP options (only SYN-bearing probes get the MSS option). The attempt is encoded
-/// in the source port; the sequence uses the same encoding for uniqueness (the reply is
-/// not required to reflect it — see the module docs).
+/// Build a raw TCP flag-scan probe for `(dport, tryno)` with the given `flags`, IPv4
+/// or IPv6 by the spec's type. Carries no TCP options (only SYN-bearing probes get
+/// the MSS option). The attempt is encoded in the source port, and in the sequence,
+/// or for a probe with the ACK flag in the acknowledgment ([`probe_seq_ack`]), as
+/// nmap does; the reply is not required to reflect it (see the module docs).
 ///
 /// # Errors
-/// Propagates [`BuildError`] from [`build_tcp_raw`] (only reachable via malformed
-/// `spec.options`).
-pub fn build_flag_probe(
-    spec: &Ipv4Spec,
+/// Propagates [`BuildError`] from the family's builder (only reachable via
+/// malformed `spec.options`).
+pub fn build_flag_probe<S: ProbeSpec>(
+    spec: &S,
     base_port: u16,
     dport: u16,
     tryno: u32,
     seqmask: u32,
     flags: u8,
 ) -> Result<Vec<u8>, BuildError> {
+    build_flag_probe_with(spec, base_port, dport, tryno, seqmask, flags, &[])
+}
+
+/// [`build_flag_probe`] carrying `data` after the TCP header (nmap's `--data`).
+///
+/// # Errors
+/// As [`build_flag_probe`], and [`BuildError::PayloadTooLarge`].
+pub fn build_flag_probe_with<S: ProbeSpec>(
+    spec: &S,
+    base_port: u16,
+    dport: u16,
+    tryno: u32,
+    seqmask: u32,
+    flags: u8,
+    data: &[u8],
+) -> Result<Vec<u8>, BuildError> {
     let sport = sport_encode(base_port, tryno);
-    let seq = seq32_encode(seqmask, tryno);
-    build_tcp_raw(
-        spec,
-        sport,
-        dport,
-        seq,
-        0, // ack
-        0, // reserved
-        flags,
-        FLAG_WINDOW,
-        0, // urgent pointer
-        &[],
-        &[],
-    )
+    let (seq, ack) = probe_seq_ack(seqmask, tryno, flags);
+    spec.tcp_probe(sport, dport, seq, ack, flags, FLAG_WINDOW, &[], data)
 }
 
 /// The per-scan constants a captured reply is matched against. `A` is the address
@@ -192,6 +197,7 @@ pub fn match_flag_response<A: IpFamily>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::{build_tcp_raw, Ipv4Spec};
     use crate::recv_validate::validate_packet;
 
     const IPPROTO_ICMP: u8 = 1;
@@ -301,6 +307,48 @@ mod tests {
             assert_eq!(m.tryno, 2);
             assert_eq!(m.src_ip, [10, 0, 0, 2]);
         }
+    }
+
+    /// nmap's rule (`sendIPScanProbe`): a probe with the ACK flag carries the encoded
+    /// attempt in its ack and a zero sequence; the others carry it in the sequence.
+    #[test]
+    fn the_attempt_rides_in_the_ack_of_probes_with_the_ack_flag() {
+        let spec = Ipv4Spec::new(US, [10, 0, 0, 2], 64, 1);
+        for scan in [
+            ScanType::Ack,
+            ScanType::Window,
+            ScanType::Maimon,
+            ScanType::Fin,
+            ScanType::Null,
+            ScanType::Xmas,
+        ] {
+            let flags = flags_for(scan).unwrap();
+            let pkt = build_flag_probe(&spec, 40000, 80, 3, SEQMASK, flags).unwrap();
+            let tcp = &pkt[20..];
+            let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+            let ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
+            let want = crate::synscan::seq32_encode(SEQMASK, 3);
+            if flags & TH_ACK != 0 {
+                assert_eq!((seq, ack), (0, want), "{scan:?}");
+            } else {
+                assert_eq!((seq, ack), (want, 0), "{scan:?}");
+            }
+        }
+    }
+
+    /// And the quote check follows it, as the C compares `th_seq` with the
+    /// probe's: a quoted ACK probe must show sequence 0.
+    #[test]
+    fn a_quoted_ack_probe_is_matched_by_its_zero_sequence() {
+        let err = icmp_quoting_our_probe([10, 0, 0, 2], 3, 3, ScanType::Ack, 80, 2);
+        let m = match_flag_response(&err, true, &ctx(ScanType::Ack)).unwrap();
+        assert_eq!((m.port, m.tryno, m.state), (80, 2, PortState::Filtered));
+        // The same error with the encoded attempt in the quoted sequence is not ours.
+        let mut forged = err.clone();
+        let seq_at = 14 + 20 + 8 + 20 + 4;
+        let enc = crate::synscan::seq32_encode(SEQMASK, 2).to_be_bytes();
+        forged[seq_at..seq_at + 4].copy_from_slice(&enc);
+        assert!(match_flag_response(&forged, true, &ctx(ScanType::Ack)).is_none());
     }
 
     #[test]
@@ -413,6 +461,7 @@ mod tests {
     mod v6 {
         use super::super::*;
         use crate::ipfamily::test6::*;
+        use crate::synscan::seq32_encode;
 
         const TH_RST: u8 = 0x04;
 
@@ -460,6 +509,33 @@ mod tests {
             assert!(
                 match_flag_response(&rst(80, 0, 0), false, &super::ctx(ScanType::Ack)).is_none()
             );
+        }
+
+        /// A probe built for IPv6 is matched by its own quote: steps b and c agree.
+        #[test]
+        fn our_ipv6_flag_probes_are_recognised_in_icmpv6_quotes() {
+            use crate::build::Ipv6Spec;
+            for scan in [ScanType::Ack, ScanType::Maimon, ScanType::Xmas] {
+                let flags = flags_for(scan).unwrap();
+                let probe = build_flag_probe(
+                    &Ipv6Spec::new(US6, TARGET6),
+                    40000,
+                    443,
+                    4,
+                    super::SEQMASK,
+                    flags,
+                )
+                .unwrap();
+                let v = crate::recv_validate::validate_packet(&probe).unwrap();
+                assert_eq!((v.version, v.proto, probe[7]), (6, 6, 255), "{scan:?}");
+                let err = icmpv6_error(ROUTER6, 1, 1, None, &[], &probe);
+                let m = match_flag_response(&err, false, &ctx6(scan)).unwrap();
+                assert_eq!(
+                    (m.port, m.tryno, m.state),
+                    (443, 4, PortState::Filtered),
+                    "{scan:?}"
+                );
+            }
         }
 
         #[test]

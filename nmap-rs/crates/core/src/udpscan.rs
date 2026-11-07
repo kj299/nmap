@@ -39,7 +39,7 @@
 //!   [`IpFamily`]. Nothing sends IPv6 UDP probes until the engine does
 //!   (`ipv6-raw-port-scans-unported`, step d).
 
-use crate::build::{build_udp_raw, BuildError, Ipv4Spec};
+use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_udp_response, PortState, ScanType};
 use crate::icmp_quote::IPPROTO_UDP;
 use crate::ipfamily::IpFamily;
@@ -58,8 +58,8 @@ pub const UDP_PROBE_PAYLOAD: &[u8] = &[];
 /// # Errors
 /// Propagates [`BuildError`] from [`build_udp_raw`] (only reachable via malformed
 /// `spec.options`).
-pub fn build_udp_probe(
-    spec: &Ipv4Spec,
+pub fn build_udp_probe<S: ProbeSpec>(
+    spec: &S,
     base_port: u16,
     dport: u16,
     tryno: u32,
@@ -76,15 +76,15 @@ pub fn build_udp_probe(
 /// Propagates [`BuildError`] from [`build_udp_raw`] — notably when the payload would
 /// push the datagram past the maximum packet size, which is rejected rather than
 /// truncated.
-pub fn build_udp_probe_with(
-    spec: &Ipv4Spec,
+pub fn build_udp_probe_with<S: ProbeSpec>(
+    spec: &S,
     base_port: u16,
     dport: u16,
     tryno: u32,
     payload: &[u8],
 ) -> Result<Vec<u8>, BuildError> {
     let sport = sport_encode(base_port, tryno);
-    build_udp_raw(spec, sport, dport, payload)
+    spec.udp_probe(sport, dport, payload)
 }
 
 /// The per-scan constants a captured reply is matched against. Deliberately carries no
@@ -185,6 +185,7 @@ fn attempt_from_sport<A>(sport: u16, ctx: &UdpMatchCtx<A>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::{build_udp_raw, Ipv4Spec};
     use crate::recv_validate::validate_packet;
 
     const IPPROTO_ICMP: u8 = 1;
@@ -435,6 +436,23 @@ mod tests {
             assert_eq!((m.port, m.tryno, m.state), (161, 3, PortState::Closed));
             // An IPv4 context does not read it.
             assert!(match_udp_response(&err, false, &super::ctx()).is_none());
+        }
+
+        /// A UDP probe built for IPv6, payload included, matched by its own quote.
+        #[test]
+        fn our_ipv6_udp_probe_is_recognised_in_an_icmpv6_quote() {
+            use crate::build::Ipv6Spec;
+            let probe =
+                build_udp_probe_with(&Ipv6Spec::new(US6, TARGET6), 40000, 161, 2, b"\x30\x26")
+                    .unwrap();
+            let v = crate::recv_validate::validate_packet(&probe).unwrap();
+            assert_eq!(
+                (v.version, v.proto, probe.len(), probe[7]),
+                (6, 17, 50, 255)
+            );
+            let err = icmpv6_error(TARGET6, 1, 4, None, &[], &probe);
+            let m = match_udp_response(&err, false, &ctx6()).unwrap();
+            assert_eq!((m.port, m.tryno, m.state), (161, 2, PortState::Closed));
         }
 
         #[test]

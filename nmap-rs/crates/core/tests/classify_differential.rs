@@ -3,15 +3,22 @@
 //! for **every** `(scan, response)` combination. The oracle
 //! (`oracle/classify_oracle.cc`) is a line-annotated transcription of those branches;
 //! `classify_cases.txt` enumerates the full matrix (default states, all 256 TCP flag
-//! bytes × 2 windows, ICMP type×code×from_target, SCTP chunks), and
+//! bytes × 2 windows, ICMP and ICMPv6 type×code×from_target, SCTP chunks), and
 //! `classify_golden.txt` is its output. This is an exhaustive check, not a sample.
+//!
+//! One ICMPv6 answer is fixed rather than reproduced: Parameter Problem, code 0,
+//! is *filtered* for every scan but `-sO`, where the C says *open*
+//! (`classify6-param-problem-field-filtered`, D2 in `docs/IPV6-SCAN-ANALYSIS.md`).
+//! Those cases keep the C's golden; the test checks the port's answer against the
+//! fix and that the C's is still `open`.
 #![cfg(not(miri))]
 
 use std::fs;
 use std::path::PathBuf;
 
 use nmap_core::classify::{
-    classify_icmp, classify_sctp, classify_tcp, default_port_state, PortState, ScanType,
+    classify_icmp, classify_icmpv6, classify_sctp, classify_tcp, default_port_state, PortState,
+    ScanType,
 };
 
 fn scan(s: &str) -> ScanType {
@@ -73,6 +80,12 @@ fn rust_result(fields: &[&str]) -> String {
             let from_target = fields[4] == "1";
             opt_tok(classify_icmp(sc, t, c, from_target))
         }
+        "icmp6" => {
+            let t = fields[2].parse::<u8>().unwrap();
+            let c = fields[3].parse::<u8>().unwrap();
+            let from_target = fields[4] == "1";
+            opt_tok(classify_icmpv6(sc, t, c, from_target))
+        }
         "sctp" => {
             let chunk = fields[2].parse::<u8>().unwrap();
             opt_tok(classify_sctp(sc, chunk))
@@ -94,20 +107,31 @@ fn classify_matches_c_oracle_over_the_full_matrix() {
         gold_lines.len(),
         "cases and golden line counts differ"
     );
-    assert!(case_lines.len() >= 12_000, "expected the full matrix");
+    assert!(case_lines.len() >= 28_000, "expected the full matrix");
 
-    let mut checked = 0;
+    let (mut checked, mut fixed) = (0, 0);
     for (case, want) in case_lines.iter().zip(gold_lines.iter()) {
         let fields: Vec<&str> = case.split_whitespace().collect();
         if fields.is_empty() {
             continue;
         }
         let got = rust_result(&fields);
+        if fields[0] == "icmp6" && fields[2] == "4" && fields[3] == "0" && fields[1] != "ipproto" {
+            // classify6-param-problem-field-filtered (D2).
+            assert_eq!(*want, "open", "the C's answer for `{case}` changed");
+            assert_eq!(got, "filtered", "the port's answer for `{case}`");
+            fixed += 1;
+            continue;
+        }
         assert_eq!(
             &got, want,
             "classify diverges from the C oracle for case `{case}`: rust={got} c={want}"
         );
         checked += 1;
     }
-    eprintln!("classify differential: {checked} cases match the C oracle");
+    // 11 scans x from-target or not.
+    assert_eq!(fixed, 22, "the D2 cases");
+    let ledger = fs::read_to_string(dir.join("../../../DIVERGENCES.md")).expect("ledger");
+    assert!(ledger.contains("`classify6-param-problem-field-filtered`"));
+    eprintln!("classify differential: {checked} cases match the C oracle, {fixed} fixed (D2)");
 }

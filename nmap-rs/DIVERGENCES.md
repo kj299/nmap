@@ -147,9 +147,9 @@ narrower *rendering* of the same result.
       and `-dN`. Found by the lfs step's review.
 - [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
       IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
-      over IPv6; every raw driver here sends IPv4 only (ICMPv6 classification is
-      ledgered above as deferred; IPv6 receive validation landed in IPv6 scans
-      step a, `docs/IPV6-SCAN-ANALYSIS.md`). With
+      over IPv6; every raw driver here sends IPv4 only. (The receive side is in:
+      IPv6 validation since IPv6 scans step a, ICMPv6 classification and the IPv6
+      matchers since step b, `docs/IPV6-SCAN-ANALYSIS.md`.) With
       `-6`, a raw scan type prints "raw IPv6 port scans are not ported yet;
       running a connect scan (-sT)" and connect-scans, as a raw scan without
       privilege does. Until FreeBSD step e it sent nothing and reported the host
@@ -393,16 +393,34 @@ lands, `[x]` = confirmed by that module's gates.
       `fatal()`s (aborts the whole process) on an ICMP type/code it does not construct
       (`tcpip.cc`). The port returns `BuildError::UnknownIcmpType` — a library never
       aborts. *(Introduced at M4 `core::build`.)*
-- [x] `classify-ipv4-icmp-only-for-now` (`core::classify`): the port classifies
-      TCP/UDP/ICMPv4/SCTP responses; the C's ICMPv6 response branch
-      (`scan_engine_raw.cc:1933`) is deferred with the rest of the IPv6 raw path (M5+),
-      consistent with the other IPv4-only-for-now scoping. The IPv4 decision logic is
-      exhaustively differential-checked (12504 cases — every scan × all 256 TCP flag
-      bytes × ICMP type/code/from-target × SCTP chunk — 0 mismatches). This is also a
-      *structural* safety win over the C: nmap's nested `switch`es with fall-through and
-      an unset `newstate` become total functions returning `Option<PortState>`, so an
-      unhandled response is an explicit `None`, never an accidental stale state.
-      *(Introduced at M4 `core::classify`.)*
+- [x] ~~`classify-ipv4-icmp-only-for-now`~~ — **resolved** at IPv6 scans step b:
+      `classify_icmpv6` ports the C's ICMPv6 branch (`scan_engine_raw.cc:1933`), with
+      the fix below, and the SYN, UDP and flag-scan matchers are generic over the
+      address family (`core::ipfamily`), so an ICMPv6 error quoting one of our probes
+      is matched as an ICMPv4 one is. The classify differential covers every code of
+      the two ICMPv6 types the C reads (28,032 cases in all; 22 pinned as the fix).
+      This is also a *structural* safety win over the C: nmap's nested `switch`es with
+      fall-through and an unset `newstate` become total functions returning
+      `Option<PortState>`, so an unhandled response is an explicit `None`, never an
+      accidental stale state. *(Introduced at M4 `core::classify`.)*
+- [x] `classify6-param-problem-field-filtered` (`core::classify::classify_icmpv6`,
+      ports `scan_engine_raw.cc:2059`): the C reads an ICMPv6 Parameter Problem with
+      code 0 ("erroneous header field encountered") quoting one of our probes as
+      **open**, for every scan type, from any sender ("it was understood, just
+      invalid"). That reading fits `-sO`; for a TCP or UDP probe it says only that
+      some node objected to a field of our packet, nothing about the port, and any
+      host on the path that can quote our probe can send it, the one forged ICMP
+      that claims open. The port says **filtered**, as for the other ICMPv6 errors,
+      and keeps open for `-sO` should it be ported. Decided D2 (b),
+      `docs/IPV6-SCAN-ANALYSIS.md`. Pinned: the 22 cases in
+      `classify_differential.rs`, and the matchers' unit tests.
+      *(Introduced at IPv6 scans step b.)*
+- [x] `classify6-unexpected-code-silent` (`core::classify::classify_icmpv6`): an
+      ICMPv6 destination-unreachable or parameter-problem with a code the C does not
+      expect (unreachable 7 and up, parameter problem 2 and up) changes nothing in
+      either, but the C prints "Unexpected ICMPv6 type/code" and hexdumps the packet
+      to stderr at any verbosity. The port prints nothing. (Q6; the `-d` log line
+      comes with the IPv6 engine, step d.) *(Introduced at IPv6 scans step b.)*
 - [x] ~~`recv-validate-ipv4-only-for-now`~~ — **resolved** at IPv6 scans step a:
       `validate_packet` validates IPv6 as `validatepkt` does, walking the
       extension-header chain as `ipv6_get_data` does (`recv_validate::ipv6_payload`),
@@ -422,7 +440,9 @@ lands, `[x]` = confirmed by that module's gates.
       walk into the next header's middle. The port takes a fragment header as its
       fixed 8 bytes and rejects one with a nonzero offset (`Reject::Fragment`), as the
       C's own IPv4 path rejects a nonzero `ip_off`. A first fragment (offset 0, with
-      or without more to come) is walked, as before. Decided D3 (b),
+      or without more to come) is walked, as before. The packet quoted in an ICMPv6
+      error is walked the same way (`icmp_quote::parse_icmpv6_error`, step b), so a
+      quoted later fragment matches no probe. Decided D3 (b),
       `docs/IPV6-SCAN-ANALYSIS.md`. Of the random corpus's 608 later fragments, the
       C accepted 331. Pinned: `v6_frag_later_tcp`, `v6_frag_later_udp`,
       `v6_frag_reserved_tcp` (`validate_differential.rs`). *(Introduced at IPv6 scans

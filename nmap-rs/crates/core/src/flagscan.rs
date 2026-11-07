@@ -27,15 +27,15 @@
 //!
 //! ## Scope / divergences
 //!
-//! Matches IPv4 replies only: IPv6 scans are `ipv6-raw-port-scans-unported` until
-//! their matchers land (IPv6 scans step b).
+//! Matches IPv4 and IPv6 replies: [`match_flag_response`] is generic over the
+//! [`IpFamily`]. Nothing sends IPv6 flag probes until the engine does
+//! (`ipv6-raw-port-scans-unported`, step d).
 
 use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
-use crate::icmp_quote::ipv4_offset;
+use crate::ipfamily::IpFamily;
 use crate::model::Reason;
-use crate::recv_validate::validate_packet;
-use crate::synscan::{match_tcp_icmp_error, seq32_encode, sport_encode, MatchCtx};
+use crate::synscan::{seq32_encode, sport_encode, tcp_icmp_error, MatchCtx};
 
 // TCP flag bits not already exported by `classify`.
 const TH_FIN: u8 = 0x01;
@@ -43,7 +43,6 @@ const TH_PSH: u8 = 0x08;
 const TH_URG: u8 = 0x20;
 
 const IPPROTO_TCP: u8 = 6;
-const IPPROTO_ICMP: u8 = 1;
 const TCP_MIN: usize = 20;
 
 /// The window a flag probe advertises. Immaterial to classification (the Window scan
@@ -98,13 +97,14 @@ pub fn build_flag_probe(
     )
 }
 
-/// The per-scan constants a captured reply is matched against.
+/// The per-scan constants a captured reply is matched against. `A` is the address
+/// family ([`IpFamily`]).
 #[derive(Debug, Clone, Copy)]
-pub struct FlagMatchCtx {
+pub struct FlagMatchCtx<A = [u8; 4]> {
     /// Which flag scan this is — selects the [`classify_tcp`] interpretation.
     pub scan: ScanType,
     /// Our own source address, for validating the packet quoted in an ICMP error.
-    pub our_ip: [u8; 4],
+    pub our_ip: A,
     /// Base TCP source port (the `tryno == 0` source port).
     pub base_port: u16,
     /// Per-scan random sequence mask — verifiable in an ICMP quote (which contains our
@@ -116,10 +116,11 @@ pub struct FlagMatchCtx {
 
 /// A captured packet matched to an outstanding flag probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlagReply {
-    /// Source IPv4 of the reply — which scanned host answered. Lets one matcher serve a
-    /// whole host group (see `nmap_sys::group`).
-    pub src_ip: [u8; 4],
+pub struct FlagReply<A = [u8; 4]> {
+    /// Which scanned host the reply is about: its source address, or for an ICMP error
+    /// the destination of the probe it quotes. Lets one matcher serve a whole host
+    /// group (see `nmap_sys::group`).
+    pub src_ip: A,
     /// The scanned port that answered (the reply's TCP source port).
     pub port: u16,
     /// Which attempt this reply answers.
@@ -131,18 +132,17 @@ pub struct FlagReply {
 }
 
 /// Decide whether a captured frame answers one of our flag probes, and to what state.
-/// Returns `None` for anything that is not a well-formed IPv4/TCP reply decoding to an
-/// in-range attempt with flags meaningful for this scan. Total on all input.
+/// Returns `None` for anything that is not a well-formed TCP reply of the context's
+/// family decoding to an in-range attempt with flags meaningful for this scan, or an
+/// ICMP error quoting one of our probes. Total on all input.
 #[must_use]
-pub fn match_flag_response(
+pub fn match_flag_response<A: IpFamily>(
     frame: &[u8],
     eth_included: bool,
-    ctx: &FlagMatchCtx,
-) -> Option<FlagReply> {
-    let ip_off = ipv4_offset(frame, eth_included)?;
-    let ip = frame.get(ip_off..)?;
-    let v = validate_packet(ip).ok()?;
-    if v.proto == IPPROTO_ICMP {
+    ctx: &FlagMatchCtx<A>,
+) -> Option<FlagReply<A>> {
+    let r = A::received(frame, eth_included)?;
+    if r.v.proto == A::ICMP {
         // An ICMP error quoting our probe: filtered, whichever flag scan this is. Shared
         // with the SYN scan, since the quote-matching rules are identical.
         let sctx = MatchCtx {
@@ -151,7 +151,7 @@ pub fn match_flag_response(
             seqmask: ctx.seqmask,
             max_tryno: ctx.max_tryno,
         };
-        let m = match_tcp_icmp_error(frame, eth_included, ctx.scan, &sctx)?;
+        let m = tcp_icmp_error(&r, ctx.scan, &sctx)?;
         return Some(FlagReply {
             src_ip: m.src_ip,
             port: m.port,
@@ -160,11 +160,10 @@ pub fn match_flag_response(
             reason: m.reason,
         });
     }
-    if v.proto != IPPROTO_TCP {
+    if r.v.proto != IPPROTO_TCP {
         return None;
     }
-    let src_ip: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
-    let tcp = ip.get(v.data_offset..)?;
+    let tcp = r.transport()?;
     if tcp.len() < TCP_MIN {
         return None;
     }
@@ -181,7 +180,7 @@ pub fn match_flag_response(
     // scan-type-specific verdict comes straight from the flags/window.
     let state = classify_tcp(ctx.scan, flags, window)?;
     Some(FlagReply {
-        src_ip,
+        src_ip: r.src,
         port: resp_sport,
         tryno,
         state,
@@ -193,6 +192,9 @@ pub fn match_flag_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recv_validate::validate_packet;
+
+    const IPPROTO_ICMP: u8 = 1;
 
     const TH_RST: u8 = 0x04;
 
@@ -404,5 +406,81 @@ mod tests {
         assert_eq!(tcp[13], flags);
         // data offset = 5 words (20 bytes) → no options.
         assert_eq!((tcp[12] >> 4) * 4, 20);
+    }
+
+    // ---- IPv6 ----
+
+    mod v6 {
+        use super::super::*;
+        use crate::ipfamily::test6::*;
+
+        const TH_RST: u8 = 0x04;
+
+        fn ctx6(scan: ScanType) -> FlagMatchCtx<[u8; 16]> {
+            FlagMatchCtx {
+                scan,
+                our_ip: US6,
+                base_port: 40000,
+                seqmask: super::SEQMASK,
+                max_tryno: 11,
+            }
+        }
+
+        fn rst(port: u16, tryno: u16, window: u16) -> Vec<u8> {
+            ipv6(
+                TARGET6,
+                US6,
+                6,
+                &[],
+                &tcp(port, 40000u16.wrapping_add(tryno), 0, 0, TH_RST, window),
+            )
+        }
+
+        #[test]
+        fn a_rst_reads_per_scan_type() {
+            let m = match_flag_response(&rst(80, 1, 0), false, &ctx6(ScanType::Ack)).unwrap();
+            assert_eq!(
+                (m.src_ip, m.port, m.tryno, m.state, m.reason),
+                (TARGET6, 80, 1, PortState::Unfiltered, Reason::Reset)
+            );
+            let m =
+                match_flag_response(&eth(&rst(80, 0, 512)), true, &ctx6(ScanType::Window)).unwrap();
+            assert_eq!(m.state, PortState::Open);
+            let m = match_flag_response(&rst(80, 0, 0), false, &ctx6(ScanType::Window)).unwrap();
+            assert_eq!(m.state, PortState::Closed);
+            for scan in [
+                ScanType::Fin,
+                ScanType::Null,
+                ScanType::Xmas,
+                ScanType::Maimon,
+            ] {
+                let m = match_flag_response(&rst(80, 0, 0), false, &ctx6(scan)).unwrap();
+                assert_eq!(m.state, PortState::Closed, "{scan:?}");
+            }
+            assert!(
+                match_flag_response(&rst(80, 0, 0), false, &super::ctx(ScanType::Ack)).is_none()
+            );
+        }
+
+        #[test]
+        fn icmpv6_errors_quoting_our_probe_are_filtered() {
+            let flags = flags_for(ScanType::Fin).unwrap();
+            let seq = seq32_encode(super::SEQMASK, 2);
+            let probe = ipv6(US6, TARGET6, 6, &[], &tcp(40002, 8443, seq, 0, flags, 1024));
+            for (t, c) in [(1, 1), (1, 4), (4, 0)] {
+                let err = icmpv6_error(ROUTER6, t, c, None, &[], &probe);
+                let m = match_flag_response(&err, false, &ctx6(ScanType::Fin)).unwrap();
+                assert_eq!(
+                    (m.src_ip, m.port, m.tryno, m.state),
+                    (TARGET6, 8443, 2, PortState::Filtered),
+                    "{t}/{c}"
+                );
+            }
+            let err = icmpv6_error(ROUTER6, 3, 0, None, &[], &probe);
+            assert!(
+                match_flag_response(&err, false, &ctx6(ScanType::Fin)).is_none(),
+                "Q5"
+            );
+        }
     }
 }

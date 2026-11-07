@@ -23,13 +23,24 @@
 //! to *closed*. This mirrors nmap's `scan_engine_raw.cc`, which looks the host up by
 //! `encaps_hdr.dst` and computes `from_target` against the outer source.
 //!
+//! ## ICMPv6
+//!
+//! [`parse_icmpv6_error`] is the same primitive for IPv6, after `get_pcap_result`'s
+//! ICMPv6 arm (`scan_engine_raw.cc:1933`): an ICMPv6 error (types 1–4, all of which
+//! quote the invoking packet, RFC 4443) whose quote is an IPv6 packet. The quote's
+//! extension headers are walked as the received packet's are
+//! ([`crate::recv_validate::ipv6_payload`]), so a quoted later fragment is refused
+//! (`recv-validate6-non-initial-fragment`), and the error is read only up to the
+//! packet's own length, 40 + `ip6_plen`, as the C reads it after `validatepkt`'s trim.
+//! Which types give a verdict is [`crate::classify::classify_icmpv6`]'s call.
+//!
 //! Total on all input: every field is bounds-checked, and a malformed or truncated quote
 //! yields `None` rather than a panic. Reached from the fuzzed matchers of all three raw
 //! scans.
 
 use crate::model::Reason;
 use crate::packet_parser::{parse_packet, Header};
-use crate::recv_validate::validate_packet;
+use crate::recv_validate::{ipv6_payload, validate_packet};
 
 /// ICMPv4 destination unreachable — quotes the packet that could not be delivered.
 pub const ICMP_DEST_UNREACH: u8 = 3;
@@ -41,7 +52,22 @@ pub const IPPROTO_TCP: u8 = 6;
 /// IP protocol number of a UDP quote, for comparing against [`Quote::proto`].
 pub const IPPROTO_UDP: u8 = 17;
 
+/// ICMPv6 destination unreachable.
+pub const ICMPV6_UNREACH: u8 = 1;
+/// ICMPv6 packet too big.
+pub const ICMPV6_PACKET_TOO_BIG: u8 = 2;
+/// ICMPv6 time exceeded.
+pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
+/// ICMPv6 parameter problem.
+pub const ICMPV6_PARAMPROBLEM: u8 = 4;
+
 const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_ICMPV6: u8 = 58;
+/// IPv6 header length; the source address is at 8..24, the destination at 24..40.
+const IPV6_HEADER_LEN: usize = 40;
+/// Ethernet header length and the IPv6 ethertype, for locating an IPv6 packet.
+const ETH_HEADER_LEN: usize = 14;
+const ETHERTYPE_IPV6: [u8; 2] = [0x86, 0xDD];
 /// Minimum IPv4 header length.
 const IP_MIN: usize = 20;
 /// Fixed ICMPv4 header length; the quoted packet begins after it.
@@ -50,19 +76,22 @@ const ICMP_HEADER_LEN: usize = 8;
 /// TCP the sequence number ("UDP hdr, or TCP hdr up to seq #").
 const QUOTED_TRANSPORT_MIN: usize = 8;
 
-/// An ICMP error together with the probe it quotes.
+/// An ICMP error together with the probe it quotes. `A` is the address: `[u8; 4]`
+/// for ICMPv4 ([`parse_icmp_error`]), `[u8; 16]` for ICMPv6 ([`parse_icmpv6_error`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Quote {
-    /// ICMP type — only [`ICMP_DEST_UNREACH`] or [`ICMP_TIME_EXCEEDED`] are produced.
+pub struct Quote<A = [u8; 4]> {
+    /// ICMP type — for ICMPv4 only [`ICMP_DEST_UNREACH`] or [`ICMP_TIME_EXCEEDED`],
+    /// for ICMPv6 one of the four error types.
     pub icmp_type: u8,
-    /// ICMP code, interpreted per scan type by [`crate::classify::classify_icmp`].
+    /// ICMP code, interpreted per scan type by [`crate::classify::classify_icmp`] or
+    /// [`crate::classify::classify_icmpv6`].
     pub icmp_code: u8,
     /// Who sent the error; may be an intermediate router.
-    pub sender: [u8; 4],
+    pub sender: A,
     /// Source of the quoted packet — must be our own address to be relevant.
-    pub quoted_src: [u8; 4],
+    pub quoted_src: A,
     /// Destination of the quoted packet: the scanned host this verdict belongs to.
-    pub quoted_dst: [u8; 4],
+    pub quoted_dst: A,
     /// IP protocol of the quoted packet (6 = TCP, 17 = UDP).
     pub proto: u8,
     /// Source port of the quoted packet — our per-attempt encoded port.
@@ -74,7 +103,7 @@ pub struct Quote {
     pub seq: Option<u32>,
 }
 
-impl Quote {
+impl<A: PartialEq> Quote<A> {
     /// Whether the error came from the very host our probe was addressed to, as opposed
     /// to a router on the way. Only then is a port-unreachable authoritative.
     #[must_use]
@@ -97,8 +126,13 @@ pub fn parse_icmp_error(frame: &[u8], eth_included: bool) -> Option<Quote> {
         return None;
     }
     let sender: [u8; 4] = ip.get(12..16)?.try_into().ok()?;
+    parse_icmp_message(sender, ip.get(v.data_offset..)?)
+}
 
-    let icmp = ip.get(v.data_offset..)?;
+/// The ICMPv4 message of an error from `sender` (its 8-byte header, then the quote),
+/// as [`parse_icmp_error`] reads it once the outer packet is validated.
+#[must_use]
+pub fn parse_icmp_message(sender: [u8; 4], icmp: &[u8]) -> Option<Quote> {
     if icmp.len() < ICMP_HEADER_LEN {
         return None;
     }
@@ -119,18 +153,7 @@ pub fn parse_icmp_error(frame: &[u8], eth_included: bool) -> Option<Quote> {
     let proto = quoted[9];
     let quoted_src: [u8; 4] = quoted.get(12..16)?.try_into().ok()?;
     let quoted_dst: [u8; 4] = quoted.get(16..20)?.try_into().ok()?;
-
-    let transport = quoted.get(ihl..)?;
-    if transport.len() < QUOTED_TRANSPORT_MIN {
-        return None;
-    }
-    let sport = u16::from_be_bytes([transport[0], transport[1]]);
-    let dport = u16::from_be_bytes([transport[2], transport[3]]);
-    // Bytes 4..8 are the TCP sequence number; for UDP they are length + checksum, which
-    // carry no attempt information, so only TCP reports a sequence.
-    let seq = (proto == IPPROTO_TCP)
-        .then(|| u32::from_be_bytes([transport[4], transport[5], transport[6], transport[7]]));
-
+    let (sport, dport, seq) = quoted_transport(proto, quoted.get(ihl..)?)?;
     Some(Quote {
         icmp_type,
         icmp_code,
@@ -142,6 +165,70 @@ pub fn parse_icmp_error(frame: &[u8], eth_included: bool) -> Option<Quote> {
         dport,
         seq,
     })
+}
+
+/// Parse a captured frame as an ICMPv6 error quoting one of our probes: an IPv6
+/// packet (the first network header of the frame) carrying ICMPv6 of type 1–4, whose
+/// quote is an IPv6 packet with at least [`QUOTED_TRANSPORT_MIN`] bytes of transport
+/// header after its extension headers. See the module docs.
+#[must_use]
+pub fn parse_icmpv6_error(frame: &[u8], eth_included: bool) -> Option<Quote<[u8; 16]>> {
+    let ip = ipv6_packet(frame, eth_included)?;
+    let v = validate_packet(ip).ok()?;
+    if v.version != 6 || v.proto != IPPROTO_ICMPV6 {
+        return None;
+    }
+    let sender: [u8; 16] = ip.get(8..24)?.try_into().ok()?;
+    // Up to the packet's own end: validatepkt trims the length before
+    // get_pcap_result reads the message (recv-validate6-trailer-trim).
+    parse_icmpv6_message(sender, ip.get(v.data_offset..v.captured_len)?)
+}
+
+/// The ICMPv6 message of an error from `sender` (its 8-byte header, then the quote),
+/// as [`parse_icmpv6_error`] reads it once the outer packet is validated.
+#[must_use]
+pub fn parse_icmpv6_message(sender: [u8; 16], icmp: &[u8]) -> Option<Quote<[u8; 16]>> {
+    if icmp.len() < ICMP_HEADER_LEN {
+        return None;
+    }
+    let (icmp_type, icmp_code) = (icmp[0], icmp[1]);
+    if !(ICMPV6_UNREACH..=ICMPV6_PARAMPROBLEM).contains(&icmp_type) {
+        return None; // informational, or not an error that quotes
+    }
+    let quoted = icmp.get(ICMP_HEADER_LEN..)?;
+    if quoted.len() < IPV6_HEADER_LEN || quoted[0] >> 4 != 6 {
+        return None; // an IPv4 quote cannot be from our IPv6 source
+    }
+    let quoted_src: [u8; 16] = quoted.get(8..24)?.try_into().ok()?;
+    let quoted_dst: [u8; 16] = quoted.get(24..40)?.try_into().ok()?;
+    let (proto, off) = ipv6_payload(quoted).ok()?;
+    let (sport, dport, seq) = quoted_transport(proto, quoted.get(off..)?)?;
+    Some(Quote {
+        icmp_type,
+        icmp_code,
+        sender,
+        quoted_src,
+        quoted_dst,
+        proto,
+        sport,
+        dport,
+        seq,
+    })
+}
+
+/// The ports, and for TCP the sequence, of a quoted transport header, which must
+/// hold at least [`QUOTED_TRANSPORT_MIN`] bytes.
+fn quoted_transport(proto: u8, transport: &[u8]) -> Option<(u16, u16, Option<u32>)> {
+    if transport.len() < QUOTED_TRANSPORT_MIN {
+        return None;
+    }
+    let sport = u16::from_be_bytes([transport[0], transport[1]]);
+    let dport = u16::from_be_bytes([transport[2], transport[3]]);
+    // Bytes 4..8 are the TCP sequence number; for UDP they are length + checksum, which
+    // carry no attempt information, so only TCP reports a sequence.
+    let seq = (proto == IPPROTO_TCP)
+        .then(|| u32::from_be_bytes([transport[4], transport[5], transport[6], transport[7]]));
+    Some((sport, dport, seq))
 }
 
 /// The reason nmap reports for an ICMP error, port of `portreasons.cc: icmp_to_reason`
@@ -165,6 +252,44 @@ pub fn icmp_to_reason(icmp_type: u8, icmp_code: u8) -> Reason {
         ICMP_TIME_EXCEEDED => Reason::TimeExceeded,
         _ => Reason::Unknown,
     }
+}
+
+/// The reason nmap reports for an ICMPv6 error, port of `portreasons.cc:
+/// icmpv6_to_reason` (the error types). `get_pcap_result` overwrites the reason its
+/// switch sets with this one, so this is what a port reports.
+#[must_use]
+pub fn icmpv6_to_reason(icmp_type: u8, icmp_code: u8) -> Reason {
+    match icmp_type {
+        ICMPV6_UNREACH => match icmp_code {
+            0 => Reason::NoRoute,
+            1 | 5 => Reason::AdminProhibited,
+            2 => Reason::BeyondScope,
+            3 => Reason::HostUnreach,
+            4 => Reason::PortUnreach,
+            6 => Reason::RejectRoute,
+            _ => Reason::DestUnreach,
+        },
+        ICMPV6_PARAMPROBLEM => Reason::ParamProblem,
+        ICMPV6_TIME_EXCEEDED => Reason::TimeExceeded,
+        _ => Reason::Unknown,
+    }
+}
+
+/// The IPv6 packet of a captured frame: the frame itself, or what follows a
+/// 14-byte Ethernet header whose type is IPv6. `None` unless the first network
+/// header is IPv6, so an IPv6 packet tunnelled inside another is never taken for
+/// a reply (`ipv4_offset`'s walk would find one).
+#[must_use]
+pub fn ipv6_packet(frame: &[u8], eth_included: bool) -> Option<&[u8]> {
+    let ip = if eth_included {
+        if frame.get(12..ETH_HEADER_LEN)? != ETHERTYPE_IPV6 {
+            return None;
+        }
+        frame.get(ETH_HEADER_LEN..)?
+    } else {
+        frame
+    };
+    (ip.first()? >> 4 == 6).then_some(ip)
 }
 
 /// Byte offset of the IPv4 header inside a captured frame, or `None` if the frame has no

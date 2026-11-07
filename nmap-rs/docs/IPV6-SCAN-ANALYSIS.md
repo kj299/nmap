@@ -441,5 +441,12 @@ is resolved. The matchers still hand it only IPv4 replies; step b changes that.
   - TCP `--data` dropped.
 
   A thirteenth, unmasked reserved bits, was equivalent: `TcpHeader::serialize`
-  masks them. In the C, through `--check`: see the commit that adds this section.
+  masks them. Four more in the C, each caught by `--check` against the committed
+  golden:
+  - `build_tcp`'s window default changed;
+  - `ipv6_cksum`'s `--badsum` changed;
+  - `sport_encode` changed;
+  - `build_udp_raw_ipv6` renamed, which stops the oracle's build.
+
+  The control run passes.
 

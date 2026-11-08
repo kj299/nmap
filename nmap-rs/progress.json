@@ -411,6 +411,24 @@
         "sha256": "d82862bdec7f2c0d1e3b71df98f81851e2434de406dac17af1e5975c0243a2f2"
       }
     },
+    "core::build": {
+      "differential": {
+        "files": 1,
+        "sha256": "58f78df8a12635f076356c4e24862d79b0696f7488a216bda41812360ac79188"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "58f78df8a12635f076356c4e24862d79b0696f7488a216bda41812360ac79188"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "58f78df8a12635f076356c4e24862d79b0696f7488a216bda41812360ac79188"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "58f78df8a12635f076356c4e24862d79b0696f7488a216bda41812360ac79188"
+      }
+    },
     "core::classify": {
       "differential": {
         "files": 1,
@@ -432,15 +450,15 @@
     "core::flagscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "ee848dc78278da102180afa62fd660f00ffed8ca15eef4836fb0e2610d715729"
+        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
       }
     },
     "core::icmp_quote": {
@@ -766,29 +784,29 @@
     "core::synscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "5fabd171dab6c9e290c8e4166385a783309698860ff20ec08fe7ef779f9305d5"
+        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
       }
     },
     "core::udpscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
+        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
+        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "30b248f4c614b0bf7029753879e6cea3d64374935c15215dd8cace4d3a8773a6"
+        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
       }
     },
     "sys::nsefs": {

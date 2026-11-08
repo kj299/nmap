@@ -39,7 +39,7 @@
 //!   classified by [`crate::classify::classify_icmpv6`]. Nothing sends IPv6 SYN
 //!   probes until the engine does (`ipv6-raw-port-scans-unported`, step d).
 
-use crate::build::{build_tcp_raw, BuildError, Ipv4Spec};
+use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};
 use crate::icmp_quote::IPPROTO_TCP as QUOTED_TCP;
 use crate::ipfamily::{IpFamily, Received};
@@ -98,36 +98,65 @@ pub fn seq32_decode(seqmask: u32, seq: u32) -> Option<u32> {
     }
 }
 
-/// Build a complete raw SYN probe packet for `(dport, tryno)`.
+/// Where a TCP probe carries its attempt number: `(seq, ack)`. nmap puts
+/// [`seq32_encode`] in the sequence, except on a probe with the ACK flag (`-sA`,
+/// `-sW`, `-sM`), where it goes in the acknowledgment and the sequence stays 0,
+/// because a reply to such a probe reflects our ack rather than our sequence
+/// (`sendIPScanProbe`, `scan_engine_raw.cc:1205`).
+#[must_use]
+pub fn probe_seq_ack(seqmask: u32, tryno: u32, flags: u8) -> (u32, u32) {
+    let encoded = seq32_encode(seqmask, tryno);
+    if flags & TH_ACK != 0 {
+        (0, encoded)
+    } else {
+        (encoded, 0)
+    }
+}
+
+/// Build a complete raw SYN probe packet for `(dport, tryno)`, IPv4 or IPv6 by
+/// the spec's type.
 ///
-/// The IPv4 fields (src/dst/ttl/ipid/tos) come from `spec`; the caller supplies the
-/// per-scan `base_port` and `seqmask` and the per-probe `tryno`. Sets `flags = SYN`,
-/// `window = 1024`, and the MSS option — the exact wire shape of an nmap `-sS` probe.
+/// The IP fields come from `spec`; the caller supplies the per-scan `base_port` and
+/// `seqmask` and the per-probe `tryno`. Sets `flags = SYN`, `window = 1024`, and the
+/// MSS option — the exact wire shape of an nmap `-sS` probe.
 ///
 /// # Errors
-/// Propagates [`BuildError`] from [`build_tcp_raw`] (only reachable via a malformed
-/// `spec.options`; the fixed SYN options here are always well-formed).
-pub fn build_syn_probe(
-    spec: &Ipv4Spec,
+/// Propagates [`BuildError`] from the family's builder (only reachable via a
+/// malformed `spec.options`; the fixed SYN options here are always well-formed).
+pub fn build_syn_probe<S: ProbeSpec>(
+    spec: &S,
     base_port: u16,
     dport: u16,
     tryno: u32,
     seqmask: u32,
 ) -> Result<Vec<u8>, BuildError> {
+    build_syn_probe_with(spec, base_port, dport, tryno, seqmask, &[])
+}
+
+/// [`build_syn_probe`] carrying `data` after the TCP header: what nmap's `--data`,
+/// `--data-string` and `--data-length` add to every TCP probe (`o.extra_payload`).
+///
+/// # Errors
+/// As [`build_syn_probe`], and [`BuildError::PayloadTooLarge`].
+pub fn build_syn_probe_with<S: ProbeSpec>(
+    spec: &S,
+    base_port: u16,
+    dport: u16,
+    tryno: u32,
+    seqmask: u32,
+    data: &[u8],
+) -> Result<Vec<u8>, BuildError> {
     let sport = sport_encode(base_port, tryno);
-    let seq = seq32_encode(seqmask, tryno);
-    build_tcp_raw(
-        spec,
+    let (seq, ack) = probe_seq_ack(seqmask, tryno, TH_SYN);
+    spec.tcp_probe(
         sport,
         dport,
         seq,
-        0, // ack
-        0, // reserved
+        ack,
         TH_SYN,
         SYN_WINDOW,
-        0, // urgent pointer
         &TCP_SYN_PROBE_OPTIONS,
-        &[],
+        data,
     )
 }
 
@@ -297,8 +326,15 @@ pub(crate) fn tcp_icmp_error<A: IpFamily>(
     if tryno > ctx.max_tryno {
         return None;
     }
-    // Our own packet is quoted back, so our encoded sequence must be there verbatim.
-    if quote.seq != Some(seq32_encode(ctx.seqmask, tryno)) {
+    // Our own packet is quoted back, so the sequence we sent must be there verbatim:
+    // the encoded attempt, or 0 for a probe carrying the ACK flag (probe_seq_ack).
+    // The C compares `th_seq` with `probe->tcpseq()` the same way.
+    let flags = if scan == ScanType::Syn {
+        TH_SYN
+    } else {
+        crate::flagscan::flags_for(scan)?
+    };
+    if quote.seq != Some(probe_seq_ack(ctx.seqmask, tryno, flags).0) {
         return None;
     }
     let state = A::classify_error(scan, &quote)?;
@@ -314,6 +350,7 @@ pub(crate) fn tcp_icmp_error<A: IpFamily>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::{build_tcp_raw, Ipv4Spec};
     use crate::recv_validate::validate_packet;
 
     const IPPROTO_ICMP: u8 = 1;
@@ -325,6 +362,15 @@ mod tests {
     const TARGET: [u8; 4] = [10, 0, 0, 2];
     /// An intermediate router, which is not the target.
     const ROUTER: [u8; 4] = [192, 168, 0, 1];
+
+    #[test]
+    fn probe_seq_ack_follows_the_ack_flag() {
+        let enc = seq32_encode(0xABCD_1234, 2);
+        assert_eq!(probe_seq_ack(0xABCD_1234, 2, TH_SYN), (enc, 0));
+        assert_eq!(probe_seq_ack(0xABCD_1234, 2, 0x01), (enc, 0)); // FIN
+        assert_eq!(probe_seq_ack(0xABCD_1234, 2, TH_ACK), (0, enc));
+        assert_eq!(probe_seq_ack(0xABCD_1234, 2, TH_ACK | 0x01), (0, enc)); // Maimon
+    }
 
     #[test]
     fn sport_encode_varies_per_attempt() {
@@ -621,6 +667,7 @@ mod tests {
 
     mod v6 {
         use super::super::*;
+        use crate::build::Ipv4Spec;
         use crate::ipfamily::test6::*;
 
         const SEQMASK: u32 = 0xABCD_1234;
@@ -798,6 +845,25 @@ mod tests {
             let v4 = build_syn_probe(&spec, 40000, 25, 0, SEQMASK).unwrap();
             let err = icmpv6_error(TARGET6, 1, 1, None, &[], &v4);
             assert!(match_syn_response(&err, false, &ctx6()).is_none());
+        }
+
+        /// A SYN probe built for IPv6: what the C sends, and matched by its own quote.
+        #[test]
+        fn our_ipv6_syn_probe_is_recognised_in_an_icmpv6_quote() {
+            use crate::build::Ipv6Spec;
+            let probe =
+                build_syn_probe(&Ipv6Spec::new(US6, TARGET6), 40000, 22, 5, SEQMASK).unwrap();
+            let v = crate::recv_validate::validate_packet(&probe).unwrap();
+            assert_eq!(
+                (v.version, v.proto, v.data_offset, probe.len()),
+                (6, 6, 40, 64)
+            );
+            assert_eq!(probe[7], 255, "hop limit (Q1)");
+            assert_eq!(&probe[40 + 13..40 + 14], &[TH_SYN]);
+            assert_eq!(&probe[40 + 20..], &TCP_SYN_PROBE_OPTIONS);
+            let err = icmpv6_error(TARGET6, 1, 4, None, &[], &probe);
+            let m = match_syn_response(&err, false, &ctx6()).unwrap();
+            assert_eq!((m.port, m.tryno, m.state), (22, 5, PortState::Filtered));
         }
 
         #[test]

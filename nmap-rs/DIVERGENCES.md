@@ -147,9 +147,10 @@ narrower *rendering* of the same result.
       and `-dN`. Found by the lfs step's review.
 - [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
       IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
-      over IPv6; every raw driver here sends IPv4 only. (The receive side is in:
-      IPv6 validation since IPv6 scans step a, ICMPv6 classification and the IPv6
-      matchers since step b, `docs/IPV6-SCAN-ANALYSIS.md`.) With
+      over IPv6; every raw driver here sends IPv4 only. (The pieces are in: IPv6
+      validation since IPv6 scans step a, ICMPv6 classification and the IPv6 matchers
+      since step b, the IPv6 probe builders since step c,
+      `docs/IPV6-SCAN-ANALYSIS.md`.) With
       `-6`, a raw scan type prints "raw IPv6 port scans are not ported yet;
       running a connect scan (-sT)" and connect-scans, as a raw scan without
       privilege does. Until FreeBSD step e it sent nothing and reported the host
@@ -389,6 +390,52 @@ lands, `[x]` = confirmed by that module's gates.
       matches nmap's own `libnetutil` header-class setters (the build differential's
       C oracle), so the ported builders agree with the class-level C byte-for-byte.
       *(Introduced at M4 `core::build`.)*
+- [x] `build6-scan-hop-limit-255` (`core::build::Ipv6Spec`, ports
+      `sendIPScanProbe`'s IPv6 arm, `scan_engine_raw.cc:1233`): **a C quirk, reproduced.**
+      nmap's IPv4 probes carry a random TTL of 37–59 when `--ttl` is not given, and
+      `build_ipv6_raw` has the same rule for a hop limit of -1. But the scan engine
+      passes `o.ttl` (-1 when unset) to `build_tcp_raw_ipv6`'s and
+      `build_udp_raw_ipv6`'s `u8 hoplimit`, where it arrives as 255, so 7.94's IPv6
+      scan probes always carry hop limit 255. `Ipv6Spec::new` does the same
+      (`SCAN_HOP_LIMIT`); `--ttl` sets it. Pinned by the scan-probe differential,
+      whose oracle feeds -1 through the C's own `u8` parameter. Q1,
+      `docs/IPV6-SCAN-ANALYSIS.md`. *(Introduced at IPv6 scans step c.)*
+- [x] `build-badsum-host-order-decrement` (`core::build`, every `o.badsum` site in
+      `tcpip.cc`): **a C quirk, reproduced.** `--badsum` runs `--sum` on the checksum
+      as a host-order `u16`, though the field holds network-order bytes. On a
+      little-endian host, which is where 7.94 runs, that takes one from the checksum's
+      first byte on the wire, borrowing from the second: a valid 0x3260 goes out as
+      0x3160. A UDP result of 0 ("no checksum") is sent as 0xFFFF. The port does what a
+      little-endian host does, on every host, for TCP, UDP and ICMP, over IPv4 and IPv6.
+      On a big-endian host the C would subtract one in network order, which is what the
+      port did before IPv6 scans step c. Its IPv4 `--badsum` checksums were therefore
+      bad in a different way from 7.94's, and it also lacked the UDP zero rule. One
+      consequence is the C's too: a TCP checksum of 0x0000 becomes 0xFFFF, the other
+      ones'-complement zero, so one `--badsum` probe in 65,536 still verifies. Pinned
+      by the scan-probe differential and `core::build`'s unit tests.
+      *(Introduced at IPv6 scans step c.)*
+- [x] `scan-attempt-encoding-step-one` (`core::synscan::sport_encode`,
+      `seq32_encode`; the engine's attempt numbers): nmap's `tryno_t` is a union of
+      `isPing:1, seqnum:7` bit-fields with an `opaque` byte, and the encoders read
+      `opaque`. With GCC's layout (measured), attempt N of a scan probe is opaque 2N.
+      So 7.94 sends retransmission N from source port base+2N, with 2N in the encoded
+      sequence. The port numbers attempts 0, 1, 2, …, so it sends from base+N. Both are
+      injective and both are decoded by the scanner that sent them. No port state
+      differs, only the source port and encoded sequence of a retransmission (the first
+      probe is the same). The probe builders agree with the C byte for byte given the
+      same attempt byte (the scan-probe differential feeds both the same `opaque`). Not
+      changed: aligning it would move the capture filter's port range and the reply
+      decode for both families. It can go with the IPv6 engine (step d) if wanted.
+      *(Found at IPv6 scans step c.)*
+- [x] ~~`flagscan-ack-probe-attempt-in-sequence`~~ — **resolved** at IPv6 scans step c:
+      nmap puts the encoded attempt in the **acknowledgment** of a probe carrying the
+      ACK flag (`-sA`, `-sW`, `-sM`), with sequence 0, because a reply reflects our ack
+      (`scan_engine_raw.cc:1205`). The port's flag probes had carried it in the
+      sequence. It was never ledgered, since no port state depends on it: a RST is
+      matched on its port, and the ICMP quote check compared against what was sent.
+      `synscan::probe_seq_ack` now applies the C's rule for both families, and the
+      quote check expects the C's sequence (0 for those probes). Found by the
+      byte-identical scan-probe differential. *(Introduced at M4 `core::flagscan`.)*
 - [x] `build-unknown-icmp-no-fatal` (`core::build`, ports `build_icmp_raw`): the C
       `fatal()`s (aborts the whole process) on an ICMP type/code it does not construct
       (`tcpip.cc`). The port returns `BuildError::UnknownIcmpType` — a library never

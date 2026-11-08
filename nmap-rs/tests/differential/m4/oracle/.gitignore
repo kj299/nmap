@@ -6,3 +6,5 @@ validate_oracle
 classify_oracle
 ipid_oracle
 validate_ipv6_walk.inc
+scanprobe6_oracle
+scanprobe6_c.inc

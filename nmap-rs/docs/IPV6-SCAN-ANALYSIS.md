@@ -1,8 +1,8 @@
 # IPv6 raw port scans — Phase 0
 
 Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).
-Steps a (receive, §11) and b (match and classify, §12) done.** Step c is next.
-Per D5 this milestone lands in its own PRs, after #153 (FreeBSD).
+Steps a (receive, §11), b (match and classify, §12) and c (build, §13) done.**
+Step d is next. Per D5 this milestone lands in its own PRs, after #153 (FreeBSD).
 
 ## 0. Value
 
@@ -230,7 +230,7 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
 |---|---|---|
 | **a — receive** ✅ (§11) | the IPv6 walk (`ipv6_get_data`), `validate_packet`'s IPv6 path (D3, Q4) | the validate oracle extended (vectors per header and fragment shape; randomized cross-check); fuzz target; Miri |
 | **b — match and classify** ✅ (§12) | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
-| **c — build** | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
+| **c — build** ✅ (§13) | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
 | **d — the engine on loopback** | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
 | **e — Ethernet** (D4) | ND per next hop; down/`no-route` when it fails | the same differential across a veth pair (Linux) and an epair (FreeBSD), plus a silent neighbor |
 
@@ -363,4 +363,90 @@ is resolved. The matchers still hand it only IPv4 replies; step b changes that.
 - **For step d.** The engine's capture filter has to admit IPv6 TCP and UDP
   behind extension headers. libpcap's `tcp` primitive only checks the first next
   header, so a filter written as for IPv4 would drop what the matchers accept.
+
+## 13. Step c — results
+
+- **Builders.** `core::build` gains `Ipv6Spec`, `build_ipv6_raw`,
+  `build_tcp_raw_ipv6` and `build_udp_raw_ipv6`, ports of the C functions of those
+  names (`tcpip.cc:549`, `:657`, `:786`) with `ipv6_cksum`'s checksum and
+  `--badsum`. `Ipv6Spec::new` is what the scan engine sends: traffic class 0, flow
+  label 0, no extension headers, hop limit 255. Q1 is reproduced
+  (`build6-scan-hop-limit-255`): `--ttl` sets the hop limit, and `-S` (an IPv4
+  address in `PacketOverrides`) does not apply.
+- **Probes.** A `ProbeSpec` trait, implemented by `Ipv4Spec` and `Ipv6Spec`, makes
+  `build_syn_probe`, `build_flag_probe` and `build_udp_probe` generic. What goes in
+  the TCP or UDP header is one piece of code for both families, as it is in
+  `sendIPScanProbe`. `*_with` variants carry `--data`'s payload on TCP probes. The
+  UDP payloads already rode `build_udp_probe_with`. The CLI still refuses `--data`,
+  `--data-string` and `--data-length` for both families; wiring them is a separate
+  change.
+- **The oracle.** `scanprobe6_oracle` compiles nmap's own code, copied out by name
+  at build time:
+  - from `tcpip.cc`: `ipv6_cksum`, `build_ipv6_raw`, `build_tcp`,
+    `build_tcp_raw_ipv6`, `build_udp`, `build_udp_raw_ipv6`;
+  - from `netutil.cc`: `ipv6_pseudoheader_cksum`;
+  - from libdnet: `ip_cksum_add`;
+  - from `scan_engine_raw.cc`: `seq32_encode`, `sport_encode`.
+
+  It transcribes only how `sendIPScanProbe` chooses their arguments, with line
+  references. That includes passing `o.ttl = -1` through the C's own `u8` parameter,
+  so the hop limit of 255 comes from the C itself. The corpus has 2,140 cases:
+  - 1,232 probes covering every scan type the port has, the hop limit,
+    attempts, masks, `--data`, UDP payloads and `--badsum`;
+  - 908 runs of the builders over random fields;
+  - the `--badsum` UDP zero cases.
+
+  All 2,140 are **byte-identical**. `regen_scanprobe6_golden.sh --check` runs in CI.
+- **Found by byte identity**, all ledgered, the first two fixed for IPv4 as well:
+  - **`flagscan-ack-probe-attempt-in-sequence` (fixed).** The C puts the attempt in
+    the ack of an ACK-flagged probe (`-sA`, `-sW`, `-sM`) and sends sequence 0; the
+    port's IPv4 flag probes had carried it in the sequence. `probe_seq_ack` now
+    follows the C, and so does the quote check.
+  - **`build-badsum-host-order-decrement` (reproduced).** The C's `--badsum`
+    decrements a host-order `u16`. On the little-endian hosts 7.94 runs on, that
+    takes one from the checksum's first wire byte, and a UDP zero goes out as
+    0xFFFF. The port's IPv4 `--badsum` had subtracted one in network order, and had
+    no UDP zero rule. A side effect carried over from the C: a TCP checksum of
+    0x0000 becomes 0xFFFF and still verifies, which the fuzz target found.
+  - **`scan-attempt-encoding-step-one` (recorded, not changed).** The C's `tryno_t`
+    `opaque` byte is `seqnum << 1`, so 7.94 sends retransmission N from base+2N; the
+    port uses base+N. No port state differs. Aligning it belongs with the engine
+    (step d) if wanted.
+- **Tests.** 13 new unit tests:
+  - the header fields and the checksum over the IPv6 pseudo-header;
+  - `--ttl` and `--badsum`, including the host-order rule and both zero cases;
+  - the refusals: misaligned or overlong options, payloads past the length field;
+  - the seq/ack rule;
+  - probes for each family, built by step c and matched by step b's own quote
+    parser.
+- **Fuzz.** `build_packet` now drives both IPv6 builders. A built packet must
+  validate as IPv6 with its whole length counted, and its checksum must verify,
+  except that `--badsum` must break it apart from the zero-checksum case above.
+  3 seeds; 15.9M runs, no failure after the zero-checksum case was understood.
+- **Miri.** Passes on `build`, `synscan`, `udpscan` and `flagscan`. The two tests
+  that search 65,536 checksums are kept out of Miri, as M6.7's slow tests are.
+- **Sabotage, 12, all caught**, by the unit tests and the differential unless
+  noted:
+  - hop limit 64 instead of 255;
+  - the traffic class in the wrong bits;
+  - the flow label unmasked (differential only);
+  - `--badsum` in network order;
+  - the UDP zero sent as zero;
+  - the attempt always in the sequence;
+  - no MSS option on a SYN;
+  - TCP summed with the UDP pseudo-header;
+  - the payload length counting the header;
+  - `--ttl` ignored;
+  - the UDP length short by its header;
+  - TCP `--data` dropped.
+
+  A thirteenth, unmasked reserved bits, was equivalent: `TcpHeader::serialize`
+  masks them. Four more in the C, each caught by `--check` against the committed
+  golden:
+  - `build_tcp`'s window default changed;
+  - `ipv6_cksum`'s `--badsum` changed;
+  - `sport_encode` changed;
+  - `build_udp_raw_ipv6` renamed, which stops the oracle's build.
+
+  The control run passes.
 

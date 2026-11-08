@@ -1,8 +1,9 @@
 # IPv6 raw port scans — Phase 0
 
 Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).
-Steps a (receive, §11), b (match and classify, §12) and c (build, §13) done.**
-Step d is next. Per D5 this milestone lands in its own PRs, after #153 (FreeBSD).
+Steps a (receive, §11), b (match and classify, §12) and c (build, §13) done.
+Step d (the engine on loopback, §14) written; its wire gates run in CI only.**
+Step e is next. Per D5 this milestone lands in its own PRs, after #153 (FreeBSD).
 
 ## 0. Value
 
@@ -222,7 +223,14 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
   each target and for off-link ones the gateway, with step e's framing per link.
   A next hop that never answers marks its hosts down, reason `no-route`, with
   the C's message.
-- **Step e's fallback goes away per scan type** as each lands.
+- **Step e's fallback goes away per scan type** as each lands. (Step d removes it
+  for this host's own addresses, all eight scan types at once; the connect fallback
+  stays for every other IPv6 target until step e.)
+- **The IPv6 capture filter admits replies behind extension headers** (step d,
+  `scan6-filter-admits-extension-headers`): 7.94's `tcp`/`udp`/`icmp6` primitives drop
+  them before its own walk runs. Recorded 2026-11-08.
+- **Attempts keep the port's numbering** (base+N, `scan-attempt-encoding-step-one`),
+  for both families. Decided 2026-11-08.
 
 ## 9. Proposed build order
 
@@ -231,7 +239,7 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
 | **a — receive** ✅ (§11) | the IPv6 walk (`ipv6_get_data`), `validate_packet`'s IPv6 path (D3, Q4) | the validate oracle extended (vectors per header and fragment shape; randomized cross-check); fuzz target; Miri |
 | **b — match and classify** ✅ (§12) | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
 | **c — build** ✅ (§13) | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
-| **d — the engine on loopback** | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
+| **d — the engine on loopback** (§14; wire gates in CI) | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
 | **e — Ethernet** (D4) | ND per next hop; down/`no-route` when it fails | the same differential across a veth pair (Linux) and an epair (FreeBSD), plus a silent neighbor |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7 and the FreeBSD
@@ -450,3 +458,128 @@ is resolved. The matchers still hand it only IPv4 replies; step b changes that.
 
   The control run passes.
 
+## 14. Step d — results
+
+Decided for this step (2026-11-08): the code lands now, gated locally by unit and
+mock-capture tests, with the wire gates wired into CI. Its PR stays a draft until CI
+has run them and they pass, since this container cannot (the kernel boots with
+`ipv6.disable=1`). The attempt numbering stays base+N.
+
+- **One engine, both families.** `sys::group` is generic over a `ScanFamily`,
+  implemented by `Ipv4Addr` and `Ipv6Addr`. A family supplies only:
+  - its probe spec, from the scan's defaults and then the operator's options. IPv4 is
+    unchanged; IPv6 is step c's `Ipv6Spec::new` with `--ttl`, `--badsum` and `-S`;
+  - its capture filter;
+  - its octets, which select step b's `IpFamily` to read replies.
+
+  `RawScanKind`'s `build_probes` and `match_reply` are generic, so `SynKind`,
+  `UdpKind` and `FlagKind` are written once for both families, and so is the loop
+  (scheduling, demux by source address, timeouts, results). The per-kind `bpf` methods
+  are gone: the filter is the family's, given the scan's transport.
+- **Sending.** An IPv6 probe goes out at layer 2 on the loopback through
+  `FramingSender` over a capture handle, as `-6 -O` already sends. Linux has no
+  `IPV6_HDRINCL`. The framing comes from `LinkFraming::for_loopback`, now shared with
+  OS detection: Linux's `lo` is Ethernet with zero MACs, FreeBSD's `lo0` is
+  `DLT_NULL`. The C sends through a raw socket there; what reaches the loopback is
+  the same packet.
+- **Routing.** `group_scan_targets` buckets targets by family and route
+  (`bucket_targets`, pure and unit-tested). An IPv6 target routed over a loopback
+  (`::1`, or one of this host's own addresses, which `choose_route6` sends over the
+  loopback from itself) joins a route-group. One routed anywhere else makes the call
+  `Unsupported` before anything is sent, since Ethernet and neighbor discovery are
+  step e's. A target with no route is down, as for IPv4.
+- **The CLI.** The `-6` fallback now applies only to a raw scan of a target beyond this
+  host (`route::routes_over_loopback6`). It says "raw IPv6 port scans reach only this
+  host's own addresses so far; running a connect scan (-sT)"
+  (`ipv6-raw-port-scans-unported`, narrowed). With `-6`, `-S` takes an IPv6 literal and
+  refuses an IPv4 one, as nmap resolves it in the scan's family (`nmap.cc:1463`). It
+  used to take only IPv4, which an IPv6 scan ignored (`cli-spoof-source-literal-only`,
+  `PacketOverrides::spoof_src6`).
+- **The capture filter** (`scan6-filter-admits-extension-headers`):
+
+  ```
+  dst host <us> and ((ip6[6:1] = <proto> and ip6[42:2] >= <base> and ip6[42:2] <= <base+span>)
+                     or (ip6[6:1] != 6 and ip6[6:1] != 17))
+  ```
+
+  Our transport straight after the fixed header must be to one of our source ports,
+  as the IPv4 filter's `portrange` requires. ICMPv6, and any reply behind extension
+  headers, passes to the walk and the matchers. libpcap's `tcp` and `portrange` would
+  read the first next header and offset 40 only, so with them a reply step b's
+  matchers accept would never reach them. 7.94's own filter drops such replies; the
+  port does not.
+- **Mock-capture tests** (`sys::group`, 9 new for IPv6):
+  - demux of two hosts by source address;
+  - the probes on the wire are step c's for every attempt, with hop limit 255, and
+    with `--ttl 9 --badsum`;
+  - `-sU` closed from the target, filtered from a router (attributed to the probed
+    host), and open on a datagram;
+  - D2's parameter problem filtered, with no-route and admin-prohibited reasons;
+  - a reply behind destination options matched;
+  - an IPv4 reply from the mapped address answering nothing in an IPv6 scan;
+  - replies without a link header, as `lo0` gives them;
+  - two routing tests (`bucket_targets`).
+- **The filters, run by libpcap.** Both families' filters are compiled by libpcap for
+  Ethernet and `DLT_NULL` and run over packets built for each case: each end of the
+  port range and one past it, the other transport, our own probe, ICMPv6, the
+  extension headers and a fragment header, and the other family. The IPv4 filter is
+  pinned to the string it always was.
+- **Live, without an IPv6 stack.** This VM has no IPv6, but its `lo` still carries
+  frames. With a userspace responder answering the probes on `lo` the way Linux
+  would, all eight scan types of `::1` resolve as Linux's stack implies:
+  - `-sS`: open `syn-ack`, closed `reset`;
+  - `-sA`: unfiltered, both;
+  - `-sW` and `-sM`: closed, both;
+  - `-sF`, `-sN` and `-sX`: open|filtered and closed;
+  - `-sU`: open|filtered, and closed `port-unreach`.
+
+  They resolve the same with a destination-options header in front of every reply.
+  This runs the real path from kernel BPF on a live capture to the engine, but it is
+  not a gate, and it is not 7.94.
+- **IPv4 is unchanged on the wire.** Here, against 7.94: all eight scans of 127.0.0.1
+  and of this host's own address match, port by port (16/16), as do the IPv4 e2e
+  tests.
+- **Wire gates, in CI only.**
+  - `scan6_e2e`: every raw scan type on `::1` through the CLI's entry points, and the
+    SYN probe on the wire byte-identical to `core::build`'s. It runs in the Linux test
+    job and the FreeBSD VM with `REQUIRE_IPV6=1`, so a loopback without IPv6 fails
+    instead of skipping.
+  - `run_raw_differential.sh` now runs `-sT` and all eight raw scans for an IPv6
+    target, and fails a raw scan that fell back to a connect scan. CI already runs it
+    on `::1` and on `fd00:5ca1::10`, on Linux and in the FreeBSD VM. These are the
+    first runs of 7.94's IPv6 scans anywhere in this project (§10).
+
+- **Miri.** The new pure tests (routing, loopback framing) and `core::build` pass. The
+  engine tests are kept out of Miri as before, since they spawn a capture thread; the
+  filter tests are kept out because they call into libpcap.
+- **Fuzz.** No new parser: replies of both families still go through step b's
+  matchers, whose targets cover both. `build_packet` was re-run on the changed
+  `core::build` (24.5M runs, no failure).
+- **Sabotage, 16, all caught.** Six in the filters and the engine's families:
+  - the extension-header clause dropped;
+  - ports read at offset 40;
+  - the other transport admitted;
+  - `src host` for `dst host`;
+  - the IPv4 filter's `icmp` changed;
+  - the IPv6 spec ignoring the options, or swapping source and destination.
+
+  Four in the engine:
+  - replies demuxed to the last host;
+  - hosts reported at our own address;
+  - the matchers told that the first target is us;
+  - a broadcast destination in the loopback framing.
+
+  Two in routing:
+  - IPv6 taken over any route;
+  - route-groups keyed by interface alone.
+
+  Three in the CLI and `core::build`:
+  - the fallback test inverted;
+  - `-S` read as IPv4 under `-6`;
+  - `spoof_src6` not applied.
+
+  Each is caught by the unit, filter or CLI tests.
+- **Lint and audits.** clippy with CI's flags is clean on Linux and FreeBSD, and fmt is
+  clean. The unsafe audit finds 42 blocks, all documented, none new. The progress
+  stamps for `core::build` and `cli` were re-run and re-stamped, and drift and audit
+  pass. The full suite passes: 1,793 tests.

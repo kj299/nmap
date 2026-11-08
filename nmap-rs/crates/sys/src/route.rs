@@ -371,6 +371,14 @@ pub fn route_for6(target: Ipv6Addr) -> io::Result<Option<Route6>> {
     Ok(choose_route6(&netif::interfaces()?, target))
 }
 
+/// Whether `target`'s route goes over a loopback: `::1`, or one of this host's own
+/// addresses ([`choose_route6`]). These are the IPv6 targets the raw port scans
+/// reach so far (IPv6 scans step d); an enumeration error, or no route, is `false`.
+#[must_use]
+pub fn routes_over_loopback6(target: Ipv6Addr) -> bool {
+    matches!(route_for6(target), Ok(Some(r)) if r.loopback)
+}
+
 /// Draw the per-scan random keys: the 32-bit sequence mask and the base TCP source
 /// port. nmap seeds these once per scan from the OS RNG; we read `/dev/urandom`
 /// directly to avoid pulling in an RNG dependency (Unix — where the raw scans run).

@@ -116,6 +116,7 @@ fn build(f: &[&str]) -> Vec<u8> {
                 ttl: (ttl >= 0).then(|| u8::try_from(ttl).unwrap()),
                 bad_sum: f[10] == "1",
                 spoof_src: None,
+                spoof_src6: None,
             };
             let spec = Ipv6Spec::new(addr(f[2]), addr(f[3])).with_overrides(overrides);
             if ttl < 0 {

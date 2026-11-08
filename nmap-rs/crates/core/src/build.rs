@@ -147,6 +147,10 @@ pub struct PacketOverrides {
     /// Replies will go to whatever really owns it, so this is only useful when
     /// the operator can observe that traffic.
     pub spoof_src: Option<[u8; 4]>,
+    /// `-6 -S addr`: the same for IPv6 probes. With `-6`, nmap reads `-S` as an
+    /// IPv6 address (`resolve(..., o.af())`, `nmap.cc:1463`), so a scan carries
+    /// one of the two, never both.
+    pub spoof_src6: Option<[u8; 16]>,
 }
 
 impl PacketOverrides {
@@ -379,8 +383,8 @@ impl Ipv6Spec {
         }
     }
 
-    /// Apply `--ttl` (as the hop limit) and `--badsum`. `-S` names an IPv4 source
-    /// in [`PacketOverrides`] and does not apply here.
+    /// Apply `--ttl` (as the hop limit), `--badsum` and `-6 -S`
+    /// ([`PacketOverrides::spoof_src6`]; an IPv4 `-S` does not apply here).
     #[must_use]
     pub fn with_overrides(mut self, o: PacketOverrides) -> Ipv6Spec {
         if let Some(ttl) = o.ttl {
@@ -388,6 +392,9 @@ impl Ipv6Spec {
         }
         if o.bad_sum {
             self.bad_sum = true;
+        }
+        if let Some(src) = o.spoof_src6 {
+            self.src = src;
         }
         self
     }
@@ -719,6 +726,7 @@ mod tests {
                 ttl: Some(13),
                 bad_sum: true,
                 spoof_src: Some([192, 0, 2, 9]),
+                spoof_src6: None,
             },
         );
         let pkt = build_tcp_raw(&spec, 1234, 80, 1, 0, 0, 0x02, 1024, 0, &[], &[]).expect("builds");
@@ -961,12 +969,31 @@ mod tests {
             ttl: Some(0),
             bad_sum: true,
             spoof_src: Some([192, 0, 2, 9]),
+            spoof_src6: None,
         });
         assert_eq!(
             (s.hop_limit, s.bad_sum, s.src),
             (0, true, SRC6),
             "no IPv4 -S here"
         );
+        // `-6 -S` is the IPv6 source, and nothing else changes; an IPv4 spec
+        // ignores it in turn.
+        let spoofed = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
+        let o6 = PacketOverrides {
+            spoof_src6: Some(spoofed),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.with_overrides(o6),
+            Ipv6Spec {
+                src: spoofed,
+                ..base
+            }
+        );
+        let v4 = Ipv4Spec::new([10, 0, 0, 1], [10, 0, 0, 2], 64, 1);
+        assert_eq!(v4.clone().with_overrides(o6), v4);
+        let wire = build_udp_raw_ipv6(&base.with_overrides(o6), 1, 2, b"").unwrap();
+        assert_eq!(&wire[8..24], &spoofed, "the source on the wire");
         let good = build_tcp_raw_ipv6(&base, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], b"x").unwrap();
         let bad = build_tcp_raw_ipv6(&s, 1, 2, 3, 4, 0, 0x10, 1024, 0, &[], b"x").unwrap();
         assert_eq!(bad[7], 0);

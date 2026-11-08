@@ -450,11 +450,20 @@ async fn run_scan(
     overrides: PacketOverrides,
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
-    // Raw port scans over IPv6 are not ported (`ipv6-raw-port-scans-unported`):
-    // every raw driver sends IPv4. Say so and connect-scan, as a raw scan
-    // without privilege does, rather than send nothing and report no ports.
-    if !matches!(cfg.scan, ScanKind::List | ScanKind::Connect) && ips.iter().any(IpAddr::is_ipv6) {
-        eprintln!("nmap-rs: raw IPv6 port scans are not ported yet; running a connect scan (-sT)");
+    // Raw IPv6 port scans reach this host's own addresses (`::1`, and an address
+    // of its own), which go over a loopback (IPv6 scans step d). Any other IPv6
+    // target needs Ethernet framing and neighbor discovery, which are not ported
+    // yet (`ipv6-raw-port-scans-unported`, step e). Say so and connect-scan, as a
+    // raw scan without privilege does, rather than send nothing and report no ports.
+    let beyond_this_host = |ip: &IpAddr| match ip {
+        IpAddr::V6(v6) => !nmap_sys::route::routes_over_loopback6(*v6),
+        IpAddr::V4(_) => false,
+    };
+    if !matches!(cfg.scan, ScanKind::List | ScanKind::Connect) && ips.iter().any(beyond_this_host) {
+        eprintln!(
+            "nmap-rs: raw IPv6 port scans reach only this host's own addresses so far; \
+             running a connect scan (-sT)"
+        );
         return connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await;
     }
     match cfg.scan {
@@ -1411,24 +1420,34 @@ fn port_warnings(cfg: &RunConfig, ports: &[u16]) -> Vec<String> {
 /// Only `-S` can fail, and it fails rather than falling back: an operator who
 /// asked to send from a particular address and silently got the routed one has
 /// been told something untrue about their own traffic. C resolves this argument
-/// through `resolve()`, so a hostname works there; here it must be an IPv4
-/// literal, which is a narrow divergence recorded in `DIVERGENCES.md`.
+/// through `resolve()` in the scan's family (`nmap.cc:1463`), so a hostname
+/// works there; here it must be a literal of that family (IPv6 with `-6`),
+/// which is a narrow divergence recorded in `DIVERGENCES.md`.
 fn packet_overrides(cfg: &RunConfig) -> Result<PacketOverrides, String> {
-    let spoof_src = match &cfg.spoof_source {
-        None => None,
-        Some(a) => match a.trim().parse::<std::net::Ipv4Addr>() {
-            Ok(ip) => Some(ip.octets()),
-            Err(_) => {
-                return Err(format!(
-                    "-S expects an IPv4 address, got \"{a}\" (names are not resolved here)"
-                ))
-            }
-        },
-    };
+    let (mut spoof_src, mut spoof_src6) = (None, None);
+    if let Some(a) = &cfg.spoof_source {
+        let family = if cfg.ipv6 { "IPv6" } else { "IPv4" };
+        let refuse =
+            || format!("-S expects an {family} address, got \"{a}\" (names are not resolved here)");
+        if cfg.ipv6 {
+            let ip = a
+                .trim()
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|_| refuse())?;
+            spoof_src6 = Some(ip.octets());
+        } else {
+            let ip = a
+                .trim()
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| refuse())?;
+            spoof_src = Some(ip.octets());
+        }
+    }
     Ok(PacketOverrides {
         ttl: cfg.ttl,
         bad_sum: cfg.bad_sum,
         spoof_src,
+        spoof_src6,
     })
 }
 

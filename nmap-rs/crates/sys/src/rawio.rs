@@ -139,6 +139,18 @@ impl LinkFraming {
         })
     }
 
+    /// The framing for a loopback whose datalink is `dlt`, where there is no
+    /// neighbor to discover: Linux's `lo` is Ethernet and takes any frame, so it
+    /// gets the interface's own MAC (zero there) and a zero destination;
+    /// FreeBSD's `lo0` is `DLT_NULL`. `None` for a datalink nmap does not send on.
+    /// Shared by the IPv6 port scans and IPv6 OS detection.
+    #[must_use]
+    pub fn for_loopback(dlt: i32, src_mac: Option<[u8; 6]>) -> Option<LinkFraming> {
+        LinkFraming::for_datalink(dlt, || Ok((src_mac.unwrap_or_default(), [0; 6])))
+            .ok()
+            .flatten()
+    }
+
     /// `packet` (an IPv6 packet) in this framing.
     #[must_use]
     pub fn frame(&self, packet: &[u8]) -> Vec<u8> {
@@ -283,6 +295,30 @@ mod tests {
         // An Ethernet link whose MACs cannot be had is an error, not a guess.
         let err = LinkFraming::for_datalink(1, || Err(io::Error::other("no ND reply")));
         assert!(err.is_err());
+    }
+
+    // A loopback has no neighbor: Linux's `lo` (Ethernet) gets its own MAC and a
+    // zero destination, FreeBSD's `lo0` its DLT_NULL family; nothing else is sent on.
+    #[test]
+    fn loopback_framing_by_datalink() {
+        let mac = Some([0, 0, 0, 0, 0, 7]);
+        assert_eq!(
+            LinkFraming::for_loopback(1, mac),
+            Some(LinkFraming::Ethernet {
+                src: [0, 0, 0, 0, 0, 7],
+                dst: [0; 6]
+            })
+        );
+        assert_eq!(
+            LinkFraming::for_loopback(1, None),
+            Some(LinkFraming::Ethernet {
+                src: [0; 6],
+                dst: [0; 6]
+            })
+        );
+        assert_eq!(LinkFraming::for_loopback(0, mac), Some(LinkFraming::Null));
+        assert_eq!(LinkFraming::for_loopback(12, None), Some(LinkFraming::Raw));
+        assert_eq!(LinkFraming::for_loopback(108, mac), None);
     }
 
     // Privileged loopback send: build a real UDP/IPv4 packet and transmit it to

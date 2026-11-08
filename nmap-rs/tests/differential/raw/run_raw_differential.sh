@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Raw-scan differential: each raw IPv4 scan type, run by C nmap and by nmap-rs
-# as root against one target, compared port by port on state and reason.
+# Raw-scan differential: each raw scan type, run by C nmap and by nmap-rs as
+# root against one target, compared port by port on state and reason.
 #
 # The target defaults to this host's own non-loopback address, the one an
 # outbound packet leaves from. C nmap scans its own address over the loopback
@@ -10,9 +10,12 @@
 # port filtered, which nmap-rs did until FreeBSD step d. TARGET=127.0.0.1
 # runs the same matrix over the loopback.
 #
-# An IPv6 TARGET runs with -6, and only the scans SCANS names (default for
-# IPv6: -sT). nmap-rs has no raw IPv6 port scans (`ipv6-raw-port-scans-unported`):
-# it connect-scans instead, and says so, so its raw rows would not compare.
+# An IPv6 TARGET runs with -6: the connect scan and every raw scan type (IPv6
+# scans step d). nmap-rs's raw IPv6 scans reach this host's own addresses, ::1
+# and an address of its own, which go over the loopback as C nmap sends them;
+# for any other IPv6 target it still connect-scans (`ipv6-raw-port-scans-unported`,
+# step e). A raw scan that fell back to a connect scan fails here rather than
+# compare connect rows with raw ones. SCANS overrides the list.
 #
 # Requires root (raw sockets, BPF) and a --features pcap build; SKIPs without
 # them, as run_os_differential.sh does.
@@ -45,7 +48,7 @@ fi
 
 TARGET="${TARGET:-$(python3 "$HERE/own_address.py")}"
 if [[ "$TARGET" == *:* ]]; then
-  FAMILY=6; SIX=(-6); SCANS="${SCANS:--sT}"
+  FAMILY=6; SIX=(-6); SCANS="${SCANS:--sT -sS -sF -sN -sX -sA -sW -sM -sU}"
 else
   FAMILY=4; SIX=(); SCANS="${SCANS:--sS -sF -sN -sX -sA -sW -sM -sU}"
 fi
@@ -98,6 +101,10 @@ for scan in $SCANS; do
   touch "$WORK/c.xml" "$WORK/rs.xml"
   if grep -q "lacks raw-scan support" "$WORK/rs.out"; then
     echo "SKIP: nmap-rs lacks the pcap feature (build with --features pcap)"; exit 0
+  fi
+  if [[ "$scan" != "-sT" ]] && grep -q "running a connect scan" "$WORK/rs.out"; then
+    echo "FAIL [$scan]: nmap-rs fell back to a connect scan:"; grep "connect scan" "$WORK/rs.out"
+    fail=1; continue
   fi
   python3 "$HERE/raw_project.py" <"$WORK/c.xml" >"$WORK/c.proj" || true
   python3 "$HERE/raw_project.py" <"$WORK/rs.xml" >"$WORK/rs.proj" || true

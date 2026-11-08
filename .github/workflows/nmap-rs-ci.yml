@@ -123,12 +123,15 @@ jobs:
       # the loopback the route names (FreeBSD's F7). They are #[ignore]d for want of
       # root, and until FreeBSD step d no CI job ran them. The runner makes cargo run
       # the test binaries it already built under sudo, so nothing is rebuilt as root.
+      # IPv6 scans step d: every raw scan type on ::1, and the IPv6 probe on the wire
+      # (scan6_e2e). REQUIRE_IPV6 makes a loopback without IPv6 fail, not skip.
       - run: >
           cargo test -p nmap-sys --all-features --no-fail-fast
           --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e
-          --test flagscan_e2e --test group_e2e -- --ignored
+          --test flagscan_e2e --test group_e2e --test scan6_e2e -- --ignored
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          REQUIRE_IPV6: "1"
       # F5: netdev's default gateway is the one /proc/net/route gives.
       - run: cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
 
@@ -569,9 +572,10 @@ jobs:
       - run: sudo -E env "PATH=$PATH" TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
       # FreeBSD step e: IPv6. -6 -O of ::1 and of an address of the host's own (a ULA
       # added to the default interface, without DAD), against C nmap, on what the
-      # classifier decides (verdict, top class, distance); then -6 -sT there. nmap-rs
-      # has no raw IPv6 port scans (`ipv6-raw-port-scans-unported`). Until step e no
-      # job compared -6 -O on the wire at all.
+      # classifier decides (verdict, top class, distance). Until step e no job
+      # compared -6 -O on the wire at all. Then, there and on ::1, -6 -sT and (IPv6
+      # scans step d) every raw scan type, port by port against C nmap; the port's
+      # raw IPv6 scans of other hosts wait for step e (`ipv6-raw-port-scans-unported`).
       - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 bash tests/differential/m5/run_os6_differential.sh
       - run: sudo ip -6 addr add fd00:5ca1::10/64 dev "$(ip -o -4 route show default | awk '{print $5}')" nodad
       - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 TARGET=fd00:5ca1::10 bash tests/differential/m5/run_os6_differential.sh
@@ -933,7 +937,8 @@ jobs:
             # names (F7). 127.0.0.2 answers on lo0 only as an alias, where
             # Linux routes all of 127/8 to lo.
             ifconfig lo0 alias 127.0.0.2/32
-            gate cargo test -p nmap-sys --all-features --no-fail-fast --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e -- --ignored
+            # IPv6 scans step d: scan6_e2e on lo0's ::1, required to run.
+            gate env REQUIRE_IPV6=1 cargo test -p nmap-sys --all-features --no-fail-fast --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e --test scan6_e2e -- --ignored
             # F5: netdev's gateway is the one `route get default` gives.
             gate cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
             # Raw scans and -O of the VM's own address (over lo0, as the C
@@ -942,7 +947,8 @@ jobs:
             gate env TARGET=127.0.0.1 bash tests/differential/raw/run_raw_differential.sh
             gate env TARGET="$(python3 tests/differential/raw/own_address.py)" bash tests/differential/m5/run_os_differential.sh
             gate bash tests/differential/m5/run_os_differential.sh
-            # Step e: IPv6, on lo0 and on an address of the VM's own. FreeBSD
+            # Step e: IPv6, on lo0 and on an address of the VM's own (-O, then
+            # -sT and, since IPv6 scans step d, every raw scan type). FreeBSD
             # keeps IPv6 off an interface rc.conf did not configure (ND6
             # IFDISABLED), so it is enabled and a ULA added; DAD takes a moment.
             ifc="$(route -n get default | awk '/interface:/ {print $2}')"

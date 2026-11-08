@@ -5,24 +5,34 @@
 //! host-group model. **No `unsafe`**.
 //!
 //! Scan-type-specific behavior (how to build a probe, how to read a reply, the
-//! no-response default, the BPF filter) is factored behind the [`RawScanKind`] trait,
-//! so the SYN / UDP / flag scans share this one loop instead of carrying near-identical
-//! per-host copies. A captured reply is routed to the host that sent it by its **source
-//! IP** — every host can share one encoded source-port range because the source address
-//! disambiguates them.
+//! no-response default) is factored behind the [`RawScanKind`] trait, so the SYN / UDP /
+//! flag scans share this one loop instead of carrying near-identical per-host copies. A
+//! captured reply is routed to the host that sent it by its **source IP** — every host can
+//! share one encoded source-port range because the source address disambiguates them.
 //!
 //! Every raw scan runs on this one engine: [`SynKind`] (`-sS`), [`UdpKind`] (`-sU`), and
 //! [`FlagKind`] (`-sA`/`-sW`/`-sM`/`-sF`/`-sN`/`-sX`). A single host is just a group of
 //! one, so there is no separate per-host driver to keep in step.
+//!
+//! **Both IP families run on it** (IPv6 scans step d). nmap's `ultra_scan` is one loop
+//! for IPv4 and IPv6: `sendIPScanProbe` builds either family's packet from the same
+//! choices and `get_pcap_result` reads either family's reply. The engine is generic over
+//! a [`ScanFamily`], implemented by the address type itself ([`Ipv4Addr`],
+//! [`Ipv6Addr`]); a family supplies only what differs: its probe spec, its capture
+//! filter ([`ScanFamily::reply_filter`]) and, through `core::ipfamily`, how its replies
+//! are read. The kinds are written once for both.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
-use nmap_core::build::{BuildError, Ipv4Spec, PacketOverrides};
+use nmap_core::build::{BuildError, Ipv4Spec, Ipv6Spec, PacketOverrides, ProbeSpec};
 use nmap_core::classify::{default_port_state, ScanType};
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe};
 use nmap_core::flagscan::{build_flag_probe, flags_for, match_flag_response, FlagMatchCtx};
+use nmap_core::ipfamily::IpFamily;
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason};
 use nmap_core::payload::UdpPayloads;
 use nmap_core::synscan::{build_syn_probe, match_syn_response, MatchCtx};
@@ -36,10 +46,102 @@ const DEFAULT_TTL: u8 = 64;
 const CAPTURE_CAPACITY: usize = 4096;
 const IDLE_WAIT: Duration = Duration::from_millis(50);
 
+/// An IP family the engine scans, implemented by its address type ([`Ipv4Addr`],
+/// [`Ipv6Addr`]). See the module docs.
+pub trait ScanFamily: Copy + Eq + Hash + Debug + Display + Into<IpAddr> + Send + Sync {
+    /// The address as the core matchers take it (`[u8; 4]`, `[u8; 16]`), which is what
+    /// reads this family's replies (`core::ipfamily`).
+    type Octets: IpFamily + Hash;
+    /// The spec this family's probes are built from.
+    type Spec: ProbeSpec;
+
+    /// The address's bytes.
+    fn octets(self) -> Self::Octets;
+
+    /// The spec of one probe from `src` to `dst`: what the scan engine sends, then the
+    /// operator's `overrides`. The one site where `--ttl`, `--badsum` and `-S` take
+    /// effect. `ipid` is the IPv4 identification; IPv6 has none.
+    fn probe_spec(src: Self, dst: Self, ipid: u16, overrides: PacketOverrides) -> Self::Spec;
+
+    /// The capture filter for replies to `src`: `proto` datagrams to our encoded source
+    /// ports `base_port..=base_port + span`, and the family's ICMP errors (an error
+    /// quoting our probe is addressed to our *address* and carries no port of ours in
+    /// its own header, so a port-scoped filter alone would drop it and the port would
+    /// fall back to the no-response default).
+    fn reply_filter(src: Self, proto: Protocol, base_port: u16, span: u16) -> String;
+}
+
+/// libpcap's name for a scanned transport, and its IP protocol number.
+fn transport(proto: Protocol) -> (&'static str, u8) {
+    match proto {
+        Protocol::Tcp => ("tcp", 6),
+        Protocol::Udp => ("udp", 17),
+        Protocol::Sctp => ("sctp", 132),
+    }
+}
+
+impl ScanFamily for Ipv4Addr {
+    type Octets = [u8; 4];
+    type Spec = Ipv4Spec;
+
+    fn octets(self) -> [u8; 4] {
+        Ipv4Addr::octets(&self)
+    }
+
+    fn probe_spec(src: Self, dst: Self, ipid: u16, overrides: PacketOverrides) -> Ipv4Spec {
+        Ipv4Spec::new(src.octets(), dst.octets(), DEFAULT_TTL, ipid).with_overrides(overrides)
+    }
+
+    fn reply_filter(src: Self, proto: Protocol, base_port: u16, span: u16) -> String {
+        format!(
+            "({} and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
+            transport(proto).0,
+            src,
+            base_port,
+            base_port.saturating_add(span),
+            src
+        )
+    }
+}
+
+impl ScanFamily for Ipv6Addr {
+    type Octets = [u8; 16];
+    type Spec = Ipv6Spec;
+
+    fn octets(self) -> [u8; 16] {
+        Ipv6Addr::octets(&self)
+    }
+
+    fn probe_spec(src: Self, dst: Self, _ipid: u16, overrides: PacketOverrides) -> Ipv6Spec {
+        Ipv6Spec::new(src.octets(), dst.octets()).with_overrides(overrides)
+    }
+
+    /// Written over the fixed header's bytes rather than libpcap's `tcp`/`udp` and
+    /// `portrange`, which see only the first next header (or a fragment header and
+    /// then it) and read ports at offset 40. A reply whose first next header is our
+    /// transport must be to one of our source ports, as for IPv4. Anything whose first
+    /// next header is neither TCP nor UDP is let through: ICMPv6, and a reply behind
+    /// extension headers, whose ports only the walk can find. The matchers validate
+    /// and match every packet, so letting more through changes nothing they decide
+    /// (`scan6-filter-admits-extension-headers`).
+    fn reply_filter(src: Self, proto: Protocol, base_port: u16, span: u16) -> String {
+        format!(
+            "dst host {} and ((ip6[6:1] = {} and ip6[42:2] >= {} and ip6[42:2] <= {}) \
+             or (ip6[6:1] != 6 and ip6[6:1] != 17))",
+            src,
+            transport(proto).1,
+            base_port,
+            base_port.saturating_add(span),
+        )
+    }
+}
+
 /// A captured reply matched to a probe, tagged with the host that sent it.
-pub struct GroupReply {
-    /// Source IPv4 of the reply — identifies which host answered.
-    pub src_ip: [u8; 4],
+pub struct GroupReply<A = [u8; 4]> {
+    /// Source address of the reply — identifies which host answered. For an ICMP error
+    /// it is the quoted destination, so an error a router relays is still attributed to
+    /// the host we probed.
+    pub src_ip: A,
     /// The scanned port that answered.
     pub port: u16,
     /// Which attempt this reply answers.
@@ -52,10 +154,10 @@ pub struct GroupReply {
 /// The per-scan constants every matcher needs, gathered so the trait method does not grow
 /// a parameter per scan feature.
 #[derive(Debug, Clone, Copy)]
-pub struct MatchParams {
+pub struct MatchParams<A = [u8; 4]> {
     /// Our own source address — required to confirm that the packet quoted inside an ICMP
     /// error is one we actually sent.
-    pub our_ip: [u8; 4],
+    pub our_ip: A,
     /// Base source port; the attempt is `sport - base_port`.
     pub base_port: u16,
     /// Highest attempt number in flight.
@@ -63,11 +165,13 @@ pub struct MatchParams {
 }
 
 /// The scan-type-specific behavior the shared group loop needs. One impl per scan
-/// technique; the loop itself is scan-agnostic.
+/// technique, for both families; the loop itself is scan-agnostic.
 pub trait RawScanKind {
-    /// The transport protocol of the scanned ports (for the result model).
+    /// The transport protocol of the scanned ports (for the result model, and the
+    /// capture filter).
     fn protocol(&self) -> Protocol;
-    /// Build the packet(s) one logical probe of `(dport, tryno)` puts on the wire.
+    /// Build the packet(s) one logical probe of `(dport, tryno)` puts on the wire, in
+    /// `spec`'s family.
     ///
     /// Usually exactly one. The UDP scan sends **several** — one per payload registered
     /// for the port, all sharing the encoded source port — which is why this returns a
@@ -75,31 +179,30 @@ pub trait RawScanKind {
     ///
     /// # Errors
     /// Propagates a [`BuildError`] from the underlying packet builder.
-    fn build_probes(
+    fn build_probes<S: ProbeSpec>(
         &self,
-        spec: &Ipv4Spec,
+        spec: &S,
         base_port: u16,
         dport: u16,
         tryno: u32,
     ) -> Result<Vec<Vec<u8>>, BuildError>;
-    /// Match a captured frame to a probe, or `None` if it is not a reply for us.
-    fn match_reply(
+    /// Match a captured frame to a probe, or `None` if it is not a reply for us. The
+    /// family is `params`': an IPv4 scan reads IPv4 replies and ICMPv4 errors, an IPv6
+    /// scan IPv6 replies and ICMPv6 errors.
+    fn match_reply<A: IpFamily>(
         &self,
         frame: &[u8],
         eth_included: bool,
-        params: &MatchParams,
-    ) -> Option<GroupReply>;
+        params: &MatchParams<A>,
+    ) -> Option<GroupReply<A>>;
     /// The `(state, reason)` for a port that never answered (this scan's default).
     fn default_final(&self) -> (PortState, Reason);
-    /// The pcap BPF filter scoping capture to replies for this scan; `src` is our
-    /// source address, `span` the encoded source-port range width.
-    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String;
 }
 
 /// Per-host mutable state carried through the group loop.
-struct HostCtx {
+struct HostCtx<A> {
     sched: HostScheduler,
-    target: Ipv4Addr,
+    target: A,
     finals: Vec<(u16, PortState, Reason)>,
     /// `--scan-delay`: earliest time (microseconds since the scan started) this
     /// host may be probed again. Per host, as nmap's scan delay is — `-T0`
@@ -109,11 +212,12 @@ struct HostCtx {
 
 /// Run a group scan over `targets` that share one route (interface + source), driving
 /// every host concurrently through the group congestion window over one capture.
-/// Returns one [`Host`] per target, in order.
+/// Returns one [`Host`] per target, in order. The family is the addresses' (`src`'s):
+/// `S` must put that family's packets on the wire, and `P` capture its replies.
 #[allow(clippy::too_many_arguments)]
-pub async fn group_scan<K, S, P>(
-    src: Ipv4Addr,
-    targets: &[Ipv4Addr],
+pub async fn group_scan<A, K, S, P>(
+    src: A,
+    targets: &[A],
     ports: &[u16],
     mut sender: S,
     source: P,
@@ -126,6 +230,7 @@ pub async fn group_scan<K, S, P>(
     overrides: PacketOverrides,
 ) -> Vec<Host>
 where
+    A: ScanFamily,
     K: RawScanKind,
     S: RawSender,
     P: PacketSource,
@@ -144,7 +249,7 @@ where
         max_tryno,
     };
 
-    let mut ctxs: Vec<HostCtx> = targets
+    let mut ctxs: Vec<HostCtx<A>> = targets
         .iter()
         .map(|&t| HostCtx {
             sched: HostScheduler::with_params(ports, template, params, min_par, max_par),
@@ -154,7 +259,7 @@ where
         })
         .collect();
     // src IP -> host index, for O(1) reply demux.
-    let by_ip: HashMap<[u8; 4], usize> = ctxs
+    let by_ip: HashMap<A::Octets, usize> = ctxs
         .iter()
         .enumerate()
         .map(|(i, c)| (c.target.octets(), i))
@@ -196,8 +301,7 @@ where
                 // The one site where --ttl / --badsum / -S take effect. A default
                 // `overrides` leaves these bytes exactly as before the options
                 // existed, which is what makes the wiring safe to review.
-                let spec = Ipv4Spec::new(src.octets(), ctx.target.octets(), DEFAULT_TTL, ipid)
-                    .with_overrides(overrides);
+                let spec = A::probe_spec(src, ctx.target, ipid, overrides);
                 match kind.build_probes(&spec, base_port, probe.port, probe.tryno) {
                     // One logical probe, one outstanding entry, however many datagrams
                     // it takes — a reply is matched by (port, tryno), and for UDP we
@@ -315,7 +419,7 @@ where
                 .iter()
                 .any(|(_, s, _)| !matches!(s, PortState::OpenFiltered | PortState::Filtered));
             let mut host = Host::new(
-                IpAddr::V4(ctx.target),
+                ctx.target.into(),
                 if up { HostState::Up } else { HostState::Down },
             );
             for (port, state, reason) in ctx.finals.drain(..) {
@@ -348,9 +452,9 @@ impl RawScanKind for SynKind {
         Protocol::Tcp
     }
 
-    fn build_probes(
+    fn build_probes<S: ProbeSpec>(
         &self,
-        spec: &Ipv4Spec,
+        spec: &S,
         base_port: u16,
         dport: u16,
         tryno: u32,
@@ -364,12 +468,12 @@ impl RawScanKind for SynKind {
         )?])
     }
 
-    fn match_reply(
+    fn match_reply<A: IpFamily>(
         &self,
         frame: &[u8],
         eth_included: bool,
-        params: &MatchParams,
-    ) -> Option<GroupReply> {
+        params: &MatchParams<A>,
+    ) -> Option<GroupReply<A>> {
         let ctx = MatchCtx {
             our_ip: params.our_ip,
             base_port: params.base_port,
@@ -392,19 +496,6 @@ impl RawScanKind for SynKind {
         (
             default_port_state(ScanType::Syn, false).into(),
             Reason::NoResponse,
-        )
-    }
-
-    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
-        // ICMP must be admitted too: an error quoting our probe is addressed to our
-        // *address* and carries no port of ours in its own header, so a port-scoped
-        // filter would drop it and the port would fall back to the no-response default.
-        format!(
-            "(tcp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
-            src,
-            base_port,
-            base_port.saturating_add(span),
-            src
         )
     }
 }
@@ -444,9 +535,9 @@ impl RawScanKind for UdpKind {
         Protocol::Udp
     }
 
-    fn build_probes(
+    fn build_probes<S: ProbeSpec>(
         &self,
-        spec: &Ipv4Spec,
+        spec: &S,
         base_port: u16,
         dport: u16,
         tryno: u32,
@@ -472,12 +563,12 @@ impl RawScanKind for UdpKind {
         }
     }
 
-    fn match_reply(
+    fn match_reply<A: IpFamily>(
         &self,
         frame: &[u8],
         eth_included: bool,
-        params: &MatchParams,
-    ) -> Option<GroupReply> {
+        params: &MatchParams<A>,
+    ) -> Option<GroupReply<A>> {
         let ctx = UdpMatchCtx {
             our_ip: params.our_ip,
             base_port: params.base_port,
@@ -501,16 +592,6 @@ impl RawScanKind for UdpKind {
             Reason::NoResponse,
         )
     }
-
-    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
-        format!(
-            "(udp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
-            src,
-            base_port,
-            base_port.saturating_add(span),
-            src
-        )
-    }
 }
 
 // ---- Stateless TCP flag scan kinds --------------------------------------------------
@@ -530,9 +611,9 @@ impl RawScanKind for FlagKind {
         Protocol::Tcp
     }
 
-    fn build_probes(
+    fn build_probes<S: ProbeSpec>(
         &self,
-        spec: &Ipv4Spec,
+        spec: &S,
         base_port: u16,
         dport: u16,
         tryno: u32,
@@ -550,12 +631,12 @@ impl RawScanKind for FlagKind {
         )?])
     }
 
-    fn match_reply(
+    fn match_reply<A: IpFamily>(
         &self,
         frame: &[u8],
         eth_included: bool,
-        params: &MatchParams,
-    ) -> Option<GroupReply> {
+        params: &MatchParams<A>,
+    ) -> Option<GroupReply<A>> {
         let ctx = FlagMatchCtx {
             scan: self.scan,
             our_ip: params.our_ip,
@@ -579,28 +660,23 @@ impl RawScanKind for FlagKind {
             Reason::NoResponse,
         )
     }
-
-    fn bpf(&self, src: Ipv4Addr, base_port: u16, span: u16) -> String {
-        // ICMP must be admitted too: an error quoting our probe is addressed to our
-        // *address* and carries no port of ours in its own header, so a port-scoped
-        // filter would drop it and the port would fall back to the no-response default.
-        format!(
-            "(tcp and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
-            src,
-            base_port,
-            base_port.saturating_add(span),
-            src
-        )
-    }
 }
 
-/// Route + capture setup for a group scan: group the IPv4 targets that share an egress
-/// route, run each route-group through [`group_scan`] over one sender + capture, and
-/// return one [`Host`] per input target, in order (feature `pcap`).
+/// Route + capture setup for a group scan: group the targets that share an egress route,
+/// run each route-group through [`group_scan`] over one sender + capture, and return one
+/// [`Host`] per input target, in order (feature `pcap`).
+///
+/// IPv4 goes out an `IP_HDRINCL` raw socket. IPv6 goes out at layer 2, framed for the
+/// link (Linux has no `IPV6_HDRINCL`; [`crate::rawio::FramingSender`]), and only over a
+/// loopback for now: `::1` and this host's own addresses, which is where no neighbor
+/// has to be discovered ([`crate::route::routes_over_loopback6`]; IPv6 scans step e
+/// brings Ethernet). A target that has no route is reported down, as for IPv4.
 ///
 /// # Errors
 /// Propagates a raw-socket / capture-open error (notably `PermissionDenied`) and any
-/// interface-enumeration error.
+/// interface-enumeration error. `Unsupported` for an IPv6 target routed anywhere but a
+/// loopback, before anything is sent, and for a loopback whose datalink nmap does not
+/// send on.
 #[cfg(feature = "pcap")]
 pub async fn group_scan_targets<K: RawScanKind>(
     kind: &K,
@@ -611,59 +687,37 @@ pub async fn group_scan_targets<K: RawScanKind>(
     max_parallelism: usize,
     overrides: PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
-    use crate::capture::pcap_source::PcapSource;
     use crate::rawio::RawIpv4Sender;
-    use crate::route::{random_scan_keys, route_for};
+    use crate::route::{route_for, route_for6};
     use nmap_core::model::ScanResults;
 
     // Probe raw-socket capability once; PermissionDenied here is the fallback signal.
+    // The same privilege opens the IPv6 path's capture handle for sending.
     drop(RawIpv4Sender::new()?);
 
     let span = u16::try_from(params.max_retransmissions).unwrap_or(16);
 
-    // Bucket the IPv4 targets by (interface, source). Non-IPv4 / unroutable
-    // targets become `Down` placeholders, keeping the output aligned with the input.
+    // Unroutable targets become `Down` placeholders, keeping the output aligned with
+    // the input.
+    let buckets = bucket_targets(targets, route_for, route_for6)?;
     let mut result_slot: Vec<Option<Host>> = vec![None; targets.len()];
-    let mut groups: HashMap<(String, Ipv4Addr), Vec<(usize, Ipv4Addr)>> = HashMap::new();
-    for (i, &ip) in targets.iter().enumerate() {
-        match ip {
-            IpAddr::V4(v4) => match route_for(v4)? {
-                Some(route) => groups
-                    .entry((route.iface, route.src))
-                    .or_default()
-                    .push((i, v4)),
-                None => result_slot[i] = Some(Host::new(ip, HostState::Down)),
-            },
-            IpAddr::V6(_) => result_slot[i] = Some(Host::new(ip, HostState::Down)),
-        }
-    }
-
-    for ((iface, src), members) in groups {
-        let (_seqmask, base_port) = random_scan_keys();
-        let group_targets: Vec<Ipv4Addr> = members.iter().map(|(_, ip)| *ip).collect();
+    let run = RouteGroupRun {
+        ports,
+        template,
+        params,
+        max_parallelism,
+        span,
+        overrides,
+    };
+    for ((iface, src), members) in buckets.v4 {
         let sender = RawIpv4Sender::new()?;
-        let source = PcapSource::open(&iface, 65535, 100, Some(&kind.bpf(src, base_port, span)))?;
-        // Ethernet framing or not is the capture's datalink to say (FreeBSD's
-        // lo0 is DLT_NULL).
-        let eth = source.eth_included();
-        let hosts = group_scan(
-            src,
-            &group_targets,
-            ports,
-            sender,
-            source,
-            kind,
-            template,
-            params,
-            max_parallelism,
-            base_port,
-            eth,
-            overrides,
-        )
-        .await;
-        for ((slot, _), host) in members.into_iter().zip(hosts) {
-            result_slot[slot] = Some(host);
-        }
+        run.scan(kind, &iface, src, &members, sender, &mut result_slot)
+            .await?;
+    }
+    for ((iface, src), (src_mac, members)) in buckets.v6 {
+        let sender = loopback_sender6(&iface, src_mac)?;
+        run.scan(kind, &iface, src, &members, sender, &mut result_slot)
+            .await?;
     }
 
     let mut results = ScanResults::new();
@@ -675,10 +729,153 @@ pub async fn group_scan_targets<K: RawScanKind>(
     Ok(results)
 }
 
+/// A scan's targets by route: the route-groups of each family, keyed by (interface,
+/// source), each member with its slot in the input. A target with no route is in
+/// neither, and is reported down.
+#[cfg(any(feature = "pcap", test))]
+#[derive(Debug, Default)]
+struct Buckets {
+    v4: HashMap<(String, Ipv4Addr), Vec<(usize, Ipv4Addr)>>,
+    v6: HashMap<(String, Ipv6Addr), Group6>,
+}
+
+/// An IPv6 route-group's members, with the loopback's own MAC, which its framing needs.
+#[cfg(any(feature = "pcap", test))]
+type Group6 = (Option<[u8; 6]>, Vec<(usize, Ipv6Addr)>);
+
+/// Group `targets` by the routes `route4` and `route6` give them. IPv6 targets are
+/// taken only over a loopback (`::1`, this host's own addresses); one routed anywhere
+/// else is `Unsupported` for the whole scan, before anything is sent, rather than
+/// probed without the neighbor discovery its link needs (IPv6 scans step e).
+///
+/// # Errors
+/// A route lookup's error, or `Unsupported` as above.
+#[cfg(any(feature = "pcap", test))]
+fn bucket_targets(
+    targets: &[IpAddr],
+    mut route4: impl FnMut(Ipv4Addr) -> std::io::Result<Option<crate::route::Route>>,
+    mut route6: impl FnMut(Ipv6Addr) -> std::io::Result<Option<crate::route::Route6>>,
+) -> std::io::Result<Buckets> {
+    let mut b = Buckets::default();
+    for (i, &ip) in targets.iter().enumerate() {
+        match ip {
+            IpAddr::V4(v4) => {
+                if let Some(route) = route4(v4)? {
+                    b.v4.entry((route.iface, route.src))
+                        .or_default()
+                        .push((i, v4));
+                }
+            }
+            IpAddr::V6(v6) => match route6(v6)? {
+                Some(route) if route.loopback => {
+                    b.v6.entry((route.iface, route.src))
+                        .or_insert_with(|| (route.src_mac, Vec::new()))
+                        .1
+                        .push((i, v6))
+                }
+                Some(route) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!(
+                            "{v6} is routed over {}, and raw IPv6 port scans reach only \
+                             this host's own addresses so far",
+                            route.iface
+                        ),
+                    ))
+                }
+                None => {}
+            },
+        }
+    }
+    Ok(b)
+}
+
+/// What every route-group of one scan shares.
+#[cfg(feature = "pcap")]
+struct RouteGroupRun<'a> {
+    ports: &'a [u16],
+    template: TimingTemplate,
+    params: TimingParams,
+    max_parallelism: usize,
+    span: u16,
+    overrides: PacketOverrides,
+}
+
+#[cfg(feature = "pcap")]
+impl RouteGroupRun<'_> {
+    /// Scan the `members` routed out `iface` from `src` through `sender`, with a capture
+    /// of their replies on `iface`, and put each host in its slot.
+    async fn scan<A: ScanFamily, K: RawScanKind, S: RawSender>(
+        &self,
+        kind: &K,
+        iface: &str,
+        src: A,
+        members: &[(usize, A)],
+        sender: S,
+        result_slot: &mut [Option<Host>],
+    ) -> std::io::Result<()> {
+        use crate::capture::pcap_source::PcapSource;
+        use crate::route::random_scan_keys;
+
+        let (_seqmask, base_port) = random_scan_keys();
+        let group_targets: Vec<A> = members.iter().map(|(_, ip)| *ip).collect();
+        let filter = A::reply_filter(src, kind.protocol(), base_port, self.span);
+        let source = PcapSource::open(iface, 65535, 100, Some(&filter))?;
+        // Ethernet framing or not is the capture's datalink to say (FreeBSD's
+        // lo0 is DLT_NULL).
+        let eth = source.eth_included();
+        let hosts = group_scan(
+            src,
+            &group_targets,
+            self.ports,
+            sender,
+            source,
+            kind,
+            self.template,
+            self.params,
+            self.max_parallelism,
+            base_port,
+            eth,
+            self.overrides,
+        )
+        .await;
+        for ((slot, _), host) in members.iter().zip(hosts) {
+            if let Some(s) = result_slot.get_mut(*slot) {
+                *s = Some(host);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The IPv6 sender for a loopback: a capture handle on `iface`, framing each packet for
+/// the link's datalink ([`crate::rawio::LinkFraming::for_loopback`]).
+///
+/// # Errors
+/// The handle's open error, or `Unsupported` for a datalink nmap does not send on.
+#[cfg(feature = "pcap")]
+fn loopback_sender6(
+    iface: &str,
+    src_mac: Option<[u8; 6]>,
+) -> std::io::Result<crate::rawio::FramingSender<crate::rawio::pcap_sender::PcapSender>> {
+    use crate::rawio::pcap_sender::PcapSender;
+    use crate::rawio::{FramingSender, LinkFraming};
+
+    let link = PcapSender::open(iface)?;
+    let dlt = link.datalink();
+    let framing = LinkFraming::for_loopback(dlt, src_mac).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("{iface}: unsupported datalink {dlt} for sending"),
+        )
+    })?;
+    Ok(FramingSender::new(link, framing))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmap_core::build::{build_tcp_raw, build_udp_raw};
+    use nmap_core::build::{build_tcp_raw, build_tcp_raw_ipv6, build_udp_raw, build_udp_raw_ipv6};
     use nmap_core::synscan::{seq32_encode, sport_encode};
     use std::sync::{Arc, Mutex};
 
@@ -1390,5 +1587,580 @@ mod tests {
         .await;
         assert_eq!(port_of(&hosts, 0, 80).state, PortState::OpenFiltered);
         assert_eq!(port_of(&hosts, 1, 80).state, PortState::Closed);
+    }
+
+    // ---- IPv6 (IPv6 scans step d) -----------------------------------------------
+
+    /// Our address in the IPv6 tests: 2001:db8::1. The engine does not route, so
+    /// any addresses do.
+    const US6: [u8; 16] = v6(1);
+
+    const fn v6(last: u8) -> [u8; 16] {
+        [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, last,
+        ]
+    }
+
+    /// Wrap an IP packet in a 14-byte Ethernet header with the IPv6 type.
+    fn framed6(ip: &[u8]) -> Vec<u8> {
+        let mut f = vec![0u8; 12];
+        f.extend_from_slice(&[0x86, 0xDD]);
+        f.extend_from_slice(ip);
+        f
+    }
+
+    /// A bare IPv6 packet from `src` to `dst`: `first` names what follows the fixed
+    /// header, `chain` is extension headers already encoded, then `payload`.
+    fn ipv6(src: [u8; 16], dst: [u8; 16], first: u8, chain: &[u8], payload: &[u8]) -> Vec<u8> {
+        let plen = u16::try_from(chain.len().saturating_add(payload.len())).unwrap();
+        let mut p = vec![0x60, 0, 0, 0];
+        p.extend_from_slice(&plen.to_be_bytes());
+        p.extend_from_slice(&[first, 64]);
+        p.extend_from_slice(&src);
+        p.extend_from_slice(&dst);
+        p.extend_from_slice(chain);
+        p.extend_from_slice(payload);
+        p
+    }
+
+    /// `pkt` (an IPv6 packet with no extension headers) with a one-unit
+    /// destination-options header put in front of its upper layer.
+    fn behind_dstopts(pkt: &[u8]) -> Vec<u8> {
+        let mut chain = vec![pkt[6], 0, 1, 4, 0, 0, 0, 0];
+        chain.extend_from_slice(&pkt[40..]);
+        let src: [u8; 16] = pkt[8..24].try_into().unwrap();
+        let dst: [u8; 16] = pkt[24..40].try_into().unwrap();
+        ipv6(src, dst, 60, &[], &chain)
+    }
+
+    /// The bare IPv6 TCP reply from `from` to our `tryno == 0` source port.
+    fn tcp_reply6_bare(
+        seqmask: u32,
+        from: [u8; 16],
+        scanned: u16,
+        base: u16,
+        flags: u8,
+        window: u16,
+    ) -> Vec<u8> {
+        build_tcp_raw_ipv6(
+            &Ipv6Spec::new(from, US6),
+            scanned,
+            sport_encode(base, 0),
+            5,
+            seq32_encode(seqmask, 0).wrapping_add(1),
+            0,
+            flags,
+            window,
+            0,
+            &[],
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn tcp_reply6(
+        seqmask: u32,
+        from: [u8; 16],
+        scanned: u16,
+        base: u16,
+        flags: u8,
+        window: u16,
+    ) -> Vec<u8> {
+        framed6(&tcp_reply6_bare(
+            seqmask, from, scanned, base, flags, window,
+        ))
+    }
+
+    /// An ICMPv6 `icmp_type`/`icmp_code` error from `sender` to us, quoting `quoted`.
+    fn icmp6_error(sender: [u8; 16], (icmp_type, icmp_code): (u8, u8), quoted: &[u8]) -> Vec<u8> {
+        let mut msg = vec![icmp_type, icmp_code, 0, 0, 0, 0, 0, 0];
+        msg.extend_from_slice(quoted);
+        framed6(&ipv6(sender, US6, 58, &[], &msg))
+    }
+
+    /// Drive `group_scan` over IPv6 `targets` with scripted reply frames. Returns the
+    /// hosts and every packet the engine sent.
+    async fn run6<K: RawScanKind>(
+        kind: &K,
+        targets: &[Ipv6Addr],
+        ports: &[u16],
+        base: u16,
+        frames: Vec<Vec<u8>>,
+        overrides: PacketOverrides,
+    ) -> (Vec<Host>, Vec<Vec<u8>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let hosts = group_scan(
+            Ipv6Addr::from(US6),
+            targets,
+            ports,
+            MockSender {
+                sent: Arc::clone(&sent),
+            },
+            MockSource {
+                frames: Arc::new(Mutex::new(frames)),
+            },
+            kind,
+            TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
+            0,
+            base,
+            true,
+            overrides,
+        )
+        .await;
+        let sent = sent.lock().unwrap().clone();
+        (hosts, sent)
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_hosts_demux_by_source_address() {
+        let seqmask = 0xABCD_1234;
+        let base = 40000u16;
+        let (h2, h3) = (Ipv6Addr::from(v6(2)), Ipv6Addr::from(v6(3)));
+        // .2 is open, .3 closed, on the same port and encoded source port.
+        let (hosts, _) = run6(
+            &SynKind { seqmask },
+            &[h2, h3],
+            &[80],
+            base,
+            vec![
+                tcp_reply6(seqmask, v6(3), 80, base, TH_RST | TH_ACK, 0),
+                tcp_reply6(seqmask, v6(2), 80, base, TH_SYN | TH_ACK, 8192),
+            ],
+            PacketOverrides::default(),
+        )
+        .await;
+        assert_eq!(hosts[0].address, IpAddr::V6(h2));
+        assert_eq!(hosts[1].address, IpAddr::V6(h3));
+        let (p2, p3) = (port_of(&hosts, 0, 80), port_of(&hosts, 1, 80));
+        assert_eq!((p2.state, p2.reason), (PortState::Open, Reason::ConnAccept));
+        assert_eq!((p3.state, p3.reason), (PortState::Closed, Reason::Reset));
+        assert_eq!(hosts[0].state, HostState::Up);
+    }
+
+    /// What an IPv6 scan puts on the wire is step c's probe, for the right host:
+    /// hop limit 255 unless `--ttl` says otherwise, and `--badsum` applied.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_probes_are_step_cs_with_the_operators_options() {
+        let seqmask = 0x0102_0304;
+        let base = 41000u16;
+        let target = Ipv6Addr::from(v6(2));
+        for (overrides, hop_limit) in [
+            (PacketOverrides::default(), 255u8),
+            (
+                PacketOverrides {
+                    ttl: Some(9),
+                    bad_sum: true,
+                    ..PacketOverrides::default()
+                },
+                9,
+            ),
+        ] {
+            let (_, sent) = run6(
+                &SynKind { seqmask },
+                &[target],
+                &[443],
+                base,
+                Vec::new(),
+                overrides,
+            )
+            .await;
+            assert!(!sent.is_empty());
+            for (tryno, pkt) in (0u32..).zip(&sent) {
+                let spec = Ipv6Spec::new(US6, v6(2)).with_overrides(overrides);
+                let want = build_syn_probe(&spec, base, 443, tryno, seqmask).unwrap();
+                assert_eq!(pkt, &want, "attempt {tryno}");
+                assert_eq!(pkt[7], hop_limit);
+                let v = nmap_core::recv_validate::validate_packet(pkt).unwrap();
+                assert_eq!((v.version, v.proto), (6, 6));
+            }
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_udp_icmpv6_errors_by_sender_and_datagrams() {
+        let base = 40000u16;
+        let (h2, h3, h4) = (
+            Ipv6Addr::from(v6(2)),
+            Ipv6Addr::from(v6(3)),
+            Ipv6Addr::from(v6(4)),
+        );
+        let probe = |to: [u8; 16]| {
+            nmap_core::udpscan::build_udp_probe(&Ipv6Spec::new(US6, to), base, 53, 0).unwrap()
+        };
+        let reply = build_udp_raw_ipv6(&Ipv6Spec::new(v6(4), US6), 53, base, b"hi").unwrap();
+        let (hosts, _) = run6(
+            &UdpKind::bare(),
+            &[h2, h3, h4],
+            &[53],
+            base,
+            vec![
+                // .3's probe is answered by a router: filtered, and on .3.
+                icmp6_error(v6(0xfe), (1, 4), &probe(v6(3))),
+                // .2 answers its own: port unreachable from the target is closed.
+                icmp6_error(v6(2), (1, 4), &probe(v6(2))),
+                // .4 sends a datagram back.
+                framed6(&reply),
+            ],
+            PacketOverrides::default(),
+        )
+        .await;
+        let p = |i| port_of(&hosts, i, 53);
+        assert_eq!(
+            (p(0).state, p(0).reason),
+            (PortState::Closed, Reason::PortUnreach)
+        );
+        assert_eq!(
+            (p(1).state, p(1).reason),
+            (PortState::Filtered, Reason::PortUnreach)
+        );
+        assert_eq!(
+            (p(2).state, p(2).reason),
+            (PortState::Open, Reason::UdpResponse)
+        );
+    }
+
+    /// D2: parameter problem code 0 on a TCP probe is filtered, not open.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_parameter_problem_is_filtered_and_no_route_is_its_own_reason() {
+        let seqmask = 0x0BAD_F00D;
+        let base = 40000u16;
+        let probe = build_syn_probe(&Ipv6Spec::new(US6, v6(2)), base, 443, 0, seqmask).unwrap();
+        for (err, reason) in [
+            ((4, 0), Reason::ParamProblem),
+            ((1, 0), Reason::NoRoute),
+            ((1, 1), Reason::AdminProhibited),
+        ] {
+            let (hosts, _) = run6(
+                &SynKind { seqmask },
+                &[Ipv6Addr::from(v6(2))],
+                &[443],
+                base,
+                vec![icmp6_error(v6(2), err, &probe)],
+                PacketOverrides::default(),
+            )
+            .await;
+            let p = port_of(&hosts, 0, 443);
+            assert_eq!(
+                (p.state, p.reason),
+                (PortState::Filtered, reason),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// A reply behind an extension header reaches the matcher (the filter lets it
+    /// through, `ipv6_filter_*`), which walks to it.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_a_reply_behind_destination_options_is_matched() {
+        let base = 40000u16;
+        let reply = tcp_reply6_bare(7, v6(2), 80, base, TH_RST | TH_ACK, 0);
+        let (hosts, _) = run6(
+            &FlagKind {
+                scan: ScanType::Ack,
+                seqmask: 7,
+            },
+            &[Ipv6Addr::from(v6(2))],
+            &[80],
+            base,
+            vec![framed6(&behind_dstopts(&reply))],
+            PacketOverrides::default(),
+        )
+        .await;
+        let p = port_of(&hosts, 0, 80);
+        assert_eq!((p.state, p.reason), (PortState::Unfiltered, Reason::Reset));
+    }
+
+    /// Each family's scan reads only its own family: an IPv4 reply from the
+    /// IPv4-mapped form of the target answers nothing in an IPv6 scan, and the
+    /// flag scans keep their own no-response defaults.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_scans_read_only_ipv6_replies() {
+        let base = 40000u16;
+        let mapped = Ipv6Addr::from(Ipv4Addr::new(127, 0, 0, 2).to_ipv6_mapped().octets());
+        for (scan, want) in [
+            (ScanType::Fin, PortState::OpenFiltered),
+            (ScanType::Window, PortState::Filtered),
+        ] {
+            let (hosts, _) = run6(
+                &FlagKind { scan, seqmask: 7 },
+                &[mapped],
+                &[80],
+                base,
+                vec![tcp_reply(7, [127, 0, 0, 2], 80, base, TH_RST | TH_ACK, 0)],
+                PacketOverrides::default(),
+            )
+            .await;
+            let p = port_of(&hosts, 0, 80);
+            assert_eq!((p.state, p.reason), (want, Reason::NoResponse), "{scan:?}");
+        }
+    }
+
+    /// Without a link header, as FreeBSD's `lo0` delivers once its `DLT_NULL`
+    /// family is stripped.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn ipv6_replies_without_a_link_header() {
+        let seqmask = 0x1111_2222;
+        let base = 40000u16;
+        let hosts = group_scan(
+            Ipv6Addr::from(US6),
+            &[Ipv6Addr::from(v6(2))],
+            &[22],
+            MockSender::default(),
+            MockSource {
+                frames: Arc::new(Mutex::new(vec![tcp_reply6_bare(
+                    seqmask,
+                    v6(2),
+                    22,
+                    base,
+                    TH_SYN | TH_ACK,
+                    1024,
+                )])),
+            },
+            &SynKind { seqmask },
+            TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
+            0,
+            base,
+            false,
+            PacketOverrides::default(),
+        )
+        .await;
+        assert_eq!(port_of(&hosts, 0, 22).state, PortState::Open);
+    }
+
+    // ---- Routing a scan's targets -------------------------------------------------
+
+    fn route6(iface: &str, src: [u8; 16], loopback: bool) -> crate::route::Route6 {
+        crate::route::Route6 {
+            iface: iface.into(),
+            src: Ipv6Addr::from(src),
+            src_mac: Some([0; 6]),
+            next_hop: Ipv6Addr::from(v6(0xfe)),
+            next_hop_mac: None,
+            directly_connected: true,
+            loopback,
+        }
+    }
+
+    /// IPv6 targets over a loopback join one route-group per (interface, source); an
+    /// unroutable one is left out (down); the IPv4 targets keep their own groups.
+    #[test]
+    fn targets_are_grouped_by_family_and_route() {
+        let lo6 = Ipv6Addr::LOCALHOST;
+        let own6 = Ipv6Addr::from(v6(0x10));
+        let none6 = Ipv6Addr::from(v6(0x99));
+        let v4 = Ipv4Addr::new(127, 0, 0, 2);
+        let targets = [
+            IpAddr::V6(lo6),
+            IpAddr::V4(v4),
+            IpAddr::V6(own6),
+            IpAddr::V6(none6),
+            IpAddr::V6(lo6),
+        ];
+        let b = bucket_targets(
+            &targets,
+            |t| {
+                Ok(Some(crate::route::Route {
+                    iface: "lo".into(),
+                    src: t,
+                }))
+            },
+            |t| {
+                Ok(if t == lo6 {
+                    Some(route6("lo", lo6.octets(), true))
+                } else if t == own6 {
+                    // An address of our own goes over the loopback from itself.
+                    Some(route6("lo", own6.octets(), true))
+                } else {
+                    None
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(b.v4.len(), 1);
+        assert_eq!(b.v4[&("lo".to_string(), v4)], vec![(1, v4)]);
+        assert_eq!(b.v6.len(), 2);
+        assert_eq!(b.v6[&("lo".to_string(), lo6)].1, vec![(0, lo6), (4, lo6)]);
+        assert_eq!(b.v6[&("lo".to_string(), own6)].1, vec![(2, own6)]);
+        assert_eq!(b.v6[&("lo".to_string(), own6)].0, Some([0; 6]));
+    }
+
+    /// An IPv6 target routed anywhere but a loopback refuses the whole scan, before
+    /// anything is sent: Ethernet and neighbor discovery are step e's.
+    #[test]
+    fn an_ipv6_target_beyond_this_host_is_refused() {
+        let far = Ipv6Addr::from(v6(0x20));
+        let err = bucket_targets(
+            &[IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V6(far)],
+            |_| Ok(None),
+            |t| Ok(Some(route6("eth0", US6, t == Ipv6Addr::LOCALHOST))),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(
+            err.to_string().contains("2001:db8::20 is routed over eth0"),
+            "{err}"
+        );
+        // A lookup error is the scan's error.
+        let err = bucket_targets(
+            &[IpAddr::V6(far)],
+            |_| Ok(None),
+            |_| Err(std::io::Error::other("no interfaces")),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "no interfaces");
+    }
+
+    // ---- The capture filters, compiled and run by libpcap -----------------------
+
+    #[cfg(feature = "pcap")]
+    mod filters {
+        use super::*;
+
+        const TCP: u8 = 6;
+        const UDP: u8 = 17;
+
+        /// Whether `filter`, compiled by libpcap for datalink `dlt`, admits the IP
+        /// packet `ip` framed for that link.
+        fn admits(dlt: i32, filter: &str, ip: &[u8]) -> bool {
+            let cap = pcap::Capture::dead(pcap::Linktype(dlt)).expect("a dead capture");
+            let prog = cap.compile(filter, true).expect("the filter compiles");
+            let six = ip[0] >> 4 == 6;
+            let frame = match dlt {
+                1 => {
+                    let mut f = vec![0u8; 12];
+                    f.extend_from_slice(if six { &[0x86, 0xDD] } else { &[0x08, 0x00] });
+                    f.extend_from_slice(ip);
+                    f
+                }
+                0 => {
+                    // A live capture's filter checks for the platform's own
+                    // AF_INET6 (libpcap's gencode), which on the BSDs is what
+                    // lo0 carries (`NULL_AF_INET6`): 28 on FreeBSD.
+                    let af = if six { socket2::Domain::IPV6.into() } else { 2 };
+                    let mut f = i32::to_ne_bytes(af).to_vec();
+                    f.extend_from_slice(ip);
+                    f
+                }
+                other => panic!("datalink {other}"),
+            };
+            prog.filter(&frame)
+        }
+
+        /// An IPv6 packet from `src` to `dst` whose upper layer is `proto` with
+        /// destination port `dport`.
+        fn l4_6(src: [u8; 16], dst: [u8; 16], proto: u8, dport: u16) -> Vec<u8> {
+            let spec = Ipv6Spec::new(src, dst);
+            match proto {
+                TCP => {
+                    build_tcp_raw_ipv6(&spec, 80, dport, 1, 2, 0, TH_RST, 0, 0, &[], &[]).unwrap()
+                }
+                UDP => build_udp_raw_ipv6(&spec, 53, dport, b"x").unwrap(),
+                _ => unreachable!(),
+            }
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "calls into libpcap")]
+        fn ipv6_filter_admits_our_ports_icmpv6_and_extension_headers() {
+            let us = Ipv6Addr::from(US6);
+            let (base, span) = (40000u16, 10u16);
+            for dlt in [1, 0] {
+                for (proto, other) in [(Protocol::Tcp, UDP), (Protocol::Udp, TCP)] {
+                    let mine = transport(proto).1;
+                    let f = Ipv6Addr::reply_filter(us, proto, base, span);
+                    let ok = |ip: &[u8]| admits(dlt, &f, ip);
+                    let why = format!("{proto:?} on datalink {dlt}: {f}");
+                    // Our transport, to each end of our source-port range.
+                    assert!(ok(&l4_6(v6(2), US6, mine, base)), "{why}");
+                    assert!(ok(&l4_6(v6(2), US6, mine, base + span)), "{why}");
+                    // ... and not past either end, nor the other transport.
+                    assert!(!ok(&l4_6(v6(2), US6, mine, base - 1)), "{why}");
+                    assert!(!ok(&l4_6(v6(2), US6, mine, base + span + 1)), "{why}");
+                    assert!(!ok(&l4_6(v6(2), US6, other, base)), "{why}");
+                    // Nor to anyone but us (our own probe to the target).
+                    assert!(!ok(&l4_6(US6, v6(2), mine, base)), "{why}");
+                    // ICMPv6 to us.
+                    let err = ipv6(v6(0xfe), US6, 58, &[], &[1, 4, 0, 0, 0, 0, 0, 0]);
+                    assert!(ok(&err), "{why}");
+                    // A reply behind an extension header, to any port: the walk
+                    // decides. Destination options, hop-by-hop, a fragment header.
+                    let deep = behind_dstopts(&l4_6(v6(2), US6, mine, 9));
+                    assert!(ok(&deep), "{why}");
+                    let mut hop = deep.clone();
+                    hop[6] = 0;
+                    assert!(ok(&hop), "{why}");
+                    let mut frag = deep.clone();
+                    frag[6] = 44;
+                    assert!(ok(&frag), "{why}");
+                    // Nothing of the other family, even to our ports.
+                    let v4 = build_udp_raw(&Ipv4Spec::new([10, 0, 0, 2], US, 64, 1), 53, base, b"")
+                        .unwrap();
+                    assert!(!ok(&v4), "{why}");
+                }
+            }
+        }
+
+        /// The IPv4 filter is the one the engine always used.
+        #[test]
+        #[cfg_attr(miri, ignore = "calls into libpcap")]
+        fn ipv4_filter_is_unchanged() {
+            let us = Ipv4Addr::from(US);
+            assert_eq!(
+                Ipv4Addr::reply_filter(us, Protocol::Tcp, 40000, 16),
+                "(tcp and dst host 127.0.0.1 and dst portrange 40000-40016) \
+                 or (icmp and dst host 127.0.0.1)"
+            );
+            assert_eq!(
+                Ipv4Addr::reply_filter(us, Protocol::Udp, 65530, 16),
+                "(udp and dst host 127.0.0.1 and dst portrange 65530-65535) \
+                 or (icmp and dst host 127.0.0.1)"
+            );
+            let f = Ipv4Addr::reply_filter(us, Protocol::Udp, 40000, 16);
+            let spec = Ipv4Spec::new([127, 0, 0, 2], US, 64, 1);
+            for dlt in [1, 0] {
+                assert!(admits(
+                    dlt,
+                    &f,
+                    &build_udp_raw(&spec, 53, 40001, b"").unwrap()
+                ));
+                assert!(!admits(
+                    dlt,
+                    &f,
+                    &build_udp_raw(&spec, 53, 39999, b"").unwrap()
+                ));
+                // IPv6 is not admitted by an IPv4 scan's filter.
+                assert!(!admits(dlt, &f, &l4_6(v6(2), US6, UDP, 40001)));
+            }
+        }
     }
 }

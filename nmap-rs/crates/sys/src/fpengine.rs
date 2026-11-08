@@ -303,10 +303,7 @@ pub async fn os_scan_host6(
     let framing = match dlt {
         // A loopback has no neighbor to discover: Linux's `lo` is Ethernet with
         // zero MACs, and takes any frame.
-        1 if route.loopback => Some(LinkFraming::Ethernet {
-            src: route.src_mac.unwrap_or_default(),
-            dst: [0; 6],
-        }),
+        _ if route.loopback => LinkFraming::for_loopback(dlt, route.src_mac),
         1 => {
             let src_mac = route.src_mac.ok_or_else(|| {
                 Error::new(

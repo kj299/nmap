@@ -147,15 +147,18 @@ narrower *rendering* of the same result.
       and `-dN`. Found by the lfs step's review.
 - [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
       IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
-      over IPv6; every raw driver here sends IPv4 only. (The pieces are in: IPv6
-      validation since IPv6 scans step a, ICMPv6 classification and the IPv6 matchers
-      since step b, the IPv6 probe builders since step c,
-      `docs/IPV6-SCAN-ANALYSIS.md`.) With
-      `-6`, a raw scan type prints "raw IPv6 port scans are not ported yet;
-      running a connect scan (-sT)" and connect-scans, as a raw scan without
+      over IPv6, **to any host**. Since IPv6 scans step d the port has all eight for
+      this host's own addresses, `::1` and an address of its own, which go over a
+      loopback (`sys::group`, one engine for both families; validation since step a,
+      ICMPv6 classification and the matchers since step b, the probes since step c,
+      `docs/IPV6-SCAN-ANALYSIS.md`). Any other IPv6 target needs Ethernet framing
+      and neighbor discovery for its next hop (step e). With `-6`, a raw scan of such
+      a target prints "raw IPv6 port scans reach only this host's own addresses so
+      far; running a connect scan (-sT)" and connect-scans, as a raw scan without
       privilege does. Until FreeBSD step e it sent nothing and reported the host
-      with no ports and no word of why. `-6 -O` is unaffected: it has its own
-      layer-2 driver. Pinned by `cli/tests/ipv6_raw_fallback.rs`.
+      with no ports and no word of why; from then until step d every IPv6 raw scan
+      fell back. `-6 -O` is unaffected: it has its own layer-2 driver. Pinned by
+      `cli/tests/ipv6_raw_fallback.rs`.
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans
@@ -425,8 +428,37 @@ lands, `[x]` = confirmed by that module's gates.
       probe is the same). The probe builders agree with the C byte for byte given the
       same attempt byte (the scan-probe differential feeds both the same `opaque`). Not
       changed: aligning it would move the capture filter's port range and the reply
-      decode for both families. It can go with the IPv6 engine (step d) if wanted.
+      decode for both families. Kept when the engine took IPv6 (step d, decided
+      2026-11-08): both families number attempts the port's way.
       *(Found at IPv6 scans step c.)*
+- [x] `scan6-filter-admits-extension-headers` (`sys::group`,
+      `ScanFamily::reply_filter` for `Ipv6Addr`; ports `begin_sniffer`,
+      `scan_engine_raw.cc:916`): nmap's capture filter for a scan is
+      `dst host <us> and (icmp or icmp6 or ((tcp or udp or sctp) and (src host …)))`.
+      libpcap's `tcp`, `udp` and `icmp6` look only at the fixed header's next header
+      (or a fragment header and then it), so a reply behind hop-by-hop,
+      destination-options or routing headers is dropped by the kernel before
+      `validatepkt`'s walk, which was written to find it, ever runs: its port takes
+      the no-response default. The port's IPv6 filter is written over the fixed
+      header's bytes: our transport straight after it must be to our source-port
+      range (as the IPv4 filter's `portrange` does), and anything whose first next
+      header is neither TCP nor UDP passes, so the walk and the matchers decide, as
+      they do for the C's own IPv4 path. A reply with extension headers is rare
+      (none on a loopback), so the wire differential cannot show it; the filter is
+      tested by libpcap itself, compiling and running it over each case on Ethernet
+      and `DLT_NULL` (`ipv6_filter_admits_our_ports_icmpv6_and_extension_headers`).
+      Recorded as an engineering choice, `docs/IPV6-SCAN-ANALYSIS.md` §14.
+      *(Introduced at IPv6 scans step d.)*
+- [x] `cli-spoof-source-literal-only` (`cli::packet_overrides`, ports `nmap.cc:1463`):
+      C resolves `-S` with `resolve()` in the scan's family, so a name works, and with
+      `-6` it must give an IPv6 address ("Failed to resolve/decode supposed IPv6
+      source address"). The port takes a literal of the scan's family only, IPv4, or
+      IPv6 with `-6` (`PacketOverrides::spoof_src6`, since IPv6 scans step d), and
+      refuses anything else rather than send from the routed address: "-S expects an
+      IPv6 address, got … (names are not resolved here)". Before step d, `-6 -S` took
+      only an IPv4 literal, which nothing IPv6 used. Pinned by
+      `cli/tests/packet_shaping.rs` and `cli/tests/ipv6_raw_fallback.rs`.
+      *(Introduced at M7.5; extended at IPv6 scans step d.)*
 - [x] ~~`flagscan-ack-probe-attempt-in-sequence`~~ — **resolved** at IPv6 scans step c:
       nmap puts the encoded attempt in the **acknowledgment** of a probe carrying the
       ACK flag (`-sA`, `-sW`, `-sM`), with sequence 0, because a reply reflects our ack

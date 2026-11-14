@@ -408,7 +408,7 @@
     "cli": {
       "unsafe_audited": {
         "files": 2,
-        "sha256": "ee24b312bee5da4f6da7877edc2c05eee2ea27682f50576e2959ff5427aa0fa7"
+        "sha256": "deed642ddc4ec2f7bee1f6e2c346c8b8c0f9ac7e1813664289067c41219b147e"
       }
     },
     "core::build": {
@@ -450,15 +450,15 @@
     "core::flagscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
+        "sha256": "5bb36a8b642ec84418fd730b0bd76721fe04857064d9265fd69c55fd8a4a930f"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
+        "sha256": "5bb36a8b642ec84418fd730b0bd76721fe04857064d9265fd69c55fd8a4a930f"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "e688db4add0dc18616c33b7b6217d9c405ee892ad5414b5f84c1f474d66c4ec5"
+        "sha256": "5bb36a8b642ec84418fd730b0bd76721fe04857064d9265fd69c55fd8a4a930f"
       }
     },
     "core::icmp_quote": {
@@ -784,29 +784,29 @@
     "core::synscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
+        "sha256": "a66e1764392589e3029db7d2a2bf8a7b853ab8b781a8a0d5fc74c0a3b3d20daa"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
+        "sha256": "a66e1764392589e3029db7d2a2bf8a7b853ab8b781a8a0d5fc74c0a3b3d20daa"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "cdaf2683fffb18910463358d6583cf256e22ffec5bcc6ec66a9f2c7a9f6a389f"
+        "sha256": "a66e1764392589e3029db7d2a2bf8a7b853ab8b781a8a0d5fc74c0a3b3d20daa"
       }
     },
     "core::udpscan": {
       "fuzzed": {
         "files": 1,
-        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
+        "sha256": "93bce24c6ec58e1d790fcf3e82c4dfadb2ab7f0860519360850d1346fc3ffad3"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
+        "sha256": "93bce24c6ec58e1d790fcf3e82c4dfadb2ab7f0860519360850d1346fc3ffad3"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "41056b97b1a34ee8b53754fa7ba7af25af8952ebf108717f44d960bc33510f62"
+        "sha256": "93bce24c6ec58e1d790fcf3e82c4dfadb2ab7f0860519360850d1346fc3ffad3"
       }
     },
     "sys::nsefs": {

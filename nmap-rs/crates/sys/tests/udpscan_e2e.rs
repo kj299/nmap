@@ -192,7 +192,8 @@ async fn udp_scan_resolves_closed_on_loopback() {
         ),
     )
     .await
-    .expect("scan completed within 10s");
+    .expect("scan completed within 10s")
+    .expect("the capture did not fail");
 
     let host = &hosts[0];
     let closed = host.ports.iter().find(|p| p.number == closed_port).unwrap();

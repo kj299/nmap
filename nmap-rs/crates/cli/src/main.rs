@@ -19,8 +19,8 @@ use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
     exclude_specs, host_specs, parse_args, parse_port_spec, parse_target, render_grepable,
-    render_normal, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable, TargetSpec,
-    TimingParams, TimingTemplate,
+    render_normal, render_normal_stdout, render_xml, Added, ExcludeSet, ScanMeta, ScanResults,
+    ServiceTable, TargetSpec, TimingParams, TimingTemplate,
 };
 mod nse;
 
@@ -343,23 +343,7 @@ async fn main() -> ExitCode {
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
     for (host, (_, name)) in results.hosts.iter_mut().zip(targets.iter()) {
         host.hostname = name.clone();
-        if cfg.assume_up && host.state != HostState::Up {
-            host.state = HostState::Up;
-        }
-        // Why this host is believed up, for `--reason`. With -Pn the answer is
-        // `user-set`: the operator asserted liveness and nothing probed it, so
-        // reporting a packet reason would be inventing evidence. Otherwise the
-        // host is up because some port answered, and the reason is that port's.
-        if host.state == HostState::Up {
-            host.reason = if cfg.assume_up {
-                Some(nmap_core::model::Reason::UserSet)
-            } else {
-                host.ports
-                    .iter()
-                    .find(|p| p.state == PortState::Open || p.state == PortState::Closed)
-                    .map(|p| p.reason)
-            };
-        }
+        host.settle_liveness(cfg.assume_up);
     }
 
     // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
@@ -421,6 +405,7 @@ async fn main() -> ExitCode {
         reason: cfg.reason,
         verbose: cfg.verbose,
         debugging: cfg.debugging,
+        assume_up: cfg.assume_up,
     };
 
     if let Err(e) = emit_outputs(
@@ -450,22 +435,6 @@ async fn run_scan(
     overrides: PacketOverrides,
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
-    // Raw IPv6 port scans reach this host's own addresses (`::1`, and an address
-    // of its own), which go over a loopback (IPv6 scans step d). Any other IPv6
-    // target needs Ethernet framing and neighbor discovery, which are not ported
-    // yet (`ipv6-raw-port-scans-unported`, step e). Say so and connect-scan, as a
-    // raw scan without privilege does, rather than send nothing and report no ports.
-    let beyond_this_host = |ip: &IpAddr| match ip {
-        IpAddr::V6(v6) => !nmap_sys::route::routes_over_loopback6(*v6),
-        IpAddr::V4(_) => false,
-    };
-    if !matches!(cfg.scan, ScanKind::List | ScanKind::Connect) && ips.iter().any(beyond_this_host) {
-        eprintln!(
-            "nmap-rs: raw IPv6 port scans reach only this host's own addresses so far; \
-             running a connect scan (-sT)"
-        );
-        return connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await;
-    }
     match cfg.scan {
         // `-sL` sends nothing at all. C sets listscan + noportscan +
         // PINGTYPE_NONE (nmap.cc:1307), so the targets are expanded, reported
@@ -591,6 +560,20 @@ fn connect_cfg(
 }
 
 /// Run a `-sS` SYN scan, falling back to a connect scan on missing privilege or setup
+/// A capture that failed mid-scan ends the run, as 7.94's `netutil_fatal` does
+/// (`read_reply_pcap`, `netutil.cc:3337`): nothing is reported and no other scan is
+/// tried, since what the capture did not deliver says nothing about the targets.
+/// Every other raw-scan error is a setup failure, which falls back.
+#[cfg(feature = "pcap")]
+fn exit_if_capture_failed(e: &std::io::Error) {
+    if nmap_sys::capture::is_capture_failure(e) {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        eprintln!("nmap-rs: {e}");
+        std::process::exit(1);
+    }
+}
+
 /// failure (built with `pcap`).
 #[cfg(feature = "pcap")]
 async fn syn_or_fallback(
@@ -613,6 +596,7 @@ async fn syn_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -669,6 +653,7 @@ async fn udp_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -758,6 +743,7 @@ async fn flag_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -1583,13 +1569,19 @@ fn emit_outputs(
     notes: &[String],
     start_epoch: i64,
 ) -> std::io::Result<()> {
-    let normal = || {
-        let mut s = render_normal(results, meta, services);
+    // The terminal's report can hold lines the `-oN` file's does not (C's
+    // `LOG_STDOUT`), and none of them when stdout is silenced.
+    let normal = |terminal: bool| {
+        let mut s = if terminal {
+            render_normal_stdout(results, meta, services)
+        } else {
+            render_normal(results, meta, services)
+        };
         s.push_str(os_block);
         s
     };
     if !cfg.stdout_is_null() {
-        print!("{}", normal());
+        print!("{}", normal(true));
     }
     // Expand the strftime escapes here rather than in `parse_args`, which is
     // pure and has no clock. One expansion point for all four options, against
@@ -1602,7 +1594,7 @@ fn emit_outputs(
             text.push_str(n);
             text.push('\n');
         }
-        text.push_str(&normal());
+        text.push_str(&normal(false));
         write_to(&expand_dest(dest, stamp), &text)?;
     }
     if let Some(dest) = &cfg.out_xml {

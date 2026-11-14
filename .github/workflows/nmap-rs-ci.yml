@@ -125,12 +125,24 @@ jobs:
       # the test binaries it already built under sudo, so nothing is rebuilt as root.
       # IPv6 scans step d: every raw scan type on ::1, and the IPv6 probe on the wire
       # (scan6_e2e). REQUIRE_IPV6 makes a loopback without IPv6 fail, not skip.
+      # Step e: every outcome over Ethernet against a scripted link behind a TAP
+      # interface (scan6_tap_e2e); REQUIRE_TAP likewise.
       - run: >
           cargo test -p nmap-sys --all-features --no-fail-fast
           --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e
-          --test flagscan_e2e --test group_e2e --test scan6_e2e -- --ignored
+          --test flagscan_e2e --test group_e2e --test scan6_e2e
+          --test scan6_tap_e2e -- --ignored
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          REQUIRE_IPV6: "1"
+          REQUIRE_TAP: "1"
+      # A raw scan's loopback target is up whatever its ports say, as 7.94 marks it
+      # (`loopback-target-localhost-response`). The CLI as root; REQUIRE_RAW makes a
+      # fallback to a connect scan fail, not skip.
+      - run: cargo test -p nmap-cli --all-features --test loopback_liveness -- --ignored
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          REQUIRE_RAW: "1"
           REQUIRE_IPV6: "1"
       # F5: netdev's default gateway is the one /proc/net/route gives.
       - run: cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
@@ -574,13 +586,29 @@ jobs:
       # added to the default interface, without DAD), against C nmap, on what the
       # classifier decides (verdict, top class, distance). Until step e no job
       # compared -6 -O on the wire at all. Then, there and on ::1, -6 -sT and (IPv6
-      # scans step d) every raw scan type, port by port against C nmap; the port's
-      # raw IPv6 scans of other hosts wait for step e (`ipv6-raw-port-scans-unported`).
+      # scans step d) every raw scan type, port by port against C nmap.
       - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 bash tests/differential/m5/run_os6_differential.sh
       - run: sudo ip -6 addr add fd00:5ca1::10/64 dev "$(ip -o -4 route show default | awk '{print $5}')" nodad
       - run: sudo -E env "PATH=$PATH" REQUIRE_IPV6=1 TARGET=fd00:5ca1::10 bash tests/differential/m5/run_os6_differential.sh
       - run: sudo -E env "PATH=$PATH" TARGET=::1 bash tests/differential/raw/run_raw_differential.sh
       - run: sudo -E env "PATH=$PATH" TARGET=fd00:5ca1::10 bash tests/differential/raw/run_raw_differential.sh
+      # IPv6 scans step e: an on-link neighbor (D4). A network namespace behind a
+      # veth pair holds fd00:6e7::2, with the fixture running inside it; fd00:6e7::3
+      # is on the link and nobody answers for it. Every scan type against 7.94 there,
+      # so neighbor discovery and Ethernet framing face it; then the silent neighbor,
+      # which both must find down (7.94's implicit ND ping, which -Pn does not skip).
+      - run: |
+          sudo ip netns add nrs6
+          sudo ip link add nrs6a type veth peer name nrs6b
+          sudo ip link set nrs6b netns nrs6
+          sudo ip addr add fd00:6e7::1/64 dev nrs6a nodad
+          sudo ip link set nrs6a up
+          sudo ip netns exec nrs6 ip addr add fd00:6e7::2/64 dev nrs6b nodad
+          sudo ip netns exec nrs6 ip link set nrs6b up
+          sudo ip netns exec nrs6 ip link set lo up
+          ping -6 -c 1 -W 5 fd00:6e7::2
+      - run: sudo -E env "PATH=$PATH" TARGET=fd00:6e7::2 FIXTURE_IN="ip netns exec nrs6" bash tests/differential/raw/run_raw_differential.sh
+      - run: sudo -E env "PATH=$PATH" TARGET=fd00:6e7::3 SILENT=1 bash tests/differential/raw/run_raw_differential.sh
       # M4/M5 packet-walk differential: rebuild the C PacketParser oracle and
       # regenerate the committed corpus + golden, then require them to be unchanged.
       # The cargo test compares against the committed golden, so without this step a
@@ -939,6 +967,8 @@ jobs:
             ifconfig lo0 alias 127.0.0.2/32
             # IPv6 scans step d: scan6_e2e on lo0's ::1, required to run.
             gate env REQUIRE_IPV6=1 cargo test -p nmap-sys --all-features --no-fail-fast --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e --test scan6_e2e -- --ignored
+            # A loopback target is up whatever its ports say (`targets.cc:588`).
+            gate env REQUIRE_RAW=1 REQUIRE_IPV6=1 cargo test -p nmap-cli --all-features --test loopback_liveness -- --ignored
             # F5: netdev's gateway is the one `route get default` gives.
             gate cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
             # Raw scans and -O of the VM's own address (over lo0, as the C
@@ -960,6 +990,30 @@ jobs:
             gate env REQUIRE_IPV6=1 TARGET=fd00:5ca1::10 bash tests/differential/m5/run_os6_differential.sh
             gate env TARGET=::1 bash tests/differential/raw/run_raw_differential.sh
             gate env TARGET=fd00:5ca1::10 bash tests/differential/raw/run_raw_differential.sh
+            # IPv6 scans step e: an on-link neighbor, a VNET jail behind an epair
+            # holding fd00:6e7::2 with the fixture inside; fd00:6e7::3 is on the
+            # link and silent. As on Linux: every scan type, then the silent one.
+            # The link is set up as one gate: a step that fails is recorded and
+            # the scans over it skipped, and the gates after them still run.
+            # `gate` returns 0 either way, so the link is tested here. In an `if`
+            # condition `set -e` is off, so each step returns.
+            six_link() {
+              kldload -n if_epair || true
+              ep="$(ifconfig epair create)" || return 1
+              ep="${ep%a}"
+              jail -c name=nrs6 persist vnet vnet.interface="${ep}b" path=/ host.hostname=nrs6 || return 1
+              ifconfig "${ep}a" inet6 -ifdisabled fd00:6e7::1/64 up || return 1
+              jexec nrs6 ifconfig lo0 up || return 1
+              jexec nrs6 ifconfig "${ep}b" inet6 -ifdisabled fd00:6e7::2/64 up || return 1
+              sleep 3
+            }
+            echo "== gate: six_link"
+            if six_link; then
+              gate env TARGET=fd00:6e7::2 FIXTURE_IN="jexec nrs6" bash tests/differential/raw/run_raw_differential.sh
+              gate env TARGET=fd00:6e7::3 SILENT=1 bash tests/differential/raw/run_raw_differential.sh
+            else
+              echo "== FAILED: six_link"; failed="$failed|six_link"
+            fi
             # The M1 matrix. As root, 7.94 SYN-scans by default and nmap-rs
             # connect-scans (`default-scan-connect-even-privileged`), and on
             # FreeBSD the connect probe's reset fails the fixture's accept()

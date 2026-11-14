@@ -310,7 +310,7 @@ ledgered and made to say so. Their driver is a milestone of its own.
   takes distance 0 there (`route::is_localhost6`, `islocalhost`).
 - **`-6` with a raw scan type** warns "raw IPv6 port scans are not ported
   yet" and connect-scans (`ipv6-raw-port-scans-unported`, newly ledgered;
-  `cli/tests/ipv6_raw_fallback.rs`).
+  `cli/tests/ipv6_raw_fallback.rs`, renamed `ipv6_raw_scans.rs` when IPv6 scans step e removed the fallback).
 - **The gate.** `tests/differential/m5/run_os6_differential.sh` runs `-6 -O`
   with both programs as root and compares what the classifier decides: the
   verdict (`OS details: <class>`, or `No OS matches for host`; nmap-rs now
@@ -377,8 +377,10 @@ ledgered and made to say so. Their driver is a milestone of its own.
 - (c) (b) without raw IPv6, ledgered.
 
 **Decided (2026-11-01): (b)**, as recommended. F1's fix serves IPv4 and IPv6 alike. The IPv6 send
-path is already layer 2 on Linux for the same reason (no `IPV6_HDRINCL`),
-and FreeBSD has none either.
+path is already layer 2 on Linux. That was said here to be for want of
+`IPV6_HDRINCL`; Linux can take a caller-built IPv6 header (`IPPROTO_RAW`, or
+`IPV6_HDRINCL` since 4.5), so layer 2 is a choice, one path for both systems
+(`ipv6-send-is-layer-2-only`, corrected at IPv6 scans step e).
 
 ### D2 — Oracle
 

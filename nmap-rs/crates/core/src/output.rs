@@ -42,6 +42,9 @@ pub struct ScanMeta<'a> {
     /// (`portlist.cc:811`), so the renderer cannot make that call without them.
     pub verbose: u8,
     pub debugging: u8,
+    /// `-Pn`: no ping was asked for. C's closing "Host seems down" note is about a
+    /// ping that did not answer, so it is not printed then (`output.cc:2501`).
+    pub assume_up: bool,
 }
 
 /// Assemble the human-readable VERSION column for a port from its `-sV` fields,
@@ -136,6 +139,11 @@ fn shown_ports<'a>(host: &'a Host, meta: &ScanMeta) -> Vec<&'a crate::model::Por
 /// (`nmap.cc:2312`). It still counts as up in the footer — the host was found,
 /// it just has nothing the operator asked to see.
 fn host_is_reportable(host: &Host, meta: &ScanMeta) -> bool {
+    // A host found down is reported only under `-v` (`nmap.cc:2153`); otherwise it
+    // shows only in the closing count, and in the note about it.
+    if host.state == crate::model::HostState::Down && meta.verbose == 0 {
+        return false;
+    }
     !meta.open_only || host.ports.iter().any(|p| p.state == PortState::Open)
 }
 
@@ -261,7 +269,6 @@ fn ignored_reason(host: &Host, state: PortState) -> &'static str {
     )
 }
 
-/// Render the full normal (default, human-readable) report.
 /// One script result as normal output prints it: `formatScriptOutput`'s
 /// lines, or, for a result with no text, the line nmap's `error()` writes to
 /// the normal output in its place (`Bug in ...`, `nse_main.cc:534`).
@@ -302,10 +309,47 @@ fn script_block_xml(out: &mut String, tag: &str, list: &[ScriptOutput]) {
     let _ = writeln!(out, "</{tag}>");
 }
 
+/// The order 7.94 reports hosts in: those host discovery found down first, as it
+/// finds them (`nmap.cc:2151`, before the group is scanned), then the rest, after
+/// the scan (`nmap.cc:2292`). With its index, for the host's script results.
+///
+/// 7.94 does this per host group, and this port orders a run as one group, so the two
+/// agree only while 7.94 makes one group of the run: one route for every target, no
+/// repeat, and fewer up hosts than a group holds (`output-down-hosts-first`).
+fn report_order(hosts: &[Host]) -> impl Iterator<Item = (usize, &Host)> {
+    let down = |h: &&Host| h.state == crate::model::HostState::Down;
+    let first = hosts.iter().enumerate().filter(move |(_, h)| down(h));
+    let then = hosts.iter().enumerate().filter(move |(_, h)| !down(h));
+    first.chain(then)
+}
+
+/// Render the full normal (default, human-readable) report, as `-oN` writes it.
+///
+/// The terminal gets [`render_normal_stdout`], which can hold one more line.
 pub fn render_normal(
     results: &ScanResults,
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
+) -> String {
+    render_normal_to(results, meta, services, false)
+}
+
+/// The normal report as the terminal gets it: [`render_normal`], plus C's
+/// `LOG_STDOUT`-only lines. That is the closing "Host seems down" note, which is
+/// in no `-oN` file (`output.cc:2501`) and is not printed when stdout is silenced.
+pub fn render_normal_stdout(
+    results: &ScanResults,
+    meta: &ScanMeta,
+    services: Option<&ServiceTable>,
+) -> String {
+    render_normal_to(results, meta, services, true)
+}
+
+fn render_normal_to(
+    results: &ScanResults,
+    meta: &ScanMeta,
+    services: Option<&ServiceTable>,
+    terminal: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -316,15 +360,19 @@ pub fn render_normal(
 
     script_block_normal(&mut out, "Pre-scan script results:", &results.scripts.pre);
 
-    let mut up = 0usize;
-    let mut first = true;
-    for (i, host) in results.hosts.iter().enumerate() {
-        // The host still counts as up even when `--open` drops it from the
-        // report: it WAS found, it just has nothing the operator asked to see.
-        // C counts it the same way (`nmap.cc:2312` skips only the printing).
-        if host.state == crate::model::HostState::Up {
-            up = up.saturating_add(1);
-        }
+    // The host still counts as up even when `--open` drops it from the report: it
+    // WAS found, it just has nothing the operator asked to see. C counts it the same
+    // way (`nmap.cc:2312` skips only the printing).
+    let up = results
+        .hosts
+        .iter()
+        .filter(|h| h.state == crate::model::HostState::Up)
+        .count();
+    // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last
+    // one's too, so one stands before whatever follows: the next host, post-scan
+    // results, or "Nmap done". A down host's report line and a list-scan host's get
+    // none (`nmap.cc:2127`, `nmap.cc:2155`).
+    for (i, host) in report_order(&results.hosts) {
         if !host_is_reportable(host, meta) {
             continue;
         }
@@ -334,12 +382,10 @@ pub fn render_normal(
             results.scripts.hosts.get(&i),
             services,
             meta,
-            first,
         );
-        first = false;
-    }
-    if !results.scripts.post.is_empty() && !first {
-        out.push('\n');
+        if host.state == crate::model::HostState::Up {
+            out.push('\n');
+        }
     }
     script_block_normal(&mut out, "Post-scan script results:", &results.scripts.post);
 
@@ -347,6 +393,15 @@ pub fn render_normal(
     out.push_str(&service_fingerprint_block(&fps));
 
     let n = results.hosts.len();
+    // C's note for a lone host its ping found down (`printfinaloutput`); not after
+    // `-Pn`, which asked for no ping, nor after a list scan, which pings nothing.
+    let down = |h: &Host| h.state == crate::model::HostState::Down;
+    if terminal && n == 1 && up == 0 && !meta.assume_up && results.hosts.iter().all(down) {
+        let _ = writeln!(
+            out,
+            "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn"
+        );
+    }
     let _ = writeln!(
         out,
         "Nmap done: {} IP address{} ({} host{} up) scanned in {:.2} seconds",
@@ -414,27 +469,35 @@ fn render_host_normal(
     scripts: Option<&crate::model::HostScripts>,
     services: Option<&ServiceTable>,
     meta: &ScanMeta,
-    first: bool,
 ) {
     let name = match &host.hostname {
         Some(h) => format!("{h} ({})", host.address),
         None => host.address.to_string(),
     };
-    // The blank line SEPARATES host blocks; it does not prefix them, and a host
-    // with no block needs none. C emits "Nmap scan report" immediately after the
-    // Starting banner, blank-lines only between hosts that have something under
-    // them, and — in a list scan — no blank lines at all, because there is no
-    // port table for one to belong to:
+    // The caller writes the blank line that ENDS a scanned host's block; nothing
+    // prefixes one. C emits "Nmap scan report" immediately after the Starting
+    // banner. A down host's report line and a list-scan host's are not blocks, so
+    // get none:
     //
     //     Nmap scan report for 127.0.0.1
     //     Nmap scan report for 127.0.0.2     <- `-sL`, no separators
-    //
-    // The old code emitted a leading "\n" unconditionally, which put a stray
-    // blank line at the top of every report. Invisible in a normal scan (the
-    // differential harness normalizes whitespace) but `-sL`'s entire output is
-    // these lines, which is what made it visible.
-    if !first && host.state != crate::model::HostState::Unknown {
-        out.push('\n');
+
+    // A down host, reported because of `-v`, is the report line alone, with why
+    // under `--reason` (`write_host_header`): nothing was scanned on it.
+    if host.state == crate::model::HostState::Down {
+        match (meta.reason, host.reason) {
+            (true, Some(r)) => {
+                let _ = writeln!(
+                    out,
+                    "Nmap scan report for {name} [host down, received {}]",
+                    r.as_str()
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "Nmap scan report for {name} [host down]");
+            }
+        }
+        return;
     }
     let _ = writeln!(out, "Nmap scan report for {name}");
 
@@ -444,10 +507,6 @@ fn render_host_normal(
     // guessing `Down`. Saying "Host seems down" about a host we never probed
     // would be inventing a result.
     if host.state == crate::model::HostState::Unknown {
-        return;
-    }
-    if host.state != crate::model::HostState::Up {
-        let _ = writeln!(out, "Host seems down.");
         return;
     }
     // `--reason` says what established liveness: "Host is up, received syn-ack".
@@ -617,7 +676,7 @@ pub fn render_grepable(
         "# {} {} scan initiated {}",
         meta.scanner, meta.version, meta.started
     );
-    for host in &results.hosts {
+    for (_, host) in report_order(&results.hosts) {
         if !host_is_reportable(host, meta) {
             continue;
         }
@@ -633,6 +692,12 @@ pub fn render_grepable(
             "Host: {} ({})\tStatus: {}",
             host.address, hostname, status
         );
+        // A down host is its status record alone (`write_host_status`): it was not
+        // scanned, so has no `Ports:` record, even if a probe the scan sent before
+        // finding it down left a port behind.
+        if host.state == crate::model::HostState::Down {
+            continue;
+        }
 
         let shown = shown_ports(host, meta);
         if !shown.is_empty() {
@@ -929,15 +994,14 @@ pub fn render_xml(
     );
     script_block_xml(&mut out, "prescript", &results.scripts.pre);
 
-    let mut up = 0usize;
-    for (i, host) in results.hosts.iter().enumerate() {
+    // Counted before any is skipped: `--open` hides a host, it does not un-find it.
+    let up = results
+        .hosts
+        .iter()
+        .filter(|h| h.state == crate::model::HostState::Up)
+        .count();
+    for (i, host) in report_order(&results.hosts) {
         let scripts = results.scripts.hosts.get(&i);
-        let is_up = host.state == crate::model::HostState::Up;
-        if is_up {
-            up = up.saturating_add(1);
-        }
-        // Counted above, then skipped: `--open` hides the host, it does not
-        // un-find it.
         if !host_is_reportable(host, meta) {
             continue;
         }
@@ -968,6 +1032,12 @@ pub fn render_xml(
                 "<hostnames><hostname name=\"{}\" type=\"user\"/></hostnames>",
                 xml_escape(h)
             );
+        }
+        // A down host is its status, address and names alone (`nmap.cc:2155`): no
+        // `<ports>`, OS or script elements.
+        if host.state == crate::model::HostState::Down {
+            let _ = writeln!(out, "</host>");
+            continue;
         }
 
         let _ = writeln!(out, "<ports>");
@@ -1177,6 +1247,7 @@ mod tests {
             reason: false,
             verbose: 0,
             debugging: 0,
+            assume_up: false,
         }
     }
 
@@ -1810,5 +1881,160 @@ mod tests {
             collect_service_fingerprints(&results),
             vec!["FP-22;".to_owned(), "FP-443;".to_owned()]
         );
+    }
+
+    /// A host found down, as an on-link IPv6 neighbor that never answers is: C
+    /// reports it only under `-v`, as the report line alone, and notes a lone down
+    /// host at the end unless `-Pn` asked for no ping (`nmap.cc:2153`,
+    /// `write_host_header`, `printfinaloutput`).
+    #[test]
+    fn a_down_host_is_reported_only_under_verbose() {
+        let mut results = ScanResults::new();
+        let mut host = Host::new(IpAddr::V6("fd00:6e7::3".parse().unwrap()), HostState::Down);
+        host.reason = Some(Reason::NoResponse);
+        results.hosts.push(host);
+        let note =
+            "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn";
+
+        let quiet = meta();
+        let normal = render_normal_stdout(&results, &quiet, None);
+        assert!(!normal.contains("Nmap scan report"), "{normal}");
+        assert!(
+            normal.contains(&format!("{note}\nNmap done: 1 IP address (0 hosts up)")),
+            "{normal}"
+        );
+        // The note is `LOG_STDOUT`: the terminal's, never an `-oN` file's.
+        let file = render_normal(&results, &quiet, None);
+        assert!(!file.contains(note), "{file}");
+        assert!(file.contains("Nmap done: 1 IP address (0 hosts up)"));
+        let xml = render_xml(&results, &quiet, None);
+        assert!(!xml.contains("<host>"), "{xml}");
+        assert!(
+            xml.contains("<hosts up=\"0\" down=\"1\" total=\"1\"/>"),
+            "{xml}"
+        );
+        assert!(!render_grepable(&results, &quiet, None).contains("Host: "));
+
+        let pn = ScanMeta {
+            assume_up: true,
+            ..meta()
+        };
+        assert!(
+            !render_normal_stdout(&results, &pn, None).contains(note),
+            "-Pn pinged nothing"
+        );
+
+        let verbose = ScanMeta {
+            verbose: 1,
+            ..meta()
+        };
+        let normal = render_normal_stdout(&results, &verbose, None);
+        assert!(
+            normal.contains("Nmap scan report for fd00:6e7::3 [host down]\n"),
+            "{normal}"
+        );
+        assert!(!normal.contains("\nHost seems down.\n"), "{normal}");
+        assert!(normal.contains(note), "the note, under -v too: {normal}");
+        assert!(!render_normal(&results, &verbose, None).contains(note));
+        assert!(render_xml(&results, &verbose, None).contains("<status state=\"down\"/>"));
+        assert!(render_grepable(&results, &verbose, None)
+            .contains("Host: fd00:6e7::3 ()\tStatus: Down\n"));
+        let why = ScanMeta {
+            reason: true,
+            ..verbose
+        };
+        assert!(render_normal(&results, &why, None)
+            .contains("Nmap scan report for fd00:6e7::3 [host down, received no-response]\n"));
+
+        // One up host among two: no note, and the down one is still not listed.
+        let mut two = results.clone();
+        two.hosts
+            .push(Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up));
+        let normal = render_normal_stdout(&two, &quiet, None);
+        assert!(
+            !normal.contains(note) && !normal.contains("fd00:6e7::3"),
+            "{normal}"
+        );
+    }
+
+    /// Down hosts as 7.94 lists them under `-v`: first, as host discovery found
+    /// them (`nmap.cc:2155`), each its report line alone, with no blank line after
+    /// it; then the scanned hosts, each block ending in one (`nmap.cc:2330`). And a
+    /// down host is its status alone in every format, even with a port left on it.
+    #[test]
+    fn down_hosts_come_first_and_alone() {
+        let up = |last: u8| {
+            let mut h = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), HostState::Up);
+            h.ports.push(Port::new(
+                80,
+                Protocol::Tcp,
+                PortState::Closed,
+                Reason::Reset,
+            ));
+            h
+        };
+        let mut down = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), HostState::Down);
+        down.reason = Some(Reason::NoResponse);
+        down.ports.push(Port::new(
+            443,
+            Protocol::Tcp,
+            PortState::Filtered,
+            Reason::NoResponse,
+        ));
+        let results = ScanResults {
+            hosts: vec![up(1), down, up(3)],
+            ..Default::default()
+        };
+        let verbose = ScanMeta {
+            verbose: 1,
+            ..meta()
+        };
+
+        let normal = render_normal(&results, &verbose, None);
+        let body = normal.split_once('\n').unwrap().1;
+        assert!(
+            body.starts_with(
+                "Nmap scan report for 127.0.0.2 [host down]\nNmap scan report for 127.0.0.1\nHost is up.\n"
+            ),
+            "{normal}"
+        );
+        assert!(
+            normal.contains("80/tcp closed unknown\n\nNmap scan report for 127.0.0.3\n"),
+            "{normal}"
+        );
+        assert!(
+            !normal.contains("443"),
+            "a down host's port shown: {normal}"
+        );
+        // The last block ends with its blank line too, before "Nmap done".
+        assert!(
+            normal.contains("80/tcp closed unknown\n\nNmap done: 3 IP addresses"),
+            "{normal}"
+        );
+
+        let grep = render_grepable(&results, &verbose, None);
+        let hosts: Vec<&str> = grep.lines().filter(|l| l.starts_with("Host: ")).collect();
+        assert_eq!(
+            hosts,
+            [
+                "Host: 127.0.0.2 ()\tStatus: Down",
+                "Host: 127.0.0.1 ()\tStatus: Up",
+                "Host: 127.0.0.1 ()\tPorts: 80/closed/tcp/////",
+                "Host: 127.0.0.3 ()\tStatus: Up",
+                "Host: 127.0.0.3 ()\tPorts: 80/closed/tcp/////",
+            ],
+            "{grep}"
+        );
+
+        let xml = render_xml(&results, &verbose, None);
+        assert!(
+            xml.contains(
+                "<host>\n<status state=\"down\"/>\n<address addr=\"127.0.0.2\" addrtype=\"ipv4\"/>\n</host>\n<host>\n<status state=\"up\"/>\n<address addr=\"127.0.0.1\""
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("portid=\"443\""), "{xml}");
+        assert_eq!(xml.matches("<ports>").count(), 2, "{xml}");
+        assert!(xml.contains("<hosts up=\"2\" down=\"1\" total=\"3\"/>"));
     }
 }

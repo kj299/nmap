@@ -36,8 +36,9 @@
 //!
 //! * Matches IPv4 and IPv6 replies: [`match_syn_response`] is generic over the
 //!   [`IpFamily`], so the TCP checks are the same code for both. ICMPv6 errors are
-//!   classified by [`crate::classify::classify_icmpv6`]. Nothing sends IPv6 SYN
-//!   probes until the engine does (`ipv6-raw-port-scans-unported`, step d).
+//!   classified by [`crate::classify::classify_icmpv6`]. The engine sends IPv6 SYN
+//!   probes to every target since IPv6 scans step e (`ipv6-raw-port-scans-unported`,
+//!   resolved).
 
 use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};

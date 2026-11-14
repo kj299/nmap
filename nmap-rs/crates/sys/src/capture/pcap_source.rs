@@ -66,10 +66,27 @@ impl PcapSource {
         read_timeout_ms: i32,
         bpf: Option<&str>,
     ) -> io::Result<PcapSource> {
+        PcapSource::open_with(iface, snaplen, read_timeout_ms, bpf, false)
+    }
+
+    /// [`PcapSource::open`], promiscuous when `promisc` is set: a scan under `-S`
+    /// listens for replies to an address that may not be this host's, as C opens its
+    /// capture then (`scan_engine_raw.cc:869`).
+    ///
+    /// # Errors
+    /// As [`PcapSource::open`].
+    pub fn open_with(
+        iface: &str,
+        snaplen: i32,
+        read_timeout_ms: i32,
+        bpf: Option<&str>,
+        promisc: bool,
+    ) -> io::Result<PcapSource> {
         let dev = pcap::Capture::from_device(iface)
             .map_err(to_io)?
             .snaplen(snaplen)
             .timeout(read_timeout_ms)
+            .promisc(promisc)
             .immediate_mode(true);
         let mut cap = dev.open().map_err(to_io)?;
         if let Some(filter) = bpf {

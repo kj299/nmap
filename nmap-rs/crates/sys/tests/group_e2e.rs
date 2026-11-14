@@ -87,7 +87,8 @@ async fn two_loopback_hosts_scanned_as_one_group() {
         ),
     )
     .await
-    .expect("group scan completed within 10s");
+    .expect("group scan completed within 10s")
+    .expect("the capture did not fail");
 
     assert_eq!(hosts.len(), 2);
     let h1 = &hosts[0];

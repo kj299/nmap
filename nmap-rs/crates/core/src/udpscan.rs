@@ -36,8 +36,8 @@
 //!   [`build_udp_probe_with`]. [`build_udp_probe`] keeps the bare, zero-length datagram
 //!   for callers that have no payload table (and for the on-the-wire differential).
 //! * Matches IPv4 and IPv6 replies: [`match_udp_response`] is generic over the
-//!   [`IpFamily`]. Nothing sends IPv6 UDP probes until the engine does
-//!   (`ipv6-raw-port-scans-unported`, step d).
+//!   [`IpFamily`]. The engine sends IPv6 UDP probes to every target since IPv6 scans
+//!   step e (`ipv6-raw-port-scans-unported`, resolved).
 
 use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_udp_response, PortState, ScanType};

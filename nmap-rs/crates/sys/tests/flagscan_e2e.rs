@@ -151,7 +151,8 @@ async fn ack_and_fin_scans_resolve_a_closed_port() {
             ),
         )
         .await
-        .expect("scan completed within 10s");
+        .expect("scan completed within 10s")
+        .expect("the capture did not fail");
 
         let p = hosts[0]
             .ports

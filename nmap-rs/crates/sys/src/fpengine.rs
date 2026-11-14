@@ -269,9 +269,9 @@ where
 /// Resolves the route, frames the battery for the link it leaves on (on Ethernet, to
 /// the next hop's MAC, resolved by neighbor discovery; on a loopback, with no neighbor
 /// to resolve: FreeBSD's `lo0` takes a 4-byte `DLT_NULL` family, Linux's `lo` Ethernet
-/// with zero MACs) and runs a round. **The IPv6 path has no L3 raw-socket option**:
-/// Linux offers no `IPV6_HDRINCL`, so a caller-built IPv6 packet cannot be handed to the
-/// kernel to route the way the IPv4 driver does. Everything below the seams here —
+/// with zero MACs) and runs a round. The IPv6 path is layer 2 by choice, one path for
+/// Linux and the BSDs (`ipv6-send-is-layer-2-only`); 7.94 hands the packet to a raw
+/// socket and lets the kernel route it. Everything below the seams here —
 /// `build6`, `fp6_match`, `fp6`, `fpmodel`, `core::ndp`, `route::choose_route6`,
 /// `run_round` — is differential-tested or mock-tested; this function is the wiring that
 /// cannot be, and is validated on a privileged host with real IPv6.

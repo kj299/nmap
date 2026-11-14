@@ -226,7 +226,7 @@ jobs:
       # --require-done: every module merges fully gated, or with its reason
       # written down. core::output sat below DONE from M1 to M6 while every
       # check passed (LESSONS #035).
-      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json audit --fuzz-manifest nmap-rs/fuzz/Cargo.toml --require-done
+      - run: python3 porting-kit/harnesses/progress/progress.py --file nmap-rs/progress.json audit --fuzz-manifest nmap-rs/fuzz/Cargo.toml --require-done --src nmap-rs/crates
         working-directory: .
 
   supply-chain:

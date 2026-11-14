@@ -10,12 +10,12 @@
 # port filtered, which nmap-rs did until FreeBSD step d. TARGET=127.0.0.1
 # runs the same matrix over the loopback.
 #
-# An IPv6 TARGET runs with -6: the connect scan and every raw scan type (IPv6
-# scans step d). nmap-rs's raw IPv6 scans reach this host's own addresses, ::1
-# and an address of its own, which go over the loopback as C nmap sends them;
-# for any other IPv6 target it still connect-scans (`ipv6-raw-port-scans-unported`,
-# step e). A raw scan that fell back to a connect scan fails here rather than
-# compare connect rows with raw ones. SCANS overrides the list.
+# An IPv6 TARGET runs with -6: the connect scan and every raw scan type. Since
+# IPv6 scans step e, nmap-rs runs every raw IPv6 scan on its engine: this host's
+# own addresses, ::1 and one of its own, over the loopback as C nmap sends them
+# (step d), and any other target over its route's link (step e). A raw scan that
+# fell back to a connect scan, for want of privilege or of setup, fails here
+# rather than compare connect rows with raw ones. SCANS overrides the list.
 #
 # An on-link neighbor (IPv6 scans step e) is another host on an Ethernet link,
 # such as a network namespace behind a veth pair or a VNET jail behind an epair.
@@ -116,7 +116,9 @@ for scan in $SCANS; do
   if grep -q "lacks raw-scan support" "$WORK/rs.out"; then
     echo "SKIP: nmap-rs lacks the pcap feature (build with --features pcap)"; exit 0
   fi
-  if [[ "$scan" != "-sT" ]] && grep -q "running a connect scan" "$WORK/rs.out"; then
+  # Every fallback names itself: "falling back to a connect scan (-sT)", or to a
+  # "TCP connect scan" for a scan that is not TCP's.
+  if [[ "$scan" != "-sT" ]] && grep -qE "falling back to a (TCP )?connect scan" "$WORK/rs.out"; then
     echo "FAIL [$scan]: nmap-rs fell back to a connect scan:"; grep "connect scan" "$WORK/rs.out"
     fail=1; continue
   fi

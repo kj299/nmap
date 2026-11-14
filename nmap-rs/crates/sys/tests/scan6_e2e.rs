@@ -267,7 +267,8 @@ async fn transmitted_ipv6_syn_probe_matches_core_build_on_the_wire() {
         ),
     )
     .await
-    .expect("the scan finished");
+    .expect("the scan finished")
+    .expect("the capture did not fail");
     assert_eq!(
         port(&hosts[0], dport, Protocol::Tcp),
         (PortState::Closed, Reason::Reset)

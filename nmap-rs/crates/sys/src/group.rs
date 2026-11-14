@@ -39,7 +39,7 @@ use nmap_core::synscan::{build_syn_probe, match_syn_response, MatchCtx};
 use nmap_core::timing::{TimingParams, TimingTemplate};
 use nmap_core::udpscan::{build_udp_probe_with, match_udp_response, UdpMatchCtx};
 
-use crate::capture::{AsyncCapture, PacketSource};
+use crate::capture::{AsyncCapture, CaptureFailed, PacketSource};
 use crate::rawio::RawSender;
 
 const DEFAULT_TTL: u8 = 64;
@@ -62,6 +62,12 @@ pub trait ScanFamily: Copy + Eq + Hash + Debug + Display + Into<IpAddr> + Send +
     /// operator's `overrides`. The one site where `--ttl`, `--badsum` and `-S` take
     /// effect. `ipid` is the IPv4 identification; IPv6 has none.
     fn probe_spec(src: Self, dst: Self, ipid: u16, overrides: PacketOverrides) -> Self::Spec;
+
+    /// The `-S` source for this family, if the operator gave one. In C it becomes the
+    /// scan's source for everything (`route_dst`'s `spoofss`, `targets.cc:437`): the
+    /// probes, the capture filter (`scan_engine_raw.cc:917`), the replies and quotes
+    /// it accepts, and the neighbor solicitation.
+    fn spoofed(overrides: PacketOverrides) -> Option<Self>;
 
     /// The capture filter for replies to `src`: `proto` datagrams to our encoded source
     /// ports `base_port..=base_port + span`, and the family's ICMP errors (an error
@@ -92,6 +98,10 @@ impl ScanFamily for Ipv4Addr {
         Ipv4Spec::new(src.octets(), dst.octets(), DEFAULT_TTL, ipid).with_overrides(overrides)
     }
 
+    fn spoofed(overrides: PacketOverrides) -> Option<Self> {
+        overrides.spoof_src.map(Ipv4Addr::from)
+    }
+
     fn reply_filter(src: Self, proto: Protocol, base_port: u16, span: u16) -> String {
         format!(
             "({} and dst host {} and dst portrange {}-{}) or (icmp and dst host {})",
@@ -114,6 +124,10 @@ impl ScanFamily for Ipv6Addr {
 
     fn probe_spec(src: Self, dst: Self, _ipid: u16, overrides: PacketOverrides) -> Ipv6Spec {
         Ipv6Spec::new(src.octets(), dst.octets()).with_overrides(overrides)
+    }
+
+    fn spoofed(overrides: PacketOverrides) -> Option<Self> {
+        overrides.spoof_src6.map(Ipv6Addr::from)
     }
 
     /// Written over the fixed header's bytes rather than libpcap's `tcp`/`udp` and
@@ -228,7 +242,7 @@ pub async fn group_scan<A, K, S, P>(
     base_port: u16,
     eth_included: bool,
     overrides: PacketOverrides,
-) -> Vec<Host>
+) -> std::io::Result<Vec<Host>>
 where
     A: ScanFamily,
     K: RawScanKind,
@@ -271,9 +285,11 @@ where
     // (host_idx, port, tryno) -> (send_us, deadline_us).
     let mut outstanding: HashMap<(usize, u16, u32), (i64, i64)> = HashMap::new();
     let mut ipid: u16 = base_port;
-    // Once the capture has ended (a pcap read error), `recv` is ready at once
-    // with `None` forever: polling it would spin this loop until the next
-    // probe deadline. The error is kept for `-d`.
+    // Once the capture has ended, `recv` is ready at once with `None` forever:
+    // polling it would spin this loop until the next probe deadline. A capture that
+    // ended in an error ends the scan with it, as 7.94's `read_reply_pcap` exits
+    // (`CaptureFailed`): its silence is not the targets'. One that simply closed (a
+    // mock run dry) leaves the outstanding probes to time out.
     let mut capture_live = true;
 
     loop {
@@ -362,12 +378,12 @@ where
         tokio::select! {
             frame = capture.recv(), if capture_live => {
                 if frame.is_none() {
+                    if let Some(e) = capture.error() {
+                        capture.stop();
+                        return Err(CaptureFailed(format!("during the scan: {e}")).into());
+                    }
                     capture_live = false;
-                    nmap_core::debug!(
-                        1,
-                        "packet capture ended: {}",
-                        capture.error().unwrap_or_else(|| "closed".into())
-                    );
+                    nmap_core::debug!(1, "packet capture ended: closed");
                 }
                 if let Some(f) = frame {
                     if let Some(reply) = kind.match_reply(&f.data, eth_included, &match_params) {
@@ -412,7 +428,8 @@ where
     capture.stop();
 
     let proto = kind.protocol();
-    ctxs.into_iter()
+    Ok(ctxs
+        .into_iter()
         .map(|mut ctx| {
             let up = ctx
                 .finals
@@ -428,7 +445,7 @@ where
             host.ports.sort_by_key(|p| (p.protocol, p.number));
             host
         })
-        .collect()
+        .collect())
 }
 
 fn now_us(start: Instant) -> i64 {
@@ -731,13 +748,22 @@ pub async fn group_scan_targets_routed<K: RawScanKind>(
         span,
         overrides,
     };
-    for ((iface, src), members) in buckets.v4 {
+    for ((iface, src, _), group) in buckets.v4 {
         let sender = RawIpv4Sender::new()?;
-        run.scan(kind, &iface, src, &members, sender, &mut result_slot)
+        run.scan(kind, &iface, src, &group.members, sender, &mut result_slot)
             .await?;
+        if group.loopback {
+            mark_localhost(
+                group.members.iter().map(|(slot, _)| *slot),
+                &mut result_slot,
+            );
+        }
     }
-    for ((iface, src), group) in buckets.v6 {
+    for ((iface, src, _), group) in buckets.v6 {
         scan_route_group6(&run, kind, &iface, src, &group, &mut result_slot).await?;
+        if group.loopback {
+            mark_localhost(group.members.iter().map(|m| m.slot), &mut result_slot);
+        }
     }
 
     let mut results = ScanResults::new();
@@ -749,14 +775,55 @@ pub async fn group_scan_targets_routed<K: RawScanKind>(
     Ok(results)
 }
 
+/// The address a route-group's scan sends from, solicits from and takes replies to,
+/// and whether its capture is promiscuous. Under `-S` that is the spoofed address of
+/// the group's family, for everything, as in C (`route_dst`'s `spoofss`,
+/// `netutil.cc:2255`), and the capture is promiscuous (`scan_engine_raw.cc:869`):
+/// replies go to whoever owns that address. Otherwise it is the route's own source.
+#[cfg(any(feature = "pcap", test))]
+fn scan_source<A: ScanFamily>(routed: A, overrides: PacketOverrides) -> (A, bool) {
+    match A::spoofed(overrides) {
+        Some(spoofed) => (spoofed, true),
+        None => (routed, false),
+    }
+}
+
+/// A target on a loopback route is up before any probe, `localhost-response`, as C
+/// marks every `devt_loopback` target (`targets.cc:588`); the scan's ports cannot make
+/// it down. Under `-Pn` C reports `user-set` instead, which `Host::settle_liveness`
+/// applies.
+#[cfg(feature = "pcap")]
+fn mark_localhost(slots: impl Iterator<Item = usize>, result_slot: &mut [Option<Host>]) {
+    for slot in slots {
+        if let Some(Some(host)) = result_slot.get_mut(slot) {
+            host.state = HostState::Up;
+            host.reason = Some(Reason::Localhost);
+        }
+    }
+}
+
 /// A scan's targets by route: the route-groups of each family, keyed by (interface,
-/// source), each member with its slot in the input. A target with no route is in
-/// neither, and is reported down.
+/// source, repeat), each member with its slot in the input. A target with no route is
+/// in neither, and is reported down.
+///
+/// The third key is how many times the target's address came before it. The engine
+/// finds a reply's host by its address, so two copies of one address in a group would
+/// share every reply. C sends a repeated address to a later host group for the same
+/// reason (`target_needs_new_hostgroup`, `targets.cc:306`), and so does this.
 #[cfg(any(feature = "pcap", test))]
 #[derive(Debug, Default)]
 struct Buckets {
-    v4: HashMap<(String, Ipv4Addr), Vec<(usize, Ipv4Addr)>>,
-    v6: HashMap<(String, Ipv6Addr), Group6>,
+    v4: HashMap<(String, Ipv4Addr, usize), Group4>,
+    v6: HashMap<(String, Ipv6Addr, usize), Group6>,
+}
+
+/// An IPv4 route-group: the targets that leave by one interface from one source.
+#[cfg(any(feature = "pcap", test))]
+#[derive(Debug, Default)]
+struct Group4 {
+    /// The route is a loopback: the targets are this host's own addresses.
+    loopback: bool,
+    members: Vec<(usize, Ipv4Addr)>,
 }
 
 /// An IPv6 route-group: the targets that leave by one interface from one source.
@@ -797,19 +864,27 @@ fn bucket_targets(
     mut route6: impl FnMut(Ipv6Addr) -> std::io::Result<Option<crate::route::Route6>>,
 ) -> std::io::Result<Buckets> {
     let mut b = Buckets::default();
+    let mut seen: HashMap<IpAddr, usize> = HashMap::new();
     for (i, &ip) in targets.iter().enumerate() {
+        let repeat = seen.entry(ip).or_insert(0);
+        let n = *repeat;
+        *repeat = repeat.saturating_add(1);
         match ip {
             IpAddr::V4(v4) => {
                 if let Some(route) = route4(v4)? {
-                    b.v4.entry((route.iface, route.src))
-                        .or_default()
-                        .push((i, v4));
+                    let group =
+                        b.v4.entry((route.iface, route.src, n))
+                            .or_insert_with(|| Group4 {
+                                loopback: route.loopback,
+                                members: Vec::new(),
+                            });
+                    group.members.push((i, v4));
                 }
             }
             IpAddr::V6(v6) => {
                 if let Some(route) = route6(v6)? {
                     let group =
-                        b.v6.entry((route.iface, route.src))
+                        b.v6.entry((route.iface, route.src, n))
                             .or_insert_with(|| Group6 {
                                 src_mac: route.src_mac,
                                 loopback: route.loopback,
@@ -850,9 +925,10 @@ struct NeighborPlan {
 ///
 /// This is what 7.94 does on Unix, where its scan probes leave through a raw socket and
 /// the kernel resolves the next hop. An on-link target is first put to the implicit ND
-/// ping (`targets.cc`'s `arpping`, `PING_SCAN_ND`), even under `-Pn` (only
-/// `--disable-arp-ping` skips it): an advertisement makes it up, `nd-response`, and
-/// silence makes it down, so it is not scanned. An off-link target gets no such ping.
+/// ping (`targets.cc`'s `arpping`, `PING_SCAN_ND`), even under `-Pn`: an
+/// advertisement makes it up, `nd-response`, and silence makes it down, so it is not
+/// scanned. `--disable-arp-ping` and `--send-ip` skip that ping, as does a link that
+/// is not `DLT_EN10MB` (`targets.cc:559-565`); the port has neither option. An off-link target gets no such ping.
 /// When its gateway cannot be resolved, the kernel drops every probe and the target's
 /// ports take their no-response defaults, which is what happens here too.
 #[cfg(any(feature = "pcap", test))]
@@ -907,10 +983,11 @@ impl RouteGroupRun<'_> {
         use crate::capture::pcap_source::PcapSource;
         use crate::route::random_scan_keys;
 
+        let (src, promiscuous) = scan_source(src, self.overrides);
         let (_seqmask, base_port) = random_scan_keys();
         let group_targets: Vec<A> = members.iter().map(|(_, ip)| *ip).collect();
         let filter = A::reply_filter(src, kind.protocol(), base_port, self.span);
-        let source = PcapSource::open(iface, 65535, 100, Some(&filter))?;
+        let source = PcapSource::open_with(iface, 65535, 100, Some(&filter), promiscuous)?;
         // Ethernet framing or not is the capture's datalink to say (FreeBSD's
         // lo0 is DLT_NULL).
         let eth = source.eth_included();
@@ -928,7 +1005,7 @@ impl RouteGroupRun<'_> {
             eth,
             self.overrides,
         )
-        .await;
+        .await?;
         for ((slot, _), host) in members.iter().zip(hosts) {
             if let Some(s) = result_slot.get_mut(*slot) {
                 *s = Some(host);
@@ -967,6 +1044,8 @@ async fn scan_route_group6<K: RawScanKind>(
     use std::io::{Error, ErrorKind};
 
     let all: Vec<(usize, Ipv6Addr)> = group.members.iter().map(|m| (m.slot, m.target)).collect();
+    // The solicitation's source too is -S's, as doND's is the target's source address.
+    let (nd_src, spoofed) = scan_source(src, run.overrides);
     let mut link = PcapSender::open(iface)?;
     let dlt = link.datalink();
     let unsupported = || {
@@ -993,18 +1072,34 @@ async fn scan_route_group6<K: RawScanKind>(
             format!("{iface} has no MAC; cannot frame an IPv6 probe at layer 2"),
         )
     })?;
-    let unknown: Vec<[u8; 16]> = group
-        .members
-        .iter()
-        .filter(|m| m.next_hop_mac.is_none())
-        .map(|m| m.next_hop.octets())
-        .collect();
-    let found = if unknown.is_empty() {
+    // The next hops not yet known: on-link targets, put to the ND ping, and the
+    // gateways of the rest, which only an advertised address resolves.
+    let unknown = |on_link: bool| -> Vec<[u8; 16]> {
+        group
+            .members
+            .iter()
+            .filter(|m| m.next_hop_mac.is_none() && m.directly_connected == on_link)
+            .map(|m| m.next_hop.octets())
+            .collect()
+    };
+    let (targets, gateways) = (unknown(true), unknown(false));
+    let found = if targets.is_empty() && gateways.is_empty() {
         HashMap::new()
     } else {
-        let filter = crate::ndp::bpf_filter(src_mac);
-        let nd_source = PcapSource::open(iface, 65535, 25, Some(&filter))?;
-        crate::ndp::resolve_many(&mut link, nd_source, src_mac, src.octets(), &unknown).await
+        // The ND ping's filter, not doND's: an advertisement to a multicast group
+        // answers it too (`ndp::resolve_many`).
+        let filter = crate::ndp::nd_ping_filter();
+        // Promiscuous under -S, as C's sniffer is for its ND ping too.
+        let nd_source = PcapSource::open_with(iface, 65535, 25, Some(&filter), spoofed)?;
+        crate::ndp::resolve_many(
+            &mut link,
+            nd_source,
+            src_mac,
+            nd_src.octets(),
+            &targets,
+            &gateways,
+        )
+        .await?
     };
     let plan = plan_neighbors(&group.members, &found);
     for target in &plan.behind_a_silent_gateway {
@@ -1173,6 +1268,7 @@ mod tests {
             Default::default(),
         )
         .await
+        .expect("a mock capture does not fail")
     }
 
     /// Look up one port's resolved state on one host.
@@ -1276,16 +1372,15 @@ mod tests {
         }
     }
 
-    /// A capture that fails ends the scan as silence does: every port times
-    /// out, within the template's bound. (Its `recv` is then ready with `None`
-    /// at once, every time; the loop stops polling it rather than spin on it
-    /// until the next probe deadline.)
+    /// A capture that fails mid-scan fails the scan, promptly, as 7.94 exits
+    /// (`read_reply_pcap`): its silence is not the targets', so no port may take its
+    /// no-response default from it. (It once ended the scan as silence does.)
     #[cfg_attr(
         miri,
         ignore = "spawns a capture thread; miri cannot run real threads/time"
     )]
     #[tokio::test]
-    async fn a_capture_that_fails_does_not_hang_the_scan() {
+    async fn a_failed_capture_fails_the_scan() {
         let targets = [Ipv4Addr::new(127, 0, 0, 2)];
         let scan = group_scan(
             Ipv4Addr::from(US),
@@ -1301,12 +1396,15 @@ mod tests {
             true,
             Default::default(),
         );
-        let hosts = tokio::time::timeout(Duration::from_secs(30), scan)
+        let err = tokio::time::timeout(Duration::from_secs(30), scan)
             .await
-            .expect("the scan ends");
-        for port in [9, 10] {
-            assert_eq!(port_of(&hosts, 0, port).state, PortState::Filtered);
-        }
+            .expect("the scan ends")
+            .unwrap_err();
+        assert!(crate::capture::is_capture_failure(&err), "{err}");
+        assert!(
+            err.to_string().contains("the BPF device went away"),
+            "{err}"
+        );
     }
 
     // ---- UDP --------------------------------------------------------------------
@@ -1872,7 +1970,8 @@ mod tests {
             true,
             overrides,
         )
-        .await;
+        .await
+        .expect("a mock capture does not fail");
         let sent = sent.lock().unwrap().clone();
         (hosts, sent)
     }
@@ -2118,7 +2217,8 @@ mod tests {
             false,
             PacketOverrides::default(),
         )
-        .await;
+        .await
+        .expect("a mock capture does not fail");
         assert_eq!(port_of(&hosts, 0, 22).state, PortState::Open);
     }
 
@@ -2164,6 +2264,7 @@ mod tests {
                 Ok(Some(crate::route::Route {
                     iface: "lo".into(),
                     src: t,
+                    loopback: true,
                 }))
             },
             |t| {
@@ -2190,19 +2291,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(b.v4.len(), 1);
-        assert_eq!(b.v4[&("lo".to_string(), v4)], vec![(1, v4)]);
-        assert_eq!(b.v6.len(), 3);
-        let slots = |key: (&str, Ipv6Addr)| -> Vec<usize> {
-            b.v6[&(key.0.to_string(), key.1)]
+        let g4 = &b.v4[&("lo".to_string(), v4, 0)];
+        assert_eq!((g4.loopback, &g4.members), (true, &vec![(1, v4)]));
+        // ::1 twice: the repeat goes to a later group, as C defers it to a later
+        // host group, so the two copies never share a reply.
+        assert_eq!(b.v6.len(), 4);
+        let slots = |key: (&str, Ipv6Addr, usize)| -> Vec<usize> {
+            b.v6[&(key.0.to_string(), key.1, key.2)]
                 .members
                 .iter()
                 .map(|m| m.slot)
                 .collect()
         };
-        assert_eq!(slots(("lo", lo6)), vec![0, 4]);
-        assert_eq!(slots(("lo", own6)), vec![2]);
-        let eth = &b.v6[&("eth0".to_string(), Ipv6Addr::from(US6))];
-        assert!(!eth.loopback && b.v6[&("lo".to_string(), lo6)].loopback);
+        assert_eq!(slots(("lo", lo6, 0)), vec![0]);
+        assert_eq!(slots(("lo", lo6, 1)), vec![4]);
+        assert_eq!(slots(("lo", own6, 0)), vec![2]);
+        let eth = &b.v6[&("eth0".to_string(), Ipv6Addr::from(US6), 0)];
+        assert!(!eth.loopback && b.v6[&("lo".to_string(), lo6, 0)].loopback);
         assert_eq!(
             eth.members,
             vec![
@@ -2222,6 +2327,101 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// `-S` names the source for its own family only.
+    #[test]
+    fn the_spoofed_source_is_the_families_own() {
+        let o = PacketOverrides {
+            spoof_src: Some([192, 0, 2, 9]),
+            ..PacketOverrides::default()
+        };
+        assert_eq!(Ipv4Addr::spoofed(o), Some(Ipv4Addr::new(192, 0, 2, 9)));
+        assert_eq!(Ipv6Addr::spoofed(o), None);
+        let o6 = PacketOverrides {
+            spoof_src6: Some(v6(9)),
+            ..PacketOverrides::default()
+        };
+        assert_eq!(Ipv6Addr::spoofed(o6), Some(Ipv6Addr::from(v6(9))));
+        assert_eq!(Ipv4Addr::spoofed(o6), None);
+        assert_eq!(Ipv4Addr::spoofed(PacketOverrides::default()), None);
+    }
+
+    /// What a route-group's scan uses as its source: the spoofed address of its own
+    /// family under `-S`, with a promiscuous capture, and the route's otherwise.
+    #[test]
+    fn a_route_groups_source_is_the_spoofed_one_under_s() {
+        let routed4 = Ipv4Addr::new(10, 0, 0, 1);
+        let routed6 = Ipv6Addr::from(US6);
+        let none = PacketOverrides::default();
+        assert_eq!(scan_source(routed4, none), (routed4, false));
+        assert_eq!(scan_source(routed6, none), (routed6, false));
+        let s4 = PacketOverrides {
+            spoof_src: Some([192, 0, 2, 9]),
+            ..none
+        };
+        assert_eq!(
+            scan_source(routed4, s4),
+            (Ipv4Addr::new(192, 0, 2, 9), true)
+        );
+        assert_eq!(scan_source(routed6, s4), (routed6, false), "an IPv4 -S");
+        let s6 = PacketOverrides {
+            spoof_src6: Some(v6(9)),
+            ..none
+        };
+        assert_eq!(scan_source(routed6, s6), (Ipv6Addr::from(v6(9)), true));
+        assert_eq!(scan_source(routed4, s6), (routed4, false), "an IPv6 -S");
+    }
+
+    /// Under -S the replies to the spoofed address are ours: the engine, given it as
+    /// its source (as `RouteGroupRun::scan` does through `scan_source`), matches
+    /// them.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn replies_to_the_spoofed_source_are_matched() {
+        let base = 40000u16;
+        let spoof = v6(9);
+        let o = PacketOverrides {
+            spoof_src6: Some(spoof),
+            ..PacketOverrides::default()
+        };
+        let src = Ipv6Addr::spoofed(o).unwrap_or(Ipv6Addr::from(US6));
+        let synack = build_tcp_raw_ipv6(
+            &Ipv6Spec::new(v6(2), spoof),
+            80,
+            sport_encode(base, 0),
+            5,
+            seq32_encode(7, 0).wrapping_add(1),
+            0,
+            TH_SYN | TH_ACK,
+            8192,
+            0,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let hosts = group_scan(
+            src,
+            &[Ipv6Addr::from(v6(2))],
+            &[80],
+            MockSender::default(),
+            MockSource {
+                frames: Arc::new(Mutex::new(vec![framed6(&synack)])),
+            },
+            &SynKind { seqmask: 7 },
+            TimingTemplate::Insane,
+            TimingParams::for_template(TimingTemplate::Insane),
+            0,
+            base,
+            true,
+            o,
+        )
+        .await
+        .expect("a mock capture does not fail");
+        assert_eq!(port_of(&hosts, 0, 80).state, PortState::Open);
     }
 
     #[test]

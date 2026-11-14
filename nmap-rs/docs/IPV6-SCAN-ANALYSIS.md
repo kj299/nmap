@@ -2,18 +2,19 @@
 
 Status: **Phase 0 done; D1–D5 decided 2026-11-02 as recommended (§7).
 Steps a (receive, §11), b (match and classify, §12) and c (build, §13) done.
-Steps d (the engine on loopback, §14) and e (Ethernet, §15) written; their wire
-gates run in CI only.** §2's account of sending on Ethernet was wrong, and was
-corrected at step e (§15). Per D5 this milestone lands in its own PRs.
+Steps d (the engine on loopback, §14) and e (Ethernet, §15) written, and their
+review's findings fixed (§15); their wire gates run in CI only.** §2's account of
+sending on Ethernet was wrong, and was corrected at step e (§15). Per D5 this
+milestone lands in its own PRs.
 
 ## 0. Value
 
-nmap scans IPv6 with every raw technique it has. nmap-rs has none: with `-6`,
-`-sS`, `-sU`, `-sA`, `-sW`, `-sM`, `-sF`, `-sN` and `-sX` all fall back to a
-connect scan and say so (FreeBSD step e, `ipv6-raw-port-scans-unported`). Until
-step e they sent nothing at all and reported no ports. A UDP scan of an IPv6
-host is therefore impossible today, and every TCP technique degrades to a full
-connect. This milestone brings the eight raw scan types the IPv4 build has to
+nmap scans IPv6 with every raw technique it has. At Phase 0 nmap-rs had none:
+with `-6`, `-sS`, `-sU`, `-sA`, `-sW`, `-sM`, `-sF`, `-sN` and `-sX` all fell
+back to a connect scan and said so (FreeBSD step e, `ipv6-raw-port-scans-unported`).
+Until FreeBSD step e they sent nothing at all and reported no ports. A UDP scan of
+an IPv6 host was therefore impossible, and every TCP technique degraded to a full
+connect. (Step e of this milestone resolved the entry, §15.) This milestone brings the eight raw scan types the IPv4 build has to
 IPv6, on Linux and FreeBSD, against nmap 7.94 on the wire.
 
 ## 1. Measured
@@ -60,12 +61,17 @@ so on every link a probe leaves through a raw socket: `IPPROTO_RAW` with the
 whole header on Linux (`acinclude.m4:90`); on the BSDs `sendmsg` on a protocol
 socket, the kernel writing the header (FreeBSD step e). The kernel resolves the
 next hop. Layer 2, to the next hop's MAC (`setTargetNextHopMAC`), is the
-`--send-eth` path. Only there is a target whose MAC cannot be found marked down
-with reason `no-route` (`targets.cc:575`). What does decide an on-link target is
+`--send-eth` path (forced by `--spoof-mac` too, `nmap.cc:1685`). Only there is a
+target whose MAC cannot be found marked down with reason `no-route`
+(`targets.cc:579`), and only one the ND ping left up: an off-link target behind a
+silent gateway, or any under `--disable-arp-ping`. What does decide an on-link target is
 the **implicit ND ping**. For a directly connected target on Ethernet, nmap
 solicits it before the scan, even under `-Pn` (`targets.cc:560`, `arpping`,
-`PING_SCAN_ND`; only `--disable-arp-ping` skips it). An advertisement makes it
-up, `nd-response`, with its MAC. Silence makes it down, and it is not scanned.
+`PING_SCAN_ND`), whenever `RawScan()` holds. `--disable-arp-ping` and `--send-ip`
+skip it, as does a link that is not `DLT_EN10MB` (`targets.cc:559-565`). An
+advertisement makes it up, `nd-response`, with its MAC. Silence makes it down,
+`no-response`, and it is not scanned, under `--send-eth` too: `setTargetNextHopMAC`
+passes over a host the ND ping found down.
 
 **Receiving** (`readip_pcap` → `validatepkt`, `tcpip.cc:1274`). The IPv6 path
 walks the extension headers with `ipv6_get_data` (`netutil.cc:689`): while the
@@ -250,7 +256,7 @@ PR #153 (FreeBSD) is open, and this branch is the only one I may push to.
 | **b — match and classify** ✅ (§12) | ICMPv6 classification (§2's table, D2, Q5, Q6); IPv6 matchers for SYN, UDP and the flag scans, sharing the IPv4 transport checks | the classify oracle extended, exhaustively; matcher unit tests over crafted replies (including quotes behind extension headers); fuzz targets |
 | **c — build** ✅ (§13) | IPv6 scan probes (Q1), `--ttl`, `--badsum`, `--data`, the UDP payloads | byte-identical to `build_tcp_raw_ipv6` / `build_udp_raw_ipv6` |
 | **d — the engine on loopback** (§14; wire gates in CI) | `group_scan` over both families; `FramingSender` per link; step e's fallback removed | privileged e2e tests on `::1`; `run_raw_differential.sh` with all 8 scans on `::1` and the host's own address, Linux and FreeBSD, against 7.94 |
-| **e — Ethernet** (D4; §15; wire gates in CI) | ND per next hop; down/`no-route` when it fails | the same differential across a veth pair (Linux) and an epair (FreeBSD), plus a silent neighbor |
+| **e — Ethernet** (D4; §15; wire gates in CI) | ND per next hop; the ND ping's verdicts (`nd-response` up, `no-response` down) | the same differential across a veth pair (Linux) and an epair (FreeBSD), plus a silent neighbor |
 
 Each step comes with its own sabotage list, as in M6.5–M6.7 and the FreeBSD
 steps.
@@ -487,8 +493,11 @@ has run them and they pass, since this container cannot (the kernel boots with
   (scheduling, demux by source address, timeouts, results). The per-kind `bpf` methods
   are gone: the filter is the family's, given the scan's transport.
 - **Sending.** An IPv6 probe goes out at layer 2 on the loopback through
-  `FramingSender` over a capture handle, as `-6 -O` already sends. Linux has no
-  `IPV6_HDRINCL`. The framing comes from `LinkFraming::for_loopback`, now shared with
+  `FramingSender` over a capture handle, as `-6 -O` already sends. That is a
+  choice, one path for Linux and the BSDs (`ipv6-send-is-layer-2-only`). Linux
+  could take a caller-built IPv6 header, through an `IPPROTO_RAW` socket or
+  `IPV6_HDRINCL` (since 4.5); this paragraph said otherwise until step e. The
+  framing comes from `LinkFraming::for_loopback`, now shared with
   OS detection: Linux's `lo` is Ethernet with zero MACs, FreeBSD's `lo0` is
   `DLT_NULL`. The C sends through a raw socket there; what reaches the loopback is
   the same packet.
@@ -656,7 +665,8 @@ and the PR a draft until CI has run them. This container still boots with
     (`FIXTURE_IN="jexec nrs6"`).
   - Both run `-sT` and every raw scan type against 7.94. Then the silent neighbor,
     fd00:6e7::3 (`SILENT=1`): every raw scan, and both tools must find the host down.
-    `-sT` is left out there, since 7.94's ND ping runs for raw scans only.
+    `-sT` is left out there: 7.94's ND ping runs only when `RawScan()` holds, which a
+    connect scan with `-Pn` does not.
   - The raw projection now ends with the run's count of hosts up and down, which is
     all a down host leaves in the XML.
 - **IPv4 unchanged on the wire.** Here, against 7.94: 127.0.0.1, eight scans, 8/8. The
@@ -701,3 +711,127 @@ and the PR a draft until CI has run them. This container still boots with
 - **Lint and audits.** clippy with CI's flags is clean on Linux and FreeBSD, and fmt is
   clean. The unsafe audit finds 42 blocks, all documented, none new. The `cli` stamp
   was re-run, and drift and audit pass. The full suite passes: 1,798 tests.
+
+### The review
+
+An adversarial review of steps d and e left 22 findings after verification. All are
+fixed here, or corrected in the docs. Five matter on the wire:
+
+- **Loopback targets** were judged by their ports, so a FIN scan of a listener on
+  127.0.0.1 or `::1` found the host down. They are now up, `localhost-response`, as
+  7.94 marks them before any probe (`loopback-target-localhost-response`).
+- **Off-link IPv6 frames** went to the interface's one gateway MAC, which can be the
+  IPv4 router's. The IPv6 gateway is now always solicited
+  (`route6-gateway-mac-not-borrowed`).
+- **`-S`** changed only the probes. The capture, the matching and the solicitations
+  kept the routed address, so no reply to the spoofed one was taken. The spoofed
+  address is now the source of all of them, with a promiscuous capture, as in C
+  (`spoof-source-receives-too`).
+- **A repeated target** shared a route-group with itself and lost every reply to its
+  twin. Each repeat now gets a group of its own, as 7.94 defers it to a later host
+  group (`scan-repeated-target-deferred`).
+- **Neighbor discovery.** A stream of advertisement-shaped frames could hold the
+  exchange open without bound; a failed capture read as silence; and any advertisement
+  could choose where the probes went. Now:
+  - the exchange ends by its last deadline plus 25 ms;
+  - a failed capture is an error;
+  - an advertisement must have hop limit 255 and a unicast MAC.
+
+  See `ndp-exchange-bounded-and-fails-loudly` and `ndp-advert-hop-limit-255`. The ND
+  ping's verdict now accepts what 7.94's accepts: any Ethernet destination, and no
+  link-layer address needed.
+
+The output now follows 7.94 too:
+- in XML and grepable output a down host is its status alone;
+- down hosts come first, with no blank line after them (`output-down-hosts-first`);
+- the "Host seems down" note goes to the terminal only;
+- a down host's reason is `no-response`, whatever found it down;
+- `-sL -Pn` claims no host up.
+
+The docs and the ledger were wrong in places, and are corrected:
+- when the ND ping runs and what skips it, and `no-route` under `--send-eth`;
+- the `IPV6_HDRINCL` rationale, here (§14) and in PLAN, BACKLOG and the FreeBSD
+  analysis;
+- the C's message for an unroutable target;
+- stale text in the raw harness, §9 and three module docs.
+
+New gates:
+- **The TAP link** counts anything sent to an address no host answers for (none). A
+  second test runs a `-S` scan there: the link answers only what comes from the
+  spoofed address.
+- **The loopback verdict**, `cli/tests/loopback_liveness.rs`, runs as root in both
+  CI jobs, with `REQUIRE_RAW=1`.
+- **The note.** `output_all` produces a lone down host in an empty network namespace
+  and checks the note's three destinations.
+- **Unit tests** for:
+  - down-host order and rendering;
+  - `-sL -Pn`;
+  - the ND hop limit, group MACs, the flood and the failed capture;
+  - the spoofed source;
+  - repeated-target grouping.
+- **CI fixes.** The raw harness now catches every fallback message; its old pattern
+  matched none. The FreeBSD job's link setup is one gate, so a failure is reported
+  and the gates after it still run.
+- **Sabotage of the fixes: 20, all caught.**
+  - Engine, six:
+    - a loopback group not marked up;
+    - `localhost-response` kept under `-Pn`;
+    - the shared gateway MAC used again;
+    - a repeat in the same group;
+    - `-S` dropped from the capture and matching, and from the solicitations (two,
+      caught by the TAP link's `-S` test).
+  - Neighbor discovery, six:
+    - any hop limit;
+    - a group MAC;
+    - an ND ping that needs a link-layer address;
+    - a filter on our MAC;
+    - a fresh window per frame;
+    - a failed capture read as silence.
+  - Liveness and output, eight:
+    - a down host with no reason;
+    - `-sL -Pn` up;
+    - a down host's ports in XML, and its `Ports:` record in grepable;
+    - the note in `-oN`;
+    - hosts in target order;
+    - a blank line after a down host;
+    - the terminal given the file's text.
+
+  The fresh-window mutation at first hung its test rather than failing it. The test
+  now has a timeout of its own.
+
+A second review, of these fixes, confirmed eight findings after verification. Fixed:
+- **A failed capture ends the run.** Both the scan's capture and ND's now return a
+  `CaptureFailed`, and the CLI exits 1 with it rather than fall back to a connect
+  scan, as 7.94's `netutil_fatal` does. Before, ND's failure became a connect scan
+  that exited 0. Since M4 the scan's own failure had let every pending port expire
+  into "filtered".
+- **Gateways need an advertised MAC.** A gateway is held to `doND`'s rule; only an
+  on-link target takes the ND ping's, which reads the frame's Ethernet source when no
+  link-layer address is given.
+- **`-S`'s source choice is one function, tested** (`scan_source`). The ND capture
+  is promiscuous under `-S` too, as C's is.
+- **Output and liveness:**
+  - the last scanned host's block ends with its blank line, before "Nmap done";
+  - an up host whose only answer is `unfiltered` takes that port's reason.
+- **`::1`** has its own loopback test, run with `REQUIRE_IPV6=1` in CI. This container
+  has no IPv6, so it skips here.
+- **The ledger:**
+  - the order entry gives 7.94's real host-group conditions;
+  - the `-S` entry names its real pins, and says what has no end-to-end test;
+  - root `-sT` without `-Pn` is ledgered open
+    (`privileged-connect-scan-no-implicit-verdicts`);
+  - `--spoof-mac` also forces layer 2;
+  - `sys::ndp`'s module doc says which byte decisions live there.
+
+The TAP link gains a gateway that answers without its link-layer address: nothing may
+be sent behind it. Sabotage of these fixes: 7, all caught.
+
+After both passes, all of these hold:
+- the full suite passes: 1,809 tests;
+- IPv4 against 7.94 on 127.0.0.1 is still 8/8;
+- clippy with CI's flags is clean on Linux and FreeBSD;
+- Miri passes on the new pure tests;
+- the unsafe audit finds 42 blocks, none new;
+- the three scan modules' match targets fuzz clean for a minute each, after their doc
+  edits;
+- the stale progress ticks are re-stamped, and drift and audit pass.

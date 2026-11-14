@@ -28,8 +28,8 @@
 //! ## Scope / divergences
 //!
 //! Matches IPv4 and IPv6 replies: [`match_flag_response`] is generic over the
-//! [`IpFamily`]. Nothing sends IPv6 flag probes until the engine does
-//! (`ipv6-raw-port-scans-unported`, step d).
+//! [`IpFamily`]. The engine sends IPv6 flag probes to every target since IPv6 scans
+//! step e (`ipv6-raw-port-scans-unported`, resolved).
 
 use crate::build::{BuildError, ProbeSpec};
 use crate::classify::{classify_tcp, PortState, ScanType, TH_ACK};

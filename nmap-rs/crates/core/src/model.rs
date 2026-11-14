@@ -260,30 +260,47 @@ impl Host {
 
     /// Settle liveness, and why, once the scan is done; `assume_up` is `-Pn`.
     ///
-    /// A verdict the scan itself reached (a reason already set) stands, `-Pn` or
-    /// not: an on-link IPv6 target is put to the implicit ND ping, which `-Pn` does
-    /// not skip in C (`targets.cc`'s `arpping`), and is up with `nd-response` or
-    /// down. Otherwise `-Pn` makes the host up, `user-set`: the operator asserted
-    /// liveness and nothing probed it, so a packet reason would be inventing
-    /// evidence. Without it the host is up because some port answered, and the
-    /// reason is that port's.
+    /// - A list scan's host (`Unknown`) was never probed and stays as it is: C
+    ///   counts no listed host up, `-Pn` or not (`nmap.cc:2116`).
+    /// - A target on a loopback route was found up without a probe,
+    ///   `localhost-response`; under `-Pn` C reports `user-set` instead, since it
+    ///   checks for no ping first (`targets.cc:593`).
+    /// - Any other verdict the scan itself reached (a reason already set) stands,
+    ///   `-Pn` or not: an on-link IPv6 target is put to the implicit ND ping, which
+    ///   `-Pn` does not skip (`targets.cc`'s `arpping`), and is up with
+    ///   `nd-response` or down.
+    /// - Otherwise `-Pn` makes the host up, `user-set`: the operator asserted
+    ///   liveness and nothing probed it, so a packet reason would be inventing
+    ///   evidence. Without it the host is up because some port answered, with that
+    ///   port's reason, or down, `no-response`, as a ping that went unanswered
+    ///   leaves it in C (`scan_engine.cc:2660`).
     pub fn settle_liveness(&mut self, assume_up: bool) {
-        if self.reason.is_some() {
+        if self.state == HostState::Unknown {
             return;
+        }
+        match self.reason {
+            Some(Reason::Localhost) if assume_up => {
+                self.reason = Some(Reason::UserSet);
+                return;
+            }
+            Some(_) => return,
+            None => {}
         }
         if assume_up {
             self.state = HostState::Up;
         }
-        if self.state == HostState::Up {
-            self.reason = if assume_up {
-                Some(Reason::UserSet)
-            } else {
-                self.ports
-                    .iter()
-                    .find(|p| p.state == PortState::Open || p.state == PortState::Closed)
-                    .map(|p| p.reason)
-            };
-        }
+        self.reason = match self.state {
+            HostState::Up if assume_up => Some(Reason::UserSet),
+            // The first port that answered: any state but the two silence leaves,
+            // so an ACK scan's `unfiltered` counts, as it made the host up.
+            HostState::Up => self
+                .ports
+                .iter()
+                .find(|p| !matches!(p.state, PortState::Filtered | PortState::OpenFiltered))
+                .map(|p| p.reason),
+            HostState::Down => Some(Reason::NoResponse),
+            HostState::Unknown => None,
+        };
     }
 
     /// Ports matching `state`, sorted by (protocol, number) — the order nmap
@@ -353,7 +370,12 @@ mod tests {
         let with = |state, reason: Option<Reason>, assume_up| {
             let mut h = Host::new(addr, state);
             h.reason = reason;
-            h.ports.push(Port::new(80, Protocol::Tcp, PortState::Closed, Reason::Reset));
+            h.ports.push(Port::new(
+                80,
+                Protocol::Tcp,
+                PortState::Closed,
+                Reason::Reset,
+            ));
             h.settle_liveness(assume_up);
             (h.state, h.reason)
         };
@@ -379,10 +401,49 @@ mod tests {
             (HostState::Up, Some(Reason::Reset)),
             "the first port that answered"
         );
-        assert_eq!(with(HostState::Down, None, false), (HostState::Down, None));
-        // As C's reason table spells them (`portreasons.cc:135`, `:147`).
+        assert_eq!(
+            with(HostState::Down, None, false),
+            (HostState::Down, Some(Reason::NoResponse)),
+            "an unanswered ping's reason"
+        );
+        // An ACK scan's answer: unfiltered, behind a filtered port that came first.
+        let mut ack = Host::new(addr, HostState::Up);
+        ack.ports.push(Port::new(
+            79,
+            Protocol::Tcp,
+            PortState::Filtered,
+            Reason::NoResponse,
+        ));
+        ack.ports.push(Port::new(
+            80,
+            Protocol::Tcp,
+            PortState::Unfiltered,
+            Reason::Reset,
+        ));
+        ack.settle_liveness(false);
+        assert_eq!(
+            ack.reason,
+            Some(Reason::Reset),
+            "an unfiltered port answered"
+        );
+        // This host's own address: up without a probe, user-set under -Pn.
+        assert_eq!(
+            with(HostState::Up, Some(Reason::Localhost), false),
+            (HostState::Up, Some(Reason::Localhost))
+        );
+        assert_eq!(
+            with(HostState::Up, Some(Reason::Localhost), true),
+            (HostState::Up, Some(Reason::UserSet))
+        );
+        // A list scan probes nothing: unknown, -Pn or not.
+        assert_eq!(
+            with(HostState::Unknown, None, true),
+            (HostState::Unknown, None)
+        );
+        // As C's reason table spells them (`portreasons.cc:135`, `:137`, `:142`).
         assert_eq!(Reason::NdResponse.as_str(), "nd-response");
         assert_eq!(Reason::NoResponse.as_str(), "no-response");
+        assert_eq!(Reason::Localhost.as_str(), "localhost-response");
     }
     use std::net::Ipv4Addr;
 

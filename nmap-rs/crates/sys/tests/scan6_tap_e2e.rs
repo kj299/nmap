@@ -30,7 +30,9 @@ use nmap_sys::group::{group_scan_targets_routed, FlagKind, RawScanKind, SynKind,
 use nmap_sys::rawio::RawIpv4Sender;
 use nmap_sys::route::{Route, Route6};
 
+/// One TAP interface per test, so the two can run at once.
 const IFACE: &str = "nrs6tap0";
+const IFACE_SPOOF: &str = "nrs6tap1";
 const OPEN_TCP: u16 = 18122;
 const CLOSED_TCP: u16 = 18199;
 const UDP_OPEN: u16 = 18153;
@@ -65,21 +67,38 @@ fn ready() -> bool {
 }
 
 /// The scripted link, up and answering. `ext` puts a destination-options header in
-/// front of every reply.
+/// front of every reply. Dropped without [`Link::stop`], as when an assertion fails,
+/// it is killed and reaped, so the TAP interface is free for the next run.
 struct Link {
-    child: Child,
+    child: Option<Child>,
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 impl Link {
     fn start(ext: bool) -> Link {
+        Link::start_from(IFACE, ext, None)
+    }
+
+    /// The link behind `iface`, expecting our probes and solicitations from `src`
+    /// (`-S`).
+    fn start_from(iface: &str, ext: bool, src: Option<Ipv6Addr>) -> Link {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tap_neighbor.py");
         let ports = [OPEN_TCP, CLOSED_TCP, UDP_OPEN, UDP_CLOSED].map(|p| p.to_string());
         let mut child = Command::new("python3")
             .arg(script)
-            .arg(IFACE)
+            .arg(iface)
             .args(&ports)
             .arg("300")
             .env("EXT", if ext { "1" } else { "0" })
+            .env("SRC", src.map(|a| a.to_string()).unwrap_or_default())
             .stdout(Stdio::piped())
             .spawn()
             .expect("start the scripted link");
@@ -88,15 +107,16 @@ impl Link {
             .read_line(&mut line)
             .unwrap();
         assert_eq!(line.trim(), "ready", "the scripted link came up");
-        Link { child }
+        Link { child: Some(child) }
     }
 
-    /// Stop the link and return its summary: `(solicited, replies, misframed)`.
-    fn stop(self) -> (u32, u32, u32) {
-        let _ = Command::new("kill")
-            .arg(self.child.id().to_string())
-            .status();
-        let out = self.child.wait_with_output().unwrap();
+    /// Stop the link and return its summary: `(solicited, replies, misframed,
+    /// stray)`.
+    fn stop(mut self) -> (u32, u32, u32, u32) {
+        let child = self.child.take().expect("the link is running");
+        // SIGTERM, which the script answers with its summary.
+        let _ = Command::new("kill").arg(child.id().to_string()).status();
+        let out = child.wait_with_output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let field = |k: &str| -> u32 {
             text.split_whitespace()
@@ -105,15 +125,20 @@ impl Link {
                 .parse()
                 .unwrap()
         };
-        (field("solicited"), field("replies"), field("misframed"))
+        (
+            field("solicited"),
+            field("replies"),
+            field("misframed"),
+            field("stray"),
+        )
     }
 }
 
 /// The routes the kernel would give, were the link configured: our address
-/// fd00:6e7::1/64 on the TAP interface, a default route by fd00:6e7::fe, and
-/// 2001:db8:2::/48 by fd00:6e7::fd.
-fn route6(target: Ipv6Addr) -> std::io::Result<Option<Route6>> {
-    let mac = std::fs::read_to_string(format!("/sys/class/net/{IFACE}/address"))?;
+/// fd00:6e7::1/64 on the TAP interface, a default route by fd00:6e7::fe,
+/// 2001:db8:2::/48 by fd00:6e7::fd, and 2001:db8:3::/48 by fd00:6e7::fc.
+fn route6(iface: &str, target: Ipv6Addr) -> std::io::Result<Option<Route6>> {
+    let mac = std::fs::read_to_string(format!("/sys/class/net/{iface}/address"))?;
     let bytes: Vec<u8> = mac
         .trim()
         .split(':')
@@ -124,11 +149,13 @@ fn route6(target: Ipv6Addr) -> std::io::Result<Option<Route6>> {
         target
     } else if target.segments()[1..3] == [0xdb8, 2] {
         v6("fd00:6e7::fd")
+    } else if target.segments()[1..3] == [0xdb8, 3] {
+        v6("fd00:6e7::fc")
     } else {
         v6("fd00:6e7::fe")
     };
     Ok(Some(Route6 {
-        iface: IFACE.into(),
+        iface: iface.into(),
         src: v6("fd00:6e7::1"),
         src_mac: Some(bytes.try_into().unwrap()),
         next_hop,
@@ -143,6 +170,16 @@ fn no_ipv4(_: Ipv4Addr) -> std::io::Result<Option<Route>> {
 }
 
 async fn scan<K: RawScanKind>(kind: &K, targets: &[Ipv6Addr], ports: &[u16]) -> ScanResults {
+    scan_with(IFACE, kind, targets, ports, PacketOverrides::default()).await
+}
+
+async fn scan_with<K: RawScanKind>(
+    iface: &str,
+    kind: &K,
+    targets: &[Ipv6Addr],
+    ports: &[u16],
+    overrides: PacketOverrides,
+) -> ScanResults {
     let t = TimingTemplate::Aggressive;
     let ips: Vec<IpAddr> = targets.iter().copied().map(IpAddr::V6).collect();
     tokio::time::timeout(
@@ -152,9 +189,9 @@ async fn scan<K: RawScanKind>(kind: &K, targets: &[Ipv6Addr], ports: &[u16]) -> 
             &ips,
             ports,
             (t, TimingParams::for_template(t), 0),
-            PacketOverrides::default(),
+            overrides,
             no_ipv4,
-            route6,
+            |target| route6(iface, target),
         ),
     )
     .await
@@ -180,21 +217,22 @@ async fn ipv6_scans_over_ethernet_resolve_neighbors_and_ports() {
     }
     for ext in [false, true] {
         let link = Link::start(ext);
-        let (near, silent, far, unreachable) = (
+        let (near, silent, far, unreachable, unframed) = (
             v6("fd00:6e7::2"),
             v6("fd00:6e7::3"),
             v6("2001:db8:1::5"),
             v6("2001:db8:2::5"),
+            v6("2001:db8:3::5"),
         );
         let r = scan(
             &SynKind {
                 seqmask: 0x1357_2468,
             },
-            &[near, silent, far, unreachable],
+            &[near, silent, far, unreachable, unframed],
             &[OPEN_TCP, CLOSED_TCP],
         )
         .await;
-        let [h_near, h_silent, h_far, h_unreachable] = &r.hosts[..] else {
+        let [h_near, h_silent, h_far, h_unreachable, h_unframed] = &r.hosts[..] else {
             panic!("{} hosts", r.hosts.len());
         };
         let tcp = |h, p| port(h, p, Protocol::Tcp);
@@ -216,12 +254,18 @@ async fn ipv6_scans_over_ethernet_resolve_neighbors_and_ports() {
         assert_eq!(tcp(h_far, OPEN_TCP), (PortState::Open, Reason::ConnAccept));
         assert_eq!(tcp(h_far, CLOSED_TCP), (PortState::Closed, Reason::Reset));
         assert_eq!(h_far.reason, None, "no ND ping for an off-link host");
-        // Behind a silent gateway: scanned, nothing sent, the no-response defaults.
-        for p in [OPEN_TCP, CLOSED_TCP] {
-            assert_eq!(
-                tcp(h_unreachable, p),
-                (PortState::Filtered, Reason::NoResponse)
-            );
+        // Behind a silent gateway, or one that gave no link-layer address: scanned,
+        // nothing sent (the link counts a probe to either as stray), the no-response
+        // defaults. A gateway is held to doND's rule, not the ND ping's.
+        for h in [h_unreachable, h_unframed] {
+            for p in [OPEN_TCP, CLOSED_TCP] {
+                assert_eq!(
+                    tcp(h, p),
+                    (PortState::Filtered, Reason::NoResponse),
+                    "{}",
+                    h.address
+                );
+            }
         }
 
         let ack = scan(
@@ -274,11 +318,70 @@ async fn ipv6_scans_over_ethernet_resolve_neighbors_and_ports() {
             assert_eq!(port(h, UDP_OPEN, Protocol::Udp).0, PortState::OpenFiltered);
         }
 
-        let (solicited, replies, misframed) = link.stop();
+        let (solicited, replies, misframed, stray) = link.stop();
         assert_eq!(misframed, 0, "every probe went to its own next hop's MAC");
+        assert_eq!(
+            stray, 0,
+            "nothing went to the silent host, nor behind the silent gateway"
+        );
         assert!(
             solicited > 0 && replies > 0,
             "{solicited} solicited, {replies} replies"
         );
     }
+}
+
+/// Under `-S` the spoofed address is the source of everything, as in 7.94: the
+/// solicitations, the probes, and the replies the scan takes. The link answers only
+/// what comes from it.
+#[tokio::test]
+#[ignore = "needs root, /dev/net/tun and python3"]
+async fn under_a_spoofed_source_the_replies_to_it_are_taken() {
+    if !ready() {
+        return;
+    }
+    let spoof = v6("fd00:6e7::9");
+    let link = Link::start_from(IFACE_SPOOF, false, Some(spoof));
+    let (near, far) = (v6("fd00:6e7::2"), v6("2001:db8:1::5"));
+    let r = scan_with(
+        IFACE_SPOOF,
+        &SynKind {
+            seqmask: 0x2468_1357,
+        },
+        &[near, far],
+        &[OPEN_TCP, CLOSED_TCP],
+        PacketOverrides {
+            spoof_src6: Some(spoof.octets()),
+            ..PacketOverrides::default()
+        },
+    )
+    .await;
+    let [h_near, h_far] = &r.hosts[..] else {
+        panic!("{} hosts", r.hosts.len());
+    };
+    assert_eq!(
+        (h_near.state, h_near.reason),
+        (HostState::Up, Some(Reason::NdResponse)),
+        "the solicitation went out from the spoofed address"
+    );
+    for h in [h_near, h_far] {
+        assert_eq!(
+            port(h, OPEN_TCP, Protocol::Tcp),
+            (PortState::Open, Reason::ConnAccept),
+            "{}",
+            h.address
+        );
+        assert_eq!(
+            port(h, CLOSED_TCP, Protocol::Tcp),
+            (PortState::Closed, Reason::Reset),
+            "{}",
+            h.address
+        );
+    }
+    let (solicited, replies, misframed, stray) = link.stop();
+    assert_eq!((misframed, stray), (0, 0));
+    assert!(
+        solicited > 0 && replies > 0,
+        "{solicited} solicited, {replies} replies"
+    );
 }

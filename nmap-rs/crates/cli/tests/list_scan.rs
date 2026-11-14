@@ -75,6 +75,36 @@ fn a_list_scan_claims_no_liveness_and_no_ports() {
     );
 }
 
+/// `-Pn` changes nothing about a list scan. `-sL` already asks for no ping
+/// (`PINGTYPE_NONE`, `nmap.cc:1307`), and C counts no host up in one
+/// (`nmap.cc:2116`): the hosts stay unknown, with no "Host is up" and no
+/// `user-set` claim, in every format.
+#[test]
+fn no_ping_does_not_make_a_list_scan_claim_liveness() {
+    let (stdout, _, ok) = run(&["-sL", "-Pn", "--reason", "127.0.0.1-2"]);
+    assert!(ok);
+    assert!(!stdout.contains("Host is up"), "claimed liveness: {stdout}");
+    assert!(!stdout.contains("user-set"), "claimed liveness: {stdout}");
+    assert!(
+        stdout.contains("(0 hosts up)"),
+        "must report 0 up: {stdout}"
+    );
+    let (grep, _, ok) = run(&["-sL", "-Pn", "-oG", "-", "127.0.0.1"]);
+    assert!(ok);
+    assert!(
+        grep.contains("Host: 127.0.0.1 ()\tStatus: Unknown"),
+        "got: {grep}"
+    );
+    let (xml, _, ok) = run(&["-sL", "-Pn", "-oX", "-", "127.0.0.1"]);
+    assert!(ok);
+    assert!(xml.contains(r#"<status state="unknown"/>"#), "got: {xml}");
+    // C's runstats count every host not up as down (`output.cc:2478`).
+    assert!(
+        xml.contains(r#"<hosts up="0" down="1" total="1"/>"#),
+        "got: {xml}"
+    );
+}
+
 /// C's grepable output for a list scan is `Status: Unknown`.
 #[test]
 fn grepable_output_says_unknown_not_down() {

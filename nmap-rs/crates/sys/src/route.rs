@@ -25,6 +25,10 @@ pub struct Route {
     pub iface: String,
     /// Source IPv4 address to stamp on outgoing probes.
     pub src: Ipv4Addr,
+    /// Whether the route goes over a loopback interface: the target is this host
+    /// (`127.0.0.0/8`, or an address of its own), which C marks up without a ping
+    /// (`targets.cc:588`, `devt_loopback`).
+    pub loopback: bool,
 }
 
 /// True if `target` is inside the network `net_addr/prefix`.
@@ -74,6 +78,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
             return Some(Route {
                 iface: i.name.clone(),
                 src,
+                loopback: true,
             });
         }
     }
@@ -89,6 +94,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
             return Some(Route {
                 iface: lo.name.clone(),
                 src: target,
+                loopback: true,
             });
         }
     }
@@ -103,6 +109,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                 return Some(Route {
                     iface: i.name.clone(),
                     src: net.addr,
+                    loopback: false,
                 });
             }
         }
@@ -115,6 +122,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                 return Some(Route {
                     iface: i.name.clone(),
                     src,
+                    loopback: false,
                 });
             }
         }
@@ -231,8 +239,11 @@ pub struct Route6 {
     /// The address whose MAC the link-layer send needs: the target itself when it is
     /// on-link, otherwise the gateway.
     pub next_hop: Ipv6Addr,
-    /// The next hop's MAC when the OS already knows it (a gateway entry), saving a
-    /// neighbor solicitation.
+    /// The next hop's MAC when it is already known, saving a neighbor solicitation.
+    /// `None` from [`choose_route6`] always: the interface table's gateway MAC is one
+    /// per interface for both families (`netif::Gateway::mac`; on the BSDs it comes
+    /// from the ARP table alone), so for IPv6 it can be the IPv4 router's. The IPv6
+    /// gateway is solicited instead (`route6-gateway-mac-not-borrowed`).
     pub next_hop_mac: Option<[u8; 6]>,
     /// Whether the target is on the same link. Gates the `NS` probe in the
     /// OS-detection battery (`Build6Params::directly_connected`).
@@ -353,7 +364,7 @@ pub fn choose_route6(ifaces: &[netif::Interface], target: Ipv6Addr) -> Option<Ro
                 src,
                 src_mac: i.mac,
                 next_hop,
-                next_hop_mac: gw.mac,
+                next_hop_mac: None,
                 directly_connected: false,
                 loopback: false,
             });
@@ -457,6 +468,7 @@ mod tests {
         Some(Route {
             iface: iface.to_string(),
             src: Ipv4Addr::from(src),
+            loopback: iface.starts_with("lo"),
         })
     }
 
@@ -655,10 +667,11 @@ mod tests {
             v6("fe80::1"),
             "resolve the gateway, not the target"
         );
+        // The table's gateway MAC (GWMAC) is per interface, for both families,
+        // and may be the IPv4 router's: the IPv6 gateway is solicited instead.
         assert_eq!(
-            r.next_hop_mac,
-            Some(GWMAC),
-            "a known gateway MAC saves a solicitation"
+            r.next_hop_mac, None,
+            "never borrowed from the gateway entry"
         );
     }
 

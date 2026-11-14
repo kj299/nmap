@@ -19,8 +19,8 @@ use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
     exclude_specs, host_specs, parse_args, parse_port_spec, parse_target, render_grepable,
-    render_normal, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable, TargetSpec,
-    TimingParams, TimingTemplate,
+    render_normal, render_normal_stdout, render_xml, Added, ExcludeSet, ScanMeta, ScanResults,
+    ServiceTable, TargetSpec, TimingParams, TimingTemplate,
 };
 mod nse;
 
@@ -560,6 +560,20 @@ fn connect_cfg(
 }
 
 /// Run a `-sS` SYN scan, falling back to a connect scan on missing privilege or setup
+/// A capture that failed mid-scan ends the run, as 7.94's `netutil_fatal` does
+/// (`read_reply_pcap`, `netutil.cc:3337`): nothing is reported and no other scan is
+/// tried, since what the capture did not deliver says nothing about the targets.
+/// Every other raw-scan error is a setup failure, which falls back.
+#[cfg(feature = "pcap")]
+fn exit_if_capture_failed(e: &std::io::Error) {
+    if nmap_sys::capture::is_capture_failure(e) {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        eprintln!("nmap-rs: {e}");
+        std::process::exit(1);
+    }
+}
+
 /// failure (built with `pcap`).
 #[cfg(feature = "pcap")]
 async fn syn_or_fallback(
@@ -582,6 +596,7 @@ async fn syn_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -638,6 +653,7 @@ async fn udp_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -727,6 +743,7 @@ async fn flag_or_fallback(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         Err(e) => {
+            exit_if_capture_failed(&e);
             eprintln!("nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)");
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
@@ -1552,13 +1569,19 @@ fn emit_outputs(
     notes: &[String],
     start_epoch: i64,
 ) -> std::io::Result<()> {
-    let normal = || {
-        let mut s = render_normal(results, meta, services);
+    // The terminal's report can hold lines the `-oN` file's does not (C's
+    // `LOG_STDOUT`), and none of them when stdout is silenced.
+    let normal = |terminal: bool| {
+        let mut s = if terminal {
+            render_normal_stdout(results, meta, services)
+        } else {
+            render_normal(results, meta, services)
+        };
         s.push_str(os_block);
         s
     };
     if !cfg.stdout_is_null() {
-        print!("{}", normal());
+        print!("{}", normal(true));
     }
     // Expand the strftime escapes here rather than in `parse_args`, which is
     // pure and has no clock. One expansion point for all four options, against
@@ -1571,7 +1594,7 @@ fn emit_outputs(
             text.push_str(n);
             text.push('\n');
         }
-        text.push_str(&normal());
+        text.push_str(&normal(false));
         write_to(&expand_dest(dest, stamp), &text)?;
     }
     if let Some(dest) = &cfg.out_xml {

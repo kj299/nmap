@@ -33,6 +33,36 @@ use tokio::sync::mpsc;
 #[cfg(feature = "pcap")]
 pub mod pcap_source;
 
+/// A capture that failed while a scan, or its neighbor discovery, was reading it.
+///
+/// 7.94 exits on one: `read_reply_pcap` calls `netutil_fatal` on `PCAP_ERROR`
+/// (`netutil.cc:3337`), on the path of the scan's replies and of ND alike. A failed
+/// capture is not silence, so no verdict may be drawn from what it did not deliver,
+/// and the CLI ends the run rather than fall back to another scan
+/// ([`is_capture_failure`]).
+#[derive(Debug)]
+pub struct CaptureFailed(pub String);
+
+impl std::fmt::Display for CaptureFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "packet capture failed {}", self.0)
+    }
+}
+
+impl std::error::Error for CaptureFailed {}
+
+impl From<CaptureFailed> for io::Error {
+    fn from(e: CaptureFailed) -> Self {
+        io::Error::other(e)
+    }
+}
+
+/// Whether `e` is a [`CaptureFailed`], as against a setup failure.
+#[must_use]
+pub fn is_capture_failure(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<CaptureFailed>())
+}
+
 /// A blocking source of captured link-layer frames.
 ///
 /// Implementations must be responsive to shutdown: `next_frame` should use a bounded

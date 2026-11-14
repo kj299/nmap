@@ -194,7 +194,8 @@ async fn syn_scan_resolves_open_and_closed_on_loopback() {
         ),
     )
     .await
-    .expect("scan completed within 10s");
+    .expect("scan completed within 10s")
+    .expect("the capture did not fail");
 
     let host = &hosts[0];
     assert_eq!(host.state, HostState::Up);

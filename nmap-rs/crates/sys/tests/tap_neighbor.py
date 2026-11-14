@@ -12,10 +12,17 @@ matching all run over a real Ethernet interface. The link holds:
   fd00:6e7::fe  a gateway that answers solicitations, with 2001:db8:1::5 behind it,
                 which answers as the on-link host does, through the gateway's MAC
   fd00:6e7::fd  a gateway that never answers
+  fd00:6e7::fc  a gateway that answers solicitations without its link-layer address,
+                so cannot be framed to; 2001:db8:3::5 behind it answers nothing
 
-With EXT=1 every reply carries a destination-options header. A probe framed to any MAC
-but its next hop's is counted as misframed. When the run ends (after SECONDS, or on
-SIGTERM) a summary line goes to stdout: "solicited=... replies=... misframed=...".
+Probes and solicitations count only from our address, fd00:6e7::1, or SRC when set: a
+scan under -S must send both from the spoofed address, as 7.94 does, and take the
+replies to it. With EXT=1 every reply carries a destination-options header. A probe framed to any MAC
+but its next hop's is counted as misframed. Anything else we send that is not a
+solicitation, to an address no host here answers for (the silent one, or one behind
+the silent gateway), is counted as stray: 7.94 sends neither. When the run ends (after
+SECONDS, or on SIGTERM) a summary line goes to stdout:
+"solicited=... replies=... misframed=... stray=...".
 
 Usage: tap_neighbor.py IFACE OPEN_TCP CLOSED_TCP UDP_OPEN UDP_CLOSED SECONDS
 """
@@ -35,7 +42,7 @@ SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 IFF_UP = 0x1
 
-US = socket.inet_pton(socket.AF_INET6, "fd00:6e7::1")
+US = socket.inet_pton(socket.AF_INET6, os.environ.get("SRC") or "fd00:6e7::1")
 NEAR = socket.inet_pton(socket.AF_INET6, "fd00:6e7::2")
 SILENT = socket.inet_pton(socket.AF_INET6, "fd00:6e7::3")
 GW = socket.inet_pton(socket.AF_INET6, "fd00:6e7::fe")
@@ -43,6 +50,8 @@ DEAD_GW = socket.inet_pton(socket.AF_INET6, "fd00:6e7::fd")
 FAR = socket.inet_pton(socket.AF_INET6, "2001:db8:1::5")
 NEAR_MAC = bytes.fromhex("020000000002")
 GW_MAC = bytes.fromhex("0200000000fe")
+BARE_GW = socket.inet_pton(socket.AF_INET6, "fd00:6e7::fc")
+BARE_GW_MAC = bytes.fromhex("0200000000fc")
 # Who answers a solicitation, with which MAC.
 ADVERTISED = {NEAR: NEAR_MAC, GW: GW_MAC}
 # The hosts that answer probes, and the MAC their probes must be framed to.
@@ -83,7 +92,7 @@ def main():
     fcntl.ioctl(ctl, SIOCSIFFLAGS, struct.pack("16sH", iface.encode(), flags | IFF_UP))
     print("ready", flush=True)
 
-    stats = {"solicited": 0, "replies": 0, "misframed": 0}
+    stats = {"solicited": 0, "replies": 0, "misframed": 0, "stray": 0}
     stop = [False]
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__(0, True))
     end = time.time() + float(seconds)
@@ -98,17 +107,35 @@ def main():
         nh, src, dst = ip[6], ip[8:24], ip[24:40]
         l4 = ip[40:]
         if nh == 58 and l4[0] == 135 and len(l4) >= 24:
-            stats["solicited"] += 1
             target = l4[8:24]
             mac = ADVERTISED.get(target)
+            # A solicitation from anyone else (the kernel's own, or ours from the
+            # wrong source) goes unanswered.
+            if src != US:
+                continue
+            if target == BARE_GW:
+                # An advertisement with no target link-layer address option.
+                stats["solicited"] += 1
+                body = struct.pack("!BBHI", 136, 0, 0, 0x60000000) + target
+                body = body[:2] + struct.pack("!H", l4_sum(target, src, 58, body)) + body[4:]
+                os.write(tap, eth_src + BARE_GW_MAC + b"\x86\xdd" + ipv6(target, src, 58, body, hlim=255))
+                continue
             if mac is None:
                 continue
+            stats["solicited"] += 1
             body = struct.pack("!BBHI", 136, 0, 0, 0x60000000) + target + b"\x02\x01" + mac
             body = body[:2] + struct.pack("!H", l4_sum(target, src, 58, body)) + body[4:]
             os.write(tap, eth_src + mac + b"\x86\xdd" + ipv6(target, src, 58, body, hlim=255))
             continue
-        # A probe: from us, hop limit 255, to a host that answers.
-        if src != US or ip[7] != 255 or dst not in HOSTS:
+        # The kernel's own traffic (router solicitations, MLD, from its link-local
+        # address) is not ours.
+        if src != US:
+            continue
+        if dst not in HOSTS:
+            stats["stray"] += 1
+            continue
+        # A probe: hop limit 255 (`build6-scan-hop-limit-255`), to a host that answers.
+        if ip[7] != 255:
             continue
         if eth_dst != HOSTS[dst]:
             stats["misframed"] += 1

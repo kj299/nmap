@@ -148,8 +148,10 @@ and IPv6 tracks are approved. Port order, leaf-first:
      hop-limit distance never fires because `is_response` never matches the error responses
      it reads, so distance is localhost/direct/none only).
    - **12b-ii-b. Privileged IPv6 wire path + CLI `-6 -O`** — the remaining integration.
-     Linux has **no `IPV6_HDRINCL`**, so a full-packet IPv6 send must go L2 (Ethernet) with
-     NDP next-hop resolution — a real subsystem, deliberately *not* stubbed with untested
+     A full-packet IPv6 send goes L2 (Ethernet) with NDP next-hop resolution. This item
+     said Linux had no `IPV6_HDRINCL`; it has, and an `IPPROTO_RAW` socket takes the header
+     too, so L2 is a choice (`ipv6-send-is-layer-2-only`, corrected at IPv6 scans step e).
+     It is a real subsystem, deliberately *not* stubbed with untested
      socket code. Decomposed leaf-first so that everything decidable from bytes is gated in
      CI and only the socket plumbing rests on a privileged host:
      - ~~**12b-ii-b-1. `core::ndp` (neighbor discovery, pure)**~~ — **done**. The

@@ -333,3 +333,55 @@ fn a_scripts_stdout_log_follows_the_report() {
     assert_eq!(run(&["-v0"]), "");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 7.94's closing "Host seems down" note is `LOG_STDOUT` (`output.cc:2501`): the
+/// terminal's, never an `-oN` file's, and not printed at all under `-oN -`, which
+/// silences the terminal's own copy. A lone host found down comes from an empty
+/// network namespace (`unshare -rn`), where a connect to anything fails at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_seems_down_note_is_the_terminals_alone() {
+    let netns = Command::new("unshare").args(["-rn", "true"]).status();
+    if !netns.is_ok_and(|s| s.success()) {
+        eprintln!("skipping: no unprivileged network namespace (unshare -rn)");
+        return;
+    }
+    let note = "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn";
+    let dir = scratch("seemsdown");
+    let run = |dest: &str| {
+        let out = Command::new("unshare")
+            .current_dir(&dir)
+            .env("NMAP_RS_DATADIR", datadir())
+            .args([
+                "-rn",
+                bin(),
+                "-sT",
+                "-n",
+                "-p",
+                "1",
+                "-oN",
+                dest,
+                "192.0.2.1",
+            ])
+            .output()
+            .expect("nmap-rs runs");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let terminal = run("n.txt");
+    assert!(
+        terminal.contains(&format!("{note}\nNmap done: 1 IP address (0 hosts up)")),
+        "{terminal}"
+    );
+    let file = std::fs::read_to_string(dir.join("n.txt")).expect("the -oN file");
+    assert!(
+        file.contains("(0 hosts up)") && !file.contains(note),
+        "{file}"
+    );
+    let dash = run("-");
+    assert!(
+        dash.contains("(0 hosts up)") && !dash.contains(note),
+        "{dash}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

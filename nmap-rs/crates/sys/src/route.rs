@@ -9,7 +9,7 @@
 //! `route-minimal-onlink-then-gateway`.
 //!
 //! [`route_for6`] is the IPv6 counterpart, and carries more than its IPv4 sibling: the
-//! IPv6 send path is layer 2 (Linux has no `IPV6_HDRINCL`), so it must also report the
+//! IPv6 send path is layer 2 (`ipv6-send-is-layer-2-only`), so it must also report the
 //! **next hop** whose MAC has to be resolved, and whether the target is directly
 //! connected — which is what gates the `NS` probe in the OS-detection battery.
 

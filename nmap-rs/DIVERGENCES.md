@@ -145,20 +145,64 @@ narrower *rendering* of the same result.
       takes `--debug=N` (`{"debug", optional_argument, 0, 'd'}`,
       `nmap.cc:531`); the port refuses it, fail-closed, and takes `--debug`
       and `-dN`. Found by the lfs step's review.
-- [ ] `ipv6-raw-port-scans-unported` (`cli`, `sys::group`; ports `ultra_scan`'s
-      IPv6 path) — nmap SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans
-      over IPv6, **to any host**. Since IPv6 scans step d the port has all eight for
-      this host's own addresses, `::1` and an address of its own, which go over a
-      loopback (`sys::group`, one engine for both families; validation since step a,
-      ICMPv6 classification and the matchers since step b, the probes since step c,
-      `docs/IPV6-SCAN-ANALYSIS.md`). Any other IPv6 target needs Ethernet framing
-      and neighbor discovery for its next hop (step e). With `-6`, a raw scan of such
-      a target prints "raw IPv6 port scans reach only this host's own addresses so
-      far; running a connect scan (-sT)" and connect-scans, as a raw scan without
-      privilege does. Until FreeBSD step e it sent nothing and reported the host
-      with no ports and no word of why; from then until step d every IPv6 raw scan
-      fell back. `-6 -O` is unaffected: it has its own layer-2 driver. Pinned by
-      `cli/tests/ipv6_raw_fallback.rs`.
+- [x] ~~`ipv6-raw-port-scans-unported`~~ — **resolved** at IPv6 scans step e. nmap's
+      SYN, UDP, ACK, Window, Maimon, FIN, NULL and Xmas scans over IPv6, to any
+      host, all run on the one engine (`sys::group`; `docs/IPV6-SCAN-ANALYSIS.md`):
+      validation since step a, ICMPv6 classification and the matchers since step b,
+      the probes since step c, this host's own addresses over a loopback since step
+      d, and every other host over Ethernet, to its next hop, since step e. Until
+      FreeBSD step e a raw IPv6 scan sent nothing and reported the host with no
+      ports and no word of why; from then until step d every one connect-scanned
+      instead and said so, and until step e every target beyond this host still
+      did. No raw scan falls back for being IPv6 now; pinned by
+      `cli/tests/ipv6_raw_scans.rs`.
+- [x] `scan6-nd-ping-decides-on-link-hosts` (`sys::group::plan_neighbors`; ports
+      `targets.cc`'s `arpping` and its `-Pn` handling, `:560`): **a C behaviour,
+      reproduced.** For a directly connected target on Ethernet, nmap runs an ND
+      ping (`PING_SCAN_ND`) before the scan **even under `-Pn`**; only
+      `--disable-arp-ping` skips it. An advertisement makes the host up with
+      reason `nd-response`. Silence makes it down, so it is not scanned, and with
+      `-Pn` the closing "Host seems down" note is not printed. The port's scan
+      resolves the same on-link MACs for the whole group at once
+      (`ndp::resolve_many`, `doND`'s schedule) and takes the same verdicts. An
+      off-link target gets no ND ping. When its gateway cannot be resolved, 7.94's
+      kernel drops every probe and the ports take their no-response defaults;
+      here the probes cannot be framed and go nowhere, with the same result. Phase
+      0 had expected a silent neighbor to be down with `no-route` (D4). That is
+      7.94's `--send-eth` path (`setTargetNextHopMAC`), not its default on Unix.
+      Pinned by `scan6_tap_e2e` and `plan_neighbors`' unit test; faced with 7.94 by
+      the silent-neighbor gate (`SILENT=1`), in CI. The `MAC Address:` line 7.94
+      prints for such a host is not ported (`on-link-mac-address-line-unported`).
+      *(Introduced at IPv6 scans step e.)*
+- [ ] `ipv4-implicit-arp-ping-unported` (`sys::group`; ports `targets.cc`'s
+      `arpping` for IPv4) — the IPv4 half of the entry above. For a directly
+      connected IPv4 target on Ethernet, 7.94 ARP-pings before a raw scan even under
+      `-Pn`, and a silent address is down. The port has no ARP ping, so it reports
+      the address up (`user-set`) with every port at its no-response default.
+      Measured at IPv6 scans step e: `-sS -Pn` of 192.0.2.77, an unused address on
+      this VM's own /24, gives `hosts up=0 down=1` under 7.94 and the host up with 3
+      filtered ports here. No CI gate has an on-link IPv4 neighbor.
+- [ ] `on-link-mac-address-line-unported` (`core::output`) — for an on-link target,
+      7.94 prints the MAC its ARP or ND ping found ("MAC Address: 02:00:00:00:00:02
+      (Unknown)", with the vendor from `nmap-mac-prefixes`) and lists it in XML as
+      an `addrtype="mac"` address. The port prints neither, for either family.
+- [x] `output-down-host-verbose-only` (`core::output`; ports `nmap.cc:2153`,
+      `write_host_header`, `printfinaloutput`): the port reported every down host,
+      as "Nmap scan report for X" and "Host seems down.", and as a `<host>` element.
+      7.94 reports a down host only under `-v`: as "Nmap scan report for X [host
+      down]" (", received no-response" with `--reason`), in XML and grepable output.
+      Otherwise the host is only counted. For a lone host found down without `-Pn`,
+      7.94 closes with "Note: Host seems down. If it is really up, but blocking our
+      ping probes, try -Pn". The port now does the same. Before IPv6 scans step e
+      only a connect scan without `-Pn` could find a host down, and no differential
+      scenario had one. The silent neighbor is the first. Pinned by
+      `a_down_host_is_reported_only_under_verbose`. *(Found and fixed at IPv6 scans
+      step e.)*
+- [ ] `raw-scan-unroutable-target-reported` (`cli`, `sys::group`; ports
+      `targets.cc:410`) — for a raw scan, 7.94 skips a target it has no route to,
+      saying "nexthost: failed to determine route to X". The port reports it: down,
+      or up under `-Pn`, with no ports. Both families. *(Found at IPv6 scans step
+      e.)*
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans
@@ -457,7 +501,7 @@ lands, `[x]` = confirmed by that module's gates.
       refuses anything else rather than send from the routed address: "-S expects an
       IPv6 address, got … (names are not resolved here)". Before step d, `-6 -S` took
       only an IPv4 literal, which nothing IPv6 used. Pinned by
-      `cli/tests/packet_shaping.rs` and `cli/tests/ipv6_raw_fallback.rs`.
+      `cli/tests/packet_shaping.rs` and `cli/tests/ipv6_raw_scans.rs`.
       *(Introduced at M7.5; extended at IPv6 scans step d.)*
 - [x] ~~`flagscan-ack-probe-attempt-in-sequence`~~ — **resolved** at IPv6 scans step c:
       nmap puts the encoded attempt in the **acknowledgment** of a probe carrying the
@@ -1577,16 +1621,22 @@ variance, and a wrong scaling formula.
 
 - [x] `ipv6-send-is-layer-2-only` (`sys::rawio::EthFramingSender`, `sys::fpengine::os_scan_host6`):
       the IPv4 driver hands a fully-built packet to an `IP_HDRINCL` raw socket and lets
-      the kernel route it. **There is no IPv6 equivalent** — Linux has no
-      `IPV6_HDRINCL`, and an `AF_INET6` raw socket does not treat a caller-supplied IPv6
-      header the way `IP_HDRINCL` treats an IPv4 one. So the IPv6 battery, which
-      `core::build6` emits as complete IPv6 packets, must be framed and injected at layer
-      2, which in turn is why the driver must resolve the next hop's MAC by neighbor
-      discovery before it can send anything at all. nmap reaches the same place by the
-      same reasoning (`send_ip_packet_eth_or_sd` falls to the Ethernet path); recorded
-      because it explains why the IPv6 driver has a whole subsystem the IPv4 one does
-      not, and why `os_scan_host6` can fail with `AddrNotAvailable` where the IPv4 path
-      would simply send. The framing itself is a thin generic wrapper over any
+      the kernel route it. The IPv6 driver frames complete IPv6 packets (as
+      `core::build6` emits them) and injects them at layer 2, which is why it must
+      resolve the next hop's MAC by neighbor discovery before it can send anything at
+      all. **Corrected at IPv6 scans step e:** this entry used to say there was no IPv6
+      equivalent of `IP_HDRINCL`, and that nmap falls to the Ethernet path the same
+      way. Both were wrong. On Linux an `AF_INET6` `IPPROTO_RAW` socket takes the
+      caller's header (`acinclude.m4:90`, `HAVE_IPV6_IPPROTO_RAW`). 7.94's default send
+      preference on Unix is `PACKET_SEND_IP_WEAK` (`NmapOps.cc:437`), so it sends IPv6
+      probes through that socket, or on the BSDs through `sendmsg` with the kernel
+      writing the header, and lets the kernel resolve the next hop. Layer 2 is its
+      `--send-eth` path. The port's layer 2 is a choice: one path for Linux and the
+      BSDs, framed for each link. On the wire it differs only in who solicits the
+      next hop: the port does, where 7.94's kernel does, after nmap's own ND ping for
+      an on-link target (`scan6-nd-ping-decides-on-link-hosts`). Since IPv6 scans
+      step e the port scans use this path too. It is also why `os_scan_host6` can fail
+      with `AddrNotAvailable` where the IPv4 path would simply send. The framing itself is a thin generic wrapper over any
       [`RawSender`], so it is exercised against a mock in CI and only the injection
       beneath it needs privilege. *(Introduced at M5 item 12b-ii-b-3.)*
       Since FreeBSD step e the frame follows the send handle's datalink, as

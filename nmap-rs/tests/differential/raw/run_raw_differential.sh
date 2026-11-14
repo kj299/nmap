@@ -17,10 +17,17 @@
 # step e). A raw scan that fell back to a connect scan fails here rather than
 # compare connect rows with raw ones. SCANS overrides the list.
 #
+# An on-link neighbor (IPv6 scans step e) is another host on an Ethernet link,
+# such as a network namespace behind a veth pair or a VNET jail behind an epair.
+# FIXTURE_IN names the command that runs the fixture there ("ip netns exec ns",
+# "jexec ns"). SILENT=1 scans an address nobody answers for: no fixture, and both
+# tools must find the host down (7.94's implicit ND ping, under -Pn too).
+#
 # Requires root (raw sockets, BPF) and a --features pcap build; SKIPs without
 # them, as run_os_differential.sh does.
 #
-# Usage: [TARGET=addr] [SCANS="-sS ..."] [NMAP=...] [NMAP_RS=...] run_raw_differential.sh
+# Usage: [TARGET=addr] [SCANS="-sS ..."] [FIXTURE_IN="cmd ..."] [SILENT=1]
+#        [NMAP=...] [NMAP_RS=...] run_raw_differential.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +56,9 @@ fi
 TARGET="${TARGET:-$(python3 "$HERE/own_address.py")}"
 if [[ "$TARGET" == *:* ]]; then
   FAMILY=6; SIX=(-6); SCANS="${SCANS:--sT -sS -sF -sN -sX -sA -sW -sM -sU}"
+  # The implicit ND ping runs for raw scans only (routes are looked up only for
+  # them, nmap.cc's o.RawScan()): -sT -Pn of a silent neighbor finds it up.
+  if [[ "${SILENT:-0}" == 1 ]]; then SCANS="${SCANS/-sT /}"; fi
 else
   FAMILY=4; SIX=(); SCANS="${SCANS:--sS -sF -sN -sX -sA -sW -sM -sU}"
 fi
@@ -58,10 +68,13 @@ echo "rust   : $NMAP_RS"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"; [[ -n "${FIXTURE_PID:-}" ]] && kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
+read -ra FIXTURE_CMD <<<"${FIXTURE_IN:-}"
+SILENT="${SILENT:-0}"
 
+if [[ "$SILENT" != 1 ]]; then
 # The fixture, on every address: a TCP listener that accepts and drains, a
 # UDP socket that never answers (open|filtered), nothing on $CLOSED.
-python3 - "$OPEN_TCP" "$OPEN_UDP" "$FAMILY" <<'PY' &
+"${FIXTURE_CMD[@]}" python3 - "$OPEN_TCP" "$OPEN_UDP" "$FAMILY" <<'PY' &
 import socket, sys, threading, time
 fam, anyaddr = (socket.AF_INET6, "::") if sys.argv[3] == "6" else (socket.AF_INET, "0.0.0.0")
 t = socket.socket(fam)
@@ -89,6 +102,7 @@ import socket, sys
 s = socket.socket(socket.AF_INET6 if $FAMILY == 6 else socket.AF_INET); s.settimeout(2)
 sys.exit(0 if s.connect_ex(('$TARGET', $OPEN_TCP)) == 0 else 1)
 " || { echo "FAIL: the fixture is not listening on $TARGET:$OPEN_TCP"; exit 1; }
+fi
 
 PORTS="$OPEN_TCP,$OPEN_UDP,$CLOSED"
 fail=0
@@ -108,7 +122,12 @@ for scan in $SCANS; do
   fi
   python3 "$HERE/raw_project.py" <"$WORK/c.xml" >"$WORK/c.proj" || true
   python3 "$HERE/raw_project.py" <"$WORK/rs.xml" >"$WORK/rs.proj" || true
-  if ! grep -q "/$OPEN_TCP " "$WORK/c.proj"; then
+  if [[ "$SILENT" == 1 ]]; then
+    # Nothing answers, so the pass condition is the host found down, not ports.
+    if ! grep -qx "hosts up=0 down=1" "$WORK/c.proj"; then
+      echo "FAIL [$scan]: C nmap did not find the silent neighbor down"; cat "$WORK/c.proj"; fail=1; continue
+    fi
+  elif ! grep -q "/$OPEN_TCP " "$WORK/c.proj"; then
     echo "FAIL [$scan]: C nmap reported no ports"; cat "$WORK/c.err"; fail=1; continue
   fi
   if diff -u "$WORK/c.proj" "$WORK/rs.proj" >"$WORK/diff"; then

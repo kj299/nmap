@@ -12,8 +12,8 @@
 //!     the only raw-send path available on Windows). Its FFI is audited upstream, so
 //!     still no first-party `unsafe`.
 //!
-//! [`EthFramingSender`] adapts an L2 backend for the IPv6 probe path, which must frame
-//! its own Ethernet header because Linux has no `IPV6_HDRINCL`.
+//! [`FramingSender`] and [`NeighborSender`] adapt an L2 backend for the IPv6 probe path,
+//! which frames its own link header (`ipv6-send-is-layer-2-only`).
 //!
 //! A [`MockSender`] records frames for driver tests without touching the network.
 
@@ -171,12 +171,12 @@ impl LinkFraming {
 /// Wraps an L2 sender so each IPv6 packet handed to it goes out framed for its link
 /// ([`LinkFraming`]).
 ///
-/// This is what the IPv6 probe path needs and the IPv4 path does not. Linux has no
-/// `IPV6_HDRINCL`: an `AF_INET6` raw socket does **not** treat a caller-supplied IPv6
-/// header the way `IP_HDRINCL` treats an IPv4 one, so a full IPv6 packet — which is what
-/// `core::build6` produces — cannot be handed to the kernel to route. It has to be
-/// framed and injected at layer 2, which on Ethernet is why the driver first resolves
-/// the next hop's MAC by neighbor discovery.
+/// This is what the IPv6 probe path needs and the IPv4 path does not. The IPv6 path
+/// injects full packets at layer 2, one path for Linux and the BSDs, where 7.94 hands
+/// them to a raw socket (a Linux `IPPROTO_RAW` one takes the header, `acinclude.m4:90`;
+/// on the BSDs the kernel writes it) and the kernel routes them
+/// (`ipv6-send-is-layer-2-only`). On Ethernet that is why the driver first resolves the
+/// next hop's MAC by neighbor discovery.
 ///
 /// Generic over the inner sender, so the framing is exercised against a
 /// [`MockSender`] in CI and only the injection underneath it needs privilege.

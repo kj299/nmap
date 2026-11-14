@@ -310,7 +310,7 @@ ledgered and made to say so. Their driver is a milestone of its own.
   takes distance 0 there (`route::is_localhost6`, `islocalhost`).
 - **`-6` with a raw scan type** warns "raw IPv6 port scans are not ported
   yet" and connect-scans (`ipv6-raw-port-scans-unported`, newly ledgered;
-  `cli/tests/ipv6_raw_fallback.rs`).
+  `cli/tests/ipv6_raw_fallback.rs`, renamed `ipv6_raw_scans.rs` when IPv6 scans step e removed the fallback).
 - **The gate.** `tests/differential/m5/run_os6_differential.sh` runs `-6 -O`
   with both programs as root and compares what the classifier decides: the
   verdict (`OS details: <class>`, or `No OS matches for host`; nmap-rs now

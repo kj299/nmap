@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Project an `-oX` document onto what a raw scan decides: each host's state,
-and each port's protocol, number, state and reason, one line apiece, sorted.
+and each port's protocol, number, state and reason, one line apiece, sorted; then
+the run's count of hosts up and down, which is all a down host leaves in the
+document without -v (IPv6 scans step e's silent neighbor).
 
 Dropped as run-to-run variable or not this gate's subject: timing, the reply's
 TTL (`reason_ttl`), service names, and everything outside <host>.
@@ -27,6 +29,9 @@ def project(xml_text):
             )
         for extra in host.iter("extraports"):
             out.append(f"  extraports {extra.get('state')} {extra.get('count')}")
+    hosts = root.find("runstats/hosts")
+    if hosts is not None:
+        out.append(f"hosts up={hosts.get('up')} down={hosts.get('down')}")
     return out
 
 

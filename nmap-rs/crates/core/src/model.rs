@@ -258,6 +258,34 @@ impl Host {
         }
     }
 
+    /// Settle liveness, and why, once the scan is done; `assume_up` is `-Pn`.
+    ///
+    /// A verdict the scan itself reached (a reason already set) stands, `-Pn` or
+    /// not: an on-link IPv6 target is put to the implicit ND ping, which `-Pn` does
+    /// not skip in C (`targets.cc`'s `arpping`), and is up with `nd-response` or
+    /// down. Otherwise `-Pn` makes the host up, `user-set`: the operator asserted
+    /// liveness and nothing probed it, so a packet reason would be inventing
+    /// evidence. Without it the host is up because some port answered, and the
+    /// reason is that port's.
+    pub fn settle_liveness(&mut self, assume_up: bool) {
+        if self.reason.is_some() {
+            return;
+        }
+        if assume_up {
+            self.state = HostState::Up;
+        }
+        if self.state == HostState::Up {
+            self.reason = if assume_up {
+                Some(Reason::UserSet)
+            } else {
+                self.ports
+                    .iter()
+                    .find(|p| p.state == PortState::Open || p.state == PortState::Closed)
+                    .map(|p| p.reason)
+            };
+        }
+    }
+
     /// Ports matching `state`, sorted by (protocol, number) — the order nmap
     /// prints them in.
     pub fn ports_in_state(&self, state: PortState) -> Vec<&Port> {
@@ -316,6 +344,46 @@ impl ScanResults {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `-Pn` makes a host up, `user-set`, unless the scan reached a verdict of its
+    /// own: the ND ping's `nd-response` up, or its silence down.
+    #[test]
+    fn liveness_settles_as_c_does() {
+        let addr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let with = |state, reason: Option<Reason>, assume_up| {
+            let mut h = Host::new(addr, state);
+            h.reason = reason;
+            h.ports.push(Port::new(80, Protocol::Tcp, PortState::Closed, Reason::Reset));
+            h.settle_liveness(assume_up);
+            (h.state, h.reason)
+        };
+        assert_eq!(
+            with(HostState::Down, None, true),
+            (HostState::Up, Some(Reason::UserSet))
+        );
+        assert_eq!(
+            with(HostState::Up, None, true),
+            (HostState::Up, Some(Reason::UserSet))
+        );
+        assert_eq!(
+            with(HostState::Down, Some(Reason::NoResponse), true),
+            (HostState::Down, Some(Reason::NoResponse)),
+            "a silent neighbor stays down under -Pn"
+        );
+        assert_eq!(
+            with(HostState::Up, Some(Reason::NdResponse), true),
+            (HostState::Up, Some(Reason::NdResponse))
+        );
+        assert_eq!(
+            with(HostState::Up, None, false),
+            (HostState::Up, Some(Reason::Reset)),
+            "the first port that answered"
+        );
+        assert_eq!(with(HostState::Down, None, false), (HostState::Down, None));
+        // As C's reason table spells them (`portreasons.cc:135`, `:147`).
+        assert_eq!(Reason::NdResponse.as_str(), "nd-response");
+        assert_eq!(Reason::NoResponse.as_str(), "no-response");
+    }
     use std::net::Ipv4Addr;
 
     #[test]

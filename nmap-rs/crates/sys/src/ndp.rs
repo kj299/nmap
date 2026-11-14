@@ -1,9 +1,10 @@
 //! NDP next-hop resolution on the wire — the I/O half of [`nmap_core::ndp`].
 //!
-//! The IPv6 probe path is layer 2. Linux has no `IPV6_HDRINCL`, so unlike IPv4 there is
-//! no raw socket that will accept a caller-built IPv6 header and route it: the driver
-//! frames its own Ethernet header, and to do that it needs the next hop's MAC. This
-//! module runs the exchange that finds it — the port of `doND()`'s send/retransmit loop.
+//! The IPv6 probe path is layer 2, by choice (`ipv6-send-is-layer-2-only`): the driver
+//! frames its own Ethernet header, and to do that it needs the next hop's MAC. (A Linux
+//! `IPPROTO_RAW` IPv6 socket would take a caller-built header, which is how 7.94 sends
+//! there, `acinclude.m4:90`; the BSDs have no such socket.) This module runs the
+//! exchange that finds the MAC — the port of `doND()`'s send/retransmit loop.
 //!
 //! Every decision made from bytes lives in `core::ndp`, where it is differential-tested
 //! against nmap and fuzzed. What is left here is scheduling and I/O, and it is generic

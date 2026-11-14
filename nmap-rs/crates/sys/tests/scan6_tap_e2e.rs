@@ -42,7 +42,7 @@ fn v6(s: &str) -> Ipv6Addr {
 
 /// Root, `/dev/net/tun` and python3, or skip (fail under `REQUIRE_TAP`).
 fn ready() -> bool {
-    let missing = if !matches!(RawIpv4Sender::new(), Ok(_)) {
+    let missing = if RawIpv4Sender::new().is_err() {
         Some("CAP_NET_RAW")
     } else if !std::path::Path::new("/dev/net/tun").exists() {
         Some("/dev/net/tun")

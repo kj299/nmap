@@ -667,7 +667,7 @@ impl RawScanKind for FlagKind {
 /// [`Host`] per input target, in order (feature `pcap`).
 ///
 /// IPv4 goes out an `IP_HDRINCL` raw socket. IPv6 goes out at layer 2, framed for its
-/// link ([`scan_route_group6`]): over a loopback with no neighbor to find, over Ethernet
+/// link (`scan_route_group6`): over a loopback with no neighbor to find, over Ethernet
 /// to each target's next hop as neighbor discovery finds it, over a link with no
 /// link-layer addresses as it is. A target that has no route is reported down, as for
 /// IPv4.

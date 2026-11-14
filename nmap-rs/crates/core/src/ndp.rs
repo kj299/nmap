@@ -1,9 +1,9 @@
 //! IPv6 Neighbor Discovery — the pure half of next-hop MAC resolution.
 //!
-//! A full-packet IPv6 send has to go out at **layer 2**: Linux has no `IPV6_HDRINCL`,
-//! so unlike the IPv4 path there is no raw socket that will accept a caller-built IPv6
-//! header and route it. The driver must frame its own Ethernet header, which means it
-//! must know the next hop's MAC. This module is the pure decision layer for that:
+//! The port sends full IPv6 packets at **layer 2**, one path for Linux and the BSDs
+//! (`ipv6-send-is-layer-2-only`; 7.94 hands them to a raw socket and the kernel routes
+//! them). The driver frames its own Ethernet header, which means it must know the next
+//! hop's MAC. This module is the pure decision layer for that:
 //! build the Neighbor Solicitation, and decide whether a captured frame answers it.
 //!
 //! Ports the NDP half of `netutil.cc`: `doND` (frame construction, addressing) and

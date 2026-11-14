@@ -343,27 +343,7 @@ async fn main() -> ExitCode {
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
     for (host, (_, name)) in results.hosts.iter_mut().zip(targets.iter()) {
         host.hostname = name.clone();
-        // A verdict the scan itself reached stands, -Pn or not: an on-link IPv6
-        // target is put to the implicit ND ping, as in C (`targets.cc`'s `arpping`,
-        // which -Pn does not skip), and is up with `nd-response` or down.
-        let established = host.reason.is_some();
-        if cfg.assume_up && host.state != HostState::Up && !established {
-            host.state = HostState::Up;
-        }
-        // Why this host is believed up, for `--reason`. With -Pn the answer is
-        // `user-set`: the operator asserted liveness and nothing probed it, so
-        // reporting a packet reason would be inventing evidence. Otherwise the
-        // host is up because some port answered, and the reason is that port's.
-        if host.state == HostState::Up && !established {
-            host.reason = if cfg.assume_up {
-                Some(nmap_core::model::Reason::UserSet)
-            } else {
-                host.ports
-                    .iter()
-                    .find(|p| p.state == PortState::Open || p.state == PortState::Closed)
-                    .map(|p| p.reason)
-            };
-        }
+        host.settle_liveness(cfg.assume_up);
     }
 
     // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.

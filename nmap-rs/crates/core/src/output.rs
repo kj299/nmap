@@ -42,6 +42,9 @@ pub struct ScanMeta<'a> {
     /// (`portlist.cc:811`), so the renderer cannot make that call without them.
     pub verbose: u8,
     pub debugging: u8,
+    /// `-Pn`: no ping was asked for. C's closing "Host seems down" note is about a
+    /// ping that did not answer, so it is not printed then (`output.cc:2501`).
+    pub assume_up: bool,
 }
 
 /// Assemble the human-readable VERSION column for a port from its `-sV` fields,
@@ -136,6 +139,11 @@ fn shown_ports<'a>(host: &'a Host, meta: &ScanMeta) -> Vec<&'a crate::model::Por
 /// (`nmap.cc:2312`). It still counts as up in the footer — the host was found,
 /// it just has nothing the operator asked to see.
 fn host_is_reportable(host: &Host, meta: &ScanMeta) -> bool {
+    // A host found down is reported only under `-v` (`nmap.cc:2153`); otherwise it
+    // shows only in the closing count, and in the note about it.
+    if host.state == crate::model::HostState::Down && meta.verbose == 0 {
+        return false;
+    }
     !meta.open_only || host.ports.iter().any(|p| p.state == PortState::Open)
 }
 
@@ -347,6 +355,15 @@ pub fn render_normal(
     out.push_str(&service_fingerprint_block(&fps));
 
     let n = results.hosts.len();
+    // C's note for a lone host its ping found down (`printfinaloutput`); not after
+    // `-Pn`, which asked for no ping, nor after a list scan, which pings nothing.
+    let down = |h: &Host| h.state == crate::model::HostState::Down;
+    if n == 1 && up == 0 && !meta.assume_up && results.hosts.iter().all(down) {
+        let _ = writeln!(
+            out,
+            "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn"
+        );
+    }
     let _ = writeln!(
         out,
         "Nmap done: {} IP address{} ({} host{} up) scanned in {:.2} seconds",
@@ -436,6 +453,23 @@ fn render_host_normal(
     if !first && host.state != crate::model::HostState::Unknown {
         out.push('\n');
     }
+    // A down host, reported because of `-v`, is the report line alone, with why
+    // under `--reason` (`write_host_header`): nothing was scanned on it.
+    if host.state == crate::model::HostState::Down {
+        match (meta.reason, host.reason) {
+            (true, Some(r)) => {
+                let _ = writeln!(
+                    out,
+                    "Nmap scan report for {name} [host down, received {}]",
+                    r.as_str()
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "Nmap scan report for {name} [host down]");
+            }
+        }
+        return;
+    }
     let _ = writeln!(out, "Nmap scan report for {name}");
 
     // A list scan (`-sL`) sends nothing, so it learns nothing about liveness.
@@ -444,10 +478,6 @@ fn render_host_normal(
     // guessing `Down`. Saying "Host seems down" about a host we never probed
     // would be inventing a result.
     if host.state == crate::model::HostState::Unknown {
-        return;
-    }
-    if host.state != crate::model::HostState::Up {
-        let _ = writeln!(out, "Host seems down.");
         return;
     }
     // `--reason` says what established liveness: "Host is up, received syn-ack".
@@ -1177,6 +1207,7 @@ mod tests {
             reason: false,
             verbose: 0,
             debugging: 0,
+            assume_up: false,
         }
     }
 
@@ -1809,6 +1840,75 @@ mod tests {
         assert_eq!(
             collect_service_fingerprints(&results),
             vec!["FP-22;".to_owned(), "FP-443;".to_owned()]
+        );
+    }
+
+    /// A host found down, as an on-link IPv6 neighbor that never answers is: C
+    /// reports it only under `-v`, as the report line alone, and notes a lone down
+    /// host at the end unless `-Pn` asked for no ping (`nmap.cc:2153`,
+    /// `write_host_header`, `printfinaloutput`).
+    #[test]
+    fn a_down_host_is_reported_only_under_verbose() {
+        let mut results = ScanResults::new();
+        let mut host = Host::new(IpAddr::V6("fd00:6e7::3".parse().unwrap()), HostState::Down);
+        host.reason = Some(Reason::NoResponse);
+        results.hosts.push(host);
+        let note =
+            "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn";
+
+        let quiet = meta();
+        let normal = render_normal(&results, &quiet, None);
+        assert!(!normal.contains("Nmap scan report"), "{normal}");
+        assert!(normal.contains(note), "{normal}");
+        assert!(
+            normal.contains("Nmap done: 1 IP address (0 hosts up)"),
+            "{normal}"
+        );
+        let xml = render_xml(&results, &quiet, None);
+        assert!(!xml.contains("<host>"), "{xml}");
+        assert!(
+            xml.contains("<hosts up=\"0\" down=\"1\" total=\"1\"/>"),
+            "{xml}"
+        );
+        assert!(!render_grepable(&results, &quiet, None).contains("Host: "));
+
+        let pn = ScanMeta {
+            assume_up: true,
+            ..meta()
+        };
+        assert!(
+            !render_normal(&results, &pn, None).contains(note),
+            "-Pn pinged nothing"
+        );
+
+        let verbose = ScanMeta {
+            verbose: 1,
+            ..meta()
+        };
+        let normal = render_normal(&results, &verbose, None);
+        assert!(
+            normal.contains("Nmap scan report for fd00:6e7::3 [host down]\n"),
+            "{normal}"
+        );
+        assert!(!normal.contains("\nHost seems down.\n"), "{normal}");
+        assert!(normal.contains(note), "the note, under -v too: {normal}");
+        assert!(render_xml(&results, &verbose, None).contains("<status state=\"down\"/>"));
+        assert!(render_grepable(&results, &verbose, None).contains("Status: Down"));
+        let why = ScanMeta {
+            reason: true,
+            ..verbose
+        };
+        assert!(render_normal(&results, &why, None)
+            .contains("Nmap scan report for fd00:6e7::3 [host down, received no-response]\n"));
+
+        // One up host among two: no note, and the down one is still not listed.
+        let mut two = results.clone();
+        two.hosts
+            .push(Host::new(IpAddr::V4(Ipv4Addr::LOCALHOST), HostState::Up));
+        let normal = render_normal(&two, &quiet, None);
+        assert!(
+            !normal.contains(note) && !normal.contains("fd00:6e7::3"),
+            "{normal}"
         );
     }
 }

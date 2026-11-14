@@ -17,6 +17,7 @@
 //!
 //! A [`MockSender`] records frames for driver tests without touching the network.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -204,6 +205,50 @@ impl<S: RawSender> RawSender for FramingSender<S> {
     }
 }
 
+/// Frames each IPv6 packet for an Ethernet link to **its own destination's** next hop:
+/// the target's MAC when it is on-link, the gateway's otherwise, as neighbor discovery
+/// found them ([`crate::ndp::resolve_many`]). An IPv6 scan sends to many targets
+/// through one handle, and they need not share a next hop, which a single
+/// [`LinkFraming`] cannot express.
+///
+/// The destination is read from the packet's own header (bytes 24..40), as
+/// [`RawIpv4Sender`] reads its routing destination. A packet to an address with no
+/// MAC is refused (`AddrNotAvailable`), never framed to a guess.
+pub struct NeighborSender<S> {
+    inner: S,
+    src_mac: [u8; 6],
+    next_hop_macs: HashMap<[u8; 16], [u8; 6]>,
+}
+
+impl<S: RawSender> NeighborSender<S> {
+    /// Frame from `src_mac`, to the next-hop MAC `next_hop_macs` gives each destination.
+    pub fn new(inner: S, src_mac: [u8; 6], next_hop_macs: HashMap<[u8; 16], [u8; 6]>) -> Self {
+        NeighborSender {
+            inner,
+            src_mac,
+            next_hop_macs,
+        }
+    }
+}
+
+impl<S: RawSender> RawSender for NeighborSender<S> {
+    fn send(&mut self, packet: &[u8]) -> io::Result<usize> {
+        let dst: [u8; 16] = packet
+            .get(24..40)
+            .and_then(|d| d.try_into().ok())
+            .filter(|_| packet.first().is_some_and(|b| b >> 4 == 6))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not an IPv6 packet"))?;
+        let mac = self.next_hop_macs.get(&dst).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no next-hop MAC for the destination",
+            )
+        })?;
+        let frame = crate::ndp::frame_ethernet(*mac, self.src_mac, packet);
+        self.inner.send(&frame)
+    }
+}
+
 /// L2 injection via libpcap/Npcap (feature `pcap`).
 #[cfg(feature = "pcap")]
 pub mod pcap_sender;
@@ -319,6 +364,52 @@ mod tests {
         assert_eq!(LinkFraming::for_loopback(0, mac), Some(LinkFraming::Null));
         assert_eq!(LinkFraming::for_loopback(12, None), Some(LinkFraming::Raw));
         assert_eq!(LinkFraming::for_loopback(108, mac), None);
+    }
+
+    // Each packet goes to its own destination's next hop, from our MAC; a destination
+    // with none, or a packet that is not IPv6, is refused and nothing is sent.
+    #[test]
+    fn neighbor_sender_frames_each_packet_for_its_destination() {
+        const US: [u8; 6] = [2, 0, 0, 0, 0, 1];
+        let a = [0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let mut b = a;
+        b[15] = 3;
+        let mut c = a;
+        c[15] = 4;
+        let ip6 = |dst: [u8; 16]| {
+            let mut p = vec![0x60, 0, 0, 0, 0, 0, 59, 64];
+            p.extend_from_slice(&[0; 16]);
+            p.extend_from_slice(&dst);
+            p
+        };
+        // b is off-link: its next hop is the gateway's MAC, shared with c.
+        let macs = HashMap::from([(a, [0xa; 6]), (b, [0xf; 6]), (c, [0xf; 6])]);
+        let mut s = NeighborSender::new(MockSender::default(), US, macs);
+        assert_eq!(s.send(&ip6(a)).unwrap(), 14 + 40);
+        s.send(&ip6(b)).unwrap();
+        s.send(&ip6(c)).unwrap();
+        let sent = &s.inner.sent;
+        for (frame, (dst, mac)) in sent
+            .iter()
+            .zip([(a, [0xa; 6]), (b, [0xf; 6]), (c, [0xf; 6])])
+        {
+            assert_eq!(&frame[0..6], &mac);
+            assert_eq!(&frame[6..12], &US);
+            assert_eq!(&frame[12..14], &[0x86, 0xdd]);
+            assert_eq!(&frame[14..], &ip6(dst)[..]);
+        }
+        let mut stranger = a;
+        stranger[15] = 9;
+        let err = s.send(&ip6(stranger)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+        let mut v4 = ip6(a);
+        v4[0] = 0x45;
+        assert_eq!(s.send(&v4).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            s.send(&[0x60; 30]).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(s.inner.sent.len(), 3, "nothing sent for a refused packet");
     }
 
     // Privileged loopback send: build a real UDP/IPv4 packet and transmit it to

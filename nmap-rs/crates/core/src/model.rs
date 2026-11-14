@@ -117,6 +117,10 @@ pub enum Reason {
     /// up without probing, so this is the only honest host reason there is:
     /// nothing was received, the liveness was declared.
     UserSet,
+    /// A Neighbor Advertisement answered our solicitation (`ER_NDRESPONSE`,
+    /// "nd-response"): an on-link IPv6 host is up. The C's implicit ND ping
+    /// (`targets.cc`'s `arpping`) decides this even under `-Pn`.
+    NdResponse,
     /// Reason not otherwise classified (`ER_UNKNOWN`).
     Unknown,
 }
@@ -126,6 +130,7 @@ impl Reason {
     pub fn as_str(self) -> &'static str {
         match self {
             Reason::UserSet => "user-set",
+            Reason::NdResponse => "nd-response",
             Reason::ConnAccept => "syn-ack",
             Reason::ConnRefused => "conn-refused",
             Reason::Reset => "reset",

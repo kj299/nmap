@@ -343,14 +343,18 @@ async fn main() -> ExitCode {
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
     for (host, (_, name)) in results.hosts.iter_mut().zip(targets.iter()) {
         host.hostname = name.clone();
-        if cfg.assume_up && host.state != HostState::Up {
+        // A verdict the scan itself reached stands, -Pn or not: an on-link IPv6
+        // target is put to the implicit ND ping, as in C (`targets.cc`'s `arpping`,
+        // which -Pn does not skip), and is up with `nd-response` or down.
+        let established = host.reason.is_some();
+        if cfg.assume_up && host.state != HostState::Up && !established {
             host.state = HostState::Up;
         }
         // Why this host is believed up, for `--reason`. With -Pn the answer is
         // `user-set`: the operator asserted liveness and nothing probed it, so
         // reporting a packet reason would be inventing evidence. Otherwise the
         // host is up because some port answered, and the reason is that port's.
-        if host.state == HostState::Up {
+        if host.state == HostState::Up && !established {
             host.reason = if cfg.assume_up {
                 Some(nmap_core::model::Reason::UserSet)
             } else {
@@ -421,6 +425,7 @@ async fn main() -> ExitCode {
         reason: cfg.reason,
         verbose: cfg.verbose,
         debugging: cfg.debugging,
+        assume_up: cfg.assume_up,
     };
 
     if let Err(e) = emit_outputs(
@@ -450,22 +455,6 @@ async fn run_scan(
     overrides: PacketOverrides,
 ) -> ScanResults {
     use nmap_core::classify::ScanType;
-    // Raw IPv6 port scans reach this host's own addresses (`::1`, and an address
-    // of its own), which go over a loopback (IPv6 scans step d). Any other IPv6
-    // target needs Ethernet framing and neighbor discovery, which are not ported
-    // yet (`ipv6-raw-port-scans-unported`, step e). Say so and connect-scan, as a
-    // raw scan without privilege does, rather than send nothing and report no ports.
-    let beyond_this_host = |ip: &IpAddr| match ip {
-        IpAddr::V6(v6) => !nmap_sys::route::routes_over_loopback6(*v6),
-        IpAddr::V4(_) => false,
-    };
-    if !matches!(cfg.scan, ScanKind::List | ScanKind::Connect) && ips.iter().any(beyond_this_host) {
-        eprintln!(
-            "nmap-rs: raw IPv6 port scans reach only this host's own addresses so far; \
-             running a connect scan (-sT)"
-        );
-        return connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await;
-    }
     match cfg.scan {
         // `-sL` sends nothing at all. C sets listscan + noportscan +
         // PINGTYPE_NONE (nmap.cc:1307), so the targets are expanded, reported

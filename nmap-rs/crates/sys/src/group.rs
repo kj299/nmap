@@ -666,17 +666,16 @@ impl RawScanKind for FlagKind {
 /// run each route-group through [`group_scan`] over one sender + capture, and return one
 /// [`Host`] per input target, in order (feature `pcap`).
 ///
-/// IPv4 goes out an `IP_HDRINCL` raw socket. IPv6 goes out at layer 2, framed for the
-/// link (Linux has no `IPV6_HDRINCL`; [`crate::rawio::FramingSender`]), and only over a
-/// loopback for now: `::1` and this host's own addresses, which is where no neighbor
-/// has to be discovered ([`crate::route::routes_over_loopback6`]; IPv6 scans step e
-/// brings Ethernet). A target that has no route is reported down, as for IPv4.
+/// IPv4 goes out an `IP_HDRINCL` raw socket. IPv6 goes out at layer 2, framed for its
+/// link ([`scan_route_group6`]): over a loopback with no neighbor to find, over Ethernet
+/// to each target's next hop as neighbor discovery finds it, over a link with no
+/// link-layer addresses as it is. A target that has no route is reported down, as for
+/// IPv4.
 ///
 /// # Errors
 /// Propagates a raw-socket / capture-open error (notably `PermissionDenied`) and any
-/// interface-enumeration error. `Unsupported` for an IPv6 target routed anywhere but a
-/// loopback, before anything is sent, and for a loopback whose datalink nmap does not
-/// send on.
+/// interface-enumeration error. `Unsupported` for an IPv6 route over a datalink nmap
+/// does not send on, or over an Ethernet interface with no MAC.
 #[cfg(feature = "pcap")]
 pub async fn group_scan_targets<K: RawScanKind>(
     kind: &K,
@@ -687,8 +686,31 @@ pub async fn group_scan_targets<K: RawScanKind>(
     max_parallelism: usize,
     overrides: PacketOverrides,
 ) -> std::io::Result<nmap_core::model::ScanResults> {
-    use crate::rawio::RawIpv4Sender;
     use crate::route::{route_for, route_for6};
+    let timing = (template, params, max_parallelism);
+    group_scan_targets_routed(
+        kind, targets, ports, timing, overrides, route_for, route_for6,
+    )
+    .await
+}
+
+/// [`group_scan_targets`] with the routes given: `route4` and `route6` stand in for the
+/// host's route table. For a privileged test of a link whose routes the kernel cannot
+/// hold (an IPv6 neighbor on a TAP interface in a kernel without IPv6).
+///
+/// # Errors
+/// As [`group_scan_targets`].
+#[cfg(feature = "pcap")]
+pub async fn group_scan_targets_routed<K: RawScanKind>(
+    kind: &K,
+    targets: &[IpAddr],
+    ports: &[u16],
+    (template, params, max_parallelism): (TimingTemplate, TimingParams, usize),
+    overrides: PacketOverrides,
+    route4: impl FnMut(Ipv4Addr) -> std::io::Result<Option<crate::route::Route>>,
+    route6: impl FnMut(Ipv6Addr) -> std::io::Result<Option<crate::route::Route6>>,
+) -> std::io::Result<nmap_core::model::ScanResults> {
+    use crate::rawio::RawIpv4Sender;
     use nmap_core::model::ScanResults;
 
     // Probe raw-socket capability once; PermissionDenied here is the fallback signal.
@@ -699,7 +721,7 @@ pub async fn group_scan_targets<K: RawScanKind>(
 
     // Unroutable targets become `Down` placeholders, keeping the output aligned with
     // the input.
-    let buckets = bucket_targets(targets, route_for, route_for6)?;
+    let buckets = bucket_targets(targets, route4, route6)?;
     let mut result_slot: Vec<Option<Host>> = vec![None; targets.len()];
     let run = RouteGroupRun {
         ports,
@@ -714,10 +736,8 @@ pub async fn group_scan_targets<K: RawScanKind>(
         run.scan(kind, &iface, src, &members, sender, &mut result_slot)
             .await?;
     }
-    for ((iface, src), (src_mac, members)) in buckets.v6 {
-        let sender = loopback_sender6(&iface, src_mac)?;
-        run.scan(kind, &iface, src, &members, sender, &mut result_slot)
-            .await?;
+    for ((iface, src), group) in buckets.v6 {
+        scan_route_group6(&run, kind, &iface, src, &group, &mut result_slot).await?;
     }
 
     let mut results = ScanResults::new();
@@ -739,17 +759,37 @@ struct Buckets {
     v6: HashMap<(String, Ipv6Addr), Group6>,
 }
 
-/// An IPv6 route-group's members, with the loopback's own MAC, which its framing needs.
+/// An IPv6 route-group: the targets that leave by one interface from one source.
 #[cfg(any(feature = "pcap", test))]
-type Group6 = (Option<[u8; 6]>, Vec<(usize, Ipv6Addr)>);
+#[derive(Debug, Default)]
+struct Group6 {
+    /// The interface's MAC, which Ethernet (and Linux's loopback) framing needs.
+    src_mac: Option<[u8; 6]>,
+    /// The route is a loopback: the targets are this host's own addresses.
+    loopback: bool,
+    members: Vec<Member6>,
+}
 
-/// Group `targets` by the routes `route4` and `route6` give them. IPv6 targets are
-/// taken only over a loopback (`::1`, this host's own addresses); one routed anywhere
-/// else is `Unsupported` for the whole scan, before anything is sent, rather than
-/// probed without the neighbor discovery its link needs (IPv6 scans step e).
+/// One IPv6 target of a route-group.
+#[cfg(any(feature = "pcap", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Member6 {
+    /// Its place in the scan's input.
+    slot: usize,
+    target: Ipv6Addr,
+    /// The address whose MAC its frames go to: the target itself when on-link, the
+    /// gateway otherwise.
+    next_hop: Ipv6Addr,
+    /// The next hop's MAC when the OS already knows it (a gateway's entry).
+    next_hop_mac: Option<[u8; 6]>,
+    /// On-link: neighbor discovery of the target itself decides whether it is up.
+    directly_connected: bool,
+}
+
+/// Group `targets` by the routes `route4` and `route6` give them.
 ///
 /// # Errors
-/// A route lookup's error, or `Unsupported` as above.
+/// A route lookup's error.
 #[cfg(any(feature = "pcap", test))]
 fn bucket_targets(
     targets: &[IpAddr],
@@ -766,28 +806,78 @@ fn bucket_targets(
                         .push((i, v4));
                 }
             }
-            IpAddr::V6(v6) => match route6(v6)? {
-                Some(route) if route.loopback => {
-                    b.v6.entry((route.iface, route.src))
-                        .or_insert_with(|| (route.src_mac, Vec::new()))
-                        .1
-                        .push((i, v6))
+            IpAddr::V6(v6) => {
+                if let Some(route) = route6(v6)? {
+                    let group =
+                        b.v6.entry((route.iface, route.src))
+                            .or_insert_with(|| Group6 {
+                                src_mac: route.src_mac,
+                                loopback: route.loopback,
+                                members: Vec::new(),
+                            });
+                    group.members.push(Member6 {
+                        slot: i,
+                        target: v6,
+                        next_hop: route.next_hop,
+                        next_hop_mac: route.next_hop_mac,
+                        directly_connected: route.directly_connected,
+                    });
                 }
-                Some(route) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        format!(
-                            "{v6} is routed over {}, and raw IPv6 port scans reach only \
-                             this host's own addresses so far",
-                            route.iface
-                        ),
-                    ))
-                }
-                None => {}
-            },
+            }
         }
     }
     Ok(b)
+}
+
+/// What neighbor discovery decided for an Ethernet route-group.
+#[cfg(any(feature = "pcap", test))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NeighborPlan {
+    /// Each scanned target's next-hop MAC, for [`crate::rawio::NeighborSender`].
+    macs: HashMap<[u8; 16], [u8; 6]>,
+    /// The targets to scan.
+    scan: Vec<(usize, Ipv6Addr)>,
+    /// On-link targets that advertised themselves: up, `nd-response`.
+    advertised: Vec<usize>,
+    /// On-link targets that never answered: down, `no-response`, and not scanned.
+    silent: Vec<usize>,
+    /// Off-link targets whose gateway never answered. They are scanned all the same,
+    /// and their probes, which cannot be framed, go nowhere.
+    behind_a_silent_gateway: Vec<Ipv6Addr>,
+}
+
+/// Decide each member's fate from the MACs neighbor discovery `found` (by next hop).
+///
+/// This is what 7.94 does on Unix, where its scan probes leave through a raw socket and
+/// the kernel resolves the next hop. An on-link target is first put to the implicit ND
+/// ping (`targets.cc`'s `arpping`, `PING_SCAN_ND`), even under `-Pn` (only
+/// `--disable-arp-ping` skips it): an advertisement makes it up, `nd-response`, and
+/// silence makes it down, so it is not scanned. An off-link target gets no such ping.
+/// When its gateway cannot be resolved, the kernel drops every probe and the target's
+/// ports take their no-response defaults, which is what happens here too.
+#[cfg(any(feature = "pcap", test))]
+fn plan_neighbors(members: &[Member6], found: &HashMap<[u8; 16], [u8; 6]>) -> NeighborPlan {
+    let mut plan = NeighborPlan::default();
+    for m in members {
+        let mac = m
+            .next_hop_mac
+            .or_else(|| found.get(&m.next_hop.octets()).copied());
+        match (mac, m.directly_connected) {
+            (Some(mac), on_link) => {
+                plan.macs.insert(m.target.octets(), mac);
+                plan.scan.push((m.slot, m.target));
+                if on_link {
+                    plan.advertised.push(m.slot);
+                }
+            }
+            (None, true) => plan.silent.push(m.slot),
+            (None, false) => {
+                plan.scan.push((m.slot, m.target));
+                plan.behind_a_silent_gateway.push(m.target);
+            }
+        }
+    }
+    plan
 }
 
 /// What every route-group of one scan shares.
@@ -848,28 +938,103 @@ impl RouteGroupRun<'_> {
     }
 }
 
-/// The IPv6 sender for a loopback: a capture handle on `iface`, framing each packet for
-/// the link's datalink ([`crate::rawio::LinkFraming::for_loopback`]).
+/// Scan one IPv6 route-group, framed for its link. An IPv6 probe goes out at layer 2
+/// through a capture handle on the interface ([`crate::rawio`]):
+///
+/// - over a loopback, framed as the loopback takes it, with no neighbor to find
+///   ([`crate::rawio::LinkFraming::for_loopback`]);
+/// - over Ethernet, to each target's next hop, whose MAC neighbor discovery finds for
+///   the whole group at once ([`crate::ndp::resolve_many`]); [`plan_neighbors`] then
+///   decides which targets are up, down or unreachable, as 7.94 does;
+/// - over a link with no link-layer addresses (a raw-IP tunnel, a BSD `DLT_NULL`
+///   tunnel), as it is.
 ///
 /// # Errors
-/// The handle's open error, or `Unsupported` for a datalink nmap does not send on.
+/// The capture handles' open errors; `Unsupported` for a datalink nmap does not send
+/// on, or an Ethernet interface with no MAC to send from.
 #[cfg(feature = "pcap")]
-fn loopback_sender6(
+async fn scan_route_group6<K: RawScanKind>(
+    run: &RouteGroupRun<'_>,
+    kind: &K,
     iface: &str,
-    src_mac: Option<[u8; 6]>,
-) -> std::io::Result<crate::rawio::FramingSender<crate::rawio::pcap_sender::PcapSender>> {
+    src: Ipv6Addr,
+    group: &Group6,
+    result_slot: &mut [Option<Host>],
+) -> std::io::Result<()> {
+    use crate::capture::pcap_source::PcapSource;
     use crate::rawio::pcap_sender::PcapSender;
-    use crate::rawio::{FramingSender, LinkFraming};
+    use crate::rawio::{FramingSender, LinkFraming, NeighborSender};
+    use std::io::{Error, ErrorKind};
 
-    let link = PcapSender::open(iface)?;
+    let all: Vec<(usize, Ipv6Addr)> = group.members.iter().map(|m| (m.slot, m.target)).collect();
+    let mut link = PcapSender::open(iface)?;
     let dlt = link.datalink();
-    let framing = LinkFraming::for_loopback(dlt, src_mac).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
+    let unsupported = || {
+        Error::new(
+            ErrorKind::Unsupported,
             format!("{iface}: unsupported datalink {dlt} for sending"),
         )
+    };
+    if group.loopback {
+        let framing = LinkFraming::for_loopback(dlt, group.src_mac).ok_or_else(unsupported)?;
+        let sender = FramingSender::new(link, framing);
+        return run.scan(kind, iface, src, &all, sender, result_slot).await;
+    }
+    if dlt != 1 {
+        let framing = LinkFraming::for_datalink(dlt, || Err(Error::other("not Ethernet")))?
+            .ok_or_else(unsupported)?;
+        let sender = FramingSender::new(link, framing);
+        return run.scan(kind, iface, src, &all, sender, result_slot).await;
+    }
+
+    let src_mac = group.src_mac.ok_or_else(|| {
+        Error::new(
+            ErrorKind::Unsupported,
+            format!("{iface} has no MAC; cannot frame an IPv6 probe at layer 2"),
+        )
     })?;
-    Ok(FramingSender::new(link, framing))
+    let unknown: Vec<[u8; 16]> = group
+        .members
+        .iter()
+        .filter(|m| m.next_hop_mac.is_none())
+        .map(|m| m.next_hop.octets())
+        .collect();
+    let found = if unknown.is_empty() {
+        HashMap::new()
+    } else {
+        let filter = crate::ndp::bpf_filter(src_mac);
+        let nd_source = PcapSource::open(iface, 65535, 25, Some(&filter))?;
+        crate::ndp::resolve_many(&mut link, nd_source, src_mac, src.octets(), &unknown).await
+    };
+    let plan = plan_neighbors(&group.members, &found);
+    for target in &plan.behind_a_silent_gateway {
+        nmap_core::debug!(
+            1,
+            "no neighbor advertisement from the gateway to {target}; its probes cannot be sent"
+        );
+    }
+    if !plan.scan.is_empty() {
+        let sender = NeighborSender::new(link, src_mac, plan.macs.clone());
+        run.scan(kind, iface, src, &plan.scan, sender, result_slot)
+            .await?;
+    }
+    for &slot in &plan.advertised {
+        if let Some(Some(host)) = result_slot.get_mut(slot) {
+            host.state = HostState::Up;
+            host.reason = Some(Reason::NdResponse);
+        }
+    }
+    for &slot in &plan.silent {
+        if let (Some(s), Some(m)) = (
+            result_slot.get_mut(slot),
+            group.members.iter().find(|m| m.slot == slot),
+        ) {
+            let mut host = Host::new(IpAddr::V6(m.target), HostState::Down);
+            host.reason = Some(Reason::NoResponse);
+            *s = Some(host);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1971,12 +2136,17 @@ mod tests {
         }
     }
 
-    /// IPv6 targets over a loopback join one route-group per (interface, source); an
-    /// unroutable one is left out (down); the IPv4 targets keep their own groups.
+    /// IPv6 targets join one route-group per (interface, source), each with what its
+    /// route says about its next hop; an unroutable one is left out (down); the IPv4
+    /// targets keep their own groups.
     #[test]
     fn targets_are_grouped_by_family_and_route() {
         let lo6 = Ipv6Addr::LOCALHOST;
         let own6 = Ipv6Addr::from(v6(0x10));
+        let (near, far) = (
+            Ipv6Addr::from(v6(0x20)),
+            Ipv6Addr::from(0xfd00_u128 << 112 | 7),
+        );
         let none6 = Ipv6Addr::from(v6(0x99));
         let v4 = Ipv4Addr::new(127, 0, 0, 2);
         let targets = [
@@ -1985,6 +2155,8 @@ mod tests {
             IpAddr::V6(own6),
             IpAddr::V6(none6),
             IpAddr::V6(lo6),
+            IpAddr::V6(near),
+            IpAddr::V6(far),
         ];
         let b = bucket_targets(
             &targets,
@@ -2000,6 +2172,17 @@ mod tests {
                 } else if t == own6 {
                     // An address of our own goes over the loopback from itself.
                     Some(route6("lo", own6.octets(), true))
+                } else if t == near {
+                    Some(crate::route::Route6 {
+                        next_hop: near,
+                        ..route6("eth0", US6, false)
+                    })
+                } else if t == far {
+                    Some(crate::route::Route6 {
+                        next_hop_mac: Some([7; 6]),
+                        directly_connected: false,
+                        ..route6("eth0", US6, false)
+                    })
                 } else {
                     None
                 })
@@ -2008,36 +2191,97 @@ mod tests {
         .unwrap();
         assert_eq!(b.v4.len(), 1);
         assert_eq!(b.v4[&("lo".to_string(), v4)], vec![(1, v4)]);
-        assert_eq!(b.v6.len(), 2);
-        assert_eq!(b.v6[&("lo".to_string(), lo6)].1, vec![(0, lo6), (4, lo6)]);
-        assert_eq!(b.v6[&("lo".to_string(), own6)].1, vec![(2, own6)]);
-        assert_eq!(b.v6[&("lo".to_string(), own6)].0, Some([0; 6]));
+        assert_eq!(b.v6.len(), 3);
+        let slots = |key: (&str, Ipv6Addr)| -> Vec<usize> {
+            b.v6[&(key.0.to_string(), key.1)]
+                .members
+                .iter()
+                .map(|m| m.slot)
+                .collect()
+        };
+        assert_eq!(slots(("lo", lo6)), vec![0, 4]);
+        assert_eq!(slots(("lo", own6)), vec![2]);
+        let eth = &b.v6[&("eth0".to_string(), Ipv6Addr::from(US6))];
+        assert!(!eth.loopback && b.v6[&("lo".to_string(), lo6)].loopback);
+        assert_eq!(
+            eth.members,
+            vec![
+                Member6 {
+                    slot: 5,
+                    target: near,
+                    next_hop: near,
+                    next_hop_mac: None,
+                    directly_connected: true,
+                },
+                Member6 {
+                    slot: 6,
+                    target: far,
+                    next_hop: Ipv6Addr::from(v6(0xfe)),
+                    next_hop_mac: Some([7; 6]),
+                    directly_connected: false,
+                },
+            ]
+        );
     }
 
-    /// An IPv6 target routed anywhere but a loopback refuses the whole scan, before
-    /// anything is sent: Ethernet and neighbor discovery are step e's.
     #[test]
-    fn an_ipv6_target_beyond_this_host_is_refused() {
-        let far = Ipv6Addr::from(v6(0x20));
+    fn a_route_lookup_error_is_the_scans_error() {
         let err = bucket_targets(
-            &[IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V6(far)],
-            |_| Ok(None),
-            |t| Ok(Some(route6("eth0", US6, t == Ipv6Addr::LOCALHOST))),
-        )
-        .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(
-            err.to_string().contains("2001:db8::20 is routed over eth0"),
-            "{err}"
-        );
-        // A lookup error is the scan's error.
-        let err = bucket_targets(
-            &[IpAddr::V6(far)],
+            &[IpAddr::V6(Ipv6Addr::from(v6(0x20)))],
             |_| Ok(None),
             |_| Err(std::io::Error::other("no interfaces")),
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "no interfaces");
+    }
+
+    fn member(
+        slot: usize,
+        last: u8,
+        next_hop: u8,
+        known: Option<[u8; 6]>,
+        on_link: bool,
+    ) -> Member6 {
+        Member6 {
+            slot,
+            target: Ipv6Addr::from(v6(last)),
+            next_hop: Ipv6Addr::from(v6(next_hop)),
+            next_hop_mac: known,
+            directly_connected: on_link,
+        }
+    }
+
+    /// 7.94 on Unix: an on-link target is up when it advertises itself and down (not
+    /// scanned) when silent; an off-link one is scanned through its gateway, whose
+    /// known MAC needs no solicitation, and is scanned even when the gateway is silent.
+    #[test]
+    fn neighbor_discovery_decides_who_is_up_and_where_frames_go() {
+        let gw = 0xfe;
+        let members = [
+            member(0, 2, 2, None, true),                // on-link, advertised
+            member(1, 3, 3, None, true),                // on-link, silent
+            member(2, 0x40, gw, None, false),           // behind the gateway, which answered
+            member(3, 0x41, gw, None, false),           // the same gateway
+            member(4, 0x50, 0xfd, Some([5; 6]), false), // gateway MAC already known
+            member(5, 0x60, 0xfc, None, false),         // behind a silent gateway
+        ];
+        let found = HashMap::from([(v6(2), [2; 6]), (v6(gw), [0xfe; 6])]);
+        let plan = plan_neighbors(&members, &found);
+        assert_eq!(plan.advertised, vec![0]);
+        assert_eq!(plan.silent, vec![1]);
+        let scanned: Vec<usize> = plan.scan.iter().map(|(s, _)| *s).collect();
+        assert_eq!(scanned, vec![0, 2, 3, 4, 5]);
+        assert_eq!(plan.behind_a_silent_gateway, vec![Ipv6Addr::from(v6(0x60))]);
+        assert_eq!(
+            plan.macs,
+            HashMap::from([
+                (v6(2), [2; 6]),
+                (v6(0x40), [0xfe; 6]),
+                (v6(0x41), [0xfe; 6]),
+                (v6(0x50), [5; 6]),
+            ]),
+            "frames go to each target's own next hop; none for the silent gateway's"
+        );
     }
 
     // ---- The capture filters, compiled and run by libpcap -----------------------

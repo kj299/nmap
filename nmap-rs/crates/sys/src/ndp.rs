@@ -10,13 +10,15 @@
 //! over [`RawSender`] and [`PacketSource`] exactly like [`crate::fpengine`], so the whole
 //! exchange runs against mocks in CI. **No `unsafe`.**
 
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use nmap_core::ndp::{
-    build_neighbor_solicitation, na_bpf_filter, resolve_from_frame, ETHERTYPE_IPV6, ETH_HDR_LEN,
+    build_neighbor_solicitation, na_bpf_filter, parse_neighbor_advertisement, resolve_from_frame,
+    ETHERTYPE_IPV6, ETH_HDR_LEN,
 };
 
 use crate::capture::{AsyncCapture, PacketSource};
@@ -118,6 +120,71 @@ where
     None
 }
 
+/// Solicit every address in `next_hops` at once: one capture, and at each of `doND`'s
+/// deadlines a solicitation to every address not yet advertised. Returns the MACs
+/// found; an address missing from the map went unanswered for the whole schedule.
+///
+/// The IPv6 scans need a MAC for every on-link target and every gateway. The C finds
+/// those of its on-link targets with one ND ping over the whole host batch
+/// (`targets.cc`'s `arpping`, `PING_SCAN_ND`), not one exchange after another, so a
+/// batch of silent neighbors costs one schedule (800 ms) rather than one each. Each
+/// address gets [`resolve`]'s schedule and acceptance rule (an advertisement about it,
+/// carrying a link-layer address); a duplicate address is solicited once.
+pub async fn resolve_many<S, P>(
+    sender: &mut S,
+    source: P,
+    src_mac: [u8; 6],
+    src_ip: [u8; 16],
+    next_hops: &[[u8; 16]],
+) -> HashMap<[u8; 16], [u8; 6]>
+where
+    S: RawSender,
+    P: PacketSource,
+{
+    let mut found = HashMap::new();
+    // Ordered, so the solicitations go out in a fixed order.
+    let mut pending: BTreeSet<[u8; 16]> = next_hops.iter().copied().collect();
+    if pending.is_empty() {
+        return found;
+    }
+    let mut capture = AsyncCapture::spawn(source, CAPTURE_CAPACITY);
+    let start = Instant::now();
+
+    'schedule: for deadline in ND_DEADLINES {
+        for &hop in &pending {
+            let _ = sender.send(&build_neighbor_solicitation(src_mac, src_ip, hop));
+        }
+        let until = start.checked_add(deadline).unwrap_or_else(Instant::now);
+        loop {
+            let remaining = until.saturating_duration_since(Instant::now());
+            let window = if remaining.is_zero() {
+                ND_MIN_LISTEN
+            } else {
+                remaining
+            };
+            match tokio::time::timeout(window, capture.recv()).await {
+                Ok(Some(frame)) => {
+                    let Some(na) = parse_neighbor_advertisement(&frame.data, ETH_HDR_LEN) else {
+                        continue;
+                    };
+                    if let (Some(mac), true) = (na.mac, pending.contains(&na.target)) {
+                        pending.remove(&na.target);
+                        found.insert(na.target, mac);
+                        if pending.is_empty() {
+                            break 'schedule;
+                        }
+                    }
+                }
+                Ok(None) => break 'schedule,
+                Err(_) => break,
+            }
+        }
+    }
+
+    capture.stop();
+    found
+}
+
 /// Resolve the MAC to address frames to, for a route already chosen.
 ///
 /// A directly-connected target is solicited for itself; otherwise the gateway is. When
@@ -188,6 +255,20 @@ mod tests {
                 Some(f) => Ok(Some(f)),
                 None => Err(io::Error::other("end of script")),
             }
+        }
+    }
+
+    /// A capture that replays scripted frames and then stays silent (open), so a
+    /// schedule runs on after the script.
+    struct ThenSilent(std::vec::IntoIter<Vec<u8>>);
+
+    impl PacketSource for ThenSilent {
+        fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
+            if let Some(f) = self.0.next() {
+                return Ok(Some(f));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+            Ok(None)
         }
     }
 
@@ -349,6 +430,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+    }
+
+    /// A second next hop, for the batch tests.
+    fn hop(last: u8) -> [u8; 16] {
+        let mut h = NEXT_HOP;
+        h[15] = last;
+        h
+    }
+
+    // Each address resolves by its own advertisement, in whatever order they come;
+    // advertisements without an address, about strangers or repeated, change nothing;
+    // and a duplicate request is solicited once.
+    #[cfg_attr(miri, ignore = "spawns a capture thread and uses the clock")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_resolves_each_address_by_its_own_advertisement() {
+        let mut sender = MockSender::default();
+        let (a, b, c) = (hop(1), hop(2), hop(3));
+        let source = ScriptedSource::new(vec![
+            advert(b, None),
+            advert(hop(9), Some([9; 6])),
+            advert(b, Some([2; 6])),
+            advert(a, Some([1; 6])),
+            advert(b, Some([7; 6])),
+        ]);
+        let got = resolve_many(&mut sender, source, SRC_MAC, SRC_IP, &[a, b, a, c]).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&a], [1; 6]);
+        assert_eq!(
+            got[&b], [2; 6],
+            "the first advertisement with an address wins"
+        );
+        assert!(!got.contains_key(&c));
+        // The first round solicits each distinct address once, as core::ndp builds it.
+        let first: Vec<Vec<u8>> = [a, b, c]
+            .iter()
+            .map(|h| build_neighbor_solicitation(SRC_MAC, SRC_IP, *h).to_vec())
+            .collect();
+        assert_eq!(sender.sent[..3], first[..]);
+    }
+
+    // Silence: every address is solicited at each of the three deadlines, and the
+    // whole batch is bounded by the schedule, not by its size.
+    #[cfg_attr(miri, ignore = "spawns a capture thread and uses the clock")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silent_batch_retransmits_on_one_schedule() {
+        let mut sender = MockSender::default();
+        let hops: Vec<[u8; 16]> = (1..=20).map(hop).collect();
+        let started = std::time::Instant::now();
+        let got = resolve_many(&mut sender, SilentSource, SRC_MAC, SRC_IP, &hops).await;
+        assert!(got.is_empty());
+        assert_eq!(sender.sent.len(), hops.len() * ND_DEADLINES.len());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    // Resolved addresses are not solicited again; nothing at all is sent for none.
+    #[cfg_attr(miri, ignore = "spawns a capture thread and uses the clock")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resolved_address_is_not_solicited_again() {
+        let mut sender = MockSender::default();
+        let (a, b) = (hop(1), hop(2));
+        let source = ThenSilent(vec![advert(a, Some([1; 6]))].into_iter());
+        let got = resolve_many(&mut sender, source, SRC_MAC, SRC_IP, &[a, b]).await;
+        assert_eq!(got.len(), 1);
+        let count = |h| {
+            let sol = build_neighbor_solicitation(SRC_MAC, SRC_IP, h).to_vec();
+            sender.sent.iter().filter(|f| **f == sol).count()
+        };
+        assert_eq!(count(a), 1, "a is solicited only in the first round");
+        assert_eq!(count(b), ND_DEADLINES.len(), "b in every round");
+        let mut none = MockSender::default();
+        let empty = resolve_many(&mut none, SilentSource, SRC_MAC, SRC_IP, &[]).await;
+        assert!(empty.is_empty() && none.sent.is_empty());
     }
 
     #[test]

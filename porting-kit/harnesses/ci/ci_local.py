@@ -399,6 +399,61 @@ def summary(paths, results, repo, only, listing):
     return "\n".join(lines)
 
 
+def _record_path(repo):
+    """Where the record for HEAD's tree lives: inside .git, so writing it changes
+    neither the tree it vouches for nor anything a commit could carry."""
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    gitdir = _git(repo, "rev-parse", "--absolute-git-dir")
+    if not tree or not gitdir:
+        return None, tree
+    return os.path.join(gitdir, "ci-local", tree + ".json"), tree
+
+
+def write_record(repo, paths, results):
+    """Record an unscoped run of a clean tree. A scoped or dirty run records nothing:
+    it is not what would be pushed, or not all of what CI would have run."""
+    path, tree = _record_path(repo)
+    if path is None or _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rec = {"tree": tree, "head": _git(repo, "rev-parse", "HEAD"),
+           "when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+           "workflows": [os.path.basename(p) for p in paths],
+           "jobs": [{"job": r["job"], "status": r["status"], "not_run": r["not_run"]}
+                    for r in results]}
+    with open(path, "w") as f:
+        json.dump(rec, f, indent=1)
+    return path
+
+
+def check_record(repo, log=sys.stdout):
+    """0 when an unscoped ci-local run of HEAD's tree is on record and passed.
+
+    The rule "no check run on the head SHA means no gate ran" (LESSONS #042) was
+    prose, and nmap's IPv6-scans milestone merged five PRs past it with neither a
+    check run nor a ci-local summary (LESSONS #052). This is the same rule as a
+    command a pre-push hook can run (`hooks/pre-push`)."""
+    path, tree = _record_path(repo)
+    if path is None or not os.path.exists(path):
+        print(f"ci-local: NO RECORD for tree {tree or '?'}: no gate has run on what HEAD "
+              "holds. Run `make -C porting-kit ci-local` on a clean tree.", file=log)
+        return 1
+    with open(path) as f:
+        rec = json.load(f)
+    failed = [j["job"] for j in rec["jobs"] if j["status"] != "PASS"]
+    gaps = [(j["job"], x) for j in rec["jobs"] for x in j["not_run"]]
+    print(f"ci-local: record of {rec['when']} for tree {tree[:12]}: "
+          f"{len(rec['jobs']) - len(failed)}/{len(rec['jobs'])} job leg(s) passed", file=log)
+    for job in failed:
+        print(f"  FAILED: {job}", file=log)
+    for job, x in gaps:
+        print(f"  never run here ({job}): {x}", file=log)
+    if gaps:
+        print("  The steps above have run nowhere unless CI ran: say so where the "
+              "change is described, and do not call them gates until they have.", file=log)
+    return 1 if failed else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("workflows", nargs="*")
@@ -408,9 +463,13 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, help="per-step timeout in seconds")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--check-record", action="store_true",
+                    help="exit 0 only if an unscoped, passing run of HEAD's tree is on record")
     args = ap.parse_args(argv)
     if args.self_test:
         return _self_test()
+    if args.check_record:
+        return check_record(args.repo or _git(".", "rev-parse", "--show-toplevel") or ".")
     if not args.workflows:
         ap.print_usage(sys.stderr)
         print("error: give at least one workflow file, or --self-test", file=sys.stderr)
@@ -429,6 +488,11 @@ def main(argv=None):
         print(json.dumps(results, indent=2))
     else:
         print("\n" + summary(args.workflows, results, repo, args.job, args.list))
+    if not args.list and not args.job:
+        rec = write_record(repo, args.workflows, results)
+        print(f"  recorded: {rec}" if rec else
+              "  NOT recorded (uncommitted changes, or not a git checkout)",
+              file=sys.stderr)
     return 0 if args.list or all(r["status"] == "PASS" for r in results) else 1
 
 
@@ -546,6 +610,30 @@ def _self_test():
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             rc = main([path, "--repo", root, "--json"])
         check("main exits 1 when a job fails", rc == 1)
+
+        # --- the record a pre-push hook checks (LESSONS #052) --------------------
+        quiet = dict(capture_output=True, text=True)
+        git = lambda *a: subprocess.run(
+            ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t",
+             "-c", "commit.gpgsign=false"] + list(a), **quiet)
+        if git("init", "-q").returncode == 0:
+            git("add", ".github"); git("commit", "-q", "-m", "one")
+            sink = io.StringIO()
+            check("no record: no gate ran on this tree", check_record(root, sink) == 1
+                  and "NO RECORD" in sink.getvalue())
+            passing = [r for r in res.values() if r["status"] == "PASS"]
+            check("an unscoped run of a clean tree is recorded",
+                  write_record(root, [path], passing) is not None)
+            sink = io.StringIO()
+            check("a passing record satisfies the check, and names what never ran",
+                  check_record(root, sink) == 0 and "never run here" in sink.getvalue())
+            write_record(root, [path], list(res.values()))
+            check("a failing record does not", check_record(root, io.StringIO()) == 1)
+            open(os.path.join(root, "sub", "new.txt"), "w").write("x")
+            git("add", "sub/new.txt"); git("commit", "-q", "-m", "two")
+            check("a new commit has no record", check_record(root, io.StringIO()) == 1)
+            open(os.path.join(root, ".github", "workflows", "t.yml"), "a").write("# edit\n")
+            check("a dirty tree is not recorded", write_record(root, [path], passing) is None)
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

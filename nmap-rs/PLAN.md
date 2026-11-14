@@ -526,7 +526,10 @@ the update/submission paths are new behavior → golden + negative tests, ledger
      - `zlib` and `libssh2` follow.
 6. 🔶 **M7 is in progress** in parallel: the cutover gate is the MUST tier of
    [`docs/M7.3-CLI-PARITY.md`](docs/M7.3-CLI-PARITY.md), of which `--host-timeout`
-   and `--min-hostgroup`/`--max-hostgroup` remain; then release engineering
+   and `--min-hostgroup`/`--max-hostgroup` remain; their **Phase 0** is
+   [`docs/M7-CUTOVER-ANALYSIS.md`](docs/M7-CUTOVER-ANALYSIS.md) (7.94's group
+   formation and host clock, measured on loopback; steps a–f; D1–D7 await a
+   decision, and no port code is written before it); then release engineering
    (SBOM, auditable and reproducible builds, signing, `DIVERGENCES.md` as release
    notes) and `ncat`/`nping`.
 

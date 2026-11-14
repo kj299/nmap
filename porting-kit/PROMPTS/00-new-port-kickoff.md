@@ -31,7 +31,10 @@ faithfully re-implement a vulnerability. Maximize safety controls.
    boundaries, privilege transitions, what "secure" means here — including the
    time and memory bound each untrusted input must respect
    (`porting-kit/RESOURCE-BOUNDS.md`). Classify which calls and path inputs can
-   block, and vet any reused library for fidelity, not only safety.
+   block, and vet any reused library for fidelity, not only safety. Fill in the
+   two tables LESSONS #056 added: the checks each received message's standard
+   requires of a receiver, and the run-time claims that were read but cannot be
+   measured here, each traced from its option's default.
 4. Decide the port shape: is this **reimplement-behind-a-seam** (OS-integration
    layer being replaced — like lsof) or **translate-with-FFI-coexistence**
    (library internals preserved)? State which and why; it sets the strategy.

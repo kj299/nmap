@@ -49,10 +49,18 @@ they are authoritative and this skill only sequences them.
 6. **Independent review, then merge** — `porting-kit/REVIEW-GATE.md` (LESSONS #041).
    Two lenses (fidelity beyond the corpus; time/memory/totality), an independent sabotage
    set, a severity table, the fix round in the same PR, merge blocked until each finding
-   is fixed or ledgered, out-of-scope findings recorded the same day. **Sabotage
-   protocol** (LESSONS #038, #044): restore from a byte copy and `touch` it; only a named
-   assertion is a catch. Pin the regression test in the same change.
-   **CI ran on the head SHA**, or paste `make -C porting-kit ci-local` (LESSONS #042).
+   is fixed or ledgered, out-of-scope findings recorded the same day. **A fix round is
+   new code: review it too, and stop only at a round that confirms nothing**; then
+   record it, `progress.py ... stamp <module> reviewed --by "<who, where>" --src crates`
+   (LESSONS #053). **Sabotage** with
+   `python3 porting-kit/harnesses/sabotage/sabotage.py --root . --spec <mutations.json>`
+   (LESSONS #038, #044, #054): it restores from a byte copy, bumps the mtime, and calls a
+   timeout INCONCLUSIVE, never a catch. Every ledgered fix gets a mutation whose
+   `expect` names the test its "Pinned by" cites (LESSONS #055). Pin the regression
+   test in the same change.
+   **CI ran on the head SHA**, or `make -C porting-kit ci-local` ran and
+   `ci_local.py --check-record` passes (LESSONS #042, #052). A gate that exists only
+   in CI has run nowhere until then: say so, and do not count it.
 
 Advance the tracker and stamp the tick (LESSONS #021, #045):
 `python3 porting-kit/harnesses/progress/progress.py --file progress.json set <module> <gate> --src crates`

@@ -18,6 +18,13 @@ matrix passed `-p` and `-oX -`.
 - **Add the combinations users actually run**: a report to the terminal and to a
   file at once, a scan type with no port list, and so on.
 - `harnesses/differential/input-matrix.example.toml` shows both shapes.
+- **A flag the harness passes on every run is a column with one value**
+  (LESSONS #057). #047 fixed the matrices and missed the scripts around them.
+  nmap's raw-scan differential passed `-Pn -n --reason` on every run of every
+  gate, so nothing compared the two tools' host verdicts without `-Pn`. A FIN
+  scan of a listening loopback port then reported the host down, a defect two
+  milestones old. `grep` each gate script for the options it hard-codes, and add
+  a run without each.
 
 ## 2. Reach census: what does the corpus actually call? (LESSONS #043)
 

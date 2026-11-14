@@ -20,6 +20,22 @@ input (n = its size), checked at n/2n/4n against C by
 | network / IPC | remote | untrusted | | |
 | environment / config | operator | trusted-ish | | |
 
+### 2a. What the standard requires of a receiver (LESSONS #056)
+For each message the tool *receives and acts on*, list the checks its standard
+makes mandatory for a receiver, and whether the C makes them. The flaw scanner
+cannot see a check that is absent. nmap acts on a Neighbor Advertisement without
+the hop-limit-255 check RFC 4861 §7.1.2 requires; the port found that only in a
+review, after it had begun framing every probe to the address such a message names.
+| Message | Standard's receiver MUSTs | C checks them? | Port |
+|---|---|---|---|
+| e.g. ND Neighbor Advertisement | hop limit 255; valid checksum; length | no | enforce, ledger |
+
+### 2b. Claims this environment cannot measure (LESSONS #056)
+A claim about the C's run-time behaviour that was read, not run. Trace each from
+the option's *default* value, not from the branch that looks like the main path.
+| Claim | Read from (`rev:path:line`, incl. where the default is set) | Why unmeasured here | Step that will measure it |
+|---|---|---|---|
+
 ## 3. Privilege transitions
 Where does the tool gain/drop privilege, elevate, or act on another security
 principal's behalf? Each is an audit hotspot; keep privilege JUST-IN-TIME and

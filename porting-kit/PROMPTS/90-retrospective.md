@@ -21,6 +21,11 @@ retrospective and **patch the Porting Kit** with what you learned.
    - **list merged SHAs with zero check runs** — a commit no gate ran on
      (LESSONS #042): `gh api repos/OWNER/REPO/commits/SHA/check-runs --jq .total_count`
      for each SHA in `git log --first-parent <base>..HEAD`;
+   - **the gates that have never run anywhere**: steps `ci_local.py` lists as
+     not run locally, on SHAs with no check run (LESSONS #052). Run
+     `make -C porting-kit ci-local` now if the milestone did not;
+   - **steps that merged unreviewed**, and fix rounds nobody reviewed
+     (LESSONS #053): `progress.py --file <f> audit --src crates --require-reviewed <prefix>`;
    - **stale ticks**: `progress.py --file <f> audit --src crates` (LESSONS #045);
    - **a reach census** of the port's exposed functions against the corpus
      (LESSONS #043);

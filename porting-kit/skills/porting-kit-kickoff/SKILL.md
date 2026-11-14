@@ -37,7 +37,10 @@ The Rust must be **safer** than the C, not merely equivalent. The C is a spec th
    an oracle; the oracle phase censuses what the corpus reaches (LESSONS #043).
 4. **Draft the threat model** from `porting-kit/skeleton/THREAT-MODEL.md`,
    including the time and memory bound each untrusted input must respect
-   (`porting-kit/RESOURCE-BOUNDS.md`, LESSONS #040).
+   (`porting-kit/RESOURCE-BOUNDS.md`, LESSONS #040), the checks each received
+   message's standard requires of a receiver, and the register of run-time claims
+   that were read, not run — each traced from the option's *default*, with the step
+   that will measure it (LESSONS #056).
 5. **Decide the port shape:** reimplement-behind-a-seam (OS-integration replaced,
    like lsof) vs translate-with-FFI-coexistence (library internals preserved). If
    translation, also read `porting-kit/C-to-Rust-Playbook-Best-of-Both.md` (Step 0

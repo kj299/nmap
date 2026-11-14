@@ -15,7 +15,9 @@ semantic-comparison stage, not build time — "it builds" tells you almost nothi
 2. **Build the input matrix** from `porting-kit/harnesses/differential/input-matrix.example.toml`.
    Cover every output format, every flag, empty/edge/large inputs, malformed/hostile
    inputs and **every integer boundary**. **Defaults are inputs:** each option also gets a
-   row where it is omitted, plus the combinations users run (LESSONS #047).
+   row where it is omitted, plus the combinations users run (LESSONS #047). **A flag
+   the harness script passes on every run is a matrix column with one value**: list
+   each, and add the run without it (LESSONS #057).
 3. **Capture + version the golden corpus**, flagging oracle nondeterminism:
    `python3 porting-kit/harnesses/golden/golden.py capture --oracle <c-bin> --matrix <m> --corpus <dir>`
    A golden encodes the host that generated it — print only facts true on every host

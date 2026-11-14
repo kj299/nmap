@@ -45,6 +45,13 @@ optional is skipped exactly when it matters.
    found, and the gate that would have caught it at its step.
 5. **A fix round in the same PR.** The merge is blocked until each finding is
    either fixed with a pinning test or ledgered with an ID.
+   **The fix round is new code, so it is reviewed too**, by a reviewer who has
+   not seen it, and the loop stops only at a round that confirms nothing
+   (LESSONS #053). In nmap's IPv6-scans step e the first review confirmed 22
+   findings; a review of their fixes confirmed 8 more, two of them introduced
+   by the fixes. Then record the review against the code:
+   `progress.py stamp MODULE reviewed --by "<who, where>" --src crates`.
+   `audit --src crates` reports the module UNREVIEWED once it changes again.
 6. **The finding's class becomes a standing gate.** Add it to the entry gates of
    every later step, for example "unmetered work: work counted apart from fuel,
    plus a scale check". The plan carries the list, and each later review checks
@@ -77,6 +84,14 @@ optional is skipped exactly when it matters.
   The whole of M6.6 merged with zero check runs while its local stand-ins were
   scoped. That is LESSONS #030's trap, and the gate the kit trusted most never
   ran.
+  `ci_local.py` records each unscoped run of a clean tree under `.git/ci-local/`,
+  and `ci_local.py --check-record` (or `hooks/pre-push`, which runs it) answers
+  whether HEAD's tree has one. The prose rule above was passed a second time:
+  five IPv6-scans PRs merged with neither a check run nor a summary
+  (LESSONS #052). **A gate that exists only in CI has run nowhere** until CI
+  runs. Name each such gate as unrun wherever the change is described.
+- **Every module the step touched has a current review**
+  (LESSONS #053): `progress.py audit --src crates --require-reviewed PREFIX`.
 - **The tracker is updated and stamped** (LESSONS #045):
   `progress.py --file progress.json set MODULE GATE --src crates`, so that
   `audit --src crates` notices when the module's code later outgrows the tick.
@@ -84,7 +99,9 @@ optional is skipped exactly when it matters.
 ## The sabotage protocol
 
 A sabotage run measures the gates. Like any measurement, it can fail without
-anyone noticing.
+anyone noticing. `harnesses/sabotage/sabotage.py` implements rules 1 and 2 and
+checks rule 6; use it rather than a script written for the occasion
+(LESSONS #054).
 
 1. **Restore from a byte copy and bump the mtime.** Save the file's bytes, mutate
    the file, run the gate, then write the saved bytes back and `touch` the file.
@@ -109,3 +126,8 @@ anyone noticing.
 5. **Sabotage the C to measure the corpus** (Phase 2, `ORACLE-CHECKS.md`). Port
    sabotage measures the gates. C sabotage measures whether the corpus can
    discriminate at all.
+6. **Every ledgered fix has a mutation that names its pin** (LESSONS #055). A
+   ledger entry's "Pinned by" line is a claim. Revert the fix as a mutation
+   whose `expect` is the test the entry names. `CAUGHT` verifies the claim;
+   `WRONG-TEST` means some other test noticed, and the entry names a test that
+   does not reach the fix. Two step-e entries named such tests.

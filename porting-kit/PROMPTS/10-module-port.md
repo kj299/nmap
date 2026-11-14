@@ -53,8 +53,13 @@ requirement before merge:
    #041): two lenses (fidelity, security/resources), an independent sabotage set
    run by the protocol — byte-copy restore plus `touch`, named assertions only
    (LESSONS #038, #044) — a severity table, and the fix round in this PR. Pin each
-   regression test in the same change. Merge only with check runs on the head SHA
-   or a pasted `make -C porting-kit ci-local` summary (LESSONS #042).
+   regression test in the same change. Run the set with
+   `porting-kit/harnesses/sabotage/sabotage.py` (LESSONS #054), and give every
+   ledgered fix a mutation whose `expect` names its pinning test (LESSONS #055).
+   The fix round is reviewed too, until a round confirms nothing, and the review
+   is stamped: `progress.py stamp MODULE reviewed --by ...` (LESSONS #053). Merge
+   only with check runs on the head SHA or a passing
+   `ci_local.py --check-record` (LESSONS #042, #052).
 
 Advance and stamp the tracker as gates clear (LESSONS #021, #045):
 `python3 porting-kit/harnesses/progress/progress.py --file progress.json set

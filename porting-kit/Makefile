@@ -22,12 +22,14 @@ PY_HARNESSES := \
 	harnesses/c-flaw-scan/scan_c_flaws.py \
 	harnesses/progress/progress.py \
 	harnesses/scaling/scale_check.py \
-	harnesses/ci/ci_local.py
+	harnesses/ci/ci_local.py \
+	harnesses/sabotage/sabotage.py
 
 SH_HARNESSES := \
 	harnesses/fuzz/gen_fuzz_target.sh \
 	harnesses/sanitizers/run_sanitizers.sh \
-	harnesses/supply-chain/run_supply_chain.sh
+	harnesses/supply-chain/run_supply_chain.sh \
+	hooks/pre-push
 
 # `ci-local` runs every job of the port's CI workflows on this machine, unscoped,
 # and prints a summary to paste into the PR. No check run on the head SHA means no

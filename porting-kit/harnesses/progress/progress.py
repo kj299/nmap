@@ -162,10 +162,19 @@ def module_digest(srcs, module):
     return h.hexdigest(), len(files)
 
 
-def cmd_stamp(path, module, gate, srcs):
-    """Record the digest of MODULE's files as of GATE's (re-)run."""
-    if gate not in GATES[1:]:
-        print(f"error: gate must be one of {', '.join(GATES[1:])}", file=sys.stderr)
+# Not a rung of the ladder: the independent review that follows it (REVIEW-GATE.md).
+# It is stamped like a gate so that code changed after its review shows as such.
+REVIEWED = "reviewed"
+
+
+def cmd_stamp(path, module, gate, srcs, by=None):
+    """Record the digest of MODULE's files as of GATE's (re-)run, or of its review."""
+    if gate not in GATES[1:] + [REVIEWED]:
+        print(f"error: gate must be one of {', '.join(GATES[1:] + [REVIEWED])}", file=sys.stderr)
+        return 2
+    if gate == REVIEWED and not (by or "").strip():
+        print("error: `stamp MODULE reviewed` needs --by: who or what reviewed it, and "
+              "where the findings are (a PR, a document section)", file=sys.stderr)
         return 2
     state = load(path)
     if module not in state.get("modules", {}):
@@ -176,7 +185,10 @@ def cmd_stamp(path, module, gate, srcs):
         print(f"error: no source files found for {module!r} under {', '.join(srcs)} "
               "(expected <src>/<crate>/src/<path>.rs or a directory)", file=sys.stderr)
         return 2
-    state.setdefault("stamps", {}).setdefault(module, {})[gate] = {"sha256": digest, "files": n}
+    rec = {"sha256": digest, "files": n}
+    if gate == REVIEWED:
+        rec["by"] = by.strip()
+    state.setdefault("stamps", {}).setdefault(module, {})[gate] = rec
     save(path, state)
     print(f"{module}: {gate} stamped at {digest[:12]} ({n} file(s))")
     return 0
@@ -299,7 +311,7 @@ def _manifest_targets(manifest):
     return set(re.findall(r'^name = "(.+)"$', text, re.M))
 
 
-def cmd_audit(path, manifest, require_done=False, srcs=None):
+def cmd_audit(path, manifest, require_done=False, srcs=None, require_reviewed=None):
     """Hard-fail on an unbacked exemption or a coverage claim naming no real target.
 
     This exists because module-to-target coverage had only ever been *inferred*, and
@@ -367,7 +379,15 @@ def cmd_audit(path, manifest, require_done=False, srcs=None):
                 continue
             now, n = module_digest(srcs, module)
             for gate, rec in sorted(gates.items()):
-                if now != rec.get("sha256"):
+                if now != rec.get("sha256") and gate == REVIEWED:
+                    # nmap's IPv6-scans steps a-d merged unreviewed; the one review
+                    # that ran found 30 defects, 8 of them in its own fix round
+                    # (LESSONS #053). Code changed after its review is unreviewed code.
+                    print(f"UNREVIEWED: {module}: changed since the review recorded by "
+                          f"{rec.get('by', '?')!r}. Review the change (REVIEW-GATE.md), "
+                          f"then `stamp {module} reviewed --by ...`.")
+                    rc = 1
+                elif now != rec.get("sha256"):
                     was = rec.get("sha256", "?")[:12]
                     print(f"STALE-TICK: {module}: {gate} was stamped at {was} "
                           f"({rec.get('files', '?')} file(s)); its files are now "
@@ -376,6 +396,13 @@ def cmd_audit(path, manifest, require_done=False, srcs=None):
                     rc = 1
     elif stamps:
         print("note: stamped ticks not checked (pass --src <crates dir>)")
+
+    for prefix in require_reviewed or []:
+        for module in sorted(m for m in mods if m == prefix or m.startswith(prefix)):
+            if REVIEWED not in stamps.get(module, {}):
+                print(f"UNREVIEWED: {module}: no review is recorded "
+                      f"(`stamp {module} reviewed --by ... --src ...`)")
+                rc = 1
 
     stalled = sorted(m for m in mods if not effective_done(state, m))
     for module in stalled:
@@ -536,6 +563,26 @@ def _self_test():
         cmd_stamp(p, "core::nse", "fuzzed", [src])
         check("audit without --src does not check stamps (opt-in)",
               cmd_audit(p, None) == 0)
+
+        # --- the review is stamped too (LESSONS #053) ----------------------------
+        check("a review needs a reviewer and a place",
+              cmd_stamp(p, "core::parser", "reviewed", [src]) == 2)
+        check("--require-reviewed fails on a module with no review recorded",
+              cmd_audit(p, None, srcs=[src], require_reviewed=["core::parser"]) == 1)
+        check("a recorded review passes it",
+              cmd_stamp(p, "core::parser", "reviewed", [src], by="agent B, PR 7") == 0
+              and cmd_audit(p, None, srcs=[src], require_reviewed=["core::parser"]) == 0)
+        check("a prefix names a step's modules",
+              cmd_audit(p, None, srcs=[src], require_reviewed=["core::nse"]) == 1)
+        open(os.path.join(core, "parser.rs"), "a").write("fn fix_round() {}\n")
+        cmd_stamp(p, "core::parser", "fuzzed", [src])
+        check("code changed after its review is unreviewed, fix rounds included",
+              cmd_audit(p, None, srcs=[src]) == 1)
+        check("re-reviewing clears it",
+              cmd_stamp(p, "core::parser", "reviewed", [src], by="agent C, PR 7 round 2") == 0
+              and cmd_audit(p, None, srcs=[src]) == 0)
+        check("the ladder itself has no `reviewed` rung",
+              cmd_set(p, "core::parser", "reviewed") == 2)
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -638,6 +685,7 @@ def main(argv=None):
     ps.add_argument("--src", nargs="+", help="also stamp the module's source digest for this gate")
     pst = sub.add_parser("stamp"); pst.add_argument("module"); pst.add_argument("gate")
     pst.add_argument("--src", nargs="+", required=True, help="crates directory (as for drift)")
+    pst.add_argument("--by", help="for `reviewed`: the reviewer and where the findings are")
     psh = sub.add_parser("show"); psh.add_argument("--json", action="store_true")
     pg = sub.add_parser("ingest"); pg.add_argument("--unsafe-json", nargs="+", default=[])
     pd = sub.add_parser("drift"); pd.add_argument("--src", nargs="+", required=True)
@@ -653,6 +701,9 @@ def main(argv=None):
                     help="fail on any module that is not done (retrospectives, milestone close)")
     pa.add_argument("--src", nargs="+",
                     help="crates directory: also fail on a stamped tick whose files changed")
+    pa.add_argument("--require-reviewed", nargs="+", metavar="PREFIX",
+                    help="fail on any module with this name or prefix that has no `reviewed` "
+                         "stamp (a step's modules, before its merge)")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -662,7 +713,7 @@ def main(argv=None):
     if args.cmd == "set":
         return cmd_set(args.file, args.module, args.gate, args.src)
     if args.cmd == "stamp":
-        return cmd_stamp(args.file, args.module, args.gate, args.src)
+        return cmd_stamp(args.file, args.module, args.gate, args.src, args.by)
     if args.cmd == "show":
         return cmd_show(args.file, args.json)
     if args.cmd == "ingest":
@@ -675,7 +726,8 @@ def main(argv=None):
         return cmd_cover(args.file, args.module,
                          [t.strip() for t in args.targets.split(",") if t.strip()])
     if args.cmd == "audit":
-        return cmd_audit(args.file, args.fuzz_manifest, args.require_done, args.src)
+        return cmd_audit(args.file, args.fuzz_manifest, args.require_done, args.src,
+                         args.require_reviewed)
     ap.print_help()
     return 2
 

@@ -53,6 +53,13 @@ The rest of Phase 0 shapes what to hunt: blocking calls and path inputs (FIFOs,
 flaw with it (LESSONS #018), and reused code whose fidelity must be measured, not
 read from its docs (LESSONS #043).
 
+## What it cannot find
+A check that is *absent*. All three C defects of nmap's IPv6-scans milestone were
+of that kind (an ICMPv6 error trusted as a reply, later fragments parsed as headers,
+a Neighbor Advertisement taken without its hop-limit check), and the scanner
+reported none of them: 0 of 3. Those come from the threat model's table of what
+each received message's standard requires of a receiver (LESSONS #056).
+
 ## Note
 This is a fast heuristic, not a full SAST pass — it bootstraps the flaw inventory in
 minutes. For depth, add clang-analyzer / CodeQL / cppcheck; this skill just makes

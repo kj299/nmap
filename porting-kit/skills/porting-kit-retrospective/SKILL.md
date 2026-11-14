@@ -29,6 +29,11 @@ A port that ships without this wastes its most valuable output.
    **List the merged SHAs with zero check runs** — each is a commit no gate ran on
    (LESSONS #042):
    `for c in $(git log --first-parent --format=%H <base>..HEAD); do echo "$c $(gh api repos/OWNER/REPO/commits/$c/check-runs --jq .total_count)"; done`
+   If CI did not run, run `make -C porting-kit ci-local` *now*, and list the steps it
+   reports as not run: on those SHAs they have **run nowhere** (LESSONS #052).
+   **List the steps that merged without a review**, and the fix rounds nobody reviewed
+   (LESSONS #053) — search the commit messages and the analysis, then
+   `progress.py --file <f> audit --src crates --require-reviewed <prefix>`.
    **Check every gate claim against the code it vouches for:** stale ticks with
    `progress.py --file <f> audit --src crates` (LESSONS #045); a reach census of the
    port's exposed functions against the corpus (LESSONS #043); and the C-generated

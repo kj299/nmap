@@ -67,15 +67,18 @@ cites. Detail lives in linked docs: [`SECURITY-CHECKLIST.md`](SECURITY-CHECKLIST
   compatibility list is not an oracle (LESSONS #043: piccolo's "implemented"
   base library had seven behaviours wrong). Count what the corpus reaches (Phase 2).
 - Write a one-page **threat model** (`skeleton/THREAT-MODEL.md`): trust
-  boundaries, privilege transitions, and — per untrusted input — the **time and
-  memory bound** it must respect (availability; LESSONS #040).
+  boundaries, privilege transitions, per untrusted input the **time and memory
+  bound** (LESSONS #040), and per received message the **checks its standard
+  requires of a receiver** and whether the C makes them (LESSONS #056).
+- **A reading is a hypothesis.** Trace a run-time claim from the option's
+  *default*; register each claim this environment cannot measure, with the step
+  that will (LESSONS #056).
 
 **Entry criteria:** access to the C source and its build.
 **Exit criteria:** module inventory table; C-flaw scan run and triaged; threat
 model written, with a bound per untrusted input.
 **Artifacts:** `progress` table, `c-flaw-scan` report, `THREAT-MODEL.md`.
-**lsof failure modes this prevents:** discovering the scary module (the
-`NtQueryObject` hang) mid-implementation instead of in the inventory.
+**lsof failure mode this prevents:** meeting the scary module mid-implementation.
 
 ---
 
@@ -152,11 +155,9 @@ checks marked ▸.
   scenarios are named in the generator and the docs say where they run;
   concurrent fixtures do not print each other's state.
 - ▸ **Reach census:** count corpus rows per function the port exposes; **zero rows
-  means unverified**, whatever the code or its dependency claims (LESSONS #043:
-  0 rows for `rawlen`, `rawset`, `pairs`, `ipairs`, `collectgarbage`).
+  means unverified**, whatever the code or its dependency claims (LESSONS #043).
 - ▸ **Sabotage the C to measure the corpus**: build variants that each break one
-  behaviour; the corpus must catch every one (LESSONS #044: 16 variants of
-  `lpeg.c`; one passed all 60,806 rows).
+  behaviour; the corpus must catch every one (LESSONS #044).
 - Stand up the **intentional-divergence ledger** (`DIVERGENCES.md`, template in the
   skeleton), seeded from the Phase-0 flaw scan.
 
@@ -214,17 +215,16 @@ documented — the gate makes the gap a build failure); tracing added reactively
 `--all-targets`, test code included, with the MSRV toolchain before pushing, and
 re-run the full clippy sweep whenever the MSRV moves (LESSONS #036).
 
-**No check run on the head SHA means no gate ran** (LESSONS #042). nmap's whole
-M6.6 merged with zero check runs while its local stand-ins were scoped. When CI
-cannot run, `make -C porting-kit ci-local` runs every workflow job unscoped; paste
-its summary into the PR. A PR with neither is blocked, not annotated.
+**No check run on the head SHA means no gate ran** (LESSONS #042, #052). When CI
+cannot run, `make -C porting-kit ci-local` runs every job unscoped and records the
+tree; `hooks/pre-push` refuses a push with no record. A gate that exists only in
+CI has **run nowhere** until CI runs: list it as unrun, never as a gate.
 
-**Sabotage is a measurement with failure modes** (LESSONS #038, #044; protocol in
-[`REVIEW-GATE.md`](REVIEW-GATE.md)): restore from a byte copy, never `git checkout`,
-**and bump the mtime** — a restore that keeps the old mtime makes cargo test the
-stale, sabotaged build; **only a named assertion counts as a catch** (a kill or
-timeout is inconclusive); and each step gets an **independent** sabotage set (step
-a: the author's 11 all caught, 8 of the reviewers' 34 missed by every gate).
+**Sabotage is a measurement with failure modes** (LESSONS #038, #044, #054;
+[`REVIEW-GATE.md`](REVIEW-GATE.md)). `harnesses/sabotage/sabotage.py` restores from
+a byte copy **and bumps the mtime**, and bounds each run: a kill or timeout is
+inconclusive, **only a named test counts**. Each step gets an **independent** set,
+and each ledgered fix a mutation that names its pinning test (LESSONS #055).
 
 For a hazardous module (flagged in Phase 1), **spike first**: a timeboxed
 experiment on the one scary syscall/idiom — does it block? need privilege? vary by
@@ -319,9 +319,10 @@ Then the loop — each step is a gate:
    set, producing a severity table. The fix round lands in the same PR; the merge
    is blocked until each finding is fixed or ledgered. **Each finding's class joins
    the entry gates of every later step**; an out-of-scope finding gets a ledger or
-   BACKLOG row the same day. Then confirm CI ran on the head SHA, and advance the
-   `progress` table **with a stamp** (`progress.py set MODULE GATE --src crates`),
-   so `audit --src` flags the tick once the code outgrows it (LESSONS #045).
+   BACKLOG row the same day. **A fix round is new code: review it too, until a
+   round confirms nothing** (LESSONS #053). Then confirm CI ran on the head SHA,
+   and stamp the `progress` table (`set MODULE GATE --src crates`; `stamp MODULE
+   reviewed --by ...`): `audit --src` flags what the code outgrew (LESSONS #045).
 
 **Entry criteria:** skeleton + oracle; the standing gates from earlier reviews.
 **Exit criteria (per module):** all gates green; review findings fixed or
@@ -369,7 +370,8 @@ published; C archived (not deleted until an overlap release proves parity).
 | C goldens are defined behaviour | UB screen + digest record (LESSONS #049) | CI |
 | Lints as errors | `clippy -D warnings` (+ overflow/cast lints) | CI |
 | Don't re-port a C vuln | `c-flaw-scan/scan_c_flaws.py` at Phase 0 | review |
-| Gates actually ran on this commit | check runs on HEAD, else `make ci-local` (LESSONS #042) | merge |
+| Gates actually ran on this commit | check runs on HEAD, else `ci_local.py --check-record` (LESSONS #042, #052) | push, merge |
+| Every step reviewed, fix rounds too | `progress.py audit --src crates --require-reviewed PREFIX` (LESSONS #053) | merge |
 | Every module reaches DONE, ticks current | `progress/progress.py audit --require-done --src crates` | CI, retrospective |
 | Signature checks reject forgeries | strict verification (e.g. Ed25519 `verify_strict`), small-order keys | review (LESSONS #037) |
 
@@ -387,13 +389,12 @@ phase; LESSONS #046). New lessons append to `LESSONS.md` with the section they
 amended. The kit is the running sum of every port it has survived.
 
 The retrospective also checks the port's records against the code:
-- list merged SHAs with **zero check runs**; each is a commit no gate ran on
-  (LESSONS #042);
+- list merged SHAs with **zero check runs** and the gates that have never run
+  anywhere (LESSONS #042, #052);
 - run `progress.py audit --require-done --src crates`: a module below DONE needs
   its reason, and a stamped tick whose code changed needs its gate re-run
   (LESSONS #035, #045);
 - re-scan the C with any scanner rules added since Phase 0; **decode** the goldens,
   re-run the UB screen and the reach census, and sweep for inputs that reach each
   new hit (LESSONS #032, #033, #043, #049);
-- check that every count the docs quote matches the golden it describes (nmap's
-  docs said 34 scenarios; the golden had 36).
+- check every count the docs quote against the golden it describes.

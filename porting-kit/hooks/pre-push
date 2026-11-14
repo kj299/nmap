@@ -1,0 +1,21 @@
+#!/bin/sh
+# pre-push: no gate ran on this tree unless ci-local recorded one (LESSONS #042, #052).
+#
+# Install where CI cannot be relied on to run:
+#   ln -s ../../porting-kit/hooks/pre-push .git/hooks/pre-push
+#
+# CI checks a commit after the push; this checks before it. It passes when an
+# unscoped `make -C porting-kit ci-local` run of exactly this tree passed, and
+# prints the steps that run only in CI, which have then run nowhere.
+#
+# To push anyway, say why, and the reason is printed where it will be read:
+#   CI_LOCAL_SKIP="CI is up: run 123 is green on the parent" git push
+top="$(git rev-parse --show-toplevel)" || exit 1
+if [ -n "${CI_LOCAL_SKIP:-}" ]; then
+  echo "pre-push: ci-local record NOT checked: $CI_LOCAL_SKIP" >&2
+  exit 0
+fi
+python3 "$top/porting-kit/harnesses/ci/ci_local.py" --check-record --repo "$top" >&2 || {
+  echo "pre-push: refused. Run \`make -C porting-kit ci-local\`, or set CI_LOCAL_SKIP=\"<why>\"." >&2
+  exit 1
+}

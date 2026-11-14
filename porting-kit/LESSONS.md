@@ -1661,6 +1661,200 @@ reports, and four retrospective audits (history, harnesses, step e, consistency)
      revision, and cite the ledger by ID.
 - **Section amended:** PLAYBOOK · Phase 2, Phase 3; `ORACLE-CHECKS.md`; `harnesses/ci/porting-ci.template.yml`; `CLAUDE.md` (working notes).
 
+## 052. The CI-liveness rule was prose, and a milestone merged past it again
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans (steps a–e, #155–#159)
+- **What happened:** The last nmap-rs-ci run is 41671139261, on ae3d4b879, on
+  2026-11-03. Every commit of steps a to e (nine, plus five merges) has zero
+  check runs. Six of them edited the workflow, 88 lines in all, and none of those
+  lines has executed. #042's rule was in force the whole time: "a PR with neither
+  [a check run nor a `ci-local` summary] is blocked, not annotated." `ci-local`
+  was never run. The local stand-ins were scoped, which is #030's trap a third
+  time: Miri on the new tests only, fuzzing on three targets, no `cargo deny`,
+  no MSRV build, no ASan job. Steps d and e went further. Their wire gates (a
+  veth neighbor on Linux, a VNET jail on FreeBSD, `::1`) exist only in CI,
+  because this container boots without IPv6. The PR bodies said "draft until CI
+  runs them". #159 was marked ready and merged six seconds later, with no run.
+- **Root cause:** #042 put the rule in three documents and gave it no command
+  that fails. An annotation in a PR body is the thing #042 said does not count,
+  and it is all the rule produced. The kit also had no word for a gate that
+  cannot run locally: `ci-local` lists such steps as "not run", and nothing
+  carried that list to where the merge was decided.
+- **Kit change:**
+  - `ci_local.py` records each unscoped run of a clean tree in
+    `.git/ci-local/<tree>.json`. `ci_local.py --check-record` exits 1 when
+    HEAD's tree has no passing record, and prints every step that did not run
+    locally as "never run here".
+  - New `hooks/pre-push` runs that check. Pushing past it needs
+    `CI_LOCAL_SKIP="<reason>"`, which is printed.
+  - PLAYBOOK Phase 4 and REVIEW-GATE.md: a gate that exists only in CI has
+    **run nowhere** until CI runs. It is listed as unrun, never as a gate.
+  - The retrospective lists the gates that have never run, with the SHAs.
+- **Still open:** the hook is opt-in per clone, and the merge button is not the
+  kit's. On nmap the first master run after this milestone is the first
+  execution of every wire gate steps d and e added.
+- **Section amended:** PLAYBOOK · Phase 4, cross-cutting controls, compounding loop; `harnesses/ci/ci_local.py`; `hooks/pre-push`; `Makefile`; `REVIEW-GATE.md`; `PROMPTS/{10-module-port,90-retrospective}.md`; `skills/porting-kit-{audit,module,retrospective}/SKILL.md`.
+
+## 053. Four steps merged unreviewed, and the review's own fixes needed a review
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans (steps a–e)
+- **What happened:** #041 requires an independent review of every step before
+  the next starts. Steps a, b, c and d merged with none: no commit message and
+  no section of the analysis mentions one. Step e got one only because the user
+  asked for a workflow, after the PR was open. It covered steps d and e and
+  confirmed 22 findings, every automated gate being green:
+  - five changed what goes on the wire (loopback hosts found down, frames sent to
+    the wrong router's MAC, `-S` replies never matched, a repeated target losing
+    its replies, neighbor discovery that a frame stream could hold open);
+  - four of the 22 had been on master since M4 or M7.5. Making the engine
+    generic over the address family changed few lines of that code and reached
+    all of it.
+
+  The fix round was 1,668 lines of Rust churn, 31% of the 5,324 the five steps
+  had written. A second review, of the fix round alone, confirmed 8 more. Two
+  were introduced by the fixes: gateways resolved under the rule meant for
+  on-link targets, and a capture failure that became a connect scan exiting 0.
+  No third round ran, so the second round's fixes are unreviewed too.
+- **Root cause:** #041's gate has no artefact. A step's gates leave ticks in
+  `progress.json`; its review leaves nothing, so its absence is invisible.
+  REVIEW-GATE.md also stopped at "a fix round in the same PR" and said nothing
+  about who checks the fix round.
+- **Kit change:**
+  - `progress.py stamp MODULE reviewed --by "<who, where>" --src crates` records
+    a review against the module's source digest. `audit --src` prints
+    `UNREVIEWED` once the module changes, fix rounds included.
+    `audit --require-reviewed PREFIX` fails on a module with no review recorded.
+    `reviewed` is not a rung of the ladder; `set MODULE reviewed` is refused.
+  - REVIEW-GATE.md item 5 and PLAYBOOK gate 6: the fix round is reviewed by a
+    reviewer who has not seen it, and the loop stops at a round that confirms
+    nothing.
+  - A step that generalises existing code (a new family, a new platform) reviews
+    the code it now reaches, not only the lines it changed.
+- **Section amended:** PLAYBOOK · Phase 4 (gate 6), cross-cutting controls; `harnesses/progress/progress.py`; `REVIEW-GATE.md`; `PROMPTS/10-module-port.md`; `skills/porting-kit-{audit,module}/SKILL.md`.
+
+## 054. The sabotage protocol was re-typed at every step, and one copy hung
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans (steps c, d, e and both fix rounds)
+- **What happened:** Each step's sabotage ran from a script written for it in a
+  scratch directory, and none was kept. Each had to restore from bytes,
+  bump the mtime and count only named failures (#038, #044), and none bounded a
+  run. In the fix round, mutation 10 ("each frame past the deadline buys another
+  window") made its test loop forever. The run sat for 96 seconds until the
+  process was killed by hand, and the script then printed `CAUGHT` for it, with
+  an empty list of failed tests. #044's second rule says a kill is not a catch.
+  It was applied by a person noticing: the test got a timeout of its own and the
+  mutation was re-run, failing by assertion. A killed run also leaves the file
+  mutated until its `finally` runs, and a commit in that window would have
+  carried the sabotage.
+- **Root cause:** The kit shipped the protocol as four paragraphs and no tool. A
+  rule every user must re-implement is re-implemented wrongly at some point.
+- **Kit change:** New `harnesses/sabotage/sabotage.py`, with a self-test, in
+  `check-kit`. It takes a JSON list of mutations and:
+  - requires the replaced span to occur exactly once;
+  - restores from the saved bytes and sets the mtime to now;
+  - bounds every run and kills the process group on timeout;
+  - reports `CAUGHT` only for a failing test named in the output, and
+    `INCONCLUSIVE` for a timeout, a mutation that does not compile, or a failure
+    with no named test;
+  - refuses to start while a backup from a killed run exists, and prints the
+    command that restores it;
+  - exits 1 unless every mutation was caught.
+- **Section amended:** PLAYBOOK · Phase 4; `harnesses/sabotage/sabotage.py`; `Makefile`; `REVIEW-GATE.md`; `PROMPTS/10-module-port.md`; `skills/porting-kit-module/SKILL.md`.
+
+## 055. A ledger entry's "Pinned by" named tests that did not reach the fix
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans (step e, both review rounds)
+- **What happened:** The entry for the `-S` fix said it was pinned by two unit
+  tests. One tested an accessor. The other computed the spoofed source itself
+  and called the engine below the line that had been fixed, so it passed on the
+  unfixed tree. Reverting the fix failed neither. Both verifiers of the second
+  review reported it independently. The same round found the entry for the
+  `doND` rule citing a test of a function nothing called any more, and the first
+  round found a test whose comment claimed it checked quoted errors while it fed
+  none. In each case the sabotage set had a mutation near the fix, caught by
+  *some* test, and that was read as the pin holding.
+- **Root cause:** #045 gave ticks a digest because a tick is a claim about code.
+  A "Pinned by" line is the same kind of claim and had no check. A sabotage run
+  recorded that a mutation was caught, not by what.
+- **Kit change:**
+  - A mutation in `sabotage.py` takes `expect`: test names, any of which must be
+    among the failures. Otherwise the verdict is `WRONG-TEST`, which is not a
+    catch.
+  - REVIEW-GATE.md sabotage rule 6 and PLAYBOOK Phase 4: every ledgered fix gets
+    a mutation that reverts it and expects the test its entry names.
+- **Section amended:** PLAYBOOK · Phase 4; `harnesses/sabotage/sabotage.py`; `REVIEW-GATE.md`; `PROMPTS/10-module-port.md`; `skills/porting-kit-module/SKILL.md`.
+
+## 056. Phase 0 read the C's non-default path as its default, and the scanner cannot see a missing check
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans (Phase 0 §2; step e)
+- **What happened:**
+  1. **A reading stood in for a measurement.** Phase 0 said 7.94 sends IPv6
+     probes at layer 2 and marks a target whose MAC it cannot find down,
+     `no-route`. That is the `--send-eth` path. The default,
+     `PACKET_SEND_IP_WEAK` (set at `NmapOps.cc:437`), sends through a raw socket,
+     and an on-link target is decided by an implicit neighbor-discovery ping that
+     `-Pn` does not skip. The analysis said under "Not verified" that 7.94's
+     IPv6 scans had never been run here, since the container has no IPv6. The
+     wrong reading shaped decision D4 and stood through four steps. It was
+     caught at step e by re-reading, not by a run. The correction then had to be
+     made in a doc, a ledger entry and comments in five files, and both reviews
+     found copies it had missed, in the same doc, PLAN, BACKLOG, the FreeBSD
+     analysis and a code comment, because the claim had been restated in prose
+     instead of cited by ID (#051).
+  2. **The scanner reported 0 of 3.** The milestone's C defects were an ICMPv6
+     Parameter Problem read as "port open", later fragments parsed as transport
+     headers, and a Neighbor Advertisement accepted without the hop-limit check
+     RFC 4861 §7.1.2 requires. `scan_c_flaws.py` on `scan_engine_raw.cc`,
+     `netutil.cc` and `targets.cc` gives 13 hits, none of them these. Each is an
+     *absent* check, which no pattern over the source can match. The first two
+     were found at Phase 0 by reading the receive path against the RFCs. The
+     third was found only in review, after the port had started framing every
+     probe to the address such a message names.
+- **Root cause:** Phase 0 had no place to record that a claim was unmeasured, so
+  an honest "not verified" in one section did not qualify the confident claim in
+  another. And the kit's only instrument for C defects looks for dangerous calls,
+  not for missing validation.
+- **Kit change:**
+  - `skeleton/THREAT-MODEL.md` §2a: per received message, the checks its
+    standard makes mandatory for a receiver, and whether the C makes them.
+  - §2b: a register of run-time claims that were read, not run. Each is traced
+    from where the option's default is set, and names the step that will
+    measure it.
+  - PLAYBOOK Phase 0 carries both. No scanner rule was added: none was
+    measurable for an absent check, and the cflaw-scan skill now says so.
+- **Section amended:** PLAYBOOK · Phase 0; `skeleton/THREAT-MODEL.md`; `PROMPTS/00-new-port-kickoff.md`; `skills/porting-kit-{kickoff,cflaw-scan}/SKILL.md`.
+
+## 057. Small amendments: a gate script's fixed flags, a workflow that never passed `--src`
+
+- **Date:** 2026-11-14
+- **Codebase:** nmap — IPv6 raw port scans
+- **What happened:**
+  1. **#047 fixed the matrices and missed the scripts.** `run_raw_differential.sh`
+     passes `-Pn -n --reason` on every run of every raw-scan gate. Nothing
+     compared host verdicts without `-Pn`, so a FIN scan of a listening loopback
+     port reporting the host down (since M4) and the whole down-host output path
+     were never exercised against 7.94. The review found both.
+  2. **#045's check never ran in CI.** The kit's CI template passes
+     `--src crates` to `progress.py audit`. nmap's workflow does not, so
+     `STALE-TICK` could only fire on a local run. It fired there in this
+     milestone, on three modules whose doc comments had changed.
+  3. **A dead check passed for a milestone.** The raw differential's test for
+     "nmap-rs fell back to a connect scan" grepped for a string no message
+     contains. A check that can only pass is a sabotage target like any other.
+- **Kit change:**
+  - ORACLE-CHECKS.md §1 and the oracle skill: a flag the harness passes on every
+    run is a matrix column with one value. List each and add the run without it.
+  - nmap's workflow now passes `--src nmap-rs/crates` (a port fix, committed
+    apart from the kit).
+  - Item 3 needs no new rule: #044 rule 3 (an independent sabotage set) is what
+    found it. It is recorded as a class for the next review to try first.
+- **Section amended:** PLAYBOOK · Phase 2 (via `ORACLE-CHECKS.md` §1); `skills/porting-kit-oracle/SKILL.md`.
+
 ## Meta — M6.6's gates were green and its reviews were not
 
 Every automated gate passed at every step commit, and every review found defects.
@@ -1673,6 +1867,22 @@ kit still would not prevent is the one #040 records: a super-linear cost on an
 input shape nobody chose to scale. Its tool, a differential performance search
 that hill-climbs inputs to maximise port ÷ oracle time and memory, is the next
 port's target. It is recorded, not stubbed.
+
+## Meta — the IPv6-scans milestone had the lessons and not the commands
+
+Three of this milestone's six lessons are older lessons that did not fire: #042
+(CI liveness), #041 (review every step) and #047 (defaults are inputs). Each had
+been written into the PLAYBOOK, a companion page and a skill, and each was a
+sentence a person had to remember at the moment they most wanted to merge. The
+fixes give each one a command that exits non-zero: `ci_local.py --check-record`,
+`progress.py audit --require-reviewed`, `sabotage.py`. The single failure the kit
+still would not prevent is the one #052 leaves open: **a gate that cannot run
+where the work is done.** The kit can now say that such a gate has run nowhere,
+and can refuse a push, but it cannot run a neighbor-discovery exchange on a host
+without IPv6, and it does not own the merge. Until CI runs, steps d and e rest
+on a scripted peer behind a TAP device and on reading. The next port's target is
+an environment census at Phase 0: for each gate the plan names, the place it can
+execute, checked before the step that depends on it is scheduled.
 
 ## Positive validations (habits that paid off, no change needed)
 
@@ -1719,3 +1929,21 @@ port's target. It is recorded, not stubbed.
   measured the corpus: at step 0b, one of 16 variants exposed a behaviour the
   corpus could not tell apart, and at HEAD all 17 variants are caught. That
   practice is now a rule (#044).
+- **A scripted peer stood in for a protocol the host lacks** (nmap IPv6 scans,
+  step e). The container boots with IPv6 disabled, so no kernel path could carry
+  a probe. A script of under 200 lines behind a TAP device played a whole link: a host, a
+  silent address, three kinds of gateway. The port's own neighbor discovery,
+  framing, capture and matching then ran over a real interface. Two sabotages
+  were caught by nothing else. It measures the port, not the C: it is a live
+  test, never an oracle.
+- **#044's "a kill is not a catch" held when applied** (nmap IPv6 scans, fix
+  round). The hung mutation was not counted. Its test got a timeout and the
+  mutation was re-run to a named failure. #054 turns the noticing into a tool.
+- **The stamp did its job on a comment-only change** (nmap IPv6 scans). Editing
+  three modules' doc comments made their `fuzzed` and `sanitized` ticks stale.
+  The targets were re-run (7.8M, 7.9M and 2.4M runs) and Miri re-run before
+  re-stamping. A digest cannot tell a comment from code, and the re-run is cheap.
+- **Adversarial verification kept the reviews honest** (nmap IPv6 scans). The
+  first review's findings were each put to skeptics told to refute them; 30
+  survived and merged into 22. In the second, 11 of 19 were refuted, most because the fix had
+  already landed, and each refutation cited the line.

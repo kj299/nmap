@@ -16,7 +16,8 @@ use std::net::IpAddr;
 use nmap_core::targets::{parse_target, ExcludeSet, TargetSpec};
 use nmap_sys::net::resolve_host;
 
-/// The most targets a run draws. Not in C; kept from the MVP.
+/// The most targets a run draws. Not in C; kept from the MVP
+/// (`target-cap-65536`, ledgered).
 pub const MAX_TARGETS: usize = 65_536;
 
 /// One target expression, ready to be expanded.
@@ -165,7 +166,9 @@ impl TargetSource {
     }
 
     /// The source is spent. The count of excluded targets is known only now,
-    /// so the `-v` line that reports it comes at the end of the run.
+    /// so the `-v` line that reports it comes when the source runs dry, which
+    /// grouping can reach before the first group is written (a batch draws up
+    /// to 4096 ahead). 7.94 prints no such line.
     fn finish(&mut self) {
         if self.finished {
             return;

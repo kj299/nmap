@@ -675,3 +675,22 @@ so the sabotage set needs root to report it.
    once and in order, and the fingerprint between its table and the next
    host; two test docs sat on the wrong tests.
 
+**The fifth review** confirmed six, all low; none needed a code change:
+
+1. The 65,536-target cap had no ledger entry, and excluded targets count
+   toward it. Ledgered, measured (`target-cap-65536`).
+2. Start-up errors are reported by kind, not in command-line order, and a
+   failing host-group bound drops the "highly aggressive" warning before it.
+   Ledgered (`startup-errors-not-in-argv-order`); the host-group entry's
+   "command-line order" now says it holds between the two options.
+3. `TargetSource::finish`'s comment still said the "excluded" line comes at
+   the end. Corrected.
+4. `-iL` given a directory is refused, where 7.94 warns and scans nothing;
+   older than the step, and pinned by its new test. Ledgered
+   (`input-list-unreadable-refused`).
+5. A failed output write exits 1 where 7.94 exits 0, and since this step it
+   comes before the scan. Ledgered (`output-write-failure-fatal`).
+6. The kit's flat rule hides growth under 5% of the baseline. The harness
+   now names a flat fit and how far the cost moved (a kit commit; LESSONS
+   #059 addendum).
+

@@ -2734,13 +2734,57 @@ removed: that one was theatre, this one is unobservable.
       `2147483648` and `99999999999999999999` each abort, exit 134). A negative
       maximum beside a smaller negative minimum passes both and runs. The port
       refuses any such value with a message naming it. Everything else is C's:
-      the setters' checks are made in command-line order with C's unsigned
-      comparisons and messages, and `atoi`'s truncation is reproduced, so
+      the two setters' checks are made in command-line order, between
+      themselves, with C's unsigned comparisons and messages, and `atoi`'s truncation is reproduced, so
       `4294967296` is 0 and refused as C refuses it, and `4294967297` is 1.
       Before this the port dropped a negative value silently and took 2^31 to
       2^32 - 1 as given. Pinned by
       `hostgroup_bounds_are_checked_as_7_94s_setters_check_them` and
       `an_impossible_hostgroup_bound_is_reported_as_c_reports_it`.
+
+- [ ] `startup-errors-not-in-argv-order` (`cli`) — **of two start-up errors,
+      7.94 reports the first on the command line; the port reports them by
+      kind.** 7.94 quits inside its option loop at the first bad value
+      (`nmap.cc:710-715` → `NmapOps.cc:578-589` for the host-group bounds). The
+      port parses every option, then refuses in a fixed order: an unusable
+      argument, `--host-timeout`, the host-group bounds, the rest. So
+      `--max-hostgroup 0 -T9` prints `-T9`'s error, where 7.94 prints
+      "Maximum host group size may not be set to less than the minimum size
+      (currently 1)"; and `--min-hostgroup 101 --max-hostgroup 0` loses 7.94's
+      "highly aggressive --min-hostgroup" warning, which the port prints only
+      after the bounds pass (*measured*, the fifth review of step b). Either
+      way the run is refused; only which message comes differs.
+
+- [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
+      65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a
+      mistyped netmask. Past it the port prints "target list truncated at 65536
+      hosts (MVP cap)" before the scan and scans the first 65,536 (*measured*:
+      `-sL -n 10.0.0.0/15` lists 65,536 addresses, 7.94 131,072). Excluded
+      targets count toward it, since the cap is applied as the list is
+      expanded: `-sL -n 10.0.0.0/8 --exclude 10.0.0.0/9` stops inside the
+      excluded half and scans nothing ("no targets left to scan"), where 7.94
+      lists 8,388,608 addresses. Pinned by
+      `the_target_cap_is_reported_only_when_a_target_lies_past_it`; lifting it
+      is a cutover decision, since memory is now flat in the target count.
+
+- [ ] `input-list-unreadable-refused` (`cli`) — **an `-iL` path that cannot be
+      read ends the run; 7.94 warns and scans nothing.** Given a directory,
+      7.94's `fopen` succeeds and its reads fail quietly, so it prints
+      "WARNING: No targets were specified, so 0 hosts scanned." and exits 0
+      (*measured*, `-iL /tmp`). The port says `failed to read input file
+      "/tmp": Is a directory` and exits 1, as it did before step b; a read
+      that fails part way is refused likewise rather than taken as the end of
+      the list. Pinned by `an_unreadable_list_says_why`.
+
+- [ ] `output-write-failure-fatal` (`cli`) — **a failed write to an output file
+      ends the run with exit 1; 7.94 ignores it.** 7.94 checks `fwrite`
+      (`output.cc:956-958`), which succeeds into stdio's buffer, and not the
+      `fflush` that fails (`output.cc:1030`, `:1042`), so `-oN /dev/full`
+      scans and exits 0 (*measured*). The port reports "failed to write output:
+      No space left on device" and exits 1. Before step b that came after the
+      scan; now the header is written first, so it comes before anything is
+      scanned. Refusing is the safe direction: a report that silently was not
+      written is the worse failure.
 
 - [x] `output-streamed-per-group` (`cli`, M7 cutover step b, D2; ports the main
       loop of `nmap.cc:2080-2330`) — **the report is written host group by host

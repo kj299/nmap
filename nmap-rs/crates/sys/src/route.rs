@@ -29,6 +29,10 @@ pub struct Route {
     /// (`127.0.0.0/8`, or an address of its own), which C marks up without a ping
     /// (`targets.cc:588`, `devt_loopback`).
     pub loopback: bool,
+    /// Whether the target is reached without a gateway: this host, or on the
+    /// link of the egress interface (`route_dst`'s `direct_connect`,
+    /// `netutil.cc`). A host group shares it (`target_needs_new_hostgroup`).
+    pub direct: bool,
 }
 
 /// True if `target` is inside the network `net_addr/prefix`.
@@ -79,6 +83,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                 iface: i.name.clone(),
                 src,
                 loopback: true,
+                direct: true,
             });
         }
     }
@@ -95,6 +100,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                 iface: lo.name.clone(),
                 src: target,
                 loopback: true,
+                direct: true,
             });
         }
     }
@@ -110,6 +116,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                     iface: i.name.clone(),
                     src: net.addr,
                     loopback: false,
+                    direct: true,
                 });
             }
         }
@@ -123,6 +130,7 @@ pub fn choose_route(ifaces: &[netif::Interface], target: Ipv4Addr) -> Option<Rou
                     iface: i.name.clone(),
                     src,
                     loopback: false,
+                    direct: false,
                 });
             }
         }
@@ -382,6 +390,67 @@ pub fn route_for6(target: Ipv6Addr) -> io::Result<Option<Route6>> {
     Ok(choose_route6(&netif::interfaces()?, target))
 }
 
+/// What a host group must share, answered per target before the scan
+/// (`core::hostgroup`): the interface, source and direct-connectedness of the
+/// route its probes take.
+///
+/// It reads the interface table once and answers from it, where
+/// [`route_for`] reads it again for every target. The source is `-S`'s address
+/// when one was given, as 7.94's `route_dst` takes it (`netutil.cc`), so `-S`
+/// can put targets the routing table would separate into one group.
+#[derive(Debug, Clone)]
+pub struct GroupRouter {
+    ifaces: Vec<netif::Interface>,
+    spoof4: Option<Ipv4Addr>,
+    spoof6: Option<Ipv6Addr>,
+}
+
+impl GroupRouter {
+    /// Read this host's interfaces.
+    ///
+    /// # Errors
+    /// Propagates an error from interface enumeration.
+    pub fn new(spoof4: Option<Ipv4Addr>, spoof6: Option<Ipv6Addr>) -> io::Result<Self> {
+        Ok(Self::from_interfaces(netif::interfaces()?, spoof4, spoof6))
+    }
+
+    /// Answer from an explicit interface list, for tests over synthetic
+    /// topologies.
+    #[must_use]
+    pub fn from_interfaces(
+        ifaces: Vec<netif::Interface>,
+        spoof4: Option<Ipv4Addr>,
+        spoof6: Option<Ipv6Addr>,
+    ) -> Self {
+        GroupRouter {
+            ifaces,
+            spoof4,
+            spoof6,
+        }
+    }
+
+    /// The key a routed host group shares, or `None` for a target with no
+    /// route. Such a target fails at scan time, as it does today; in a group it
+    /// is unrestricted, like an unrouted run's targets.
+    #[must_use]
+    pub fn key(&self, target: std::net::IpAddr) -> Option<nmap_core::hostgroup::RouteKey> {
+        use nmap_core::hostgroup::RouteKey;
+        use std::net::IpAddr;
+        match target {
+            IpAddr::V4(t) => choose_route(&self.ifaces, t).map(|r| RouteKey {
+                iface: r.iface,
+                source: IpAddr::V4(self.spoof4.unwrap_or(r.src)),
+                direct: r.direct,
+            }),
+            IpAddr::V6(t) => choose_route6(&self.ifaces, t).map(|r| RouteKey {
+                iface: r.iface,
+                source: IpAddr::V6(self.spoof6.unwrap_or(r.src)),
+                direct: r.directly_connected,
+            }),
+        }
+    }
+}
+
 /// Draw the per-scan random keys: the 32-bit sequence mask and the base TCP source
 /// port. nmap seeds these once per scan from the OS RNG; we read `/dev/urandom`
 /// directly to avoid pulling in an RNG dependency (Unix — where the raw scans run).
@@ -469,6 +538,7 @@ mod tests {
             iface: iface.to_string(),
             src: Ipv4Addr::from(src),
             loopback: iface.starts_with("lo"),
+            direct: true,
         })
     }
 
@@ -531,12 +601,55 @@ mod tests {
         let ifaces = topology4();
         let r = choose_route(&ifaces, Ipv4Addr::new(192, 168, 56, 1));
         assert_eq!(r, route("em1", [192, 168, 56, 3]));
-        // Off-link: the interface with the gateway, not the first one listed.
+        // Off-link: the interface with the gateway, not the first one listed,
+        // and not directly connected.
         let r = choose_route(&ifaces, Ipv4Addr::new(8, 8, 8, 8));
-        assert_eq!(r, route("em0", [10, 0, 2, 15]));
+        assert_eq!(
+            r,
+            route("em0", [10, 0, 2, 15]).map(|r| Route { direct: false, ..r })
+        );
         let mut no_gw = ifaces;
         no_gw[0].gateway = None;
         assert_eq!(choose_route(&no_gw, Ipv4Addr::new(8, 8, 8, 8)), None);
+    }
+
+    /// The key a host group shares: each part of the route, and `-S`'s
+    /// address in place of the routed source.
+    #[test]
+    fn a_group_key_is_the_route_its_probes_take() {
+        use nmap_core::hostgroup::RouteKey;
+        use std::net::IpAddr;
+        let key = |iface: &str, src: [u8; 4], direct: bool| {
+            Some(RouteKey {
+                iface: iface.into(),
+                source: IpAddr::V4(Ipv4Addr::from(src)),
+                direct,
+            })
+        };
+        let r = GroupRouter::from_interfaces(topology4(), None, None);
+        let at = |a: [u8; 4]| r.key(IpAddr::V4(Ipv4Addr::from(a)));
+        assert_eq!(at([127, 0, 0, 2]), key("lo0", [127, 0, 0, 1], true));
+        assert_eq!(
+            at([10, 0, 2, 15]),
+            key("lo0", [10, 0, 2, 15], true),
+            "own address"
+        );
+        assert_eq!(at([192, 168, 56, 1]), key("em1", [192, 168, 56, 3], true));
+        assert_eq!(at([8, 8, 8, 8]), key("em0", [10, 0, 2, 15], false));
+        let spoofed =
+            GroupRouter::from_interfaces(topology4(), Some(Ipv4Addr::new(10, 9, 9, 9)), None);
+        assert_eq!(
+            spoofed.key(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+            key("lo0", [10, 9, 9, 9], true)
+        );
+        assert_eq!(
+            spoofed.key(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            key("em0", [10, 9, 9, 9], false)
+        );
+        let mut no_gw = topology4();
+        no_gw[0].gateway = None;
+        let r = GroupRouter::from_interfaces(no_gw, None, None);
+        assert_eq!(r.key(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))), None);
     }
 
     #[cfg_attr(miri, ignore = "reads /dev/urandom")]
@@ -673,6 +786,23 @@ mod tests {
             r.next_hop_mac, None,
             "never borrowed from the gateway entry"
         );
+    }
+
+    /// The IPv6 key: the same three parts, directness from the route.
+    #[test]
+    fn a_group_key_for_ipv6() {
+        use std::net::IpAddr;
+        let r = GroupRouter::from_interfaces(topology(), None, None);
+        let on = r.key(IpAddr::V6(v6("2001:db8:1::99"))).expect("on-link");
+        let off = r.key(IpAddr::V6(v6("2001:db8:ffff::1"))).expect("off-link");
+        assert_eq!((on.iface.as_str(), on.direct), ("eth0", true));
+        assert_eq!((off.iface.as_str(), off.direct), ("eth0", false));
+        assert_eq!(on.source, IpAddr::V6(v6("2001:db8:1::5")));
+        let spoofed = GroupRouter::from_interfaces(topology(), None, Some(v6("2001:db8:9::9")));
+        let k = spoofed
+            .key(IpAddr::V6(v6("2001:db8:1::99")))
+            .expect("on-link");
+        assert_eq!(k.source, IpAddr::V6(v6("2001:db8:9::9")));
     }
 
     // A link-local destination must be answered from a link-local source. Pairing a

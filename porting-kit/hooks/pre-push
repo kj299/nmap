@@ -4,9 +4,11 @@
 # Install where CI cannot be relied on to run:
 #   ln -s ../../porting-kit/hooks/pre-push .git/hooks/pre-push
 #
-# CI checks a commit after the push; this checks before it. It passes when an
-# unscoped `make -C porting-kit ci-local` run of exactly this tree passed, and
-# prints the steps that run only in CI, which have then run nowhere.
+# CI checks a commit after the push; this checks before it. It passes when every
+# job of every workflow has passed on exactly this tree, in one
+# `make -C porting-kit ci-local` run or job by job (`ci_local.py --job`, LESSONS
+# #058), and prints the steps that were waived or run only in CI: those have
+# passed nowhere.
 #
 # To push anyway, say why, and the reason is printed where it will be read:
 #   CI_LOCAL_SKIP="CI is up: run 123 is green on the parent" git push

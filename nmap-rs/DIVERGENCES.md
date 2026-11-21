@@ -269,11 +269,13 @@ narrower *rendering* of the same result.
       port's `-sT` is a connect scan and does neither: it judges the host by its
       ports. So as root `-sT --reason -p 22 127.0.0.1` says "received syn-ack" where
       7.94 says "received localhost-response", and an on-link neighbor that answers
-      ND but drops TCP is down here and up, `nd-response`, under 7.94. The port sends
-      no host-discovery pings at all (IPv6 scans D1), so these verdicts belong with
+      ND but drops TCP is down here and up, `nd-response`, under 7.94. The port's
+      connect scan sends no host-discovery pings (IPv6 scans D1; the port's one
+      ping, the ND ping, belongs to its raw scans), so these verdicts belong with
       that work. For the same reason 7.94 splits such a scan's targets into host
-      groups by route and holds a repeated address for a later group, and the
-      port's connect scan groups by size alone (`hostgroup-every-target-counts`).
+      groups by route and holds a repeated address for a later group; whether the
+      port's `-sT` gives `core::hostgroup` a route then is decided at M7 cutover
+      step b (`hostgroup-every-target-counts`).
       *(Found in review at IPv6 scans step e.)*
 - [x] `scan-repeated-target-deferred` (`sys::group::bucket_targets`; ports
       `target_needs_new_hostgroup`, `targets.cc:306-313`): a target named twice went
@@ -2695,21 +2697,37 @@ removed: that one was theatre, this one is unobservable.
 
 - [ ] `hostgroup-every-target-counts` (`core::hostgroup`, M7 cutover step a;
       ports `nmap.cc`'s main loop, `determineScanGroupSize`,
-      `target_needs_new_hostgroup`, `refresh_hostbatch`) — **a group here counts
-      every target; 7.94 counts only the hosts its ping found up.** 7.94 draws a
-      target, reports and frees it at once if host discovery found it down, and
-      puts it in the group only if it is up (`nmap.cc`, the loop's `HOST_UP`
-      test). The port sends no host-discovery probes (IPv6 scans D1), so every
-      target takes a place. Under `-Pn` the two agree, and that is what the
-      golden measures: 54 runs of 7.94 with `-Pn -n -v`
-      (`tests/differential/m7/hostgroup_golden.txt`). Without `-Pn`, a run with
-      down hosts fills 7.94's groups from further down the list than the port's.
-      Two more limits of the same module: `--randomize-hosts`, which quadruples
-      the batch, and `-iR` are not ported; and as root without `-Pn` 7.94 routes
-      a `-sT` scan's targets, so it splits them by route where the port's connect
-      scan does not (`privileged-connect-scan-no-implicit-verdicts`). Nothing
-      calls the module until step b; `--min-hostgroup` and `--max-hostgroup`
-      stay refused until then (`timing-knobs-not-yet-enforced`).
+      `target_needs_new_hostgroup`, `refresh_hostbatch`) — **every target takes a
+      place in a group here; in 7.94 a host found down takes none.** 7.94 draws a
+      target and, if host discovery found it down, reports and frees it at once:
+      it takes no place, and it is added to `o.numhosts_scanned`, which the
+      quick-group rule reads (`nmap.cc`, the loop's `HOST_UP` test). The port
+      has no verdict when it forms a group, so every target takes a place: it
+      sends no IPv4 discovery probes (IPv6 scans D1), and its one discovery, the
+      IPv6 ND ping, runs after grouping
+      (`scan6-nd-ping-decides-on-link-hosts`).
+      - The two agree when every target is up. That is what the golden measures:
+        7.94 with `-Pn -n -v` over targets routed by the loopback
+        (`tests/differential/m7/hostgroup_golden.txt`).
+      - `-Pn` alone does not make them agree. 7.94 puts an on-link Ethernet
+        target to its ARP or ND ping whatever the ping type
+        (`ipv4-implicit-arp-ping-unported`, `scan6-nd-ping-decides-on-link-hosts`),
+        and a silent one is down. *Measured in the review of step a,* in a
+        network namespace with an interface nobody answers on:
+        `-Pn -sS -p 1-1001` over four silent on-link addresses and then 70
+        loopback ones gives 7.94 four down hosts and groups of 4, 64 and 2. The
+        module, given the same 74 targets, forms 4, 60 and 10, with the four
+        silent addresses as its quick group.
+      - 7.94 routes a run's targets when it is root and `RawScan()` holds: every
+        raw port scan, and a `-sT` scan with `-O` or `--traceroute`, or without
+        `-Pn` (`privileged-connect-scan-no-implicit-verdicts`). The module takes
+        that as its caller's `route: Some`. The golden holds a `-sT -O` case.
+      - `--randomize-hosts`, which quadruples the batch, `-iR` and SCTP scans
+        are not ported.
+
+      Nothing calls the module until step b, which decides how a down verdict
+      enters it. `--min-hostgroup` and `--max-hostgroup` stay refused until then
+      (`timing-knobs-not-yet-enforced`).
 
 - [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
       representable subnormal written in decimal would be refused here and
@@ -4642,6 +4660,15 @@ of ten points is caught:
       sets does.
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
+      7.94 draws them after the command line's targets: once those are spent,
+      its target source reads the queue (`next_expression`, `targets.cc`).
+      From there they are batched, deferred and grouped like any other target.
+      For example (*measured*, `-sT`): a prerule adding two loopback hosts to a
+      run of one gives one group of three, and a hostrule adding them gives a
+      group of one and then a group of two. `core::hostgroup` asks its source
+      again whenever a group wants a target and the batch is spent, for that
+      reason, so the queue can be the tail of the source
+      (`a_source_that_resumes_adds_groups`).
 - [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
       `LOG_PLAIN`) go to the terminal as they happen, unless `-v0` or a `-`
       destination discards stdout (`cli-stdout-silenced-by-output-files`).

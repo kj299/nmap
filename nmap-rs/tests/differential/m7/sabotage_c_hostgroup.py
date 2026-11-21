@@ -6,6 +6,10 @@ source, rebuilds it, and runs gen_hostgroup_golden.py --check with it. The golde
 must differ for every variant: one that still matches is a rule the corpus cannot
 tell from its absence, and so a rule the port could get wrong unseen.
 
+A variant is CAUGHT by the first case that runs to its end and differs. A case
+the broken nmap hangs on is passed over after two minutes and is not a catch; a
+variant whose only failures are such cases is INCONCLUSIVE.
+
 Usage: sabotage_c_hostgroup.py ORACLE_SRC [--only N ...]
   ORACLE_SRC: a built tree of nmap 7.94 (3be01efb1). It is edited in place and
   restored after each variant; `make` must already have succeeded there.
@@ -53,6 +57,13 @@ V = [
  ("the batch not raised to --min-hostgroup", NM, "  if (o.ping_group_sz < o.minHostGroupSz())\n    o.ping_group_sz = o.minHostGroupSz();", ""),
  ("a batch of 4,095", "nmap.h", "#define PING_GROUP_SZ 4096", "#define PING_GROUP_SZ 4095"),
  ("a batch of 4,097", "nmap.h", "#define PING_GROUP_SZ 4096", "#define PING_GROUP_SZ 4097"),
+ # Found by the review of step a: each of these passed the first 55 cases.
+ ("a default of 17", SE, "int groupsize = 16;", "int groupsize = 17;"),
+ ("no quick group below -T3", SE, "o.timing_level <= 4) {", "o.timing_level >= 3 && o.timing_level <= 4) {"),
+ ("a short first group shortens the second too", SE, "      else if (hosts_scanned_so_far == quickgroupsz &&", "      else if (hosts_scanned_so_far <= quickgroupsz &&"),
+ ("the repeat test reads only the group's first address", TG, "  for (i = 0; i < targets_sz; i++) {", "  for (i = 0; i < 1; i++) {"),
+ ("the batch raised past --min-hostgroup", NM, "    o.ping_group_sz = o.minHostGroupSz();", "    o.ping_group_sz = o.minHostGroupSz() + 1;"),
+ ("hosts scanned is the last group's", NM, "    o.numhosts_scanned += Targets.size();", "    o.numhosts_scanned = Targets.size();"),
 ]
 
 
@@ -60,7 +71,7 @@ def main():
     src = os.path.abspath(sys.argv[1])
     only = [int(x) for x in sys.argv[3:]] if len(sys.argv) > 2 and sys.argv[2] == "--only" else None
     gen = [sys.executable, os.path.join(HERE, "gen_hostgroup_golden.py"),
-           "--nmap", os.path.join(src, "nmap"), "--check"]
+           "--nmap", os.path.join(src, "nmap"), "--check", "--fail-fast", "--timeout", "120"]
     env = dict(os.environ, NMAPDIR=src)
     quiet = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     caught = total = 0
@@ -83,7 +94,9 @@ def main():
             differs = [l for l in r.stdout.splitlines() if l.startswith("  golden: ")]
             if r.returncode != 0 and differs:
                 caught += 1
-                print(f"CAUGHT  {i} {name}: {len(differs)} case(s), first {differs[0][10:80]}", flush=True)
+                hung = r.stdout.count("DID NOT FINISH")
+                print(f"CAUGHT  {i} {name}: {differs[0][10:90]}"
+                      + (f" ({hung} earlier case(s) did not finish)" if hung else ""), flush=True)
             elif r.returncode != 0:
                 print(f"INCONCLUSIVE {i} {name}: {r.stdout[-300:]}", flush=True)
             else:

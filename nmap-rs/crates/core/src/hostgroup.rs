@@ -22,11 +22,31 @@
 //!
 //! ## Scope / divergences
 //!
-//! * The port sends no host-discovery probes, so every target counts toward a
-//!   group. 7.94 drops a host its ping found down as it draws it, without counting
-//!   it (`nmap.cc`, the loop's `HOST_UP` test).
+//! * Every target here takes a place in a group. In 7.94 a host found down takes
+//!   none: the loop reports and frees it as it is drawn, and adds it to
+//!   `o.numhosts_scanned`, which the quick-group rule reads (`nmap.cc`, the loop's
+//!   `HOST_UP` test). The port has no such verdict when it forms a group: it
+//!   sends no IPv4 discovery probes at all, and its one discovery, the IPv6 ND
+//!   ping, runs after grouping. `-Pn` does not close the gap: 7.94 still puts
+//!   an on-link Ethernet target to its ARP or ND ping under `-Pn`
+//!   (`refresh_hostbatch`'s `arpping`, which no ping type switches off), and a
+//!   silent one is down.
+//!   The two agree when every target is up; step b decides how a down verdict
+//!   enters here.
 //! * `--randomize-hosts` (which quadruples the batch) and `-iR` are not ported, nor
 //!   are SCTP scans, whose groups are 128 like UDP's.
+//! * The source is asked again after it has ended: whenever a group wants a
+//!   target and the batch is spent, as `nexthost` calls `refresh_hostbatch`.
+//!   7.94's source resumes. Targets a script adds (`target.add`) are read by
+//!   `next_expression` once the command line is spent, so they are drawn after
+//!   the command line's targets, and from there are batched, deferred and
+//!   grouped like any other target. The targets a source here yields after its
+//!   end are treated the same way, and [`HostGroups`] may likewise yield a
+//!   group after it has yielded `None`.
+//!   7.94's loop ends at the first empty group, so a caller stops at the first
+//!   `None`. The port does not scan script-added targets yet
+//!   (`nse-new-targets-not-scanned`); when it does, this is the way in. A caller
+//!   whose iterator must not be asked past its end fuses it.
 //! * There is no untrusted input here: sizes come from the command line and keys
 //!   from this host's routing table. A group is bounded by the operator's
 //!   `--max-hostgroup` (default 100,000) and the size rule, a batch by
@@ -51,7 +71,8 @@ pub struct GroupSizing {
     /// so `-sS -sU` sizes as UDP.
     pub udp: bool,
     /// A TCP scan is among them (`o.TCPScan()`): connect, SYN, ACK, Window, Maimon,
-    /// FIN, NULL or Xmas.
+    /// FIN, NULL or Xmas. C's predicate also holds for the bounce and idle scans,
+    /// which are not ported.
     pub tcp: bool,
     /// The number of TCP ports to scan (`ports->tcp_count`).
     pub tcp_ports: usize,
@@ -88,8 +109,12 @@ pub fn scan_group_size(hosts_scanned: usize, s: &GroupSizing) -> usize {
             }
         }
     }
-    // C's `box(min, max, size)`: the minimum first, then the maximum, so the
-    // maximum wins if the two cross (they cannot: the options are validated).
+    // C's `box(min, max, size)`. It asserts `min <= max`. 7.94 refuses a minimum
+    // above the maximum, but a maximum that reads negative as a 32-bit `int`
+    // (`-1`, or anything from 2^31 to 2^32 - 1) passes its checks and trips the
+    // assertion. The caller must refuse both kinds; if the two crossed here,
+    // this would return the maximum. The final `max(1)` is not in C: a group of
+    // none would end the run, and nothing valid reaches it.
     let min = usize::try_from(s.min_hostgroup).unwrap_or(usize::MAX);
     let max = usize::try_from(s.max_hostgroup).unwrap_or(usize::MAX);
     size.max(min).min(max).max(1)
@@ -100,7 +125,8 @@ pub fn scan_group_size(hosts_scanned: usize, s: &GroupSizing) -> usize {
 pub struct RouteKey {
     /// The interface (`Target::deviceName`).
     pub iface: String,
-    /// The source address (`Target::SourceSockAddr`).
+    /// The source address the probes carry (`Target::SourceSockAddr`): `-S`'s when
+    /// given, which makes one group of targets the routing table would separate.
     pub source: IpAddr,
     /// Whether the target is on that interface's link (`Target::directlyConnected`).
     pub direct: bool,
@@ -112,9 +138,13 @@ pub struct RouteKey {
 pub struct Member<T> {
     /// The target's address. A routed group holds no address twice.
     pub address: IpAddr,
-    /// Its route, for a scan that routes its targets (a raw scan). `None` for one
-    /// that does not (a connect scan): C applies no homogeneity rule then
-    /// (`target_needs_new_hostgroup`'s "no restrictions on non-root scans").
+    /// Its route, when the run routes its targets, and `None` when it does not: C
+    /// applies no homogeneity rule then (`target_needs_new_hostgroup`'s "no
+    /// restrictions on non-root scans"). 7.94 routes a target when it is root and
+    /// `o.RawScan()` holds (`targets.cc`, `NmapOps.cc`). That is every raw port
+    /// scan, and also a connect scan with `-O` or `--traceroute`, or without
+    /// `-Pn`, whose pings are raw. Only an unprivileged run, or a connect scan
+    /// under `-Pn` with neither, has no route.
     pub route: Option<RouteKey>,
     /// The caller's own data for this target.
     pub item: T,
@@ -472,9 +502,9 @@ mod tests {
     }
 
     /// The quick-group rule reads the hosts of every group so far, not of the last
-    /// one: a later group that happens to hold four hosts shortens nothing. It
-    /// takes three routes to end a batch on such a group, which loopback and one
-    /// address cannot give the golden.
+    /// one: a later group that happens to hold four hosts shortens nothing. The
+    /// golden shows the same with repeats on one route
+    /// (`l1-l68,l65x64,l69-l140`); here a second route ends the batch.
     #[test]
     fn hosts_scanned_counts_every_earlier_group() {
         let route = |last: u8| lo([127, 0, 0, last]);
@@ -535,6 +565,29 @@ mod tests {
         });
         let sizes: Vec<usize> = HostGroups::new(source, wide).map(|v| v.len()).collect();
         assert_eq!(sizes, [5000, 1000]);
+    }
+
+    /// The source is asked again when a group wants a target and the batch is
+    /// spent, as `nexthost` calls `refresh_hostbatch`: one that ends and later
+    /// has more adds groups. 7.94 does this with the targets a script adds while
+    /// a group is scanned (*measured*: `--script-args newtargets`, a script
+    /// adding two hosts to a run of one, scans "127.0.0.1" and then "2 hosts").
+    #[test]
+    fn a_source_that_resumes_adds_groups() {
+        use std::cell::RefCell;
+        let queue = RefCell::new(VecDeque::from([member(1, None)]));
+        let source = std::iter::from_fn(|| queue.borrow_mut().pop_front());
+        let mut groups = HostGroups::new(source, sizing());
+        let items = |g: Option<Vec<Member<u8>>>| -> Option<Vec<u8>> {
+            g.map(|g| g.into_iter().map(|m| m.item).collect())
+        };
+        assert_eq!(items(groups.next()), Some(vec![1]));
+        // The group is scanned, and a script adds two targets.
+        queue
+            .borrow_mut()
+            .extend([member(2, None), member(3, None)]);
+        assert_eq!(items(groups.next()), Some(vec![2, 3]));
+        assert_eq!(items(groups.next()), None);
     }
 
     #[test]

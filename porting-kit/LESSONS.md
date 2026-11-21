@@ -1882,6 +1882,11 @@ reports, and four retrospective audits (history, harnesses, step e, consistency)
     carry `WAIVED, failed here` with the reason. A waiver is for an environment
     limit (no IPv6, no VM), stated in at least 20 characters. It is not for a
     failure to look at later, and a waived step has passed nowhere.
+  - A run records **the tree it began on**. Noticed on the first day of per-job
+    records: a review's fix round was ready to commit while a long job was still
+    compiling its parent, and the record would have been written for the new
+    tree. If HEAD's tree at the end is not the clean tree of the start, nothing
+    is recorded.
 - **Section amended:** PLAYBOOK · Phase 3 (gate identity); `REVIEW-GATE.md`
   (merge preconditions); `hooks/pre-push`; `skills/porting-kit-audit/SKILL.md`.
 

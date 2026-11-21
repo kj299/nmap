@@ -700,7 +700,7 @@
    "groups_and_order_match_nmap"
   ],
   "expect": [
-   "hosts_scanned_counts_every_earlier_group"
+   "groups_and_order_match_nmap"
   ]
  },
  {
@@ -723,6 +723,182 @@
   ],
   "expect": [
    "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a default of 17",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "let mut size: usize = 16;",
+  "new": "let mut size: usize = 17;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "no quick group below -T3",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "s.timing_level <= 4 {",
+  "new": "(3..=4).contains(&s.timing_level) {",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a short first group shortens the second too",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "} else if hosts_scanned == quick &&",
+  "new": "} else if hosts_scanned <= quick &&",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the repeat test reads only the group's first address",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "    addresses.contains(&target.address)\n}",
+  "new": "    first.address == target.address && !addresses.is_empty()\n}",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "only the batch's first address is tracked",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "            addresses.insert(target.address);\n            self.batch.push_back(target);",
+  "new": "            if self.batch.is_empty() {\n                addresses.insert(target.address);\n            }\n            self.batch.push_back(target);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "only the group's first address is tracked",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "            addresses.insert(target.address);\n            group.push(target);",
+  "new": "            if group.is_empty() {\n                addresses.insert(target.address);\n            }\n            group.push(target);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the batch raised past --min-hostgroup",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "batch_size: PING_GROUP_SZ.max(min),",
+  "new": "batch_size: PING_GROUP_SZ.max(min.saturating_add(1)),",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the source is asked only until its first end",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "    source: I,\n    sizing: GroupSizing,\n    batch_size: usize,\n    /// The batch drawn and not yet handed out, in order (`hostbatch` from\n    /// `next_batch_no` on).\n    batch: VecDeque<Member<T>>,\n    /// Deferred while the current batch was filled (`defer_buffer`).\n    deferred: Vec<Member<T>>,\n    /// Deferred by an earlier batch, to be drawn before `source` (`undeferred`).\n    undeferred: VecDeque<Member<T>>,\n    /// Hosts in the groups handed out so far (`o.numhosts_scanned`).\n    scanned: usize,\n}\n\nimpl<I, T> HostGroups<I, T>\nwhere\n    I: Iterator<Item = Member<T>>,\n{\n    /// Group `source` under `sizing`. The batch is [`PING_GROUP_SZ`], or\n    /// `--min-hostgroup` when that is larger (`nmap.cc`, before the main loop).\n    pub fn new(source: I, sizing: GroupSizing) -> Self {\n        let min = usize::try_from(sizing.min_hostgroup).unwrap_or(usize::MAX);\n        HostGroups {\n            source,\n",
+  "new": "    source: std::iter::Fuse<I>,\n    sizing: GroupSizing,\n    batch_size: usize,\n    /// The batch drawn and not yet handed out, in order (`hostbatch` from\n    /// `next_batch_no` on).\n    batch: VecDeque<Member<T>>,\n    /// Deferred while the current batch was filled (`defer_buffer`).\n    deferred: Vec<Member<T>>,\n    /// Deferred by an earlier batch, to be drawn before `source` (`undeferred`).\n    undeferred: VecDeque<Member<T>>,\n    /// Hosts in the groups handed out so far (`o.numhosts_scanned`).\n    scanned: usize,\n}\n\nimpl<I, T> HostGroups<I, T>\nwhere\n    I: Iterator<Item = Member<T>>,\n{\n    /// Group `source` under `sizing`. The batch is [`PING_GROUP_SZ`], or\n    /// `--min-hostgroup` when that is larger (`nmap.cc`, before the main loop).\n    pub fn new(source: I, sizing: GroupSizing) -> Self {\n        let min = usize::try_from(sizing.min_hostgroup).unwrap_or(usize::MAX);\n        HostGroups {\n            source: source.fuse(),\n",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "a_source_that_resumes_adds_groups"
   ]
  }
 ]

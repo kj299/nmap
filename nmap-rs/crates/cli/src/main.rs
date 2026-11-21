@@ -338,7 +338,11 @@ async fn main() -> ExitCode {
     .unwrap_or(0);
     let started = format!("epoch+{start_epoch}s");
     let clock = Instant::now();
-    let mut results = run_scan(&cfg, &ips, &ports, template, timing, max_par, overrides).await;
+    let once = RunOnce::default();
+    let mut results = run_scan(
+        &once, &cfg, &ips, &ports, template, timing, max_par, overrides,
+    )
+    .await;
     let elapsed = clock.elapsed().as_secs_f64();
 
     // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
@@ -349,7 +353,7 @@ async fn main() -> ExitCode {
 
     // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
     if cfg.service_version {
-        run_service_version(&cfg, &mut results, services.as_ref()).await;
+        run_service_version(&once, &cfg, &mut results, services.as_ref()).await;
     }
 
     // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so this
@@ -357,11 +361,11 @@ async fn main() -> ExitCode {
     let os_block = if cfg.os_detection {
         #[cfg(feature = "pcap")]
         {
-            run_os_detection(&cfg, &mut results).await
+            run_os_detection(&once, &cfg, &mut results).await
         }
         #[cfg(not(feature = "pcap"))]
         {
-            run_os_detection(&cfg, &mut results)
+            run_os_detection(&once, &cfg, &mut results)
         }
     } else {
         String::new()
@@ -424,9 +428,46 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What a run loads or decides once and every host group shares (M7 cutover
+/// step b). nmap reads its data files once per run and, having found it cannot
+/// send raw packets, does not try again for the next group.
+#[derive(Default)]
+struct RunOnce {
+    /// `-sV`'s probe database, parsed and compiled on first use. `None` inside
+    /// when the file is missing: the warning is printed once.
+    probes: std::cell::OnceCell<Option<(Arc<ProbeDb>, Arc<CompiledDb>)>>,
+    /// `-sU`'s payloads, built from the probe file on first use.
+    #[cfg(feature = "pcap")]
+    udp: std::cell::OnceCell<nmap_core::payload::UdpPayloads>,
+    /// `-O`'s fingerprint database, parsed on first use.
+    #[cfg(feature = "pcap")]
+    os_db: std::cell::OnceCell<Option<nmap_core::osdb::model::FingerPrintDb>>,
+    /// A raw scan fell back to a connect scan: later groups go straight to it,
+    /// and the reason is not printed again.
+    connect_fallback: std::cell::Cell<bool>,
+    /// `-O` lacked privilege: later groups skip it without a second message.
+    #[cfg(feature = "pcap")]
+    os_denied: std::cell::Cell<bool>,
+    /// `-O` cannot run in this build: said once.
+    #[cfg(not(feature = "pcap"))]
+    os_unavailable: std::cell::Cell<bool>,
+}
+
+impl RunOnce {
+    /// Fall back to a connect scan, saying why the first time only.
+    fn fall_back(&self, why: &str) {
+        if !self.connect_fallback.replace(true) {
+            eprintln!("{why}");
+        }
+    }
+}
+
 /// Dispatch to the requested scan technique. The privileged raw scans fall back to a
 /// connect scan when unavailable (no privilege, or a build without `pcap`).
+// One over the limit with the run's shared state; see `flag_or_fallback`.
+#[allow(clippy::too_many_arguments)]
 async fn run_scan(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -453,13 +494,14 @@ async fn run_scan(
             connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
         }
         ScanKind::Syn => {
-            syn_or_fallback(cfg, ips, ports, template, params, max_par, overrides).await
+            syn_or_fallback(once, cfg, ips, ports, template, params, max_par, overrides).await
         }
         ScanKind::Udp => {
-            udp_or_fallback(cfg, ips, ports, template, params, max_par, overrides).await
+            udp_or_fallback(once, cfg, ips, ports, template, params, max_par, overrides).await
         }
         ScanKind::Ack => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -473,6 +515,7 @@ async fn run_scan(
         }
         ScanKind::Window => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -486,6 +529,7 @@ async fn run_scan(
         }
         ScanKind::Maimon => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -499,6 +543,7 @@ async fn run_scan(
         }
         ScanKind::Fin => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -512,6 +557,7 @@ async fn run_scan(
         }
         ScanKind::Null => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -525,6 +571,7 @@ async fn run_scan(
         }
         ScanKind::Xmas => {
             flag_or_fallback(
+                once,
                 cfg,
                 ips,
                 ports,
@@ -577,7 +624,9 @@ fn exit_if_capture_failed(e: &std::io::Error) {
 
 /// failure (built with `pcap`).
 #[cfg(feature = "pcap")]
+#[allow(clippy::too_many_arguments)]
 async fn syn_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -586,27 +635,36 @@ async fn syn_or_fallback(
     max_par: usize,
     overrides: PacketOverrides,
 ) -> ScanResults {
+    let ccfg = connect_cfg(cfg, ports, template, params, max_par);
+    let connect = || connect_scan(ips, &ccfg);
+    if once.connect_fallback.get() {
+        return connect().await;
+    }
     match nmap_sys::synscan::syn_scan_targets(ips, ports, template, params, max_par, overrides)
         .await
     {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!(
-                "nmap-rs: -sS requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
+            once.fall_back(
+                "nmap-rs: -sS requires root/CAP_NET_RAW; falling back to a connect scan (-sT)",
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            connect().await
         }
         Err(e) => {
             exit_if_capture_failed(&e);
-            eprintln!("nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            once.fall_back(&format!(
+                "nmap-rs: -sS setup failed ({e}); falling back to a connect scan (-sT)"
+            ));
+            connect().await
         }
     }
 }
 
 /// Without the `pcap` feature there is no raw-scan backend; `-sS` runs a connect scan.
 #[cfg(not(feature = "pcap"))]
+#[allow(clippy::too_many_arguments)]
 async fn syn_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -616,8 +674,8 @@ async fn syn_or_fallback(
     // Signature parity with the pcap build; nothing here sends packets.
     _overrides: PacketOverrides,
 ) -> ScanResults {
-    eprintln!(
-        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)"
+    once.fall_back(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a connect scan (-sT)",
     );
     connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
@@ -626,7 +684,9 @@ async fn syn_or_fallback(
 /// failure (built with `pcap`). A UDP scan reports UDP ports; the connect fallback can
 /// only report TCP, so the fallback is a genuine degradation (noted to the user).
 #[cfg(feature = "pcap")]
+#[allow(clippy::too_many_arguments)]
 async fn udp_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -635,28 +695,35 @@ async fn udp_or_fallback(
     max_par: usize,
     overrides: PacketOverrides,
 ) -> ScanResults {
+    let ccfg = connect_cfg(cfg, ports, template, params, max_par);
+    let connect = || connect_scan(ips, &ccfg);
+    if once.connect_fallback.get() {
+        return connect().await;
+    }
     match nmap_sys::udpscan::udp_scan_targets(
         ips,
         ports,
         template,
         params,
         max_par,
-        udp_payloads(),
+        once.udp.get_or_init(udp_payloads).clone(),
         overrides,
     )
     .await
     {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!(
-                "nmap-rs: -sU requires root/CAP_NET_RAW; falling back to a TCP connect scan (-sT)"
+            once.fall_back(
+                "nmap-rs: -sU requires root/CAP_NET_RAW; falling back to a TCP connect scan (-sT)",
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            connect().await
         }
         Err(e) => {
             exit_if_capture_failed(&e);
-            eprintln!("nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            once.fall_back(&format!(
+                "nmap-rs: -sU setup failed ({e}); falling back to a TCP connect scan (-sT)"
+            ));
+            connect().await
         }
     }
 }
@@ -698,7 +765,9 @@ fn udp_payloads() -> nmap_core::payload::UdpPayloads {
 
 /// Without the `pcap` feature there is no raw-scan backend; `-sU` runs a connect scan.
 #[cfg(not(feature = "pcap"))]
+#[allow(clippy::too_many_arguments)]
 async fn udp_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -708,8 +777,8 @@ async fn udp_or_fallback(
     // Signature parity with the pcap build; nothing here sends packets.
     _overrides: PacketOverrides,
 ) -> ScanResults {
-    eprintln!(
-        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
+    once.fall_back(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)",
     );
     connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
@@ -722,6 +791,7 @@ async fn udp_or_fallback(
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "pcap")]
 async fn flag_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -731,6 +801,11 @@ async fn flag_or_fallback(
     scan: nmap_core::classify::ScanType,
     overrides: PacketOverrides,
 ) -> ScanResults {
+    let ccfg = connect_cfg(cfg, ports, template, params, max_par);
+    let connect = || connect_scan(ips, &ccfg);
+    if once.connect_fallback.get() {
+        return connect().await;
+    }
     match nmap_sys::flagscan::flag_scan_targets(
         scan, ips, ports, template, params, max_par, overrides,
     )
@@ -738,22 +813,26 @@ async fn flag_or_fallback(
     {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!(
-                "nmap-rs: this scan requires root/CAP_NET_RAW; falling back to a connect scan (-sT)"
+            once.fall_back(
+                "nmap-rs: this scan requires root/CAP_NET_RAW; falling back to a connect scan (-sT)",
             );
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            connect().await
         }
         Err(e) => {
             exit_if_capture_failed(&e);
-            eprintln!("nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)");
-            connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
+            once.fall_back(&format!(
+                "nmap-rs: raw scan setup failed ({e}); falling back to a connect scan (-sT)"
+            ));
+            connect().await
         }
     }
 }
 
 /// Without the `pcap` feature there is no raw-scan backend; the flag scans run a connect scan.
 #[cfg(not(feature = "pcap"))]
+#[allow(clippy::too_many_arguments)]
 async fn flag_or_fallback(
+    once: &RunOnce,
     cfg: &RunConfig,
     ips: &[IpAddr],
     ports: &[u16],
@@ -764,8 +843,8 @@ async fn flag_or_fallback(
     // Signature parity with the pcap build; nothing here sends packets.
     _overrides: PacketOverrides,
 ) -> ScanResults {
-    eprintln!(
-        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)"
+    once.fall_back(
+        "nmap-rs: this build lacks raw-scan support (rebuild with --features pcap); running a TCP connect scan (-sT)",
     );
     connect_scan(ips, &connect_cfg(cfg, ports, template, params, max_par)).await
 }
@@ -779,22 +858,31 @@ async fn flag_or_fallback(
 /// privilege says so plainly rather than printing nothing — silence would leave the user
 /// unable to tell an unidentifiable host from a build that cannot look.
 #[cfg(feature = "pcap")]
-async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String {
+async fn run_os_detection(once: &RunOnce, cfg: &RunConfig, results: &mut ScanResults) -> String {
     use nmap_core::osdb::model::FingerPrintDb;
     use nmap_core::osscan::{
         attribute_distance, render, submission_reason, HostFacts, Report, SubmissionInputs,
     };
 
     let mut out = String::new();
-    let Some(db_text) = load_os_db() else {
-        eprintln!("nmap-rs: -O requires nmap-os-db; skipping OS detection");
-        return out;
-    };
-    let db = FingerPrintDb::parse(&db_text);
-    if db.prints.is_empty() {
-        eprintln!("nmap-rs: nmap-os-db has no usable fingerprints; skipping OS detection");
+    if once.os_denied.get() {
         return out;
     }
+    let db = once.os_db.get_or_init(|| {
+        let Some(db_text) = load_os_db() else {
+            eprintln!("nmap-rs: -O requires nmap-os-db; skipping OS detection");
+            return None;
+        };
+        let db = FingerPrintDb::parse(&db_text);
+        if db.prints.is_empty() {
+            eprintln!("nmap-rs: nmap-os-db has no usable fingerprints; skipping OS detection");
+            return None;
+        }
+        Some(db)
+    });
+    let Some(db) = db else {
+        return out;
+    };
 
     for host in &mut results.hosts {
         if host.state != HostState::Up {
@@ -826,7 +914,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String 
         let outcome = nmap_sys::osscan::os_scan_host(
             v4,
             &host.ports,
-            &db,
+            db,
             cfg.max_os_tries.unwrap_or(nmap_sys::osscan::MAX_OS_TRIES),
         )
         .await;
@@ -834,6 +922,7 @@ async fn run_os_detection(cfg: &RunConfig, results: &mut ScanResults) -> String 
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 eprintln!("nmap-rs: -O requires root/CAP_NET_RAW; skipping OS detection");
+                once.os_denied.set(true);
                 return out;
             }
             Err(e) => {
@@ -1054,30 +1143,39 @@ async fn run_os_detection6(
 
 /// Without the `pcap` feature there is no capture backend, so `-O` cannot run.
 #[cfg(not(feature = "pcap"))]
-fn run_os_detection(_cfg: &RunConfig, _results: &mut ScanResults) -> String {
-    eprintln!(
-        "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
-    );
+fn run_os_detection(once: &RunOnce, _cfg: &RunConfig, _results: &mut ScanResults) -> String {
+    // Said once per run, not once per host group.
+    if !once.os_unavailable.replace(true) {
+        eprintln!(
+            "nmap-rs: -O requires a --features pcap build with raw-socket privilege; skipping OS detection"
+        );
+    }
     String::new()
 }
 
 async fn run_service_version(
+    once: &RunOnce,
     cfg: &RunConfig,
     results: &mut ScanResults,
     services: Option<&ServiceTable>,
 ) {
-    let Some(db_text) = load_probe_db_text() else {
-        eprintln!(
-            "nmap-rs: -sV requested but nmap-service-probes not found; skipping version scan"
-        );
+    let loaded = once.probes.get_or_init(|| {
+        let Some(db_text) = load_probe_db_text() else {
+            eprintln!(
+                "nmap-rs: -sV requested but nmap-service-probes not found; skipping version scan"
+            );
+            return None;
+        };
+        let db = ProbeDb::parse(&db_text);
+        for w in db.warnings.iter().take(3) {
+            nmap_core::verbose!(1, "nmap-service-probes line {}: {}", w.line, w.message);
+        }
+        let compiled = Arc::new(CompiledDb::compile(&db));
+        Some((Arc::new(db), compiled))
+    });
+    let Some((db, compiled)) = loaded.as_ref().map(|(d, c)| (Arc::clone(d), Arc::clone(c))) else {
         return;
     };
-    let db = ProbeDb::parse(&db_text);
-    for w in db.warnings.iter().take(3) {
-        nmap_core::verbose!(1, "nmap-service-probes line {}: {}", w.line, w.message);
-    }
-    let db = Arc::new(db);
-    let compiled = Arc::new(CompiledDb::compile(&db));
 
     // Gather open TCP ports per host, in the host order `service_scan` expects,
     // minus the ports `nmap-service-probes` tells us not to probe.

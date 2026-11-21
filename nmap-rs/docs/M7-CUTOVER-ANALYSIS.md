@@ -724,3 +724,9 @@ both ledgered without a code change:
    on, ends the run as one before it does. The ledger said "before the cap";
    it now names both.
 
+**The eighth review** confirmed one, low, ledgered: a `--min-hostgroup` of
+2^28 or more makes 7.94 quit in `safe_zalloc` (its batch of pointers reads
+negative as an `int`), where the port, its batch bounded by the target cap,
+runs. `hostgroup-bound-past-int-refused` said everything else was C's; it
+now names this case, measured. It re-ran all 26 mutations: each caught.
+

@@ -2733,7 +2733,16 @@ removed: that one was theatre, this one is unobservable.
       assertion `bmin <= bmax` in `box` (*measured*: `--max-hostgroup -1`,
       `2147483648` and `99999999999999999999` each abort, exit 134). A negative
       maximum beside a smaller negative minimum passes both and runs. The port
-      refuses any such value with a message naming it. Everything else is C's:
+      refuses any such value with a message naming it. One more value 7.94
+      quits on, the port runs: a `--min-hostgroup` of 2^28 or more, with a
+      maximum no smaller. 7.94 raises its batch to the minimum
+      (`nmap.cc:2102-2103`) and allocates a pointer per slot
+      (`targets.cc:328`), and `safe_zalloc` quits when the size reads
+      negative as an `int` (`nbase/nbase_memalloc.c:110-111`): "Tried to
+      malloc negative amount of memory!!! QUITTING!", exit 1, before any
+      target (*measured*: 268435456 for both quits, 268435455 runs). The
+      port's batch is bounded by the target cap, so it runs (59 MiB at a /16
+      with 2^31 - 1 for both). Otherwise, everything is C's:
       the two setters' checks are made in command-line order, between
       themselves, with C's unsigned comparisons and messages, and `atoi`'s truncation is reproduced, so
       `4294967296` is 0 and refused as C refuses it, and `4294967297` is 1.

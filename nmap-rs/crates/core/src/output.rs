@@ -313,9 +313,8 @@ fn script_block_xml(out: &mut String, tag: &str, list: &[ScriptOutput]) {
 /// finds them (`nmap.cc:2151`, before the group is scanned), then the rest, after
 /// the scan (`nmap.cc:2292`). With its index, for the host's script results.
 ///
-/// 7.94 does this per host group, and this port orders a run as one group, so the two
-/// agree only while 7.94 makes one group of the run: one route for every target, no
-/// repeat, and fewer up hosts than a group holds (`output-down-hosts-first`).
+/// 7.94 does this per host group: each group's down hosts, then its up ones. The
+/// `*_group` renderers take one group at a time for that reason.
 fn report_order(hosts: &[Host]) -> impl Iterator<Item = (usize, &Host)> {
     let down = |h: &&Host| h.state == crate::model::HostState::Down;
     let first = hosts.iter().enumerate().filter(move |(_, h)| down(h));
@@ -351,52 +350,116 @@ fn render_normal_to(
     services: Option<&ServiceTable>,
     terminal: bool,
 ) -> String {
+    let mut out = normal_header(meta, &results.scripts.pre);
+    out.push_str(&normal_group(results, meta, services));
+    out.push_str(&normal_footer(
+        &RunTotals::of(results),
+        &results.scripts.post,
+        meta,
+        terminal,
+    ));
+    out
+}
+
+/// What a run's closing lines need from the hosts of every group, counted as
+/// each group is written: nmap writes a group's hosts when the group is done
+/// and the totals at the end (`nmap.cc:2292-2330`, `printfinaloutput`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunTotals {
+    /// Every target of the run, reported or not.
+    pub hosts: usize,
+    /// Those found up, counted before `--open` hides any.
+    pub up: usize,
+    /// Those found down. With `up`, not always `hosts`: a list scan's are
+    /// neither.
+    pub down: usize,
+    /// The unmatched service fingerprints, in host then port order, for the
+    /// block after the last host.
+    pub fingerprints: Vec<String>,
+}
+
+impl RunTotals {
+    /// The totals of one group, or of a run reported as one.
+    #[must_use]
+    pub fn of(group: &ScanResults) -> Self {
+        let mut t = RunTotals::default();
+        t.add(group);
+        t
+    }
+
+    /// Count a group's hosts in.
+    pub fn add(&mut self, group: &ScanResults) {
+        let count = |state| group.hosts.iter().filter(|h| h.state == state).count();
+        self.hosts = self.hosts.saturating_add(group.hosts.len());
+        self.up = self.up.saturating_add(count(crate::model::HostState::Up));
+        self.down = self
+            .down
+            .saturating_add(count(crate::model::HostState::Down));
+        self.fingerprints
+            .extend(collect_service_fingerprints(group));
+    }
+}
+
+/// The normal report's opening: the "Starting" line and the pre-scan scripts'
+/// results.
+#[must_use]
+pub fn normal_header(meta: &ScanMeta, pre: &[ScriptOutput]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
         "Starting {} {} ( https://nmap.org/nmap-rs ) at {}",
         meta.scanner, meta.version, meta.started
     );
+    script_block_normal(&mut out, "Pre-scan script results:", pre);
+    out
+}
 
-    script_block_normal(&mut out, "Pre-scan script results:", &results.scripts.pre);
-
-    // The host still counts as up even when `--open` drops it from the report: it
-    // WAS found, it just has nothing the operator asked to see. C counts it the same
-    // way (`nmap.cc:2312` skips only the printing).
-    let up = results
-        .hosts
-        .iter()
-        .filter(|h| h.state == crate::model::HostState::Up)
-        .count();
+/// One host group's hosts in the normal report, down hosts first
+/// ([`report_order`]). `group.scripts.hosts` is keyed by index into
+/// `group.hosts`; its pre- and post-scan lists are not read.
+#[must_use]
+pub fn normal_group(
+    group: &ScanResults,
+    meta: &ScanMeta,
+    services: Option<&ServiceTable>,
+) -> String {
+    let mut out = String::new();
     // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last
     // one's too, so one stands before whatever follows: the next host, post-scan
     // results, or "Nmap done". A down host's report line and a list-scan host's get
     // none (`nmap.cc:2127`, `nmap.cc:2155`).
-    for (i, host) in report_order(&results.hosts) {
+    for (i, host) in report_order(&group.hosts) {
         if !host_is_reportable(host, meta) {
             continue;
         }
-        render_host_normal(
-            &mut out,
-            host,
-            results.scripts.hosts.get(&i),
-            services,
-            meta,
-        );
+        render_host_normal(&mut out, host, group.scripts.hosts.get(&i), services, meta);
         if host.state == crate::model::HostState::Up {
             out.push('\n');
         }
     }
-    script_block_normal(&mut out, "Post-scan script results:", &results.scripts.post);
+    out
+}
 
-    let fps = collect_service_fingerprints(results);
-    out.push_str(&service_fingerprint_block(&fps));
-
-    let n = results.hosts.len();
+/// The normal report's closing: the post-scan scripts' results, the unmatched
+/// service fingerprints, the terminal's "Host seems down" note, and "Nmap done".
+///
+/// The host still counts as up even when `--open` drops it from the report: it
+/// WAS found, it just has nothing the operator asked to see. C counts it the same
+/// way (`nmap.cc:2312` skips only the printing).
+#[must_use]
+pub fn normal_footer(
+    totals: &RunTotals,
+    post: &[ScriptOutput],
+    meta: &ScanMeta,
+    terminal: bool,
+) -> String {
+    let mut out = String::new();
+    script_block_normal(&mut out, "Post-scan script results:", post);
+    out.push_str(&service_fingerprint_block(&totals.fingerprints));
+    let (n, up) = (totals.hosts, totals.up);
     // C's note for a lone host its ping found down (`printfinaloutput`); not after
     // `-Pn`, which asked for no ping, nor after a list scan, which pings nothing.
-    let down = |h: &Host| h.state == crate::model::HostState::Down;
-    if terminal && n == 1 && up == 0 && !meta.assume_up && results.hosts.iter().all(down) {
+    if terminal && n == 1 && up == 0 && !meta.assume_up && totals.down == 1 {
         let _ = writeln!(
             out,
             "Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn"
@@ -670,12 +733,44 @@ pub fn render_grepable(
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
 ) -> String {
+    let mut out = grepable_header(meta);
+    out.push_str(&grepable_group(results, meta, services));
+    out.push_str(&grepable_footer(&RunTotals::of(results), meta));
+    out
+}
+
+/// The grepable report's opening comment.
+#[must_use]
+pub fn grepable_header(meta: &ScanMeta) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
         "# {} {} scan initiated {}",
         meta.scanner, meta.version, meta.started
     );
+    out
+}
+
+/// The grepable report's closing comment.
+#[must_use]
+pub fn grepable_footer(totals: &RunTotals, meta: &ScanMeta) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# {} done at {} -- {} IP address scanned",
+        meta.scanner, meta.started, totals.hosts
+    );
+    out
+}
+
+/// One host group's hosts in the grepable report, down hosts first.
+#[must_use]
+pub fn grepable_group(
+    results: &ScanResults,
+    meta: &ScanMeta,
+    services: Option<&ServiceTable>,
+) -> String {
+    let mut out = String::new();
     for (_, host) in report_order(&results.hosts) {
         if !host_is_reportable(host, meta) {
             continue;
@@ -759,13 +854,6 @@ pub fn render_grepable(
             );
         }
     }
-    let _ = writeln!(
-        out,
-        "# {} done at {} -- {} IP address scanned",
-        meta.scanner,
-        meta.started,
-        results.hosts.len()
-    );
     out
 }
 
@@ -982,6 +1070,19 @@ pub fn render_xml(
     meta: &ScanMeta,
     services: Option<&ServiceTable>,
 ) -> String {
+    let mut out = xml_header(meta, &results.scripts.pre);
+    out.push_str(&xml_group(results, meta, services));
+    out.push_str(&xml_footer(
+        &RunTotals::of(results),
+        &results.scripts.post,
+        meta,
+    ));
+    out
+}
+
+/// The XML report's opening: the prolog, `<nmaprun>` and `<prescript>`.
+#[must_use]
+pub fn xml_header(meta: &ScanMeta, pre: &[ScriptOutput]) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     let _ = writeln!(
@@ -992,14 +1093,38 @@ pub fn render_xml(
         xml_escape(meta.started),
         xml_escape(meta.version)
     );
-    script_block_xml(&mut out, "prescript", &results.scripts.pre);
+    script_block_xml(&mut out, "prescript", pre);
+    out
+}
 
-    // Counted before any is skipped: `--open` hides a host, it does not un-find it.
-    let up = results
-        .hosts
-        .iter()
-        .filter(|h| h.state == crate::model::HostState::Up)
-        .count();
+/// The XML report's closing: `<postscript>`, `<runstats>` and `</nmaprun>`.
+/// Hosts are counted before any is skipped: `--open` hides a host, it does not
+/// un-find it.
+#[must_use]
+pub fn xml_footer(totals: &RunTotals, post: &[ScriptOutput], meta: &ScanMeta) -> String {
+    let mut out = String::new();
+    script_block_xml(&mut out, "postscript", post);
+    let _ = writeln!(
+        out,
+        "<runstats><finished time=\"{}\" elapsed=\"{:.2}\"/><hosts up=\"{}\" down=\"{}\" total=\"{}\"/></runstats>",
+        xml_escape(meta.started),
+        meta.elapsed_secs,
+        totals.up,
+        totals.hosts.saturating_sub(totals.up),
+        totals.hosts
+    );
+    out.push_str("</nmaprun>\n");
+    out
+}
+
+/// One host group's `<host>` elements, down hosts first.
+#[must_use]
+pub fn xml_group(
+    results: &ScanResults,
+    meta: &ScanMeta,
+    services: Option<&ServiceTable>,
+) -> String {
+    let mut out = String::new();
     for (i, host) in report_order(&results.hosts) {
         let scripts = results.scripts.hosts.get(&i);
         if !host_is_reportable(host, meta) {
@@ -1083,18 +1208,6 @@ pub fn render_xml(
         }
         let _ = writeln!(out, "</host>");
     }
-    script_block_xml(&mut out, "postscript", &results.scripts.post);
-
-    let _ = writeln!(
-        out,
-        "<runstats><finished time=\"{}\" elapsed=\"{:.2}\"/><hosts up=\"{}\" down=\"{}\" total=\"{}\"/></runstats>",
-        xml_escape(meta.started),
-        meta.elapsed_secs,
-        up,
-        results.hosts.len().saturating_sub(up),
-        results.hosts.len()
-    );
-    out.push_str("</nmaprun>\n");
     out
 }
 
@@ -1961,6 +2074,116 @@ mod tests {
     /// them (`nmap.cc:2155`), each its report line alone, with no blank line after
     /// it; then the scanned hosts, each block ending in one (`nmap.cc:2330`). And a
     /// down host is its status alone in every format, even with a port left on it.
+    /// A run written group by group is the run written whole, when no group
+    /// has a down host to move: the header, each group's hosts, the footer
+    /// from the totals of every group.
+    #[test]
+    fn a_run_written_by_group_is_the_run_written_whole() {
+        let host = |last: u8, state: HostState| {
+            let mut h = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), state);
+            h.ports.push(Port::new(
+                80,
+                Protocol::Tcp,
+                PortState::Open,
+                Reason::ConnAccept,
+            ));
+            h.ports[0].service.fingerprint =
+                (last == 3).then(|| format!("SF-Port80-TCP:V=7.94%I=7%D=1/1%Time=0%P=x%r({last})"));
+            h
+        };
+        let all = ScanResults {
+            hosts: (1..=5).map(|i| host(i, HostState::Up)).collect(),
+            ..Default::default()
+        };
+        let groups: Vec<ScanResults> = all
+            .hosts
+            .chunks(2)
+            .map(|c| ScanResults {
+                hosts: c.to_vec(),
+                ..Default::default()
+            })
+            .collect();
+        let mut totals = RunTotals::default();
+        for g in &groups {
+            totals.add(g);
+        }
+        assert_eq!(totals, RunTotals::of(&all));
+        let m = ScanMeta {
+            verbose: 1,
+            ..meta()
+        };
+        let by = |head: String, body: &dyn Fn(&ScanResults) -> String, foot: String| {
+            head + &groups.iter().map(body).collect::<String>() + &foot
+        };
+        assert_eq!(
+            by(
+                normal_header(&m, &[]),
+                &|g| normal_group(g, &m, None),
+                normal_footer(&totals, &[], &m, true)
+            ),
+            render_normal_stdout(&all, &m, None)
+        );
+        assert_eq!(
+            by(
+                grepable_header(&m),
+                &|g| grepable_group(g, &m, None),
+                grepable_footer(&totals, &m)
+            ),
+            render_grepable(&all, &m, None)
+        );
+        assert_eq!(
+            by(
+                xml_header(&m, &[]),
+                &|g| xml_group(g, &m, None),
+                xml_footer(&totals, &[], &m)
+            ),
+            render_xml(&all, &m, None)
+        );
+    }
+
+    /// Down hosts come first in their own group, as 7.94 reports them, and the
+    /// totals still count every group.
+    #[test]
+    fn down_hosts_come_first_in_each_group() {
+        let host = |last: u8, state: HostState| {
+            Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), state)
+        };
+        let groups = [
+            ScanResults {
+                hosts: vec![host(1, HostState::Up), host(2, HostState::Down)],
+                ..Default::default()
+            },
+            ScanResults {
+                hosts: vec![host(3, HostState::Up), host(4, HostState::Down)],
+                ..Default::default()
+            },
+        ];
+        let m = ScanMeta {
+            verbose: 1,
+            ..meta()
+        };
+        let body: String = groups.iter().map(|g| normal_group(g, &m, None)).collect();
+        let reports: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("Nmap scan report for "))
+            .collect();
+        assert_eq!(
+            reports,
+            [
+                "127.0.0.2 [host down]",
+                "127.0.0.1",
+                "127.0.0.4 [host down]",
+                "127.0.0.3"
+            ]
+        );
+        let mut totals = RunTotals::default();
+        groups.iter().for_each(|g| totals.add(g));
+        assert_eq!((totals.hosts, totals.up, totals.down), (4, 2, 2));
+        assert!(xml_footer(&totals, &[], &m).contains("<hosts up=\"2\" down=\"2\" total=\"4\"/>"));
+        assert!(normal_footer(&totals, &[], &m, true)
+            .ends_with("Nmap done: 4 IP addresses (2 hosts up) scanned in 1.00 seconds\n"));
+    }
+
     #[test]
     fn down_hosts_come_first_and_alone() {
         let up = |last: u8| {

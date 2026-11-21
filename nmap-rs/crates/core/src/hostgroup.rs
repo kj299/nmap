@@ -136,10 +136,11 @@ impl RouteKey {
     /// The key of a routed run's target that has no route. 7.94 drops such a
     /// target before grouping (`targets.cc:409-413`), so it shapes no group;
     /// the port keeps it, to report it (`raw-scan-unroutable-target-reported`).
-    /// No interface is named "", so this key matches no routed target's:
-    /// unroutable targets share a group with each other alone, and a group
-    /// they start keeps the routing rule. (`None` would mean "not routed", and
-    /// lift the rule for the whole group.)
+    /// No interface is named "", so this key matches no routed target's, and
+    /// [`HostGroups`] sets a target with it aside as it is drawn: it takes no
+    /// batch or defer slot, is not counted as scanned, and is handed out in
+    /// groups of unroutable targets alone. (`None` would mean "not routed",
+    /// and lift the rule for the whole group.)
     #[must_use]
     pub fn unroutable(target: IpAddr) -> Self {
         RouteKey {
@@ -199,6 +200,11 @@ fn needs_new_group<T>(first: &Member<T>, addresses: &HashSet<IpAddr>, target: &M
     addresses.contains(&target.address)
 }
 
+/// Whether `m` is a routed run's target with no route ([`RouteKey::unroutable`]).
+fn is_unroutable<T>(m: &Member<T>) -> bool {
+    m.route.as_ref().is_some_and(RouteKey::is_unroutable)
+}
+
 /// A run's targets as the groups nmap scans them in: an iterator of groups.
 ///
 /// It draws from `source` only as far as the next group needs (at most a batch
@@ -217,6 +223,11 @@ where
     deferred: Vec<Member<T>>,
     /// Deferred by an earlier batch, to be drawn before `source` (`undeferred`).
     undeferred: VecDeque<Member<T>>,
+    /// Unroutable targets of a routed run, set aside as they are drawn. 7.94
+    /// drops such a target in `setup_target` (`targets.cc:409-413`) before it
+    /// reaches the batch, so it takes no batch or defer slot; the port keeps it
+    /// to report it, in groups of its own, at most a batch ahead.
+    unroutable: VecDeque<Member<T>>,
     /// Hosts in the groups handed out so far (`o.numhosts_scanned`).
     scanned: usize,
 }
@@ -236,6 +247,7 @@ where
             batch: VecDeque::new(),
             deferred: Vec::new(),
             undeferred: VecDeque::new(),
+            unroutable: VecDeque::new(),
             scanned: 0,
         }
     }
@@ -250,6 +262,13 @@ where
             let Some(target) = self.undeferred.pop_front().or_else(|| self.source.next()) else {
                 break;
             };
+            if is_unroutable(&target) {
+                self.unroutable.push_back(target);
+                if self.unroutable.len() < self.batch_size {
+                    continue;
+                }
+                break;
+            }
             let misfit = self
                 .batch
                 .front()
@@ -289,6 +308,28 @@ where
         let ideal = scan_group_size(self.scanned, &self.sizing);
         let mut group: Vec<Member<T>> = Vec::new();
         let mut addresses: HashSet<IpAddr> = HashSet::new();
+        // The unroutable targets set aside come out first, as groups of their
+        // own: still one family, no address twice.
+        if self.batch.is_empty() && self.unroutable.is_empty() {
+            self.refresh();
+        }
+        if !self.unroutable.is_empty() {
+            while group.len() < ideal {
+                let Some(target) = self.unroutable.pop_front() else {
+                    break;
+                };
+                if group
+                    .first()
+                    .is_some_and(|first| needs_new_group(first, &addresses, &target))
+                {
+                    self.unroutable.push_front(target);
+                    break;
+                }
+                addresses.insert(target.address);
+                group.push(target);
+            }
+            return Some(group);
+        }
         while group.len() < ideal {
             let Some(target) = self.next_host() else {
                 break;
@@ -306,14 +347,10 @@ where
         if group.is_empty() {
             return None;
         }
-        // `o.numhosts_scanned` (`nmap.cc:2327`) counts the targets 7.94 scans.
-        // It never sees an unroutable one, dropped in `setup_target`
-        // (`targets.cc:409-413`), so neither does the quick-group rule here.
-        let routed = group
-            .iter()
-            .filter(|m| !m.route.as_ref().is_some_and(RouteKey::is_unroutable))
-            .count();
-        self.scanned = self.scanned.saturating_add(routed);
+        // `o.numhosts_scanned` (`nmap.cc:2337`) counts the targets 7.94 scans.
+        // An unroutable one never reaches here (it was set aside), and its
+        // groups above are not counted, as 7.94 never scans it.
+        self.scanned = self.scanned.saturating_add(group.len());
         Some(group)
     }
 }
@@ -481,7 +518,8 @@ mod tests {
     }
 
     /// In a routed run, a target with no route neither joins a routed group nor
-    /// lifts the rule for one it starts: the unroutable ones group alone.
+    /// lifts the rule for one: the unroutable ones group alone, ahead of the
+    /// routed targets drawn with them.
     #[test]
     fn an_unroutable_target_shapes_no_routed_group() {
         let a = lo([127, 0, 0, 1]);
@@ -509,9 +547,10 @@ mod tests {
             sizing(),
         );
         assert_eq!(got, [vec![1, 4], vec![2], vec![3]]);
-        // Inside a routed group: it waits, as any other route does.
+        // Between routed targets: it is set aside as it is drawn and reported
+        // first, and the routed group is whole.
         let got = groups(vec![member(1, a.clone()), none(2), member(3, a)], sizing());
-        assert_eq!(got, [vec![1, 3], vec![2]]);
+        assert_eq!(got, [vec![2], vec![1, 3]]);
     }
 
     /// An unroutable target is not counted as scanned, as 7.94 never scans it:
@@ -537,6 +576,47 @@ mod tests {
         with.extend(routed);
         let got: Vec<usize> = groups(with, quick).iter().map(Vec::len).collect();
         assert_eq!(got, [1, 8, 12]);
+    }
+
+    /// Unroutable targets take no defer slot: 64 of them between routed ones
+    /// change no routed group, as 7.94, dropping them before the batch, has
+    /// the routed ones alone (`targets.cc:409-413`).
+    #[test]
+    fn unroutable_targets_take_no_defer_slot() {
+        let eth = |n: &str| {
+            Some(RouteKey {
+                iface: n.into(),
+                source: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                direct: true,
+            })
+        };
+        let unroutable = |i: u8| {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 1, 0, i));
+            Member {
+                address: addr,
+                route: Some(RouteKey::unroutable(addr)),
+                item: 100 + i,
+            }
+        };
+        let mut with = vec![member(1, eth("eth0"))];
+        with.extend((0..64).map(unroutable));
+        with.extend([
+            member(2, eth("eth0")),
+            member(3, eth("eth1")),
+            member(4, eth("eth0")),
+        ]);
+        let routed_groups: Vec<Vec<u8>> = groups(with, sizing())
+            .into_iter()
+            .filter(|g| g.iter().all(|&i| i < 100))
+            .collect();
+        let without = vec![
+            member(1, eth("eth0")),
+            member(2, eth("eth0")),
+            member(3, eth("eth1")),
+            member(4, eth("eth0")),
+        ];
+        assert_eq!(routed_groups, groups(without, sizing()));
+        assert_eq!(routed_groups, [vec![1, 2, 4], vec![3]]);
     }
 
     /// A scan that does not route its targets has no such rule: mixed sources and

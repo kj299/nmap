@@ -551,10 +551,10 @@
     ]
   },
   {
-    "name": "an unroutable target counts as scanned",
+    "name": "an unroutable target is batched and deferred",
     "file": "crates/core/src/hostgroup.rs",
-    "old": "        self.scanned = self.scanned.saturating_add(routed);",
-    "new": "        self.scanned = self.scanned.saturating_add(group.len() + routed * 0);",
+    "old": "            if is_unroutable(&target) {\n                self.unroutable.push_back(target);",
+    "new": "            if false && is_unroutable(&target) {\n                self.unroutable.push_back(target);",
     "cmd": [
       "cargo",
       "test",
@@ -566,6 +566,7 @@
       "hostgroup::tests"
     ],
     "expect": [
+      "hostgroup::tests::unroutable_targets_take_no_defer_slot",
       "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
     ]
   }

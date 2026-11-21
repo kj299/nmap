@@ -750,7 +750,7 @@ now names this case, measured. It re-ran all 26 mutations: each caught.
 
 1. A group of unroutable targets still counted toward the targets scanned,
    which the quick first group reads, where 7.94 never scans them
-   (`targets.cc:409-413`, `nmap.cc:2327`): one unroutable target first made
+   (`targets.cc:409-413`, `nmap.cc:2337`): one unroutable target first made
    a `-T4 -p-` run's 20 routed targets one group instead of 8 and 12. They
    are no longer counted, with a unit test.
 2. Nothing failed if the CLI went back to grouping an unroutable target by
@@ -762,4 +762,15 @@ now names this case, measured. It re-ran all 26 mutations: each caught.
    it can, over IPv6. Corrected.
 
 Both fixes have sabotage entries (29 in all).
+
+**The eleventh review** confirmed two, both low:
+
+1. Unroutable targets still took defer slots: against a routed batch they
+   were misfits, so 64 of them ended the batch early and split routed
+   targets 7.94 would group (`[A1], [A2, A3], [B1]` where 7.94, dropping
+   them, gives `[A1, A2, A3], [B1]`). `HostGroups` now sets an unroutable
+   target aside as it is drawn, before the batch and the defer buffer, and
+   hands those out first, in groups of their own, at most a batch ahead.
+   A unit test runs the reviewer's case.
+2. `o.numhosts_scanned` was cited as `nmap.cc:2327`; it is `:2337`.
 

@@ -286,15 +286,17 @@ narrower *rendering* of the same result.
       specification="X" status="skipped" reason="invalid"/>` to the XML
       (`log_bogus_target`, `output.cc:1305`). The port reports the target: down, or up
       under `-Pn`, with no ports. Both families. *(Found at IPv6 scans step e.)*
-      Since M7 cutover step b such a target is grouped under a key of its own
-      (`RouteKey::unroutable`), with the other unroutable ones, and is not
-      counted as scanned, so it shapes no routed group, as 7.94's skipped
-      target shapes none: neither the routing rule nor the quick first
-      group's count (`o.numhosts_scanned`, `nmap.cc:2327`). It still takes a
-      group of its own, which 7.94 does not form. Before the ninth review of
-      step b it had no key, which lifted the routing rule for any group it
-      started and let it join any group; before the tenth it counted toward
-      the quick group. Pinned end to end over IPv6 by
+      Since M7 cutover step b such a target has a key of its own
+      (`RouteKey::unroutable`) and is set aside as it is drawn, so it shapes no
+      routed group, as 7.94's skipped target shapes none: it takes no batch or
+      defer slot (`DEFER_LIMIT`), is not counted toward the quick first
+      group (`o.numhosts_scanned`, `nmap.cc:2337`), and is handed out in groups
+      of unroutable targets alone, ahead of the routed targets drawn with it.
+      Those groups 7.94 does not form. Before the ninth review of step b it had
+      no key, which lifted the routing rule for any group it started and let
+      it join any group; before the tenth it counted toward the quick group;
+      before the eleventh it took defer slots, so 64 of them could end a
+      routed batch early. Pinned end to end over IPv6 by
       `an_unroutable_target_groups_apart_from_routed_ones` (root).
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when

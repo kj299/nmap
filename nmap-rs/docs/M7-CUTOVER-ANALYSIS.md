@@ -863,3 +863,14 @@ the root tests. It confirmed two, both low:
    lapsed from the sabotage map when the eleventh round re-anchored it.
    Restored, against the unroutable groups' hand-out.
 
+**The seventeenth review** found no code defect and no unledgered difference:
+the 61 golden cases, 400 more randomised runs against the model of 7.94's
+loop (0 differences), the root CLI tests, and one-group output byte for byte
+against the build before the step in all three formats. It confirmed one,
+low: `spoof-source-groups-by-route` cited `netutil.cc:2401-2406` (the
+`spoofss` copy) for `route_dst`'s device filter, which is `:2451` and
+`:2473-2475`. Corrected. It noted, without a false claim to correct, that
+the CLI's sizing inputs (port count, timing level, which scans route) are
+pinned by the root golden gate in CI's differential job and by no cargo
+test.
+

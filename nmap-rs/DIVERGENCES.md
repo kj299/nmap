@@ -2827,7 +2827,8 @@ removed: that one was theatre, this one is unobservable.
       still split by each target's routed interface; 7.94's do not.** 7.94
       sets the device to the one holding the `-S` address
       (`ipaddr2devname`, `nmap.cc:1734-1737`), and `route_dst` then keeps only
-      that device's routes (`libnetutil/netutil.cc:2401-2406`), so every
+      that device's routes and loopback (`libnetutil/netutil.cc:2451`,
+      `:2473-2475`), so every
       target has the same interface and `target_needs_new_hostgroup`'s
       interface test (`targets.cc:291-295`) never splits a group. The port's
       key takes `-S`'s address as the source but the interface its own

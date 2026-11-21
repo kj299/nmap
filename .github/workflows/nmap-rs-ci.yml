@@ -453,6 +453,12 @@ jobs:
       # Fixture listeners + both binaries + diff_run.py over the M1 matrix.
       # Fails on any UNLEDGERED divergence in port-state fidelity.
       - run: bash tests/differential/run_differential.sh
+      # M7 cutover step a: the groups this nmap forms, read from its own -v output
+      # over 54 runs (scan type, port count, -T, --min/--max-hostgroup, mixed
+      # routes, repeats, the defer buffer, the batch boundary), must be the ones
+      # the committed golden holds. The test job compares core::hostgroup with
+      # that golden; this is what ties the golden to the oracle. Root: raw scans.
+      - run: sudo python3 tests/differential/m7/gen_hostgroup_golden.py --check
       # M6.3: the `nmap` module's non-I/O half against this same nmap. The
       # generator scans loopback fixtures in ten scenarios (options,
       # --script-args, -sV with and without --allports, UDP, IPv6, selection by

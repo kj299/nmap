@@ -185,6 +185,9 @@
     "congestion": {
       "fuzzed": "AIMD congestion-window arithmetic over our own scheduler state. Replies are classified and validated by core before any number reaches here, so no attacker-controlled bytes are parsed."
     },
+    "core::hostgroup": {
+      "fuzzed": "Pure arithmetic over the operator's own options and this host's routing keys: group sizes from the command line, route keys from the routing table. It parses no bytes and reads nothing from the network, so there is no untrusted input to fuzz. Bounds are unit-tested (a million-target source is drawn one batch at a time)."
+    },
     "core::ipfamily": {
       "differential": "A per-family adapter with no C function of its own: get_pcap_result's family split is reproduced by the matchers built on it. Its IPv4 side is the code the IPv4 matchers ran before it existed, compared with 7.94 on the wire by the raw differential; its IPv6 side meets 7.94 when the engine sends IPv6 probes (IPv6 scans step d), and until then is covered by the matchers' unit tests over crafted IPv6 replies and the classify differential."
     },
@@ -295,6 +298,7 @@
     "core::headers::ipv6ext": "unsafe_audited",
     "core::headers::tcp": "unsafe_audited",
     "core::headers::udp": "unsafe_audited",
+    "core::hostgroup": "unsafe_audited",
     "core::icmp_quote": "unsafe_audited",
     "core::ipfamily": "unsafe_audited",
     "core::ipid": "unsafe_audited",
@@ -459,6 +463,28 @@
       "unsafe_audited": {
         "files": 1,
         "sha256": "5bb36a8b642ec84418fd730b0bd76721fe04857064d9265fd69c55fd8a4a930f"
+      }
+    },
+    "core::hostgroup": {
+      "differential": {
+        "files": 1,
+        "sha256": "ff05934612b41862816bdd5912a3cb04b55b291e68419b03dd00cfc9b3ee0713"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "ff05934612b41862816bdd5912a3cb04b55b291e68419b03dd00cfc9b3ee0713"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "ff05934612b41862816bdd5912a3cb04b55b291e68419b03dd00cfc9b3ee0713"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "ff05934612b41862816bdd5912a3cb04b55b291e68419b03dd00cfc9b3ee0713"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "ff05934612b41862816bdd5912a3cb04b55b291e68419b03dd00cfc9b3ee0713"
       }
     },
     "core::icmp_quote": {

@@ -1,7 +1,7 @@
 # M7 cutover gate: host groups and the host timeout — Phase 0
 
-Status: **Phase 0 written; D1–D7 await a decision (§8). No port code until they
-are decided.** C line numbers are this tree's at `b5bebc249`. Everything marked
+Status: **Phase 0 written; D1–D7 decided 2026-11-21, all as recommended (§8).
+Step a (group formation) is done: §10.** C line numbers are this tree's at `b5bebc249`. Everything marked
 *measured* was run here against the installed oracle, Nmap 7.94SVN, on loopback.
 
 ## 0. Value
@@ -231,9 +231,10 @@ will be measured.
 | Claim | Read from | Why unmeasured | Measured at |
 |---|---|---|---|
 | `-O` charges and checks the clock as §2.2 says | `osscan2.cc:933-3366` | not run yet; needs a slow OS-scan fixture | step d |
-| Group sizes for UDP and SCTP scans (128) | `scan_engine.cc:1222-1225` | only TCP rows run so far | step a's matrix |
-| The first-group rule at `-T4` (8) and `-T5` (none) | `scan_engine.cc:1228-1238` | only `-T3` run so far | step a's matrix |
-| A repeated target starts a new group as root | `targets.cc:306-313` | read at IPv6 step e, never run | step a's matrix |
+| Group sizes for UDP scans (128) | `scan_engine.cc:1222-1225` | — | **measured at step a** (§10) |
+| Group sizes for SCTP scans (128) | `scan_engine.cc:1222-1225` | the port has no SCTP scan to compare | when SCTP scans are ported |
+| The first-group rule at `-T4` (8) and `-T5` (none) | `scan_engine.cc:1228-1238` | — | **measured at step a** (§10) |
+| A repeated target starts a new group as root | `targets.cc:306-313` | — | **measured at step a** (§10) |
 | FreeBSD forms the same groups | — | no FreeBSD here | CI's VM job, when CI runs |
 | IPv6 targets group the same way | `targets.cc:287` | no IPv6 here | CI, when CI runs |
 
@@ -258,6 +259,12 @@ mutation naming the pin of every ledgered fix; and a `ci-local` record on the
 tree that is pushed.
 
 ## 8. Decisions
+
+**Decided 2026-11-21: all seven as recommended.** D1 (a) 7.94's whole rule; D2
+(a) output streams per group; D3 (a) a timed-out host's partial work is
+discarded; D4 (a) the timeout is enforced at the deadline in every phase; D5
+`-T5`'s 15 minutes at step f; D6 (a) the `-v` progress lines stay out of scope;
+D7 one PR per step.
 
 - **D1 — How faithful is group formation?**
   - (a) 7.94's whole rule: sizes by scan type and port count, the first-group
@@ -304,7 +311,75 @@ tree that is pushed.
 
 - Nothing in §1 or §2 was run as root over a real interface, on FreeBSD, or over
   IPv6. §6 lists what follows from that.
-- The `-v` matrix of §5.1 is designed, not built. The five rows of §1.1 are the
-  only group sizes measured so far.
-- CI has not run since 3 November. This document changes no code, so nothing
-  here depends on it; step a's PR will carry a `ci-local` record.
+- The `-v` matrix of §5.1 is built (§10). It runs on loopback with one address
+  of the host's own as the second route, so the interface and
+  direct-connectedness rules and the address-family rule are unit-tested and
+  not compared with 7.94.
+- CI has not run since 3 November. Each step's PR carries a `ci-local` record
+  and names what that record leaves unrun.
+
+## 10. Step a: group formation
+
+`core::hostgroup` ports `determineScanGroupSize`, `target_needs_new_hostgroup`
+and the batch behind them (`refresh_hostbatch`, `nexthost`, `returnhost`) as a
+pure iterator: targets in, groups out. Nothing calls it yet; step b does.
+
+**What Phase 0 had not read.** §1.1 says a mismatching host is deferred to the
+next batch. The rest of that mechanism decides the order of reports, and the
+matrix measured each part:
+
+- The defer buffer holds 64 (`DEFER_LIMIT`, `targets.h`). The target that fills
+  it ends the batch, so targets after it are not drawn into that batch even if
+  they fit.
+- Deferred targets are drawn before the source when the next batch is filled.
+- A full batch does not look at the next target. So `l1-l4096,own,l4097` puts
+  `own` at the head of the second batch and `l4097` waits behind it, while under
+  `--min-hostgroup 5000` (a batch of 5,000) `own` is deferred and `l4097`
+  overtakes it.
+- The quick-group rule reads the hosts of every group so far
+  (`o.numhosts_scanned`), so only the run's second group is shortened.
+
+**The gate.** `tests/differential/m7/gen_hostgroup_golden.py` runs 7.94 under
+`-Pn -n -v` over 55 cases and reads each group's size and the order of reports
+from nmap's own output. The cases cover:
+
+- six scan-type combinations: `-sT`, `-sS`, `-sA`, `-sU`, `-sS -sU`, `-sU -sS`;
+- port counts 1, 2, 15, 16, 17, 20, 64, 1000, 1001 and 2000;
+- `-T3`, `-T4` and `-T5`;
+- `--min-hostgroup` and `--max-hostgroup`, each alone, together, and absent;
+- a second source, repeated addresses, the defer buffer at 63, 64 and 65, and
+  the batch at 4,095, 4,096 and 4,097 hosts.
+
+`crates/core/tests/hostgroup_differential.rs` requires the port to give the same
+sizes and the same order on every case. It does. The golden was generated from
+the installed 7.94SVN, and matches a build of this repository's 7.94 commit
+(`3be01efb1`) and a build of the tree's current C.
+
+**The golden can tell broken C apart.** `sabotage_c_hostgroup.py` builds 23
+variants of the C, one changed rule each, and requires the generator's `--check`
+to fail on each. It found one gap: a C that shortens every later group, not only
+the second, passed, because no case had a third full group. The case
+`-p 1-1001`, 130 hosts (4, 60, 64, 2) was added, and all 23 are now caught. One
+variant as first written produced an nmap that scanned nothing; it was
+rewritten to one that runs.
+
+**The tests can tell a broken port apart.** 33 mutations of `hostgroup.rs`
+through the kit's `sabotage.py` (`tests/differential/m7/sabotage_hostgroup.json`),
+33 caught, 29 of them by the differential by name. The other four are rules
+loopback cannot show 7.94 exercising, and are pinned by unit tests only:
+a different interface, a different direct-connectedness, a different address
+family, and `numhosts_scanned` accumulating (it takes three routes to end a
+batch on a group of exactly four).
+
+**Divergences.** The port counts every target toward a group, since it sends no
+host-discovery probes; 7.94 counts up hosts (`hostgroup-every-target-counts`).
+As root without `-Pn`, 7.94 also splits a `-sT` scan by route
+(`privileged-connect-scan-no-implicit-verdicts`). `--randomize-hosts`, `-iR`
+and SCTP scans are not ported.
+
+**Gates.** Fuzzing is exempt with a reason: the module reads sizes from the
+command line and route keys from this host's routing table, and no bytes from
+the network. Miri passes on its unit tests. It has no `unsafe`. In CI the
+differential job runs the generator's `--check` as root against the distro's
+nmap; that step has not run in CI, which has not run since 3 November, and has
+run here.

@@ -780,5 +780,26 @@
     "expect": [
       "hostgroup::tests::a_routed_group_is_homogeneous"
     ]
+  },
+  {
+    "name": "a list scan is routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            ScanKind::List => false,",
+    "new": "            ScanKind::List => true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
   }
 ]

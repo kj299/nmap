@@ -921,3 +921,10 @@ and two, both low:
 It also found that undeferring in reverse order passed the unit tests; a
 case now pins the order, with a sabotage entry.
 
+**The twenty-first review** found no code defect and no unledgered
+difference (the 61 golden cases; the root CLI tests; report order over
+several groups and `-oG` lines against 7.94; ten more mutations, the four
+the cargo tests miss all caught by the golden gate) and one, low: nothing
+pinned that a list scan routes nothing. The root test now checks `-sL`'s
+input order, as 7.94 lists them, with a sabotage entry.
+

@@ -335,6 +335,12 @@ fn a_routed_run_groups_by_route() {
     assert_eq!(sizes(&err), [2, 1], "{err}");
     assert_eq!(reports(&out), ["127.0.0.1", "127.0.0.2", own.as_str()]);
 
+    // A list scan routes nothing (its ping type is none, `nmap.cc:1307`, so
+    // `RawScan()` is false): input order, as 7.94 lists them (*measured*).
+    let (out, err, ok) = run(&["-sL", "-n", "127.0.0.1", &own, "127.0.0.2"]);
+    assert!(ok, "{err}");
+    assert_eq!(reports(&out), ["127.0.0.1", own.as_str(), "127.0.0.2"]);
+
     // A repeated address waits for a later group.
     let (out, err, ok) = run(&[
         "-d",

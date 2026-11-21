@@ -109,6 +109,10 @@ def fit_exponent(sizes, values):
     return sum((x - mx) * (y - my) for x, y in pts) / den if den else float("nan")
 
 
+# A cost that changes by less than this fraction across every size is flat.
+FLAT = 0.05
+
+
 def growth_exponent(sizes, values):
     """The exponent k of cost = a + b*n^k, with the constant a cancelled.
 
@@ -118,11 +122,18 @@ def growth_exponent(sizes, values):
     is a high-water mark: an interpreter that peaks at 12 MiB while starting
     hides a 4 MiB allocation completely, which a floor subtraction cannot undo.
     Falls back to fitting the values themselves for two sizes, non-geometric
-    sizes, or differences too noisy to be positive. Returns (k, method)."""
+    sizes, differences too noisy to be positive, or values that barely move.
+    The last matters for a flat peak RSS: 14.6, 14.6, 14.9 MiB has positive
+    differences of 0.01 and 0.3, whose fit is n^2 (nmap M7 cutover step b,
+    LESSONS #059). Below FLAT, a 5% change across every size, a cost is flat
+    and fitted as values. Returns (k, method)."""
     if len(sizes) >= 3 and all(n > 0 for n in sizes):
         ratios = [b / a for a, b in zip(sizes, sizes[1:])]
         diffs = [b - a for a, b in zip(values, values[1:])]
-        if max(ratios) - min(ratios) < 0.01 * ratios[0] and all(d > 0 for d in diffs):
+        lo = min(values)
+        flat = lo > 0 and (max(values) - lo) / lo < FLAT
+        if (not flat and max(ratios) - min(ratios) < 0.01 * ratios[0]
+                and all(d > 0 for d in diffs)):
             return fit_exponent(sizes[:-1], diffs), "differences"
     return fit_exponent(sizes, values), "values"
 
@@ -305,6 +316,9 @@ def _self_test():
 
     check("the fit recovers an exact exponent",
           abs(fit_exponent([1, 2, 4, 8], [3 * n ** 2 for n in (1, 2, 4, 8)]) - 2) < 1e-9)
+    k, how = growth_exponent([4096, 16384, 65536], [14.60, 14.61, 14.90])
+    check("a flat cost with noise-sized rises is flat, not n^2",
+          how == "values" and abs(k) < 0.05)
     k, how = growth_exponent([1, 2, 4, 8], [50 + 3 * n ** 2 for n in (1, 2, 4, 8)])
     check("fitting differences cancels a constant start-up cost",
           how == "differences" and abs(k - 2) < 1e-9)

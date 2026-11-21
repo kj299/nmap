@@ -263,7 +263,10 @@ async fn main() -> ExitCode {
     // targets from them lazily, less the excluded ones (`targets::TargetSource`).
     // The first is drawn now: a run with none ends here, before the script
     // engine starts or an output file is opened.
-    let mut source = targets::TargetSource::new(targets::prepare(&cfg).await, excludes);
+    let ipv6 = cfg.ipv6;
+    let specs = std::mem::take(&mut cfg.targets);
+    let mut source =
+        targets::TargetSource::new(targets::prepare(specs, ipv6).await, ipv6, excludes);
     let Some(first) = source.next() else {
         // Distinguish "nothing resolved" from "you excluded everything". They
         // need opposite reactions from the operator, and reporting a successful
@@ -276,6 +279,31 @@ async fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     };
+
+    // One timestamp for the whole run: the banner, the XML, and every `%`
+    // escape in an output filename all derive from it. Reading the clock twice
+    // would let `-oA scan-%F` and the banner disagree across midnight.
+    let start_epoch = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
+    let started = format!("epoch+{start_epoch}s");
+    // Every destination is opened before anything runs, as 7.94 opens its log
+    // files while it reads the options: a path that cannot be written ends the
+    // run before a script or a probe.
+    let mut sinks = match Sinks::open(&cfg, start_epoch) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nmap-rs: failed to open output: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // "scanned in" counts from here, the pre-scan scripts included, as 7.94's
+    // `o.start` does.
+    let clock = Instant::now();
 
     // NSE (M6.4e): `open_nse`, then the pre-scan phase, before any scanning
     // (`nmap.cc:2084-2099`).
@@ -307,17 +335,6 @@ async fn main() -> ExitCode {
     let template = cfg.timing_template.unwrap_or(TimingTemplate::Normal);
     let max_par = timing.max_parallelism as usize;
 
-    // One timestamp for the whole run: the banner, the XML, and every `%`
-    // escape in an output filename all derive from it. Reading the clock twice
-    // would let `-oA scan-%F` and the banner disagree across midnight.
-    let start_epoch = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0);
-    let started = format!("epoch+{start_epoch}s");
     let args_line = args.join(" ");
     let mut meta = ScanMeta {
         scanner: "nmap-rs",
@@ -333,16 +350,8 @@ async fn main() -> ExitCode {
         assume_up: cfg.assume_up,
     };
 
-    // Every destination is opened, and given its opening lines, before the
-    // first group is scanned; each group's hosts are written as the group is
-    // done (M7 cutover step b, D2).
-    let mut sinks = match Sinks::open(&cfg, start_epoch) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("nmap-rs: failed to write output: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // Their opening lines, now the pre-scan results are known; each group's
+    // hosts are written as the group is done (M7 cutover step b, D2).
     if let Err(e) = sinks.header(&meta, &scripts.pre, &port_notes) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
@@ -373,7 +382,6 @@ async fn main() -> ExitCode {
     let once = RunOnce::default();
     let mut totals = nmap_core::output::RunTotals::default();
     let mut os_block = String::new();
-    let clock = Instant::now();
     for (k, group) in nmap_core::hostgroup::HostGroups::new(members, sizing).enumerate() {
         nmap_core::debug!(
             1,
@@ -436,6 +444,18 @@ async fn main() -> ExitCode {
             eprintln!("nmap-rs: failed to write output: {e}");
             return ExitCode::FAILURE;
         }
+    }
+
+    if once.sv_excluded.get() > 0 {
+        // C says the same thing the other way round, when the override is on:
+        // "Overriding exclude ports option! Some undesirable ports may be
+        // version scanned!" Saying it in the quiet direction too means the
+        // operator can tell a port was left alone on purpose.
+        nmap_core::verbose!(
+            1,
+            "{} port(s) not version-scanned (nmap-service-probes Exclude); --allports overrides",
+            once.sv_excluded.get()
+        );
     }
 
     // Post-scan, after the last group (`nmap.cc:2349`).
@@ -645,6 +665,9 @@ struct RunOnce {
     /// `-O`'s fingerprint database, parsed on first use.
     #[cfg(feature = "pcap")]
     os_db: std::cell::OnceCell<Option<nmap_core::osdb::model::FingerPrintDb>>,
+    /// Ports `-sV` left alone under `nmap-service-probes`' Exclude, over every
+    /// group, reported once at the end.
+    sv_excluded: std::cell::Cell<usize>,
     /// A raw scan fell back to a connect scan: later groups go straight to it,
     /// and the reason is not printed again.
     connect_fallback: std::cell::Cell<bool>,
@@ -810,11 +833,12 @@ fn connect_cfg(
     }
 }
 
-/// Run a `-sS` SYN scan, falling back to a connect scan on missing privilege or setup
 /// A capture that failed mid-scan ends the run, as 7.94's `netutil_fatal` does
-/// (`read_reply_pcap`, `netutil.cc:3337`): nothing is reported and no other scan is
-/// tried, since what the capture did not deliver says nothing about the targets.
-/// Every other raw-scan error is a setup failure, which falls back.
+/// (`read_reply_pcap`, `netutil.cc:3337`): the failing group is not reported and no
+/// other scan is tried, since what the capture did not deliver says nothing about the
+/// targets. Earlier groups are already on the terminal and in the output files, which
+/// are left without their closing lines, as 7.94's are. Every other raw-scan error is
+/// a setup failure, which falls back.
 #[cfg(feature = "pcap")]
 fn exit_if_capture_failed(e: &std::io::Error) {
     if nmap_sys::capture::is_capture_failure(e) {
@@ -825,6 +849,7 @@ fn exit_if_capture_failed(e: &std::io::Error) {
     }
 }
 
+/// Run a `-sS` SYN scan, falling back to a connect scan on missing privilege or setup
 /// failure (built with `pcap`).
 #[cfg(feature = "pcap")]
 #[allow(clippy::too_many_arguments)]
@@ -1418,16 +1443,9 @@ async fn run_service_version(
             (h.address, ports)
         })
         .collect();
-    if skipped_excluded > 0 {
-        // C says the same thing the other way round, when the override is on:
-        // "Overriding exclude ports option! Some undesirable ports may be
-        // version scanned!" Saying it in the quiet direction too means the
-        // operator can tell a port was left alone on purpose.
-        nmap_core::verbose!(
-            1,
-            "{skipped_excluded} port(s) not version-scanned (nmap-service-probes Exclude); --allports overrides"
-        );
-    }
+    // Counted over the run and reported once, after the last group.
+    once.sv_excluded
+        .set(once.sv_excluded.get().saturating_add(skipped_excluded));
     if open.iter().all(|(_, ports)| ports.is_empty()) {
         return; // nothing open to probe
     }

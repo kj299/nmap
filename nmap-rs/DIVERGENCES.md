@@ -2749,17 +2749,40 @@ removed: that one was theatre, this one is unobservable.
       it was over and held every result in memory. Now each group's hosts are
       written to the terminal and to every `-o` file, and flushed, when the
       group is done, and dropped; the totals come at the end. What moved with it:
-      - output files are created before the first group is scanned (7.94 opens
-        them at option parsing), so a run that fails mid-way leaves what it
-        wrote, and an unwritable path fails before any scanning;
-      - the "Starting" line is printed after the pre-scan scripts, not after the
-        whole run (7.94 prints it before them);
-      - "scanned in" times every phase of every group, not the port scan alone;
-      - a script's own log lines to stdout can now fall between groups.
-      For a run that forms one group, each format's bytes are as before. Still
-      whole-run, as before: the `-O` block after "Nmap done"
-      (`nse-os-block-after-scripts`) and the unmatched service fingerprints
-      before it. Pinned by `cli/tests/hostgroups.rs`.
+      - every output file is opened before the script engine starts or a probe
+        is sent, so an unwritable path ends the run at once, as in 7.94
+        (*measured*: both fail within a few milliseconds ahead of a pre-scan
+        script that sleeps); a run that fails mid-way leaves what it wrote;
+      - "scanned in" counts from before the pre-scan scripts, as 7.94's
+        `o.start` does (*measured*: a prerule that sleeps 2 s gives 2.06 s;
+        7.94 2.07 s). Before, it timed the port scan alone;
+      - the "Starting" line is printed after the pre-scan scripts (7.94 prints
+        it before them);
+      - two formats sent to stdout (`-oN - -oX -`) interleave group by group,
+        as 7.94's do, where the port wrote one whole and then the other;
+      - a script's own log lines to stdout can fall between groups;
+      - the unmatched service fingerprints are printed after each host's port
+        table, at most nine, as `printportoutput` prints them
+        (`output.cc:738-739`, `:846-856`; *measured* with two hosts behind an
+        unrecognised banner). Before, one block for the whole run followed the
+        last host, uncapped;
+      - `-sV`'s count of ports left alone under the probe file's Exclude is
+        reported once, after the last group.
+      Otherwise a run that forms one group writes each format's bytes as
+      before. Still whole-run: the `-O` block after "Nmap done"
+      (`nse-os-block-after-scripts`). Pinned by `cli/tests/hostgroups.rs` and
+      `fingerprints_follow_their_hosts_table_at_most_nine`.
+
+- [ ] `target-list-file-read-whole` (`cli`, M7 cutover step b) — **`-iL`'s file is
+      read whole before the first target is drawn.** 7.94 reads it as it draws
+      (`grab_next_host_spec`). The port keeps each line as text and parses it
+      only when the target source reaches it, so a range costs nothing until it
+      is walked, but the lines themselves are held: *measured*, peak RSS 29 MiB
+      for 256k lines and 87 MiB for a million, where 7.94 holds 16 MiB for
+      either. Step b first parsed every line up front, a kilobyte each (1.2 GiB
+      for a million lines; found in its review and fixed there). The list is
+      read only up to the first expression past `MAX_TARGETS`'s worth, and the
+      truncation is reported before anything is scanned.
 
 - [ ] `connect-scan-quadratic-in-group-size` (`sys::scan::run_group`) — **the
       connect engine's time grows as the square of its group's size.** Each
@@ -2778,7 +2801,9 @@ removed: that one was theatre, this one is unobservable.
 - [ ] `report-no-blank-line-before-port-table` (`core::output`; ports
       `printportoutput`, `output.cc`) — **the normal report has no blank line
       between "Host is up" and the port table.** 7.94 prints one, on the
-      terminal and in `-oN` (*measured*: `-sT -Pn -n -p 1 127.0.0.1`). Found
+      terminal and in `-oN` (*measured*: `-sT -Pn -n -p 1 127.0.0.1`), when no
+      "Not shown:" line comes between them; after one, neither prints a blank
+      line, and the two agree (*measured*: `-p 1-30,8081`). Found
       while comparing step b's multi-group output with 7.94; it predates step b
       (the build before it prints the same). Not fixed there: it is outside the
       step, and every normal-output golden would move with it.

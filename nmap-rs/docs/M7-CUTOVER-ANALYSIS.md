@@ -574,7 +574,7 @@ loop. b.7 is the gates below.
   default and `--min-hostgroup`; every format whole across groups; a group's
   report on disk while the run goes on; and, as root, routed grouping by source
   and repeat. In CI's privileged steps on Linux and FreeBSD.
-- *Sabotage.* 18 mutations across the six commits through `sabotage.py`
+- *Sabotage (before the review).* 18 mutations across the six commits through `sabotage.py`
   (`tests/differential/m7/sabotage_stepb.json`), each naming the test that must
   catch it. The first run caught 17: dropping the service fingerprints from the
   totals passed, because the test that compares a run written by group with
@@ -582,7 +582,33 @@ loop. b.7 is the gates below.
   fingerprint block itself, and all 18 are caught.
 
 **What changed for an operator** (`output-streamed-per-group`): output files are
-created before the first group; "Starting" follows the pre-scan scripts; "scanned
-in" times every phase; a script's stdout lines can fall between groups. For a run
-that forms one group, each format's bytes are as before.
+opened before anything runs; "Starting" follows the pre-scan scripts; "scanned
+in" counts from before them; two formats on stdout interleave by group; a
+script's stdout lines can fall between groups; the unmatched service
+fingerprints follow each host's table, at most nine, as in 7.94. Otherwise a run
+that forms one group writes each format's bytes as before.
+
+**The first review** confirmed eight findings, and the fix round answers each:
+
+1. `-iL` memory grew a kilobyte per line, since every line was parsed before
+   the first target was drawn: 1.2 GiB for a million lines, against 102 MiB
+   before the step. Lines are kept as text and parsed when reached: 87 MiB
+   (`target-list-file-read-whole`; 7.94 holds 16 MiB).
+2. The unmatched service fingerprints stayed one run-wide, uncapped block,
+   where 7.94 prints at most nine per host after its table. Moved, and the
+   mutation that pinned the old placement replaced.
+3. Output files were opened after the pre-scan scripts, so an unwritable path
+   failed only after them. Opened first now.
+4. "scanned in" did not count the pre-scan phase. It does now.
+5. "Each format's bytes are as before" was false for two formats on stdout,
+   which now interleave, as in 7.94. The claim is corrected.
+6. `-sV`'s Exclude note printed once per group. Once per run now.
+7. The truncation message came when the source ran dry. It comes before the
+   scan now; the `-v` "excluded N host(s)" line still comes at the end, since
+   the count is known only then.
+8. Comments: the capture-failure function's doc, the blank-line ledger entry
+   (7.94 prints none after "Not shown:"), and a test's sizing comment.
+
+A ninth, noted: the mutation of `routes_targets` is caught only by a root test,
+so the sabotage set needs root to report it.
 

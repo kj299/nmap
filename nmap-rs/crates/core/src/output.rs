@@ -363,7 +363,8 @@ fn render_normal_to(
 
 /// What a run's closing lines need from the hosts of every group, counted as
 /// each group is written: nmap writes a group's hosts when the group is done
-/// and the totals at the end (`nmap.cc:2292-2330`, `printfinaloutput`).
+/// and the totals at the end (`nmap.cc:2292-2330`, `printfinaloutput`). It
+/// holds counts only, so it does not grow with the run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunTotals {
     /// Every target of the run, reported or not.
@@ -373,9 +374,6 @@ pub struct RunTotals {
     /// Those found down. With `up`, not always `hosts`: a list scan's are
     /// neither.
     pub down: usize,
-    /// The unmatched service fingerprints, in host then port order, for the
-    /// block after the last host.
-    pub fingerprints: Vec<String>,
 }
 
 impl RunTotals {
@@ -395,8 +393,6 @@ impl RunTotals {
         self.down = self
             .down
             .saturating_add(count(crate::model::HostState::Down));
-        self.fingerprints
-            .extend(collect_service_fingerprints(group));
     }
 }
 
@@ -440,8 +436,8 @@ pub fn normal_group(
     out
 }
 
-/// The normal report's closing: the post-scan scripts' results, the unmatched
-/// service fingerprints, the terminal's "Host seems down" note, and "Nmap done".
+/// The normal report's closing: the post-scan scripts' results, the terminal's
+/// "Host seems down" note, and "Nmap done".
 ///
 /// The host still counts as up even when `--open` drops it from the report: it
 /// WAS found, it just has nothing the operator asked to see. C counts it the same
@@ -455,7 +451,6 @@ pub fn normal_footer(
 ) -> String {
     let mut out = String::new();
     script_block_normal(&mut out, "Post-scan script results:", post);
-    out.push_str(&service_fingerprint_block(&totals.fingerprints));
     let (n, up) = (totals.hosts, totals.up);
     // C's note for a lone host its ping found down (`printfinaloutput`); not after
     // `-Pn`, which asked for no ping, nor after a list scan, which pings nothing.
@@ -476,6 +471,10 @@ pub fn normal_footer(
     );
     out
 }
+
+/// The most unmatched service fingerprints a host's report holds:
+/// `printportoutput` saves one while it holds no more than eight.
+pub const MAX_SERVICE_FPS_PER_HOST: usize = 9;
 
 /// Every unmatched-but-submittable service fingerprint in the scan, in host then
 /// port order.
@@ -614,6 +613,15 @@ fn render_host_normal(
     let shown = shown_ports(host, meta);
     if !shown.is_empty() {
         render_port_table(out, &shown, scripts, services, meta);
+        // The host's unmatched service fingerprints, after its table, at most
+        // nine of the ports shown (`printportoutput`, `output.cc:738-739` and
+        // `:846-856`).
+        let fps: Vec<String> = shown
+            .iter()
+            .filter_map(|p| p.service.fingerprint.clone())
+            .take(MAX_SERVICE_FPS_PER_HOST)
+            .collect();
+        out.push_str(&service_fingerprint_block(&fps));
     }
     // `printhostscriptresults`, after the port table.
     if let Some(list) = scripts.map(|s| s.host.as_slice()).filter(|l| !l.is_empty()) {
@@ -1965,6 +1973,46 @@ mod tests {
         assert!(out.contains("submit.cgi?new-service"));
     }
 
+    /// Each host's fingerprints follow its own port table, at most nine, as
+    /// `printportoutput` prints them; none reaches the run's closing lines.
+    #[test]
+    fn fingerprints_follow_their_hosts_table_at_most_nine() {
+        let host = |last: u8, fps: u16| {
+            let mut h = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), HostState::Up);
+            for n in 1..=fps {
+                let mut p = Port::new(9000 + n, Protocol::Tcp, PortState::Open, Reason::ConnAccept);
+                p.service.fingerprint = Some(format!("FP-{last}-{n};"));
+                h.ports.push(p);
+            }
+            h
+        };
+        let results = ScanResults {
+            hosts: vec![host(1, 1), host(2, 12)],
+            ..Default::default()
+        };
+        let out = render_normal(&results, &meta(), None);
+        let second = out
+            .find("Nmap scan report for 127.0.0.2")
+            .expect("second host");
+        let (first, rest) = out.split_at(second);
+        assert!(
+            first.contains("1 service unrecognized despite returning data.")
+                && first.contains("FP-1-1;"),
+            "{out}"
+        );
+        assert!(
+            rest.contains("9 services unrecognized despite returning data."),
+            "{out}"
+        );
+        assert!(
+            rest.contains("FP-2-9;") && !rest.contains("FP-2-10;"),
+            "{out}"
+        );
+        assert!(!out.contains("2 services unrecognized"), "{out}");
+        let tail = &out[out.find("FP-2-9;").unwrap()..];
+        assert!(tail.lines().nth(1).is_some_and(str::is_empty), "{out}");
+    }
+
     #[test]
     fn several_fingerprints_are_pluralised_and_separated() {
         let fps = vec!["FP-A;".to_owned(), "FP-B;".to_owned(), "FP-C;".to_owned()];
@@ -2108,10 +2156,6 @@ mod tests {
             totals.add(g);
         }
         assert_eq!(totals, RunTotals::of(&all));
-        // The fingerprint of the second group's host reaches the footer.
-        assert_eq!(totals.fingerprints.len(), 1, "{totals:?}");
-        assert!(normal_footer(&totals, &[], &meta(), false)
-            .starts_with("1 service unrecognized despite returning data."));
         let m = ScanMeta {
             verbose: 1,
             ..meta()

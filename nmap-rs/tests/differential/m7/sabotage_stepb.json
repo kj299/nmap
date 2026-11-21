@@ -208,24 +208,6 @@
   ]
  },
  {
-  "name": "fingerprints are not carried to the footer",
-  "file": "crates/core/src/output.rs",
-  "old": "            .extend(collect_service_fingerprints(group));",
-  "new": "            .extend(Vec::<String>::new());",
-  "cmd": [
-   "cargo",
-   "test",
-   "-p",
-   "nmap-core",
-   "--no-fail-fast",
-   "--lib",
-   "output::"
-  ],
-  "expect": [
-   "a_run_written_by_group_is_the_run_written_whole"
-  ]
- },
- {
   "name": "-S is not the group's source",
   "file": "crates/sys/src/route.rs",
   "old": "                source: IpAddr::V4(self.spoof4.unwrap_or(r.src)),",
@@ -356,6 +338,62 @@
   ],
   "expect": [
    "an_impossible_hostgroup_bound_is_reported_as_c_reports_it"
+  ]
+ },
+ {
+  "name": "a host's fingerprints are not capped at nine",
+  "file": "crates/core/src/output.rs",
+  "old": "pub const MAX_SERVICE_FPS_PER_HOST: usize = 9;",
+  "new": "pub const MAX_SERVICE_FPS_PER_HOST: usize = 10;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "output::"
+  ],
+  "expect": [
+   "fingerprints_follow_their_hosts_table_at_most_nine"
+  ]
+ },
+ {
+  "name": "a host's fingerprints are not printed",
+  "file": "crates/core/src/output.rs",
+  "old": "        out.push_str(&service_fingerprint_block(&fps));\n",
+  "new": "        let _ = service_fingerprint_block(&fps);\n",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "output::"
+  ],
+  "expect": [
+   "fingerprints_follow_their_hosts_table_at_most_nine"
+  ]
+ },
+ {
+  "name": "prepare goes on past the cap",
+  "file": "crates/cli/src/targets.rs",
+  "old": "        if planned >= cap {",
+  "new": "        if false && planned >= cap {",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-cli",
+   "--all-features",
+   "--no-fail-fast",
+   "--bin",
+   "nmap-rs",
+   "targets::"
+  ],
+  "expect": [
+   "prepare_stops_past_the_cap"
   ]
  }
 ]

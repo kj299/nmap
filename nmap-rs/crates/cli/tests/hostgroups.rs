@@ -95,8 +95,9 @@ fn the_groups_take_the_sizes_7_94_gives_them() {
     assert!(ok, "{err}");
     assert_eq!(sizes(&err), [5], "{err}");
 
-    // --min-hostgroup raises a group past the size rule (here 1,024 / 20 = 51,
-    // floored at 64).
+    // --min-hostgroup raises a group past the size rule: a list scan is
+    // neither TCP nor UDP, so 16, boxed up to 100. (7.94 reports a list
+    // scan's hosts as it draws them; the groups here change nothing visible.)
     let (_, err, ok) = run(&["-d", "-sL", "-n", "--min-hostgroup", "100", "10.0.0.1-130"]);
     assert!(ok, "{err}");
     assert_eq!(sizes(&err), [100, 30], "{err}");
@@ -223,6 +224,40 @@ fn a_group_is_written_before_the_next_is_scanned() {
     );
     let text = std::fs::read_to_string(&n).unwrap();
     assert_eq!(reports(&text), ["127.0.0.1", "127.0.0.2", "127.0.0.3"]);
+}
+
+/// An output path that cannot be written ends the run before anything runs,
+/// as 7.94 fails at once: the pre-scan script here sleeps three seconds, and
+/// the run must end well before it would wake.
+#[test]
+fn an_unwritable_output_fails_before_anything_runs() {
+    let script = scratch("slowpre.nse");
+    std::fs::write(
+        &script,
+        "description = 'x'\ncategories = {'safe'}\nlocal stdnse = require 'stdnse'\nprerule = function() return true end\naction = function() stdnse.sleep(3) return 'slept' end\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let (out, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--script",
+        script.to_str().unwrap(),
+        "-oX",
+        "/nonexistent-dir/x.xml",
+        "127.0.0.1",
+    ]);
+    let took = started.elapsed();
+    assert!(!ok, "{err}");
+    assert!(err.contains("failed to open output"), "{err}");
+    assert!(
+        took < Duration::from_millis(2500),
+        "the pre-scan script ran first: {took:?}"
+    );
+    assert!(!out.contains("Nmap scan report"), "{out}");
 }
 
 /// This host's own non-loopback IPv4 address, if it has one.

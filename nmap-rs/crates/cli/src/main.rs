@@ -117,20 +117,22 @@ async fn main() -> ExitCode {
         eprintln!("nmap-rs: only one input filename allowed (-iL given more than once)");
         return ExitCode::FAILURE;
     }
-    // Target specs from `-iL`, appended AFTER the positional ones. That order is
-    // the C's: `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv
-    // entries while `optind < argc` and only then reads the input file.
-    if let Some(path) = cfg.input_file.clone() {
-        match read_host_list(&path) {
-            Ok(specs) => cfg.targets.extend(specs),
+    // Target specs from `-iL`, after the positional ones. That order is the C's:
+    // `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv entries
+    // while `optind < argc` and only then reads the input file. The file is
+    // opened now and read as targets are needed (`targets::prepare`).
+    let input_list = match cfg.input_file.clone() {
+        None => None,
+        Some(path) => match open_host_list(&path) {
+            Ok(r) => Some((path, r)),
             Err(e) => {
                 eprintln!("nmap-rs: failed to read input file \"{path}\": {e}");
                 return ExitCode::FAILURE;
             }
-        }
-    }
+        },
+    };
 
-    if cfg.targets.is_empty() {
+    if cfg.targets.is_empty() && input_list.is_none() {
         eprintln!("nmap-rs: no targets specified");
         print_usage();
         return ExitCode::FAILURE;
@@ -259,27 +261,6 @@ async fn main() -> ExitCode {
         eprintln!("{w}");
     }
 
-    // Parse every target expression and resolve every name, then draw the
-    // targets from them lazily, less the excluded ones (`targets::TargetSource`).
-    // The first is drawn now: a run with none ends here, before the script
-    // engine starts or an output file is opened.
-    let ipv6 = cfg.ipv6;
-    let specs = std::mem::take(&mut cfg.targets);
-    let mut source =
-        targets::TargetSource::new(targets::prepare(specs, ipv6).await, ipv6, excludes);
-    let Some(first) = source.next() else {
-        // Distinguish "nothing resolved" from "you excluded everything". They
-        // need opposite reactions from the operator, and reporting a successful
-        // exclusion as a resolution failure would send them looking for a bug
-        // that is not there.
-        if source.drawn() > 0 {
-            eprintln!("nmap-rs: no targets left to scan — every host matched an exclusion");
-        } else {
-            eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
-        }
-        return ExitCode::FAILURE;
-    };
-
     // One timestamp for the whole run: the banner, the XML, and every `%`
     // escape in an output filename all derive from it. Reading the clock twice
     // would let `-oA scan-%F` and the banner disagree across midnight.
@@ -293,7 +274,7 @@ async fn main() -> ExitCode {
     let started = format!("epoch+{start_epoch}s");
     // Every destination is opened before anything runs, as 7.94 opens its log
     // files while it reads the options: a path that cannot be written ends the
-    // run before a script or a probe.
+    // run before a name is resolved, a script runs or a probe is sent.
     let mut sinks = match Sinks::open(&cfg, start_epoch) {
         Ok(s) => s,
         Err(e) => {
@@ -301,9 +282,48 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // "scanned in" counts from here, the pre-scan scripts included, as 7.94's
-    // `o.start` does.
+    // "scanned in" counts from here, name resolution and the pre-scan scripts
+    // included, as 7.94's `o.start` does.
     let clock = Instant::now();
+
+    // Check every target expression and resolve every name, then draw the
+    // targets from them lazily, less the excluded ones (`targets::TargetSource`).
+    // The first is drawn now: a run with none ends here, before the script
+    // engine starts.
+    let ipv6 = cfg.ipv6;
+    let positional = std::mem::take(&mut cfg.targets).into_iter().map(Ok);
+    let listed = input_list
+        .into_iter()
+        .flat_map(|(path, r)| r.map(move |spec| spec.map_err(|e| (path.clone(), e))));
+    let prepared = match targets::prepare(positional.chain(listed), ipv6).await {
+        Ok(p) => p,
+        Err((path, e)) => {
+            eprintln!("nmap-rs: failed to read input file \"{path}\": {e:?}");
+            sinks.discard();
+            return ExitCode::FAILURE;
+        }
+    };
+    if prepared.seen == 0 {
+        // An `-iL` file that held no specification at all.
+        eprintln!("nmap-rs: no targets specified");
+        print_usage();
+        sinks.discard();
+        return ExitCode::FAILURE;
+    }
+    let mut source = targets::TargetSource::new(prepared.exprs, ipv6, excludes);
+    let Some(first) = source.next() else {
+        // Distinguish "nothing resolved" from "you excluded everything". They
+        // need opposite reactions from the operator, and reporting a successful
+        // exclusion as a resolution failure would send them looking for a bug
+        // that is not there.
+        if source.drawn() > 0 {
+            eprintln!("nmap-rs: no targets left to scan — every host matched an exclusion");
+        } else {
+            eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
+        }
+        sinks.discard();
+        return ExitCode::FAILURE;
+    };
 
     // NSE (M6.4e): `open_nse`, then the pre-scan phase, before any scanning
     // (`nmap.cc:2084-2099`).
@@ -312,6 +332,7 @@ async fn main() -> ExitCode {
             Ok(n) => Some(n),
             Err(e) => {
                 eprintln!("NSE: failed to initialize the script engine:\n{e}\n\nQUITTING!");
+                sinks.discard();
                 return ExitCode::FAILURE;
             }
         }
@@ -517,7 +538,8 @@ fn group_sizing(
 /// One output destination: stdout, or a file written as the run goes.
 enum Dest {
     Stdout,
-    File(std::io::BufWriter<std::fs::File>),
+    /// The file, and the path it was created at.
+    File(std::io::BufWriter<std::fs::File>, String),
 }
 
 impl Dest {
@@ -526,9 +548,8 @@ impl Dest {
         if is_stdout_dest(&dest) {
             return Ok(Dest::Stdout);
         }
-        Ok(Dest::File(std::io::BufWriter::new(std::fs::File::create(
-            dest,
-        )?)))
+        let file = std::fs::File::create(&dest)?;
+        Ok(Dest::File(std::io::BufWriter::new(file), dest))
     }
 
     /// Write and flush: what a group's hosts are written as, is on disk before
@@ -541,7 +562,7 @@ impl Dest {
                 out.write_all(text.as_bytes())?;
                 out.flush()
             }
-            Dest::File(f) => {
+            Dest::File(f, _) => {
                 f.write_all(text.as_bytes())?;
                 f.flush()
             }
@@ -575,6 +596,18 @@ impl Sinks {
             xml: open(&cfg.out_xml)?,
             grep: open(&cfg.out_grep)?,
         })
+    }
+
+    /// The run ended before writing anything: remove the files it created, so
+    /// none is left empty. (7.94 has written its opening lines by then and adds
+    /// the error; `output-streamed-per-group`.)
+    fn discard(self) {
+        for d in [self.normal, self.xml, self.grep].into_iter().flatten() {
+            if let Dest::File(f, path) = d {
+                drop(f);
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     fn each(&mut self, terminal: &str, normal: &str, xml: &str, grep: &str) -> std::io::Result<()> {
@@ -1757,12 +1790,13 @@ fn packet_overrides(cfg: &RunConfig) -> Result<PacketOverrides, String> {
     })
 }
 
-/// Read a `-iL` / `--excludefile` list into host specifications.
+/// Read an `--excludefile` list into host specifications, whole: an exclusion
+/// must be known before the first target is drawn.
 ///
 /// `-` means stdin, as in C (`o.inputfd = stdin`). Any read failure is an error
 /// the caller must refuse on: C `pfatal`s here, and the safe direction is the
-/// same one — a target list we could not read is not an empty list, and an
-/// exclusion list we could not read must never become "exclude nothing".
+/// same one — an exclusion list we could not read must never become "exclude
+/// nothing".
 fn read_host_list(path: &str) -> Result<Vec<String>, String> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -1777,6 +1811,23 @@ fn read_host_list(path: &str) -> Result<Vec<String>, String> {
         Ok(specs) => Ok(specs.into_iter().map(str::to_string).collect()),
         Err(e) => Err(format!("{e:?}")),
     }
+}
+
+/// Open a `-iL` list, to be read as targets are drawn (`targets::prepare`), as
+/// 7.94 reads it (`grab_next_host_spec`). `-` means stdin. A read failure part
+/// way is an error the run refuses on, as one at the start is: a target list
+/// we could not read is not a shorter list.
+fn open_host_list(
+    path: &str,
+) -> Result<nmap_core::HostSpecReader<Box<dyn std::io::BufRead>>, String> {
+    let reader: Box<dyn std::io::BufRead> = if path == "-" {
+        Box::new(std::io::BufReader::new(std::io::stdin()))
+    } else {
+        Box::new(std::io::BufReader::new(
+            std::fs::File::open(path).map_err(|e| e.to_string())?,
+        ))
+    };
+    Ok(nmap_core::HostSpecReader::new(reader))
 }
 
 /// Build the exclusion set from `--exclude` and `--excludefile` combined.

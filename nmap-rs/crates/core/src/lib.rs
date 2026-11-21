@@ -67,8 +67,8 @@ pub use ports::{parse_port_spec, PortList, PortSpecError, ServiceTable};
 pub use probedb::{MatchRule, Probe as ServiceProbe, ProbeDb, ProbeProtocol, ProbeWarning};
 pub use servicescan::{MatchKind, ProbeRef, Resolution, Scheduler as ServiceScheduler};
 pub use targets::{
-    exclude_specs, host_specs, parse_target, Added, ExcludeSet, HostListError, Ipv4Ranges,
-    TargetParseError, TargetSpec,
+    exclude_specs, host_specs, parse_target, Added, ExcludeSet, HostListError, HostSpecReader,
+    Ipv4Ranges, TargetParseError, TargetSpec,
 };
 pub use timing::{TimeoutInfo, TimingParams, TimingTemplate};
 pub use versioninfo::{build as build_version_info, VersionInfo};

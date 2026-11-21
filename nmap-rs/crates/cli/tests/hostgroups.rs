@@ -250,9 +250,31 @@ fn an_unwritable_output_fails_before_anything_runs() {
         "/nonexistent-dir/x.xml",
         "127.0.0.1",
     ]);
+    // And ahead of the engine itself: with a script that cannot load, the
+    // output path is still what fails.
+    let (_, err2, ok2) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--script",
+        "no-such-script-anywhere",
+        "-oX",
+        "/nonexistent-dir/x.xml",
+        "127.0.0.1",
+    ]);
+    assert!(
+        !ok2 && err2.contains("failed to open output") && !err2.contains("NSE"),
+        "{err2}"
+    );
     let took = started.elapsed();
     assert!(!ok, "{err}");
     assert!(err.contains("failed to open output"), "{err}");
+    assert!(
+        !err.contains("NSE"),
+        "the script engine started first: {err}"
+    );
     assert!(
         took < Duration::from_millis(2500),
         "the pre-scan script ran first: {took:?}"

@@ -28,21 +28,51 @@ pub enum Expr {
     One(IpAddr, Option<String>),
 }
 
+/// What [`prepare`] made of the target list.
+#[derive(Debug)]
+pub struct Prepared {
+    /// The expressions to draw from, in order.
+    pub exprs: Vec<Expr>,
+    /// How many specifications were read, valid or not. Zero means the list
+    /// held none at all.
+    pub seen: usize,
+}
+
 /// Check and resolve the run's target expressions, in order, printing each one
-/// that fails, as the CLI always has. Stops at the first expression past
-/// [`MAX_TARGETS`], and says so now, before anything is scanned.
-pub async fn prepare(specs: Vec<String>, ipv6: bool) -> Vec<Expr> {
+/// that fails, as the CLI always has.
+///
+/// `specs` is read only as far as it is needed, so an `-iL` file is read up to
+/// the first expression past [`MAX_TARGETS`]'s worth and no further. That is a
+/// truncation if the expression is a target: a name past the cap counts
+/// without being resolved, and one that does not parse is reported and passed
+/// over, as before the cap. It is said now, before anything is scanned. A
+/// specification that could not be read ends it with the error.
+pub async fn prepare<E>(
+    specs: impl Iterator<Item = Result<String, E>>,
+    ipv6: bool,
+) -> Result<Prepared, E> {
     let mut out = Vec::new();
+    let mut seen = 0usize;
     let mut planned: u64 = 0;
     let cap = u64::try_from(MAX_TARGETS).unwrap_or(u64::MAX);
-    let mut specs = specs.into_iter();
-    for expr in specs.by_ref() {
+    let mut truncated = false;
+    for expr in specs {
+        let expr = expr?;
+        seen = seen.saturating_add(1);
+        let parsed = parse_target(&expr, ipv6);
         if planned >= cap {
-            // One more expression than the cap holds.
-            planned = planned.saturating_add(1);
-            break;
+            match parsed {
+                Ok(_) => {
+                    truncated = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("nmap-rs: bad target \"{expr}\": {e:?}");
+                    continue;
+                }
+            }
         }
-        match parse_target(&expr, ipv6) {
+        match parsed {
             Ok(TargetSpec::Ipv4(ranges)) => {
                 planned = planned.saturating_add(ranges.count());
                 out.push(Expr::Range(expr));
@@ -64,10 +94,10 @@ pub async fn prepare(specs: Vec<String>, ipv6: bool) -> Vec<Expr> {
             Err(e) => eprintln!("nmap-rs: bad target \"{expr}\": {e:?}"),
         }
     }
-    if planned > cap {
+    if truncated || planned > cap {
         eprintln!("nmap-rs: target list truncated at {MAX_TARGETS} hosts (MVP cap)");
     }
-    out
+    Ok(Prepared { exprs: out, seen })
 }
 
 /// The run's targets, one at a time, with the names they came from.
@@ -240,18 +270,42 @@ mod tests {
         assert_eq!(src.drawn(), MAX_TARGETS);
     }
 
-    /// The list is checked before anything is drawn: a name past the cap is
-    /// not resolved, and the expressions kept are text.
+    fn specs(list: &[&str]) -> impl Iterator<Item = Result<String, ()>> {
+        list.iter()
+            .map(|s| Ok((*s).to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// The list is read no further than the cap: a name past it is not
+    /// resolved, and what is kept is text.
     #[tokio::test]
     async fn prepare_stops_past_the_cap() {
-        let specs = vec![
-            "10.0.0.0/16".to_string(),
-            "10.1.0.1".to_string(),
-            "no-such-name.invalid".to_string(),
+        let p = prepare(specs(&["10.0.0.0/16", "localhost", "10.1.0.1"]), false)
+            .await
+            .unwrap();
+        assert_eq!(p.exprs.len(), 1, "{p:?}");
+        assert!(matches!(&p.exprs[0], Expr::Range(s) if s == "10.0.0.0/16"));
+        assert_eq!(p.seen, 2, "read one past the cap, and no further");
+        // Below the cap, the same name resolves and is kept.
+        let p = prepare(specs(&["10.0.0.0/24", "localhost"]), false)
+            .await
+            .unwrap();
+        assert_eq!(p.exprs.len(), 2, "{p:?}");
+    }
+
+    /// Reading stops at the first unreadable specification, with its error.
+    #[tokio::test]
+    async fn an_unreadable_spec_ends_the_list() {
+        let list = vec![
+            Ok("10.0.0.1".to_string()),
+            Err("broken"),
+            Ok("10.0.0.2".to_string()),
         ];
-        let exprs = prepare(specs, false).await;
-        assert_eq!(exprs.len(), 1, "{exprs:?}");
-        assert!(matches!(&exprs[0], Expr::Range(s) if s == "10.0.0.0/16"));
+        assert_eq!(
+            prepare(list.into_iter(), false).await.unwrap_err(),
+            "broken"
+        );
     }
 
     /// Everything excluded: nothing comes, and the count says why.

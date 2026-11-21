@@ -87,8 +87,8 @@
  {
   "name": "a group's file is not flushed",
   "file": "crates/cli/src/main.rs",
-  "old": "            Dest::File(f) => {\n                f.write_all(text.as_bytes())?;\n                f.flush()\n            }",
-  "new": "            Dest::File(f) => f.write_all(text.as_bytes()),",
+  "old": "            Dest::File(f, _) => {\n                f.write_all(text.as_bytes())?;\n                f.flush()\n            }",
+  "new": "            Dest::File(f, _) => f.write_all(text.as_bytes()),",
   "cmd": [
    "cargo",
    "test",
@@ -394,6 +394,44 @@
   ],
   "expect": [
    "prepare_stops_past_the_cap"
+  ]
+ },
+ {
+  "name": "a spec past the cap that is no target is a truncation",
+  "file": "crates/cli/src/targets.rs",
+  "old": "                Err(e) => {\n                    eprintln!(\"nmap-rs: bad target \\\"{expr}\\\": {e:?}\");\n                    continue;\n                }",
+  "new": "                Err(_) => {\n                    truncated = true;\n                    break;\n                }",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-cli",
+   "--all-features",
+   "--no-fail-fast",
+   "--test",
+   "target_scope"
+  ],
+  "expect": [
+   "the_target_cap_is_reported_only_when_a_target_lies_past_it"
+  ]
+ },
+ {
+  "name": "an early failure leaves its files",
+  "file": "crates/cli/src/main.rs",
+  "old": "                let _ = std::fs::remove_file(path);",
+  "new": "                let _ = path;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-cli",
+   "--all-features",
+   "--no-fail-fast",
+   "--test",
+   "target_scope"
+  ],
+  "expect": [
+   "a_run_that_fails_before_writing_leaves_no_file"
   ]
  }
 ]

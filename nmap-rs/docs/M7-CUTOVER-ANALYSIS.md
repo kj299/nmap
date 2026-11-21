@@ -612,3 +612,22 @@ that forms one group writes each format's bytes as before.
 A ninth, noted: the mutation of `routes_targets` is caught only by a root test,
 so the sabotage set needs root to report it.
 
+**The second review** confirmed five, all low:
+
+1. The `-iL` fix still held every line: the file was read whole before
+   `prepare` ran, so memory grew with the list past the cap (351 MiB at 4M
+   lines), and the ledger said otherwise. The file is now read a
+   specification at a time, no further than the cap: 17 MiB at every size.
+2. Opening the output files before the script engine left them empty when the
+   engine could not start. A run that ends before writing removes them.
+3. "scanned in" and the start time still left out name resolution. Both are
+   taken before it now, and the files are opened before it.
+4. The truncation message printed when only an unparsable specification lay
+   past the cap, and that specification's error went unreported. Now a name
+   past the cap counts, unresolved; a specification that does not parse is
+   reported, and does not.
+5. Two tests could not fail for part of what they claimed. `prepare`'s test
+   uses a name that resolves; the message, at and past the cap, and the files
+   left by an early failure have CLI tests; the unwritable-output test also
+   runs with a script that cannot load.
+

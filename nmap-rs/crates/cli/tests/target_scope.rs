@@ -270,3 +270,57 @@ fn an_over_long_spec_in_a_list_refuses_to_scan() {
     assert!(hosts_in(&stdout).is_empty());
     assert!(stderr.contains("SpecTooLong"), "got: {stderr}");
 }
+
+/// The 65,536-target cap is reported before the scan, and only when a target
+/// lies past it: not at exactly the cap, and not for a specification past it
+/// that is no target at all (which is reported as such). M7 cutover step b.
+#[test]
+fn the_target_cap_is_reported_only_when_a_target_lies_past_it() {
+    const CUT: &str = "target list truncated at 65536 hosts";
+    let (out, err, ok) = run(&["-sL", "-n", "127.0.0.0/16", "127.1.0.1"]);
+    assert!(ok, "{err}");
+    assert!(err.contains(CUT), "{err}");
+    assert_eq!(out.matches("Nmap scan report").count(), 65_536);
+
+    let (_, err, ok) = run(&["-sL", "-n", "127.0.0.0/16"]);
+    assert!(ok, "{err}");
+    assert!(!err.contains(CUT), "exactly the cap: {err}");
+
+    let (_, err, ok) = run(&["-sL", "-n", "127.0.0.0/16", "10.0.0.1/abc"]);
+    assert!(ok, "{err}");
+    assert!(!err.contains(CUT), "{err}");
+    assert!(err.contains("bad target \"10.0.0.1/abc\""), "{err}");
+
+    // A name past the cap counts, unresolved.
+    let (_, err, _) = run(&["-sL", "-n", "127.0.0.0/16", "no-such-name.invalid"]);
+    assert!(err.contains(CUT), "{err}");
+    assert!(!err.contains("failed to resolve"), "{err}");
+}
+
+/// A run that ends before writing anything leaves no output file behind: here
+/// the script engine cannot start.
+#[test]
+fn a_run_that_fails_before_writing_leaves_no_file() {
+    let dir = std::env::temp_dir().join(format!("nmap-rs-scope-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (n, x) = (dir.join("f.nmap"), dir.join("f.xml"));
+    let (_, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--script",
+        "no-such-script-anywhere",
+        "-oN",
+        n.to_str().unwrap(),
+        "-oX",
+        x.to_str().unwrap(),
+        "127.0.0.1",
+    ]);
+    assert!(!ok, "{err}");
+    assert!(
+        !n.exists() && !x.exists(),
+        "an empty output file was left: {err}"
+    );
+}

@@ -199,7 +199,7 @@ pub struct RunConfig {
     pub min_parallelism: Option<u32>,
     pub max_parallelism: Option<u32>,
     /// `--min-hostgroup` / `--max-hostgroup`, as C's setters store them: the
-    /// `int` from `atoi`, converted to `unsigned` (`NmapOps.cc:573-585`).
+    /// `int` from `atoi`, converted to `unsigned` (`NmapOps.cc:578-589`).
     pub min_hostgroup: Option<u32>,
     pub max_hostgroup: Option<u32>,
     /// The first of the two setters' fatal errors, in command-line order. C
@@ -1103,8 +1103,8 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 let key = long_flag(s, "max-hostgroup", &mut keybuf2).unwrap_or("--max-hostgroup");
                 let (v, adv) = long_opt_value(args, i, key);
                 consumed_extra = adv;
-                // `o.setMaxHostGroupSz(atoi(optarg))` (`nmap.cc:704`;
-                // `NmapOps.cc:579-585`). The `int` becomes the `unsigned` the
+                // `o.setMaxHostGroupSz(atoi(optarg))` (`nmap.cc:710-711`;
+                // `NmapOps.cc:584-589`). The `int` becomes the `unsigned` the
                 // setter takes, and is compared unsigned.
                 let sz = c_int(atoi(&v)).cast_unsigned();
                 let min = cfg.min_hostgroup.unwrap_or(1);
@@ -1127,7 +1127,7 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 let (v, adv) = long_opt_value(args, i, key);
                 consumed_extra = adv;
                 // `o.setMinHostGroupSz(atoi(optarg))`, then the warning
-                // (`nmap.cc:706-708`; `NmapOps.cc:573-577`).
+                // (`nmap.cc:712-715`; `NmapOps.cc:578-582`).
                 let n = c_int(atoi(&v));
                 let sz = n.cast_unsigned();
                 let max = cfg.max_hostgroup.unwrap_or(100_000);

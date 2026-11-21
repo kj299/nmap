@@ -117,16 +117,6 @@ async fn main() -> ExitCode {
         eprintln!("nmap-rs: only one input filename allowed (-iL given more than once)");
         return ExitCode::FAILURE;
     }
-    // Both lists from stdin cannot be: whichever read it first would leave the
-    // other empty. 7.94 refuses the exclusion list ("Failed to open exclude
-    // file - for reading").
-    if cfg.input_file.as_deref() == Some("-") && cfg.exclude_file.as_deref() == Some("-") {
-        eprintln!(
-            "nmap-rs: -iL - and --excludefile - cannot both read stdin; refusing rather than \
-             excluding nothing"
-        );
-        return ExitCode::FAILURE;
-    }
     // Target specs from `-iL`, after the positional ones. That order is the C's:
     // `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv entries
     // while `optind < argc` and only then reads the input file. The file is
@@ -190,6 +180,33 @@ async fn main() -> ExitCode {
             }
         );
     }
+
+    // One timestamp for the whole run: the banner, the XML, and every `%`
+    // escape in an output filename all derive from it. Reading the clock twice
+    // would let `-oA scan-%F` and the banner disagree across midnight.
+    let start_epoch = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
+    let started = format!("epoch+{start_epoch}s");
+    // Every destination is opened before anything runs, as 7.94 opens its log
+    // files while it applies the options (`nmap.cc:1534-1546`), before the
+    // exclusions are read (`:1752`): a path that cannot be written ends the run
+    // before a name is resolved, a script runs or a probe is sent.
+    let mut sinks = match Sinks::open(&cfg, start_epoch) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nmap-rs: failed to open output: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // "scanned in" counts from here, the data files, name resolution and the
+    // pre-scan scripts included, as 7.94's `o.start` (taken at start-up,
+    // `NmapOps.cc:291`) does.
+    let clock = Instant::now();
 
     let excludes = match build_excludes(&cfg).await {
         Ok(set) => set,
@@ -270,31 +287,6 @@ async fn main() -> ExitCode {
     for w in &port_notes {
         eprintln!("{w}");
     }
-
-    // One timestamp for the whole run: the banner, the XML, and every `%`
-    // escape in an output filename all derive from it. Reading the clock twice
-    // would let `-oA scan-%F` and the banner disagree across midnight.
-    let start_epoch = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0);
-    let started = format!("epoch+{start_epoch}s");
-    // Every destination is opened before anything runs, as 7.94 opens its log
-    // files while it reads the options: a path that cannot be written ends the
-    // run before a name is resolved, a script runs or a probe is sent.
-    let mut sinks = match Sinks::open(&cfg, start_epoch) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("nmap-rs: failed to open output: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // "scanned in" counts from here, name resolution and the pre-scan scripts
-    // included, as 7.94's `o.start` does.
-    let clock = Instant::now();
 
     // Check every target expression and resolve every name, then draw the
     // targets from them lazily, less the excluded ones (`targets::TargetSource`).
@@ -1787,20 +1779,14 @@ fn packet_overrides(cfg: &RunConfig) -> Result<PacketOverrides, String> {
 /// Read an `--excludefile` list into host specifications, whole: an exclusion
 /// must be known before the first target is drawn.
 ///
-/// `-` means stdin, as in C (`o.inputfd = stdin`). Any read failure is an error
+/// `-` is a file name here, not stdin: 7.94 `fopen`s the name as given
+/// (`nmap.cc:1752`), so `--excludefile -` reads a file called `-`. Any read
+/// failure is an error
 /// the caller must refuse on: C `pfatal`s here, and the safe direction is the
 /// same one — an exclusion list we could not read must never become "exclude
 /// nothing".
 fn read_host_list(path: &str) -> Result<Vec<String>, String> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    if path == "-" {
-        std::io::stdin()
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-    } else {
-        bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     match host_specs(&bytes) {
         Ok(specs) => Ok(specs.into_iter().map(str::to_string).collect()),
         Err(e) => Err(e.to_string()),

@@ -2725,7 +2725,7 @@ removed: that one was theatre, this one is unobservable.
       in 7.94, as a down IPv4 target does.
 
 - [x] `hostgroup-bound-past-int-refused` (`core::options`, M7 cutover step b;
-      ports `NmapOps::setMinHostGroupSz`/`setMaxHostGroupSz`, `NmapOps.cc:573-585`,
+      ports `NmapOps::setMinHostGroupSz`/`setMaxHostGroupSz`, `NmapOps.cc:578-589`,
       and `box`, `utils.h:93`) — **a `--min-hostgroup` or `--max-hostgroup`
       that reads negative as a 32-bit `int` is refused; 7.94 aborts.** C takes
       `atoi`'s `int`, stores it `unsigned`, and reads it back as `int`. So `-1`,
@@ -2749,35 +2749,63 @@ removed: that one was theatre, this one is unobservable.
       it was over and held every result in memory. Now each group's hosts are
       written to the terminal and to every `-o` file, and flushed, when the
       group is done, and dropped; the totals come at the end. What moved with it:
-      - every output file is opened before a name is resolved, the script
-        engine starts or a probe is sent, so an unwritable path ends the run at
-        once, as in 7.94 (*measured*: both fail within a few milliseconds ahead
-        of a pre-scan script that sleeps); a run that fails mid-way leaves what
-        it wrote. No output path is ever deleted, as 7.94 deletes none: a run
-        whose script engine cannot start leaves its files empty, where 7.94
-        has written its opening line by then and adds the error to it. A run
-        given no target at all prints the usage and opens no file, where 7.94
-        warns, writes a zero-host report and exits 0 (*measured*);
-      - "scanned in" counts from before name resolution and the pre-scan
-        scripts, as 7.94's `o.start` does (*measured*: a prerule that sleeps
-        2 s gives 2.06 s, 7.94 2.07 s; 20,000 names give 0.70 s of a 0.72 s
-        run). Before, it timed the port scan alone;
+      - every output file is opened before the exclusions are read, a name is
+        resolved, the script engine starts or a probe is sent, as 7.94 opens
+        its logs (`nmap.cc:1534-1546`) before the exclude file (`:1752`), so
+        an unwritable path ends the run at once (*measured*: both fail within
+        a few milliseconds ahead of a pre-scan script that sleeps, and ahead
+        of an exclusion name that does not resolve); a run that fails mid-way
+        leaves what it wrote. No output path is ever deleted, as 7.94 deletes
+        none. A run that ends after the files are opened and before a group is
+        written leaves them empty and exits 1: a script engine that cannot
+        start (7.94 has written its opening line and adds the error), and a
+        run left with no target to scan — an `-iL` file with none, every
+        target excluded, every name unresolved (7.94 warns "No targets were
+        specified", writes a zero-host report and exits 0; *measured*, 813 to
+        853 bytes of XML against the port's 0). A run given no target at all
+        on the command line prints the usage before opening any file;
+      - "scanned in" counts from before the data files are read, names are
+        resolved and the pre-scan scripts run; 7.94's `o.start` is taken at
+        start-up (`NmapOps.cc:291`), a few option checks earlier (*measured*:
+        a prerule that sleeps 2 s gives 2.06 s, 7.94 2.07 s; 20,000 names give
+        0.70 s of a 0.72 s run). Before, it timed the port scan alone;
       - the "Starting" line is printed after the pre-scan scripts (7.94 prints
         it before them);
       - two formats sent to stdout (`-oN - -oX -`) interleave group by group,
-        as 7.94's do, where the port wrote one whole and then the other;
+        where the port wrote one whole and then the other. 7.94 interleaves
+        them at each write, so its lines can mix mid-line (*measured*:
+        "# # Nmap 7.94SVN scan initiated"); the port keeps each group of each
+        format whole;
       - a script's own log lines to stdout can fall between groups;
       - the unmatched service fingerprints are printed after each host's port
         table, at most nine, as `printportoutput` prints them
-        (`output.cc:738-739`, `:846-856`; *measured* with two hosts behind an
+        (`output.cc:723-724`, `:831-842`; *measured* with two hosts behind an
         unrecognised banner). Before, one block for the whole run followed the
         last host, uncapped;
       - `-sV`'s count of ports left alone under the probe file's Exclude is
         reported once, after the last group.
       Otherwise a run that forms one group writes each format's bytes as
       before. Still whole-run: the `-O` block after "Nmap done"
-      (`nse-os-block-after-scripts`). Pinned by `cli/tests/hostgroups.rs` and
+      (`nse-os-block-after-scripts`), which is held until then
+      (`os-block-held-for-the-run`). Pinned by `cli/tests/hostgroups.rs` and
       `fingerprints_follow_their_hosts_table_at_most_nine`.
+
+- [ ] `os-block-held-for-the-run` (`cli`, M7 cutover step b) — **with `-O`,
+      every up host's OS text is kept until the run ends.** The OS block is
+      written after "Nmap done" (`nse-os-block-after-scripts`), so each
+      group's part of it is appended to one string and held: memory grows
+      with the number of hosts `-O` reports on, a few hundred bytes each,
+      where the rest of the report is dropped as each group is written. 7.94
+      prints each host's OS lines in its report and holds none. Not measured;
+      it goes when the OS block moves into the host's report.
+
+- [x] `exclude-file-dash-is-a-file` (`cli`, M7 cutover step b) — **`--excludefile
+      -` names a file called `-`.** 7.94 `fopen`s the name as given
+      (`nmap.cc:1752`), so with no such file it fails ("Failed to open exclude
+      file - for reading"). The port read stdin for it, and so scanned with an
+      exclusion 7.94 would have refused to run without. Now it reads the file
+      `-`, and refuses when there is none (*measured* both ways; a test).
+      `-iL -` still reads stdin, as 7.94's does (`nmap.cc:1096-1097`).
 
 - [x] `target-list-file-read-whole` (`cli`, M7 cutover step b) — **`-iL`'s file
       is read as the target list is checked, and no further than the cap.** 7.94

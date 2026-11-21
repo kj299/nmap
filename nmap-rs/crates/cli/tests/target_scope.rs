@@ -325,12 +325,16 @@ fn an_early_failure_never_deletes_an_output_path() {
     assert!(n.exists(), "the output path was deleted: {err}");
 }
 
-/// `-iL -` and `--excludefile -` cannot both read stdin: refused, as 7.94
-/// refuses, rather than leaving one of them empty.
+/// `--excludefile -` names a file called `-`, as 7.94's `fopen` reads it
+/// (`nmap.cc:1752`), not stdin: with no such file the run is refused, whatever
+/// stdin holds, and nothing is scanned.
 #[test]
-fn both_lists_from_stdin_are_refused() {
+fn an_exclude_file_named_dash_is_a_file_not_stdin() {
+    let dir = std::env::temp_dir().join(format!("nmap-rs-dash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
     let mut child = Command::new(bin())
-        .args(["-sL", "-n", "-iL", "-", "--excludefile", "-"])
+        .current_dir(&dir)
+        .args(["-sL", "-n", "--excludefile", "-", "127.0.0.1-2"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -344,9 +348,45 @@ fn both_lists_from_stdin_are_refused() {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(err.contains("cannot both read stdin"), "{err}");
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("Nmap scan report"));
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("failed to read exclude file \"-\""), "{err}");
+    assert!(hosts_in(&String::from_utf8_lossy(&out.stdout)).is_empty());
+
+    // With a file of that name, it is the file that is read.
+    std::fs::write(dir.join("-"), "127.0.0.2\n").unwrap();
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["-sL", "-n", "--excludefile", "-", "127.0.0.1-2"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(hosts_in(&stdout), vec!["127.0.0.1".to_string()], "{stdout}");
+}
+
+/// An unwritable output path ends the run before an exclusion name is
+/// resolved, as 7.94 opens its logs first (`nmap.cc:1534-1546`).
+#[test]
+fn an_unwritable_output_is_reported_before_an_exclusion_is_resolved() {
+    let (_, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-p",
+        "1",
+        "--exclude",
+        "nonexist.invalid",
+        "-oX",
+        "/nonexistent-dir/x.xml",
+        "127.0.0.1",
+    ]);
+    assert!(!ok);
+    assert!(err.contains("failed to open output"), "{err}");
+    assert!(!err.contains("excluded name"), "{err}");
 }
 
 /// A list that cannot be read says why in words, not as a type's dump.

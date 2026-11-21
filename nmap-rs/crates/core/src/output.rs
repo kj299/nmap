@@ -614,8 +614,8 @@ fn render_host_normal(
     if !shown.is_empty() {
         render_port_table(out, &shown, scripts, services, meta);
         // The host's unmatched service fingerprints, after its table, at most
-        // nine of the ports shown (`printportoutput`, `output.cc:738-739` and
-        // `:846-856`).
+        // nine of the ports shown (`printportoutput`, `output.cc:723-724` and
+        // `:831-842`).
         let fps: Vec<String> = shown
             .iter()
             .filter_map(|p| p.service.fingerprint.clone())
@@ -2118,13 +2118,10 @@ mod tests {
         );
     }
 
-    /// Down hosts as 7.94 lists them under `-v`: first, as host discovery found
-    /// them (`nmap.cc:2155`), each its report line alone, with no blank line after
-    /// it; then the scanned hosts, each block ending in one (`nmap.cc:2330`). And a
-    /// down host is its status alone in every format, even with a port left on it.
-    /// A run written group by group is the run written whole, when no group
-    /// has a down host to move: the header, each group's hosts, the footer
-    /// from the totals of every group.
+    /// A run written group by group is one report: one header and one footer
+    /// in each format, every host once and in order, a host's fingerprint
+    /// after its own table and before the next host; and it is the run the
+    /// whole-run renderers write, when no group has a down host to move.
     #[test]
     fn a_run_written_by_group_is_the_run_written_whole() {
         let host = |last: u8, state: HostState| {
@@ -2163,30 +2160,65 @@ mod tests {
         let by = |head: String, body: &dyn Fn(&ScanResults) -> String, foot: String| {
             head + &groups.iter().map(body).collect::<String>() + &foot
         };
-        assert_eq!(
-            by(
-                normal_header(&m, &[]),
-                &|g| normal_group(g, &m, None),
-                normal_footer(&totals, &[], &m, true)
-            ),
-            render_normal_stdout(&all, &m, None)
+        let normal = by(
+            normal_header(&m, &[]),
+            &|g| normal_group(g, &m, None),
+            normal_footer(&totals, &[], &m, true),
         );
-        assert_eq!(
-            by(
-                grepable_header(&m),
-                &|g| grepable_group(g, &m, None),
-                grepable_footer(&totals, &m)
-            ),
-            render_grepable(&all, &m, None)
+        let grepable = by(
+            grepable_header(&m),
+            &|g| grepable_group(g, &m, None),
+            grepable_footer(&totals, &m),
         );
-        assert_eq!(
-            by(
-                xml_header(&m, &[]),
-                &|g| xml_group(g, &m, None),
-                xml_footer(&totals, &[], &m)
-            ),
-            render_xml(&all, &m, None)
+        let xml = by(
+            xml_header(&m, &[]),
+            &|g| xml_group(g, &m, None),
+            xml_footer(&totals, &[], &m),
         );
+        // One report, whatever the grouping.
+        assert_eq!(normal.matches("Starting ").count(), 1, "{normal}");
+        assert_eq!(normal.matches("Nmap done:").count(), 1, "{normal}");
+        assert!(
+            normal.ends_with("Nmap done: 5 IP addresses (5 hosts up) scanned in 1.00 seconds\n")
+        );
+        assert_eq!(grepable.matches(" done at ").count(), 1, "{grepable}");
+        assert_eq!(xml.matches("<nmaprun ").count(), 1, "{xml}");
+        assert_eq!(xml.matches("</nmaprun>").count(), 1, "{xml}");
+        assert!(
+            xml.contains("<hosts up=\"5\" down=\"0\" total=\"5\"/>"),
+            "{xml}"
+        );
+        // Every host once, in order, in each format.
+        let order = |text: &str, before: &str| -> Vec<u8> {
+            text.match_indices(before)
+                .map(|(i, _)| {
+                    let rest = &text[i + before.len()..];
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(rest.len());
+                    rest[..end].parse().unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(
+            order(&normal, "Nmap scan report for 127.0.0."),
+            [1, 2, 3, 4, 5]
+        );
+        // Two lines a host, its status then its ports.
+        assert_eq!(
+            order(&grepable, "Host: 127.0.0."),
+            [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+        );
+        assert_eq!(order(&xml, "<address addr=\"127.0.0."), [1, 2, 3, 4, 5]);
+        // Host 3's fingerprint sits between its table and host 4's report.
+        let fp = normal.find("SF-Port80-TCP").expect("fingerprint printed");
+        assert!(normal.find("Nmap scan report for 127.0.0.3").unwrap() < fp);
+        assert!(fp < normal.find("Nmap scan report for 127.0.0.4").unwrap());
+        assert_eq!(normal.matches("SF-Port80-TCP").count(), 1);
+        // And the whole-run renderers write the same.
+        assert_eq!(normal, render_normal_stdout(&all, &m, None));
+        assert_eq!(grepable, render_grepable(&all, &m, None));
+        assert_eq!(xml, render_xml(&all, &m, None));
     }
 
     /// Down hosts come first in their own group, as 7.94 reports them, and the
@@ -2232,6 +2264,10 @@ mod tests {
             .ends_with("Nmap done: 4 IP addresses (2 hosts up) scanned in 1.00 seconds\n"));
     }
 
+    /// Down hosts as 7.94 lists them under `-v`: first, as host discovery found
+    /// them (`nmap.cc:2155`), each its report line alone, with no blank line after
+    /// it; then the scanned hosts, each block ending in one (`nmap.cc:2330`). And a
+    /// down host is its status alone in every format, even with a port left on it.
     #[test]
     fn down_hosts_come_first_and_alone() {
         let up = |last: u8| {

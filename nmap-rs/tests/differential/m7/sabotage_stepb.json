@@ -414,5 +414,43 @@
     "expect": [
       "the_target_cap_is_reported_only_when_a_target_lies_past_it"
     ]
+  },
+  {
+    "name": "--excludefile - reads stdin",
+    "file": "crates/cli/src/main.rs",
+    "old": "    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;\n    match host_specs(&bytes) {",
+    "new": "    let bytes = if path == \"-\" {\n        let mut b = Vec::new();\n        std::io::Read::read_to_end(&mut std::io::stdin(), &mut b).map_err(|e| e.to_string())?;\n        b\n    } else {\n        std::fs::read(path).map_err(|e| e.to_string())?\n    };\n    match host_specs(&bytes) {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "target_scope"
+    ],
+    "expect": [
+      "an_exclude_file_named_dash_is_a_file_not_stdin"
+    ]
+  },
+  {
+    "name": "each group repeats the normal header",
+    "file": "crates/core/src/output.rs",
+    "old": "    let mut out = String::new();\n    // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last",
+    "new": "    let mut out = normal_header(meta, &[]);\n    // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_run_written_by_group_is_the_run_written_whole"
+    ]
   }
 ]

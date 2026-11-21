@@ -583,7 +583,8 @@ loop. b.7 is the gates below.
 
 **What changed for an operator** (`output-streamed-per-group`): output files are
 opened before anything runs; "Starting" follows the pre-scan scripts; "scanned
-in" counts from before them; two formats on stdout interleave by group; a
+in" counts from before them; two formats on stdout interleave by group (7.94's
+at each write); a
 script's stdout lines can fall between groups; the unmatched service
 fingerprints follow each host's table, at most nine, as in 7.94. Otherwise a run
 that forms one group writes each format's bytes as before.
@@ -604,8 +605,9 @@ that forms one group writes each format's bytes as before.
    which now interleave, as in 7.94. The claim is corrected.
 6. `-sV`'s Exclude note printed once per group. Once per run now.
 7. The truncation message came when the source ran dry. It comes before the
-   scan now; the `-v` "excluded N host(s)" line still comes at the end, since
-   the count is known only then.
+   scan now. The `-v` "excluded N host(s)" line comes when the source runs
+   dry, which grouping can reach before the first group is written (the
+   fourth review corrected "at the end"); 7.94 prints no such line.
 8. Comments: the capture-failure function's doc, the blank-line ledger entry
    (7.94 prints none after "Not shown:"), and a test's sizing comment.
 
@@ -639,7 +641,8 @@ so the sabotage set needs root to report it.
    output path, and now neither does the port: the files are left, empty.
    A test checks that a file that was there survives.
 2. `-iL -` with `--excludefile -` read stdin for one of them and found it
-   empty for the other. Refused now, with a test.
+   empty for the other. Refused then; the fourth review found the premise
+   wrong, below.
 3. A list that could not be read printed the error's debug form. It prints
    a sentence now (the C's for a specification too long), for `-iL` and
    `--excludefile` alike, with tests.
@@ -648,4 +651,27 @@ so the sabotage set needs root to report it.
 5. The ledger said an early failure with no target removed files; a run with
    no target opens none. The entry now says what each side does, measured.
 6. The sabotage entry for the removal went with it.
+
+**The fourth review** confirmed six, all low:
+
+1. The exclusions were read and their names resolved before the output files
+   were opened, so an unresolvable exclusion was reported ahead of an
+   unwritable path, where 7.94 opens its logs first (`nmap.cc:1534-1546`,
+   `:1752`). The files and the clock now come first, with a test.
+2. A run left with no target after the files were opened (an empty `-iL`,
+   every target excluded, every name unresolved) left them empty and exited
+   1, unrecorded; 7.94 writes a zero-host report and exits 0. Ledgered,
+   measured, in `output-streamed-per-group`.
+3. `--excludefile -` read stdin; 7.94 `fopen`s a file named `-`. It does now
+   (`exclude-file-dash-is-a-file`), so the both-on-stdin refusal goes, its
+   test replaced by one for the file named `-`.
+4. Text: the "excluded N host(s)" timing (above), the stdout interleaving
+   (7.94 mixes at each write, not by group), and five C line numbers.
+5. With `-O`, the OS block is held for the run, so memory grows with the
+   hosts it covers: ledgered (`os-block-held-for-the-run`).
+6. The test comparing a run written by group with one written whole could
+   fail only through the totals, since the whole-run renderers are that
+   composition. It now asserts one header and footer per format, every host
+   once and in order, and the fingerprint between its table and the next
+   host; two test docs sat on the wrong tests.
 

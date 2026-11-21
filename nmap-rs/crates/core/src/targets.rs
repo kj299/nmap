@@ -907,7 +907,7 @@ mod tests {
 
     use super::*;
 
-    /// The streaming reader agrees with [`host_specs`], specs and errors alike.
+    /// A list error reads as a sentence: the C's for a spec too long.
     #[test]
     fn host_list_errors_read_as_sentences() {
         assert_eq!(
@@ -921,6 +921,7 @@ mod tests {
         assert_eq!(HostListError::Read("gone".into()).to_string(), "gone");
     }
 
+    /// The streaming reader agrees with [`host_specs`], specs and errors alike.
     #[test]
     fn the_host_spec_reader_agrees_with_host_specs() {
         let long = "a".repeat(MAX_HOST_SPEC);

@@ -379,15 +379,16 @@ number was reached in rounds, and each found the golden or its harness short:
 
 So "all caught" is a statement about these 29, not about every wrong C.
 
-**The tests can tell a broken port apart.** 40 mutations of `hostgroup.rs`
+**The tests can tell a broken port apart.** 41 mutations of `hostgroup.rs`
 through the kit's `sabotage.py` (`tests/differential/m7/sabotage_hostgroup.json`),
-40 caught, 37 of them by the differential by name. The other three are rules
-loopback cannot show 7.94 exercising, and are pinned by unit tests only: a
+41 caught, 37 of them by the differential by name. The other four are pinned by
+unit tests only. Three are rules loopback cannot show 7.94 exercising: a
 different interface, a different direct-connectedness and a different address
-family. The source is fused, which has a unit test and no mutation: undoing it
-changes a type and a call, and the harness mutates one span.
+family. The fourth is that the source is asked again after it has ended, which
+the generator has no case for (it would take a script that adds targets).
 
-**The review.** One independent review, of the step as first written. It could
+**The review.** Independent reviews, repeated on each fix round. The first was
+of the step as first written. It could
 not make the port's sizes or order differ from 7.94 on any input in which every
 target is up: it read the C line by line, ran 362 random cases against the 7.94
 build with no difference, and replayed the mutations. What it found, all
@@ -407,7 +408,30 @@ confirmed here and fixed in the follow-up to #161:
    and the golden holds a `-sT -O` case.
 5. Smaller: a stale case count in two comments; the generator would have read
    an ARP ping's "Scanning N hosts" as groups, and now refuses a run in which
-   nmap pings; the source iterator was asked again after its end, and is fused.
+   nmap pings; the source iterator was asked again after its end (see the
+   second round).
+
+**The second round**, on that fix round, confirmed four more. None is in the
+grouping logic: 119 further random cases against 7.94 showed no difference.
+
+1. **The fix for "asked again after its end" was the wrong way round.** The fix
+   round fused the source. 7.94's source resumes on purpose: when the command
+   line's targets are spent it reads the targets scripts have added, and scans
+   them in later groups (*measured*: a script adding two hosts to a run of one
+   gives "Scanning 127.0.0.1" and then "Scanning 2 hosts"). The fuse is undone,
+   the module says why it asks again, and `nse-new-targets-not-scanned` names
+   this as the way in.
+2. **The fuse's unit test could not fail.** Without the fuse it never returned,
+   and a hang is not a catch. Its replacement adds targets between two groups,
+   as a script would, and a mutation that fuses the source fails it by name.
+3. **`--check` had stopped comparing the golden as a file.** Rewritten to
+   compare case by case, it accepted a stale second line for a case, and any
+   order. It compares the whole file again, and refuses an `--only` that
+   matches no case.
+4. Two sentences were contradicted by the same commit: "the port sends no
+   host-discovery probes" (it sends the IPv6 ND ping, after grouping), and
+   "`box` asserts what validation guarantees" (7.94 lets a value past
+   `i32::MAX` wrap and trip it).
 
 **For step b**, from the review:
 
@@ -421,6 +445,9 @@ confirmed here and fixed in the follow-up to #161:
   (measured: `-sS -S 127.0.0.1 -e lo` over `l1, own, l2` is one group of 3).
 - **Bounds above `i32::MAX`.** 7.94 aborts on `--max-hostgroup 2147483648`
   (an assertion in `box`). The CLI should refuse such a value with a message.
+- **Script-added targets.** The module asks its source again for every group.
+  Whether step b feeds it the new-targets queue, or leaves
+  `nse-new-targets-not-scanned` open, is decided there.
 
 **Divergences.** Every target takes a place in a group here, and in 7.94 a down
 host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`

@@ -25,8 +25,9 @@
 //! * Every target here takes a place in a group. In 7.94 a host found down takes
 //!   none: the loop reports and frees it as it is drawn, and adds it to
 //!   `o.numhosts_scanned`, which the quick-group rule reads (`nmap.cc`, the loop's
-//!   `HOST_UP` test). The port sends no host-discovery probes, so it has no such
-//!   verdict when it forms a group. `-Pn` does not close the gap: 7.94 still puts
+//!   `HOST_UP` test). The port has no such verdict when it forms a group: it
+//!   sends no IPv4 discovery probes at all, and its one discovery, the IPv6 ND
+//!   ping, runs after grouping. `-Pn` does not close the gap: 7.94 still puts
 //!   an on-link Ethernet target to its ARP or ND ping under `-Pn`
 //!   (`refresh_hostbatch`'s `arpping`, which no ping type switches off), and a
 //!   silent one is down.
@@ -34,6 +35,14 @@
 //!   enters here.
 //! * `--randomize-hosts` (which quadruples the batch) and `-iR` are not ported, nor
 //!   are SCTP scans, whose groups are 128 like UDP's.
+//! * The source is asked again after it has ended, once for every group, as C
+//!   asks `nexthost`. 7.94's source resumes: targets a script adds
+//!   (`target.add`, read by `next_expression` when the command line is spent)
+//!   are scanned in later groups. A source here that yields again after its end
+//!   therefore adds groups, and [`HostGroups`] may likewise yield a group after
+//!   it has yielded `None`. The port does not scan script-added targets yet
+//!   (`nse-new-targets-not-scanned`); when it does, this is the way in. A caller
+//!   whose iterator must not be asked past its end fuses it.
 //! * There is no untrusted input here: sizes come from the command line and keys
 //!   from this host's routing table. A group is bounded by the operator's
 //!   `--max-hostgroup` (default 100,000) and the size rule, a batch by
@@ -96,10 +105,11 @@ pub fn scan_group_size(hosts_scanned: usize, s: &GroupSizing) -> usize {
             }
         }
     }
-    // C's `box(min, max, size)`. It asserts `min <= max`, which option validation
-    // guarantees there and must guarantee here; if they crossed, this would return
-    // the maximum. The final `max(1)` is not in C: a group of none would end the
-    // run, and nothing valid reaches it.
+    // C's `box(min, max, size)`. It asserts `min <= max`. 7.94 refuses a minimum
+    // above the maximum, but lets a value past `i32::MAX` wrap and trip the
+    // assertion. The caller must refuse both; if the two crossed here, this would
+    // return the maximum. The final `max(1)` is not in C: a group of none would
+    // end the run, and nothing valid reaches it.
     let min = usize::try_from(s.min_hostgroup).unwrap_or(usize::MAX);
     let max = usize::try_from(s.max_hostgroup).unwrap_or(usize::MAX);
     size.max(min).min(max).max(1)
@@ -165,7 +175,7 @@ pub struct HostGroups<I, T>
 where
     I: Iterator<Item = Member<T>>,
 {
-    source: std::iter::Fuse<I>,
+    source: I,
     sizing: GroupSizing,
     batch_size: usize,
     /// The batch drawn and not yet handed out, in order (`hostbatch` from
@@ -188,9 +198,7 @@ where
     pub fn new(source: I, sizing: GroupSizing) -> Self {
         let min = usize::try_from(sizing.min_hostgroup).unwrap_or(usize::MAX);
         HostGroups {
-            // Asked again after its end, as C asks `nexthost` again: fused, so
-            // an iterator that resumes cannot reorder a finished run.
-            source: source.fuse(),
+            source,
             sizing,
             batch_size: PING_GROUP_SZ.max(min),
             batch: VecDeque::new(),
@@ -554,21 +562,27 @@ mod tests {
         assert_eq!(sizes, [5000, 1000]);
     }
 
-    /// The loop asks for a target again after the source has ended, as C asks
-    /// `nexthost` after every group. An iterator may answer anything then, so the
-    /// source is fused: one that resumes does not reorder a finished run.
+    /// The source is asked again for every group, as C asks `nexthost`: one that
+    /// ends and later has more adds groups. 7.94 does this with the targets a
+    /// script adds while a group is scanned (*measured*: `--script-args
+    /// newtargets`, a script adding two hosts to a run of one, scans "127.0.0.1"
+    /// and then "2 hosts").
     #[test]
-    fn a_source_is_not_asked_past_its_end() {
-        let mut calls = 0u8;
-        let source = std::iter::from_fn(|| {
-            calls = calls.saturating_add(1);
-            // One target, the end, and then, were it asked, targets without end.
-            (calls != 2).then(|| member(calls, None))
-        });
-        let got: Vec<Vec<u8>> = HostGroups::new(source, sizing())
-            .map(|g| g.into_iter().map(|m| m.item).collect())
-            .collect();
-        assert_eq!(got, [vec![1]]);
+    fn a_source_that_resumes_adds_groups() {
+        use std::cell::RefCell;
+        let queue = RefCell::new(VecDeque::from([member(1, None)]));
+        let source = std::iter::from_fn(|| queue.borrow_mut().pop_front());
+        let mut groups = HostGroups::new(source, sizing());
+        let items = |g: Option<Vec<Member<u8>>>| -> Option<Vec<u8>> {
+            g.map(|g| g.into_iter().map(|m| m.item).collect())
+        };
+        assert_eq!(items(groups.next()), Some(vec![1]));
+        // The group is scanned, and a script adds two targets.
+        queue
+            .borrow_mut()
+            .extend([member(2, None), member(3, None)]);
+        assert_eq!(items(groups.next()), Some(vec![2, 3]));
+        assert_eq!(items(groups.next()), None);
     }
 
     #[test]

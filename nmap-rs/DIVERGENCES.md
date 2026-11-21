@@ -2701,8 +2701,10 @@ removed: that one was theatre, this one is unobservable.
       target and, if host discovery found it down, reports and frees it at once:
       it takes no place, and it is added to `o.numhosts_scanned`, which the
       quick-group rule reads (`nmap.cc`, the loop's `HOST_UP` test). The port
-      sends no host-discovery probes (IPv6 scans D1), so it has no verdict when
-      it forms a group and every target takes a place.
+      has no verdict when it forms a group, so every target takes a place: it
+      sends no IPv4 discovery probes (IPv6 scans D1), and its one discovery, the
+      IPv6 ND ping, runs after grouping
+      (`scan6-nd-ping-decides-on-link-hosts`).
       - The two agree when every target is up. That is what the golden measures:
         7.94 with `-Pn -n -v` over targets routed by the loopback
         (`tests/differential/m7/hostgroup_golden.txt`).
@@ -4657,6 +4659,11 @@ of ten points is caught:
       sets does.
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
+      7.94 scans them in later host groups: when the command line's targets are
+      spent, its target source reads the queue (`next_expression`,
+      `targets.cc`). `core::hostgroup` asks its source again for every group
+      for that reason, so the queue can be the tail of the source
+      (`a_source_that_resumes_adds_groups`).
 - [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
       `LOG_PLAIN`) go to the terminal as they happen, unless `-v0` or a `-`
       destination discards stdout (`cli-stdout-silenced-by-output-files`).

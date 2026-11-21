@@ -237,10 +237,13 @@ def main():
     if own is None:
         sys.exit("FAIL: needs a non-loopback IPv4 address of this host's own")
     cases = [c for c in matrix() if not a.only or a.only in name(c)]
-    want = {}
+    if not cases:
+        sys.exit(f"FAIL: no case matches --only {a.only!r}")
+    want, golden = {}, []
     if a.check:
-        for l in open(a.golden).read().splitlines():
-            want[l.split(" | ")[0]] = l
+        golden = [l for l in open(a.golden).read().splitlines()
+                  if not a.only or a.only in l.split(" | ")[0]]
+        want = {l.split(" | ")[0]: l for l in golden}
     lines, differs, unfinished = [], 0, []
     for c in cases:
         got = run(a.nmap, c, own, a.timeout)
@@ -258,11 +261,14 @@ def main():
             if a.fail_fast:
                 break
     if a.check:
-        extra = [] if a.only or a.fail_fast and differs else \
-            sorted(set(want) - {name(c) for c in cases})
-        for n in extra:
+        # Case by case above, so that one difference can end a run early. The
+        # golden is still compared as a file: a line for a case the matrix no
+        # longer has, a second line for one it has, or another order, differ.
+        whole = not unfinished and not (a.fail_fast and differs)
+        if whole and golden != lines and not differs:
             differs += 1
-            print(f"DIFFERS:\n  golden: {want[n]}\n  now:    (no such case)")
+            print(f"DIFFERS: {a.golden} holds {len(golden)} line(s) for these "
+                  f"{len(lines)} case(s), or holds them in another order")
         if differs:
             sys.exit(f"FAIL: {a.golden} differs in {differs} case(s)")
         if unfinished:

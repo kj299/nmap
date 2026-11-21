@@ -587,8 +587,7 @@ mod tests {
     }
 
     /// In a routed run, a target with no route neither joins a routed group nor
-    /// lifts the rule for one: the unroutable ones group alone, ahead of the
-    /// routed targets drawn with them.
+    /// lifts the rule for one: the unroutable ones group alone.
     #[test]
     fn an_unroutable_target_shapes_no_routed_group() {
         let a = lo([127, 0, 0, 1]);
@@ -800,6 +799,26 @@ mod tests {
         assert_eq!(
             routed_groups(with, sizing()),
             routed_groups(without, sizing())
+        );
+        // The kept group's own addresses: an address it holds, met after the
+        // fill resumes, starts the next group (`targets.cc:306-313`).
+        let mut with: Vec<Member<u32>> = (0..batch).map(|i| at(i, &a)).collect();
+        with.extend((0..batch).map(unroutable));
+        with.push(Member {
+            item: batch + 9000,
+            ..at(4000, &a)
+        });
+        with.extend((batch..batch + 500).map(|i| at(i, &a)));
+        let without: Vec<Member<u32>> = with
+            .iter()
+            .filter(|m| m.item != u32::MAX)
+            .cloned()
+            .collect();
+        let got = routed_groups(with, thousand);
+        assert_eq!(got, routed_groups(without, thousand));
+        assert_eq!(
+            got.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1000, 1000, 1000, 1000, 96, 501]
         );
     }
 

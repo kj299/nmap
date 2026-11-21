@@ -683,5 +683,24 @@
     "expect": [
       "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
     ]
+  },
+  {
+    "name": "a kept group forgets its addresses",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "Some((std::mem::take(&mut group), std::mem::take(&mut addresses)));",
+    "new": "Some((std::mem::take(&mut group), HashSet::new()));",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
   }
 ]

@@ -815,3 +815,18 @@ ledgered case. It confirmed four, all low:
 
 Each has a sabotage entry.
 
+**The fourteenth review** found no defect in the grouping: a model of 7.94's
+loop (`refresh_hostbatch`, `defer`, `nexthost`, `returnhost`, the main
+loop's check against `Targets[0]`), fed the same runs without the unroutable
+targets, matched in 8,300 randomised runs, with bursts of up to 13,000
+unroutable, `--min-hostgroup` above the batch and `--max-hostgroup` from 1;
+the harness was sensitive enough that a defer limit of 63 differed in 215 of
+300. It confirmed two, both low:
+
+1. Nothing pinned the kept group's own addresses: forgetting them let a
+   group hold an address twice after the fill resumed. The resume test now
+   pins it, with a sabotage entry.
+2. The ledger said the unroutable groups come ahead of the routed targets
+   drawn with them; when a group's own draw runs the fill, they come after
+   that group. Corrected.
+

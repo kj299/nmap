@@ -694,3 +694,19 @@ so the sabotage set needs root to report it.
    now names a flat fit and how far the cost moved (a kit commit; LESSONS
    #059 addendum).
 
+**The sixth review** confirmed four, all low:
+
+1. The ledger named two early exits that leave the files empty; every
+   refusal after they are opened does, where 7.94 writes its fatal message
+   into them. The entry now lists them, measured.
+2. `target-list-file-read-whole` said one difference remained; a bad
+   specification before the cap also ends the run before any batch is
+   scanned. Recorded, measured.
+3. The "excluded N host(s)" line's new timing was in no ledger entry. It is
+   in `output-streamed-per-group` now.
+4. Three earlier fixes had no test: the connect fallback announced once, the
+   `-sV` Exclude note once, and "scanned in" counting the pre-scan scripts.
+   Each has a test and a sabotage entry now (26 in all); the first mutation
+   tried for the fallback was equivalent, the guard being doubled, and was
+   replaced.
+

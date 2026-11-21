@@ -452,5 +452,62 @@
     "expect": [
       "output::tests::a_run_written_by_group_is_the_run_written_whole"
     ]
+  },
+  {
+    "name": "\"scanned in\" starts after the pre-scan",
+    "file": "crates/cli/src/main.rs",
+    "old": "    let clock = Instant::now();\n",
+    "new": "    let clock = Instant::now() + std::time::Duration::from_secs(5);\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "scanned_in_counts_the_pre_scan_scripts"
+    ]
+  },
+  {
+    "name": "the Exclude count is the last group's",
+    "file": "crates/cli/src/main.rs",
+    "old": "        .set(once.sv_excluded.get().saturating_add(skipped_excluded));",
+    "new": "        .set(skipped_excluded);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "the_version_exclude_note_is_once_for_the_run"
+    ]
+  },
+  {
+    "name": "the fallback is not remembered",
+    "file": "crates/cli/src/main.rs",
+    "old": "        if !self.connect_fallback.replace(true) {",
+    "new": "        if !self.connect_fallback.get() {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "the_connect_fallback_is_announced_once"
+    ]
   }
 ]

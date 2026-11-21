@@ -2800,14 +2800,21 @@ removed: that one was theatre, this one is unobservable.
         a few milliseconds ahead of a pre-scan script that sleeps, and ahead
         of an exclusion name that does not resolve); a run that fails mid-way
         leaves what it wrote. No output path is ever deleted, as 7.94 deletes
-        none. A run that ends after the files are opened and before a group is
-        written leaves them empty and exits 1: a script engine that cannot
-        start (7.94 has written its opening line and adds the error), and a
-        run left with no target to scan — an `-iL` file with none, every
-        target excluded, every name unresolved (7.94 warns "No targets were
-        specified", writes a zero-host report and exits 0; *measured*, 813 to
-        853 bytes of XML against the port's 0). A run given no target at all
-        on the command line prints the usage before opening any file;
+        none. Any run that ends after the files are opened and before a group
+        is written leaves them empty and exits 1, where before the step most
+        such runs created no file. That covers every refusal from there on —
+        an option pair C refuses (`-sL -p 80`, `-F -p 80`, `-p 70000`,
+        `--port-ratio 0`, a second `--exclude-ports`), an exclude file that
+        cannot be read, a bad `-iL` specification, a script engine that
+        cannot start — and a run left with no target to scan (an `-iL` file
+        with none, every target excluded, every name unresolved). 7.94's
+        `fatal` writes its message into the files: `-oN` gets the error and
+        "QUITTING!", `-oX` a closing `<runstats>` with `exit="error"` and the
+        message (*measured*: `-sL -p 80` leaves 99 and 370 bytes against the
+        port's 0 and 0). With no target, 7.94 warns "No targets were
+        specified", writes a zero-host report and exits 0 (*measured*, 813 to
+        853 bytes of XML). A run given no target at all on the command line
+        prints the usage before opening any file;
       - "scanned in" counts from before the data files are read, names are
         resolved and the pre-scan scripts run; 7.94's `o.start` is taken at
         start-up (`NmapOps.cc:291`), a few option checks earlier (*measured*:
@@ -2827,7 +2834,10 @@ removed: that one was theatre, this one is unobservable.
         unrecognised banner). Before, one block for the whole run followed the
         last host, uncapped;
       - `-sV`'s count of ports left alone under the probe file's Exclude is
-        reported once, after the last group.
+        reported once, after the last group;
+      - the port's own `-v` line "excluded N host(s)" (7.94 has none) comes
+        when the target source runs dry, which can fall between groups or
+        before the first; before, it came before the scan.
       Otherwise a run that forms one group writes each format's bytes as
       before. Still whole-run: the `-O` block after "Nmap done"
       (`nse-os-block-after-scripts`), which is held until then
@@ -2861,9 +2871,16 @@ removed: that one was theatre, this one is unobservable.
       is flat in the list's length: *measured*, 17 MiB at 256k, 1M and 4M lines,
       where 7.94 holds 16 MiB. Before step b the port read the file whole and
       held every line (102 MiB for a million); step b first parsed every line
-      up front as well (1.2 GiB), and its reviews found both. One difference
-      remains: the names up to the cap are resolved before the first group,
-      where 7.94 resolves each as its batch is filled.
+      up front as well (1.2 GiB), and its reviews found both. Two differences
+      remain, both from reading the list up to the cap before the first group
+      where 7.94 reads it as it fills each batch (`grab_next_host_spec`,
+      `libnetutil/netutil.cc:3786`, from the loop at `nmap.cc:2110`): the names
+      up to the cap are resolved first; and a bad specification anywhere
+      before the cap (too long, not UTF-8, a read error) ends the run before
+      anything is scanned, where 7.94 scans and reports the batches before it
+      and then quits (*measured*: 5,000 addresses then a 1,100-byte token;
+      7.94 lists 4,096 hosts, the port none, as it did before the step). A
+      slow `-iL -` likewise starts no scan until it ends or reaches the cap.
 
 - [ ] `connect-scan-quadratic-in-group-size` (`sys::scan::run_group`) — **the
       connect engine's time grows as the square of its group's size.** Each

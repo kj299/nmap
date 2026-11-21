@@ -359,3 +359,127 @@ fn a_routed_run_groups_by_route() {
     assert_eq!(sizes(&err), [3], "{err}");
     assert_eq!(reports(&out), ["127.0.0.1", own.as_str(), "127.0.0.2"]);
 }
+
+/// "scanned in" counts from before the pre-scan scripts, as 7.94's `o.start`
+/// (`NmapOps.cc:291`) does: a prerule that sleeps a second is in it.
+#[test]
+fn scanned_in_counts_the_pre_scan_scripts() {
+    let script = scratch("sleep1pre.nse");
+    std::fs::write(
+        &script,
+        "description = 'x'\ncategories = {'safe'}\nlocal stdnse = require 'stdnse'\nprerule = function() return true end\naction = function() stdnse.sleep(1) return 'slept' end\n",
+    )
+    .unwrap();
+    let (out, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--script",
+        script.to_str().unwrap(),
+        "127.0.0.1",
+    ]);
+    assert!(ok, "{err}");
+    let secs: f64 = out
+        .lines()
+        .find_map(|l| {
+            l.split_once(" scanned in ")?
+                .1
+                .split(' ')
+                .next()?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no \"scanned in\": {out}"));
+    assert!(
+        secs >= 1.0,
+        "scanned in {secs} s, under the prerule's 1 s: {out}"
+    );
+}
+
+/// `-sV`'s count of ports left alone under the probe file's Exclude is one
+/// line for the run, the count of every group, not a line per group.
+#[test]
+fn the_version_exclude_note_is_once_for_the_run() {
+    // Any free port of the Exclude range (`nmap-service-probes`: T:9100-9107).
+    let Some((port, _l)) =
+        (9100..=9107).find_map(|p| TcpListener::bind(("0.0.0.0", p)).ok().map(|l| (p, l)))
+    else {
+        eprintln!("skipped: every port of 9100-9107 is taken");
+        return;
+    };
+    let port = port.to_string();
+    let (_, err, ok) = run(&[
+        "-sV",
+        "-sT",
+        "-Pn",
+        "-n",
+        "-v",
+        "-p",
+        &port,
+        "--max-hostgroup",
+        "1",
+        "127.0.0.1-3",
+    ]);
+    assert!(ok, "{err}");
+    let notes: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("not version-scanned"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{err}");
+    assert!(notes[0].starts_with("3 port(s)"), "{err}");
+}
+
+/// A raw scan that falls back to a connect scan says so once for the run, not
+/// once per group. Run without privilege: as root, through `setpriv`.
+#[test]
+fn the_connect_fallback_is_announced_once() {
+    let args = [
+        "-sS",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--max-hostgroup",
+        "1",
+        "127.0.0.1-3",
+    ];
+    // Root or not, by `id -u`, so the test needs no unsafe.
+    let root = Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
+    let out = if root {
+        let Ok(out) = Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "--"])
+            .arg(bin())
+            .args(args)
+            .output()
+        else {
+            eprintln!("skipped: root without setpriv");
+            return;
+        };
+        out
+    } else {
+        Command::new(bin()).args(args).output().unwrap()
+    };
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && err.contains("Permission denied") {
+        eprintln!("skipped: the binary is not executable unprivileged: {err}");
+        return;
+    }
+    assert!(out.status.success(), "{err}");
+    assert_eq!(
+        err.matches("falling back to a connect scan").count(),
+        1,
+        "{err}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout)
+            .matches("Nmap scan report for ")
+            .count(),
+        3
+    );
+}

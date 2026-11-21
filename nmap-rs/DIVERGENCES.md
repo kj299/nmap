@@ -271,7 +271,10 @@ narrower *rendering* of the same result.
       7.94 says "received localhost-response", and an on-link neighbor that answers
       ND but drops TCP is down here and up, `nd-response`, under 7.94. The port sends
       no host-discovery pings at all (IPv6 scans D1), so these verdicts belong with
-      that work. *(Found in review at IPv6 scans step e.)*
+      that work. For the same reason 7.94 splits such a scan's targets into host
+      groups by route and holds a repeated address for a later group, and the
+      port's connect scan groups by size alone (`hostgroup-every-target-counts`).
+      *(Found in review at IPv6 scans step e.)*
 - [x] `scan-repeated-target-deferred` (`sys::group::bucket_targets`; ports
       `target_needs_new_hostgroup`, `targets.cc:306-313`): a target named twice went
       into one route-group twice. The engine finds a reply's host by its address, so
@@ -2689,6 +2692,24 @@ removed: that one was theatre, this one is unobservable.
       host timeout is likewise not enforced — it is recorded in
       `TimingParams::host_timeout_ms` and read by nothing yet. Pinned by
       `fail_closed::a_constraint_we_cannot_honour_is_refused`.
+
+- [ ] `hostgroup-every-target-counts` (`core::hostgroup`, M7 cutover step a;
+      ports `nmap.cc`'s main loop, `determineScanGroupSize`,
+      `target_needs_new_hostgroup`, `refresh_hostbatch`) — **a group here counts
+      every target; 7.94 counts only the hosts its ping found up.** 7.94 draws a
+      target, reports and frees it at once if host discovery found it down, and
+      puts it in the group only if it is up (`nmap.cc`, the loop's `HOST_UP`
+      test). The port sends no host-discovery probes (IPv6 scans D1), so every
+      target takes a place. Under `-Pn` the two agree, and that is what the
+      golden measures: 54 runs of 7.94 with `-Pn -n -v`
+      (`tests/differential/m7/hostgroup_golden.txt`). Without `-Pn`, a run with
+      down hosts fills 7.94's groups from further down the list than the port's.
+      Two more limits of the same module: `--randomize-hosts`, which quadruples
+      the batch, and `-iR` are not ported; and as root without `-Pn` 7.94 routes
+      a `-sT` scan's targets, so it splits them by route where the port's connect
+      scan does not (`privileged-connect-scan-no-implicit-verdicts`). Nothing
+      calls the module until step b; `--min-hostgroup` and `--max-hostgroup`
+      stay refused until then (`timing-knobs-not-yet-enforced`).
 
 - [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
       representable subnormal written in decimal would be refused here and

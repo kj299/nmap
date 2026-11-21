@@ -1855,6 +1855,36 @@ reports, and four retrospective audits (history, harnesses, step e, consistency)
     found it. It is recorded as a class for the next review to try first.
 - **Section amended:** PLAYBOOK · Phase 2 (via `ORACLE-CHECKS.md` §1); `skills/porting-kit-oracle/SKILL.md`.
 
+## 058. The record only an unscoped run could write was never written
+
+- **Date:** 2026-11-21
+- **Codebase:** nmap — M7 cutover gate, step a
+- **What happened:** #052 gave "no gate ran on this tree" a command:
+  `ci_local.py --check-record`, satisfied by one unscoped run of a clean tree.
+  The first time it was needed, that run could not finish. The container allows a
+  background command a fixed time, nmap's workflow needs more than that end to
+  end, and the run was killed inside the fuzz job. Five jobs had passed whole and
+  the record said nothing, because only a complete run wrote one. A second cause
+  would have had the same effect: one step, the IPv6 end-to-end test, cannot pass
+  on a host booted with `ipv6.disable=1`, so the job holding it could never be
+  recorded as passed even if the run had fitted. The rule's intent is that no job
+  is skipped and none is cut down. A rule whose only reachable outcomes are
+  "nothing on record" and "skip the check" teaches the second.
+- **Kit change:**
+  - `ci_local.py` records **per job leg**. Runs of a clean tree merge into one
+    record for that tree, so `--job build-test`, then `--job miri`, and so on,
+    add up. `--check-record` reads the workflows itself and passes only when
+    every leg of every job has passed on HEAD's tree; a leg with no record is
+    named with the command that would run it. A job is still run whole: the unit
+    that may be split is the workflow, never the job (#030).
+  - `--waive-step JOB:TEXT=REASON` for a step this machine cannot run. The step
+    still runs. If it fails, the job goes on, and the record and every summary
+    carry `WAIVED, failed here` with the reason. A waiver is for an environment
+    limit (no IPv6, no VM), stated in at least 20 characters. It is not for a
+    failure to look at later, and a waived step has passed nowhere.
+- **Section amended:** PLAYBOOK · Phase 3 (gate identity); `REVIEW-GATE.md`
+  (merge preconditions); `hooks/pre-push`; `skills/porting-kit-audit/SKILL.md`.
+
 ## Meta — M6.6's gates were green and its reviews were not
 
 Every automated gate passed at every step commit, and every review found defects.

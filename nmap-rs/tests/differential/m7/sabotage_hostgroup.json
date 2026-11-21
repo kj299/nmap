@@ -1,0 +1,728 @@
+[
+ {
+  "name": "UDP groups of 127",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "        size = 128;",
+  "new": "        size = 127;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "TCP tested before UDP",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "    if s.udp {\n        size = 128;",
+  "new": "    if s.udp && !s.tcp {\n        size = 128;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "1023 / ports",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "1024_usize.checked_div(s.tcp_ports).unwrap_or(1024)",
+  "new": "1023_usize.checked_div(s.tcp_ports).unwrap_or(1023)",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a floor of 63",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": ".unwrap_or(1024).max(64);",
+  "new": ".unwrap_or(1024).max(63);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the quick group from 1,000 ports",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "s.tcp_ports > 1000 &&",
+  "new": "s.tcp_ports >= 1000 &&",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the quick group from 1,002 ports",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "s.tcp_ports > 1000 &&",
+  "new": "s.tcp_ports > 1001 &&",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "no quick group at -T4",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "s.timing_level <= 4 {",
+  "new": "s.timing_level <= 3 {",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a quick group at -T5",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "s.timing_level <= 4 {",
+  "new": "s.timing_level <= 5 {",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "-T4's quick group is 4",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "if s.timing_level == 4 { 8 } else { 4 }",
+  "new": "if s.timing_level == 4 { 4 } else { 4 }",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the second group not shortened",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "size = size.saturating_sub(quick);",
+  "new": "size = size.saturating_sub(0);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "every later group shortened",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "} else if hosts_scanned == quick &&",
+  "new": "} else if hosts_scanned >= quick &&",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "--min-hostgroup ignored",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "size.max(min).min(max).max(1)",
+  "new": "size.min(max).max(1)",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "--max-hostgroup ignored",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "size.max(min).min(max).max(1)",
+  "new": "size.max(min).max(1)",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a different source shares a group",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "        if group.iface != route.iface\n            || group.source != route.source\n            || group.direct != route.direct\n",
+  "new": "        if group.iface != route.iface\n            || group.direct != route.direct\n",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a different interface shares a group",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "        if group.iface != route.iface\n            || group.source != route.source\n            || group.direct != route.direct\n",
+  "new": "        if group.source != route.source\n            || group.direct != route.direct\n",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "a_routed_group_is_homogeneous"
+  ]
+ },
+ {
+  "name": "an off-link target shares a group",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "        if group.iface != route.iface\n            || group.source != route.source\n            || group.direct != route.direct\n",
+  "new": "        if group.iface != route.iface\n            || group.source != route.source\n",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "a_routed_group_is_homogeneous"
+  ]
+ },
+ {
+  "name": "another family shares a group",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "if first.address.is_ipv4() != target.address.is_ipv4() {",
+  "new": "if false {",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "a_routed_group_is_homogeneous"
+  ]
+ },
+ {
+  "name": "a repeated address shares a group",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "    addresses.contains(&target.address)\n}",
+  "new": "    false\n}",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "unrouted scans hold repeats back too",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "    let Some(route) = &target.route else {\n        return false;\n    };",
+  "new": "    let Some(route) = &target.route else {\n        return addresses.contains(&target.address);\n    };",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a defer buffer of 63",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "pub const DEFER_LIMIT: usize = 64;",
+  "new": "pub const DEFER_LIMIT: usize = 63;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a defer buffer of 65",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "pub const DEFER_LIMIT: usize = 64;",
+  "new": "pub const DEFER_LIMIT: usize = 65;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a misfit ends the batch instead of waiting",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "if self.deferred.len() < DEFER_LIMIT {\n                    continue;\n                }",
+  "new": "if self.deferred.len() < 1 {\n                    continue;\n                }",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the batch not raised to --min-hostgroup",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "batch_size: PING_GROUP_SZ.max(min),",
+  "new": "batch_size: PING_GROUP_SZ,",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a batch of 4,095",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "pub const PING_GROUP_SZ: usize = 4096;",
+  "new": "pub const PING_GROUP_SZ: usize = 4095;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a batch of 4,097",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "pub const PING_GROUP_SZ: usize = 4096;",
+  "new": "pub const PING_GROUP_SZ: usize = 4097;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the source drawn before the deferred",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "self.undeferred.pop_front().or_else(|| self.source.next())",
+  "new": "self.source.next().or_else(|| self.undeferred.pop_front())",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a handed-back target goes to the back",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "self.batch.push_front(target);",
+  "new": "self.batch.push_back(target);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "a handed-back target is dropped",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "                self.batch.push_front(target);\n                break;",
+  "new": "                break;",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the batch's addresses are not tracked",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "            addresses.insert(target.address);\n            self.batch.push_back(target);",
+  "new": "            self.batch.push_back(target);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "the group's addresses are not tracked",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "            addresses.insert(target.address);\n            group.push(target);",
+  "new": "            group.push(target);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "hosts scanned counts groups",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "self.scanned = self.scanned.saturating_add(group.len());",
+  "new": "self.scanned = self.scanned.saturating_add(1);",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ },
+ {
+  "name": "hosts scanned is the last group's",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "self.scanned = self.scanned.saturating_add(group.len());",
+  "new": "self.scanned = group.len();",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "hosts_scanned_counts_every_earlier_group"
+  ]
+ },
+ {
+  "name": "the deferred are forgotten",
+  "file": "crates/core/src/hostgroup.rs",
+  "old": "        self.undeferred.extend(self.deferred.drain(..));",
+  "new": "        self.deferred.clear();",
+  "cmd": [
+   "cargo",
+   "test",
+   "-p",
+   "nmap-core",
+   "--no-fail-fast",
+   "--lib",
+   "--test",
+   "hostgroup_differential",
+   "--",
+   "hostgroup::",
+   "groups_and_order_match_nmap"
+  ],
+  "expect": [
+   "groups_and_order_match_nmap"
+  ]
+ }
+]

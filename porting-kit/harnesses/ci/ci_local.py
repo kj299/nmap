@@ -301,17 +301,37 @@ def plan(workflow, only=None):
     return out
 
 
-def run_workflow(path, repo, only=None, timeout=None, listing=False, log=sys.stdout):
+def leg_label(job_id, combo):
+    return job_id + (" [" + ", ".join(f"{k}={v}" for k, v in combo.items()) + "]" if combo else "")
+
+
+def parse_waivers(specs):
+    """`JOB:TEXT=REASON` -> {job: [(text, reason)]}. A waived step still runs; if it
+    fails, the job goes on and the step is recorded as waived, with the reason."""
+    out = {}
+    for spec in specs or []:
+        head, sep, reason = spec.partition("=")
+        job, sep2, text = head.partition(":")
+        if not (sep and sep2 and job.strip() and text.strip() and len(reason.strip()) >= 20):
+            raise ValueError(f"--waive-step {spec!r}: want JOB:TEXT=REASON, the reason "
+                             "at least 20 characters")
+        out.setdefault(job.strip(), []).append((text.strip(), reason.strip()))
+    return out
+
+
+def run_workflow(path, repo, only=None, timeout=None, listing=False, log=sys.stdout,
+                 waivers=None):
+    waivers = waivers or {}
     wf = parse_workflow(open(path, encoding="utf-8").read())
     wd_default = ((wf.get("defaults") or {}).get("run") or {}).get("working-directory") or "."
     results = []
     for job_id, idx, total, combo, job in plan(wf, only):
-        label = job_id + (" [" + ", ".join(f"{k}={v}" for k, v in combo.items()) + "]" if combo else "")
+        label = leg_label(job_id, combo)
         jwd = ((job.get("defaults") or {}).get("run") or {}).get("working-directory") or wd_default
         ctx = {"matrix": combo, "strategy": {"job-total": total, "job-index": idx}, "steps": {},
                "listing": listing}
         res = {"job": label, "status": "PASS", "ran": 0, "setup_skipped": 0, "not_run": [],
-               "unresolved": set(), "seconds": 0.0, "notes": matrix_legs(job)[1]}
+               "waived": [], "unresolved": set(), "seconds": 0.0, "notes": matrix_legs(job)[1]}
         env_base = dict(os.environ)
         for scope in (wf.get("env") or {}, job.get("env") or {}):
             env_base.update({k: substitute(v, ctx, res["unresolved"]) for k, v in scope.items()})
@@ -363,7 +383,11 @@ def run_workflow(path, repo, only=None, timeout=None, listing=False, log=sys.std
                         outputs[k] = v
                 ctx["steps"][step["id"]] = outputs
             os.unlink(env["GITHUB_OUTPUT"])
-            if rc != 0 and not step.get("continue-on-error"):
+            waiver = next((r for t, r in waivers.get(job_id, []) if t in cmd), None)
+            if rc != 0 and waiver:
+                res["waived"].append(f"step {n} '{name}' exited {rc}: {waiver}")
+                print(f"     WAIVED (exited {rc}): {waiver}", file=log)
+            elif rc != 0 and not step.get("continue-on-error"):
                 res["status"] = f"FAIL (step {n} '{name}' exited {rc})"
                 break
         if listing:
@@ -380,13 +404,16 @@ def summary(paths, results, repo, only, listing):
              f"  at {head}{' + UNCOMMITTED CHANGES' if dirty else ''}"
              f", {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime())}"]
     if only:
-        lines.append(f"  SCOPED to job(s) {', '.join(only)}: an inner loop, NOT a substitute for CI")
+        lines.append(f"  SCOPED to job(s) {', '.join(only)}: NOT a substitute for CI until "
+                     "--check-record shows every job of the workflow passed on this tree")
     w = max((len(r["job"]) for r in results), default=10)
     for r in results:
         lines.append(f"  {r['job'].ljust(w)}  {r['status']}  ({r['ran']} step(s) run, "
                      f"{r['setup_skipped']} set-up action(s) assumed, {r['seconds']:.0f}s)")
         for x in r["not_run"]:
             lines.append(f"  {''.ljust(w)}    not run: {x}")
+        for x in r.get("waived", []):
+            lines.append(f"  {''.ljust(w)}    WAIVED, failed here: {x}")
         if r["unresolved"]:
             lines.append(f"  {''.ljust(w)}    resolved to empty: {', '.join(r['unresolved'])}")
         for x in r["notes"]:
@@ -410,48 +437,75 @@ def _record_path(repo):
 
 
 def write_record(repo, paths, results):
-    """Record an unscoped run of a clean tree. A scoped or dirty run records nothing:
-    it is not what would be pushed, or not all of what CI would have run."""
+    """Merge these job legs into the record for HEAD's tree. A dirty tree records
+    nothing: it is not what would be pushed.
+
+    The record is per job leg, so a pass can be built up over several runs. One
+    unscoped run of nmap's workflow did not fit in the longest background run its
+    container allows (LESSONS #058); a record that only an unscoped run could
+    write would never have been written. Every job is still run whole."""
     path, tree = _record_path(repo)
     if path is None or _git(repo, "status", "--porcelain", "--untracked-files=no"):
         return None
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    rec = {"tree": tree, "head": _git(repo, "rev-parse", "HEAD"),
-           "when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-           "workflows": [os.path.basename(p) for p in paths],
-           "jobs": [{"job": r["job"], "status": r["status"], "not_run": r["not_run"]}
-                    for r in results]}
+    rec = {"tree": tree, "jobs": {}}
+    if os.path.exists(path):
+        with open(path) as f:
+            old = json.load(f)
+        if isinstance(old.get("jobs"), dict):
+            rec = old
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for r in results:
+        rec["jobs"][r["job"]] = {"status": r["status"], "not_run": r["not_run"],
+                                 "waived": r.get("waived", []), "when": now}
+    rec["head"] = _git(repo, "rev-parse", "HEAD")
     with open(path, "w") as f:
         json.dump(rec, f, indent=1)
     return path
 
 
-def check_record(repo, log=sys.stdout):
-    """0 when an unscoped ci-local run of HEAD's tree is on record and passed.
+def default_workflows(repo):
+    d = os.path.join(repo, ".github", "workflows")
+    return sorted(os.path.join(d, f) for f in (os.listdir(d) if os.path.isdir(d) else [])
+                  if f.endswith((".yml", ".yaml")))
+
+
+def check_record(repo, log=sys.stdout, workflows=None):
+    """0 when every job leg of the workflows has passed on HEAD's tree, per the record.
 
     The rule "no check run on the head SHA means no gate ran" (LESSONS #042) was
     prose, and nmap's IPv6-scans milestone merged five PRs past it with neither a
     check run nor a ci-local summary (LESSONS #052). This is the same rule as a
     command a pre-push hook can run (`hooks/pre-push`)."""
     path, tree = _record_path(repo)
-    if path is None or not os.path.exists(path):
-        print(f"ci-local: NO RECORD for tree {tree or '?'}: no gate has run on what HEAD "
-              "holds. Run `make -C porting-kit ci-local` on a clean tree.", file=log)
-        return 1
-    with open(path) as f:
-        rec = json.load(f)
-    failed = [j["job"] for j in rec["jobs"] if j["status"] != "PASS"]
-    gaps = [(j["job"], x) for j in rec["jobs"] for x in j["not_run"]]
-    print(f"ci-local: record of {rec['when']} for tree {tree[:12]}: "
-          f"{len(rec['jobs']) - len(failed)}/{len(rec['jobs'])} job leg(s) passed", file=log)
-    for job in failed:
-        print(f"  FAILED: {job}", file=log)
-    for job, x in gaps:
-        print(f"  never run here ({job}): {x}", file=log)
-    if gaps:
-        print("  The steps above have run nowhere unless CI ran: say so where the "
+    rec = {"jobs": {}}
+    if path is not None and os.path.exists(path):
+        with open(path) as f:
+            rec = json.load(f)
+    want = []
+    for wf_path in workflows or default_workflows(repo):
+        wf = parse_workflow(open(wf_path, encoding="utf-8").read())
+        want += [leg_label(job_id, combo) for job_id, _i, _n, combo, _job in plan(wf)]
+    jobs = rec.get("jobs") if isinstance(rec.get("jobs"), dict) else {}
+    missing = [j for j in want if j not in jobs]
+    failed = [j for j in want if j in jobs and jobs[j]["status"] != "PASS"]
+    passed = len(want) - len(missing) - len(failed)
+    print(f"ci-local: tree {(tree or '?')[:12]}: {passed}/{len(want)} job leg(s) passed"
+          + ("" if want else " (no workflow found)"), file=log)
+    for j in missing:
+        print(f"  NO RECORD: {j} (run `ci_local.py --job {j.split(' ')[0]} <workflow>`)", file=log)
+    for j in failed:
+        print(f"  FAILED: {j}: {jobs[j]['status']}", file=log)
+    gaps = [(j, x) for j in want if j in jobs for x in jobs[j]["not_run"]]
+    waived = [(j, x) for j in want if j in jobs for x in jobs[j].get("waived", [])]
+    for j, x in gaps:
+        print(f"  never run here ({j}): {x}", file=log)
+    for j, x in waived:
+        print(f"  WAIVED, failed here ({j}): {x}", file=log)
+    if gaps or waived:
+        print("  The steps above have passed nowhere unless CI ran: say so where the "
               "change is described, and do not call them gates until they have.", file=log)
-    return 1 if failed else 0
+    return 1 if (missing or failed or not want) else 0
 
 
 def main(argv=None):
@@ -464,12 +518,24 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--check-record", action="store_true",
-                    help="exit 0 only if an unscoped, passing run of HEAD's tree is on record")
+                    help="exit 0 only if every job of the workflows (default: all in "
+                         ".github/workflows) has passed on HEAD's tree, per the record")
+    ap.add_argument("--waive-step", action="append", default=[], metavar="JOB:TEXT=REASON",
+                    help="a step of JOB whose command contains TEXT may fail here: the job "
+                         "goes on, and the step is recorded and reported as waived. For a "
+                         "step this machine cannot run (no IPv6, no VM), never for a "
+                         "failure to be looked at later")
     args = ap.parse_args(argv)
     if args.self_test:
         return _self_test()
     if args.check_record:
-        return check_record(args.repo or _git(".", "rev-parse", "--show-toplevel") or ".")
+        return check_record(args.repo or _git(".", "rev-parse", "--show-toplevel") or ".",
+                            workflows=args.workflows or None)
+    try:
+        waivers = parse_waivers(args.waive_step)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     if not args.workflows:
         ap.print_usage(sys.stderr)
         print("error: give at least one workflow file, or --self-test", file=sys.stderr)
@@ -479,7 +545,8 @@ def main(argv=None):
         repo = args.repo or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(wf))))
         try:
             results += run_workflow(wf, repo, args.job or None, args.timeout, args.list,
-                                    log=sys.stderr if args.json else sys.stdout)
+                                    log=sys.stderr if args.json else sys.stdout,
+                                    waivers=waivers)
         except (OSError, ValueError) as e:
             print(f"error: {wf}: {e}", file=sys.stderr)
             return 2
@@ -488,7 +555,7 @@ def main(argv=None):
         print(json.dumps(results, indent=2))
     else:
         print("\n" + summary(args.workflows, results, repo, args.job, args.list))
-    if not args.list and not args.job:
+    if not args.list:
         rec = write_record(repo, args.workflows, results)
         print(f"  recorded: {rec}" if rec else
               "  NOT recorded (uncommitted changes, or not a git checkout)",
@@ -620,20 +687,40 @@ def _self_test():
             git("add", ".github"); git("commit", "-q", "-m", "one")
             sink = io.StringIO()
             check("no record: no gate ran on this tree", check_record(root, sink) == 1
-                  and "NO RECORD" in sink.getvalue())
+                  and sink.getvalue().count("NO RECORD") == 5)
             passing = [r for r in res.values() if r["status"] == "PASS"]
-            check("an unscoped run of a clean tree is recorded",
-                  write_record(root, [path], passing) is not None)
+            check("a run of a clean tree is recorded",
+                  write_record(root, [path], passing[:1]) is not None)
             sink = io.StringIO()
-            check("a passing record satisfies the check, and names what never ran",
-                  check_record(root, sink) == 0 and "never run here" in sink.getvalue())
+            check("one job on record is not the workflow",
+                  check_record(root, sink) == 1 and "1/5 job leg(s) passed" in sink.getvalue())
             write_record(root, [path], list(res.values()))
-            check("a failing record does not", check_record(root, io.StringIO()) == 1)
+            sink = io.StringIO()
+            check("a failing job fails the check, and what never ran is named",
+                  check_record(root, sink) == 1 and "FAILED: broken" in sink.getvalue()
+                  and "never run here" in sink.getvalue())
+            fixed = dict(res["broken"], status="PASS",
+                         waived=["step 1 'false' exited 1: this box cannot run it at all"])
+            write_record(root, [path], [fixed])
+            sink = io.StringIO()
+            check("the record is built up job by job; a waiver passes and is reported",
+                  check_record(root, sink) == 0 and "WAIVED, failed here" in sink.getvalue())
             open(os.path.join(root, "sub", "new.txt"), "w").write("x")
             git("add", "sub/new.txt"); git("commit", "-q", "-m", "two")
             check("a new commit has no record", check_record(root, io.StringIO()) == 1)
             open(os.path.join(root, ".github", "workflows", "t.yml"), "a").write("# edit\n")
             check("a dirty tree is not recorded", write_record(root, [path], passing) is None)
+        log = io.StringIO()
+        w = parse_waivers(["broken:false=this box cannot run the false command"])
+        wres = {r["job"]: r for r in run_workflow(path, root, only=["broken"], log=log, waivers=w)}
+        check("a waived step may fail: the job goes on and says so",
+              wres["broken"]["status"] == "PASS" and len(wres["broken"]["waived"]) == 1
+              and read("unreachable.txt") == "unreachable")
+        try:
+            parse_waivers(["broken:false=too short"])
+            check("a waiver needs a reason", False)
+        except ValueError:
+            pass
 
     print("\nself-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1

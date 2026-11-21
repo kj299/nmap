@@ -63,7 +63,7 @@ repo-root `porting-kit/`; adjust the paths inside if you vendor it elsewhere).
 | `harnesses/progress/progress.py` | per-module status table incl. safety gates (`init`, `set`, `show`, `ingest`); `drift` fails on an untracked shipped module; `exempt` records a reasoned gate exemption, `cover` maps modules to fuzz targets, `stamp` records a source digest at a tick, and `audit` fails on an unreasoned exemption, a coverage claim naming a missing target, or (`--src`) a stamped tick whose code changed | tracking + **CI** |
 | `harnesses/ci/porting-ci.template.yml` | wires all gates into GitHub Actions | — |
 | `harnesses/ci/ci_local.py` (`make ci-local`) | runs every workflow job locally, unscoped, when CI did not run on the head SHA | merge |
-| `harnesses/ci/ci_local.py --check-record`, `hooks/pre-push` | whether an unscoped local run of HEAD's tree is on record, and which steps have run nowhere | push |
+| `harnesses/ci/ci_local.py --check-record`, `hooks/pre-push` | whether every workflow job has passed locally on HEAD's tree, and which steps were waived or have run nowhere | push |
 | `harnesses/sabotage/sabotage.py` | breaks the port one mutation at a time and reports which named test caught each; a timeout is never a catch | review |
 
 ```

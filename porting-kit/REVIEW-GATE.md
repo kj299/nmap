@@ -84,9 +84,13 @@ optional is skipped exactly when it matters.
   The whole of M6.6 merged with zero check runs while its local stand-ins were
   scoped. That is LESSONS #030's trap, and the gate the kit trusted most never
   ran.
-  `ci_local.py` records each unscoped run of a clean tree under `.git/ci-local/`,
-  and `ci_local.py --check-record` (or `hooks/pre-push`, which runs it) answers
-  whether HEAD's tree has one. The prose rule above was passed a second time:
+  `ci_local.py` records each job it runs on a clean tree under `.git/ci-local/`,
+  and `ci_local.py --check-record` (or `hooks/pre-push`, which runs it) passes
+  only when every job of every workflow has passed on HEAD's tree. The record may
+  be built job by job (`--job`), because one run of everything may not fit where
+  the work is done; a job is never cut down. A step the machine cannot run takes
+  `--waive-step JOB:TEXT=REASON`, and is then reported as waived, not as passed
+  (LESSONS #058). The prose rule above was passed a second time:
   five IPv6-scans PRs merged with neither a check run nor a summary
   (LESSONS #052). **A gate that exists only in CI has run nowhere** until CI
   runs. Name each such gate as unrun wherever the change is described.

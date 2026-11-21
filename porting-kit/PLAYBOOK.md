@@ -216,9 +216,9 @@ documented — the gate makes the gap a build failure); tracing added reactively
 re-run the full clippy sweep whenever the MSRV moves (LESSONS #036).
 
 **No check run on the head SHA means no gate ran** (LESSONS #042, #052). When CI
-cannot run, `make -C porting-kit ci-local` runs every job unscoped and records the
-tree; `hooks/pre-push` refuses a push with no record. A gate that exists only in
-CI has **run nowhere** until CI runs: list it as unrun, never as a gate.
+cannot run, `make -C porting-kit ci-local` runs every job and records each on the
+tree, job by job if one run will not fit (#058); `hooks/pre-push` refuses a push
+with a job unrecorded. A gate only CI runs has **run nowhere**: list it as unrun.
 
 **Sabotage is a measurement with failure modes** (LESSONS #038, #044, #054;
 [`REVIEW-GATE.md`](REVIEW-GATE.md)). `harnesses/sabotage/sabotage.py` restores from

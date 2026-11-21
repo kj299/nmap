@@ -16,7 +16,8 @@ oracle is at gate 2 of 6, not done.
    `make -C porting-kit ci-local` has run every workflow job unscoped and its summary is
    attached; a scoped local run (`-p`, a filter, changed targets only) does not count
    (LESSONS #030). `python3 porting-kit/harnesses/ci/ci_local.py --check-record` answers
-   it for HEAD's tree and lists the steps that have run nowhere (LESSONS #052). Also
+   it for HEAD's tree, job by job, and lists the steps that were waived or have run
+   nowhere (LESSONS #052, #058). Also
    report **reviewed**: `progress.py --file <f> audit --src crates --require-reviewed
    <prefix>` fails on a module with no recorded review, or changed since it (LESSONS #053).
 1. **Unsafe contained + documented** (toolchain-free hard gate):

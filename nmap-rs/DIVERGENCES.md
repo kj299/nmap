@@ -4660,10 +4660,11 @@ of ten points is caught:
       sets does.
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
-      7.94 scans them after the command line's targets: once those are spent,
+      7.94 draws them after the command line's targets: once those are spent,
       its target source reads the queue (`next_expression`, `targets.cc`). So a
-      prerule's additions share the first group if it has room, and a hostrule's
-      come in later groups. `core::hostgroup` asks its source again whenever a
+      prerule's additions share the first group if it has room, a hostrule's
+      come in later groups, and a command-line target deferred from a batch is
+      scanned after the additions drawn into it. `core::hostgroup` asks its source again whenever a
       group wants a target and the batch is spent, for that reason, so the
       queue can be the tail of the source
       (`a_source_that_resumes_adds_groups`).

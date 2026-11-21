@@ -174,8 +174,11 @@ Nmap done: 1 IP address (1 host up) scanned in 1.06 seconds
   (`nse-no-host-timeout`).
 - **Output:** `core::output` renders a whole `ScanResults` at once, down hosts
   first (`report_order`). `Host` has no "timed out" state.
-- **Not ported, and out of scope here:** host discovery (so no ping batch and no
-  discovery time to exclude), `--randomize-hosts`, `-iR`, traceroute, idle and
+- **Not ported, and out of scope here:** host discovery other than the IPv6 ND
+  ping, which the raw engine runs per route-group after grouping (so no ping
+  batch; *corrected at step a's fourth review, this said there was no discovery
+  time to exclude*: whether the ND ping's time is charged to the host clock is
+  step c's to settle, and 7.94 charges none, §2.2), `--randomize-hosts`, `-iR`, traceroute, idle and
   FTP-bounce scans, and the `-v` progress lines ("Initiating…", "Completed…").
 
 ## 4. Threat model delta
@@ -416,7 +419,7 @@ grouping logic: 119 further random cases against 7.94 showed no difference.
 
 1. **The fix for "asked again after its end" was the wrong way round.** The fix
    round fused the source. 7.94's source resumes on purpose: when the command
-   line's targets are spent it reads the targets scripts have added, and scans
+   line's targets are spent it reads the targets scripts have added, and draws
    them after those (*measured*: a hostrule script adding two hosts to a run of
    one gives "Scanning 127.0.0.1" and then "Scanning 2 hosts"). The fuse is undone,
    the module says why it asks again, and `nse-new-targets-not-scanned` names
@@ -466,10 +469,24 @@ against 7.94, traced poll for poll against an instrumented build.
    said "the rest match". It now compares the cases that finished with the
    golden's lines for them.
 4. The sentence the second round corrected ("no host discovery") survived in
-   the generator's header and in one older ledger entry. Both corrected.
+   the generator's header and in one older ledger entry. Both corrected. (A
+   third copy, in §3 of this document, was found in the fourth round.)
 5. The note on `box` named one of the inputs that trip 7.94's assertion; a
    negative maximum does too.
 6. The second round's item 3 above had the stale line's position backwards.
+
+**The fourth round**, on the third fix round, confirmed two, both sentences. It
+could not make the generator's `--check` give a wrong answer in 504
+combinations of doctored goldens, modes and timed-out cases.
+
+1. "Script-added targets are scanned after the command line's targets" is
+   false when a command-line target is deferred: it waits for the next batch,
+   behind the additions (*measured*: a prerule adding two loopback hosts to
+   `127.0.0.1 192.0.2.2 127.0.0.2` under `-sS` gives a group of four and then
+   192.0.2.2). The port does the same. The three sentences now say "drawn
+   after".
+2. §3's "host discovery ... no discovery time to exclude" was the third copy
+   of the sentence above. Corrected there.
 
 **Divergences.** Every target takes a place in a group here, and in 7.94 a down
 host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`

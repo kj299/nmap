@@ -436,7 +436,13 @@ def _record_path(repo):
     return os.path.join(gitdir, "ci-local", tree + ".json"), tree
 
 
-def write_record(repo, paths, results):
+def tree_state(repo):
+    """(HEAD's tree, whether tracked files differ from it): what a run is a run of."""
+    return (_git(repo, "rev-parse", "HEAD^{tree}"),
+            bool(_git(repo, "status", "--porcelain", "--untracked-files=no")))
+
+
+def write_record(repo, paths, results, started=None):
     """Merge these job legs into the record for HEAD's tree. A dirty tree records
     nothing: it is not what would be pushed.
 
@@ -446,6 +452,11 @@ def write_record(repo, paths, results):
     write would never have been written. Every job is still run whole."""
     path, tree = _record_path(repo)
     if path is None or _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        return None
+    # `started` is tree_state() from before the first step. A job takes minutes to
+    # hours; a commit made meanwhile would otherwise be vouched for by a run that
+    # compiled its parent.
+    if started is not None and started != (tree, False):
         return None
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rec = {"tree": tree, "jobs": {}}
@@ -541,6 +552,8 @@ def main(argv=None):
         print("error: give at least one workflow file, or --self-test", file=sys.stderr)
         return 2
     results = []
+    started = tree_state(args.repo or os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(args.workflows[0])))))
     for wf in args.workflows:
         repo = args.repo or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(wf))))
         try:
@@ -556,10 +569,10 @@ def main(argv=None):
     else:
         print("\n" + summary(args.workflows, results, repo, args.job, args.list))
     if not args.list:
-        rec = write_record(repo, args.workflows, results)
+        rec = write_record(repo, args.workflows, results, started)
         print(f"  recorded: {rec}" if rec else
-              "  NOT recorded (uncommitted changes, or not a git checkout)",
-              file=sys.stderr)
+              "  NOT recorded (uncommitted changes when the run began or ended, a commit "
+              "made during it, or not a git checkout)", file=sys.stderr)
     return 0 if args.list or all(r["status"] == "PASS" for r in results) else 1
 
 
@@ -708,6 +721,12 @@ def _self_test():
             open(os.path.join(root, "sub", "new.txt"), "w").write("x")
             git("add", "sub/new.txt"); git("commit", "-q", "-m", "two")
             check("a new commit has no record", check_record(root, io.StringIO()) == 1)
+            here = tree_state(root)
+            check("a run that began on another tree, or on a dirty one, is not recorded",
+                  write_record(root, [path], passing[:1], started=("0" * 40, False)) is None
+                  and write_record(root, [path], passing[:1], started=(here[0], True)) is None
+                  and check_record(root, io.StringIO()) == 1
+                  and write_record(root, [path], passing[:1], started=here) is not None)
             open(os.path.join(root, ".github", "workflows", "t.yml"), "a").write("# edit\n")
             check("a dirty tree is not recorded", write_record(root, [path], passing) is None)
         log = io.StringIO()

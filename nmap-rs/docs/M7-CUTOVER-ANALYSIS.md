@@ -889,3 +889,20 @@ the seventeenth round's 400-run comparison) and three, all low:
 3. The main loop was cited as `nmap.cc:2080-2330` and the write loop as
    `:2292-2330`; they are `:2104-2346` and `:2293-2335`.
 
+**The nineteenth review** found no code defect (the 61 golden cases, the root
+CLI tests, the IPv6 reproduction, a multi-group `-oG` run against 7.94) and
+three, all low:
+
+1. Under `-S 192.0.2.2`, 7.94 sends loopback targets out `eth0` by the
+   gateway, so it can split groups the port keeps together, the reverse of
+   the case `spoof-source-groups-by-route` recorded; and the entry said
+   `route_dst` keeps the loopback, which it skips. Rewritten with both
+   directions, 7.94's routes measured with `--route-dst`.
+2. The ninth round's ledger line that 7.94's `fatal` closes an `-oX` a capture
+   failure leaves open was wrong: that path is `netutil_fatal`, which writes
+   only to stderr, so 7.94 leaves it unclosed too, as `main.rs` says. And a
+   failed write is no fatal error in 7.94. Corrected.
+3. CI's progress audit fails on the branch while `core::hostgroup`'s review
+   stamp waits for a clean round. That is the gate doing its job: the stamp
+   is set, and the branch pushed, after a round confirms nothing.
+

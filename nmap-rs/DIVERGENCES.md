@@ -2833,23 +2833,31 @@ removed: that one was theatre, this one is unobservable.
       way the run is refused; only which message comes differs.
 
 - [ ] `spoof-source-groups-by-route` (`sys::route::GroupRouter::key`, M7
-      cutover step b) — **under `-S` without `-e`, the port's host groups
-      still split by each target's routed interface; 7.94's do not.** 7.94
-      sets the device to the one holding the `-S` address
-      (`ipaddr2devname`, `nmap.cc:1734-1737`), and `route_dst` then keeps only
-      that device's routes and loopback (`libnetutil/netutil.cc:2451`,
-      `:2473-2475`), so every
-      target has the same interface and `target_needs_new_hostgroup`'s
-      interface test (`targets.cc:291-295`) never splits a group. The port's
-      key takes `-S`'s address as the source but the interface its own
-      routing picks per target, which is the interface its probes then take
+      cutover step b) — **under `-S` without `-e`, the port groups by each
+      target's own route; 7.94 sends every target out the device holding the
+      `-S` address, so their groups differ in both directions.** 7.94 sets the
+      device to the one holding `-S` (`ipaddr2devname`, `nmap.cc:1734-1737`),
+      and `route_dst` then keeps only that device's routes and skips the
+      loopback unless it is that device (`libnetutil/netutil.cc:2451`,
+      `:2473-2475`). So with `-S 192.0.2.2` even loopback targets go out `eth0`,
+      by the gateway, not direct (*measured* with `--route-dst`, which sends
+      nothing: 192.0.2.2 `eth0 … direct`, 127.0.0.1 and 127.0.0.3 `eth0
+      srcaddr 192.0.2.2 nexthop 192.0.2.1`). The port's key takes `-S`'s
+      address as the source but the interface and directness its own routing
+      picks per target, which is how its probes then go
       (`spoof-source-receives-too`): grouping follows the port's engine, not
-      7.94's. So `-sS -S 192.0.2.2 192.0.2.2 192.0.2.5` makes two groups
-      (lo, as an own address, and eth0) where 7.94 makes one. By reading; a
-      run against 7.94 needs an off-host target. Over loopback and an own
-      address the two agree (*measured*, `-S 127.0.0.1` over 127.0.0.1,
-      192.0.2.2 and 127.0.0.3: one group of 3 each). It goes when the
-      engine forces `-S`'s device as C does.
+      7.94's. Two ways it shows:
+      - the port splits where 7.94 does not: `-sS -S 192.0.2.2 192.0.2.2
+        192.0.2.5` is two groups (lo, as an own address, and eth0), one in
+        7.94, since both go out eth0 direct;
+      - 7.94 splits where the port does not: `-sS -S 192.0.2.2 127.0.0.1
+        192.0.2.2 127.0.0.3` is one group of 3 over lo in the port (reported
+        1, 2, 3, *measured*), and in 7.94, by its routes above, the loopback
+        pair off-link and 192.0.2.2 direct, so two groups reported 1, 3, 2
+        (by reading: running it would send packets off the machine).
+      With `-S 127.0.0.1` the two agree (*measured*, over 127.0.0.1,
+      192.0.2.2 and 127.0.0.3: one group of 3 each). It goes when the engine
+      forces `-S`'s device as C does.
 
 - [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
       65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a
@@ -2895,12 +2903,13 @@ removed: that one was theatre, this one is unobservable.
         an unwritable path ends the run at once (*measured*: both fail within
         a few milliseconds ahead of a pre-scan script that sleeps, and ahead
         of an exclusion name that does not resolve); a run that fails mid-way
-        leaves what it wrote, and a run that dies after a group is written
-        (a capture that fails, a write that fails) leaves an `-oX` without its
-        closing `<runstats>` and `</nmaprun>`, where 7.94's `fatal` closes the
-        open elements and writes `<runstats>` with `exit="error"`
-        (`nmap_error.cc:104-135`). No output path is ever deleted, as 7.94
-        deletes none. Any run that ends after the files are opened and before a group
+        leaves what it wrote: a capture that fails after a group is written
+        leaves an `-oX` without its closing `<runstats>` and `</nmaprun>`, as
+        7.94's does, since it ends in `netutil_fatal`, which writes only to
+        stderr (`libnetutil/netutil.cc:3337`, `:153-167`), not in `fatal`; a
+        write that fails ends the port's run there, where 7.94 goes on
+        (`output-write-failure-fatal`). No output path is ever deleted, as
+        7.94 deletes none. Any run that ends after the files are opened and before a group
         is written leaves them empty and exits 1, where before the step most
         such runs created no file. That covers every refusal from there on —
         an option pair C refuses (`-sL -p 80`, `-F -p 80`, `-p 70000`,

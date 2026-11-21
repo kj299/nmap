@@ -730,3 +730,18 @@ negative as an `int`), where the port, its batch bounded by the target cap,
 runs. `hostgroup-bound-past-int-refused` said everything else was C's; it
 now names this case, measured. It re-ran all 26 mutations: each caught.
 
+**The ninth review** reported three, all low, all by reading:
+
+1. An unroutable target in a routed run had no group key, the marker of an
+   unrouted run, so a group it started took targets of any route and it
+   could join any group. It now has a key of its own
+   (`RouteKey::unroutable`, by `GroupRouter::group_key`), with unit tests
+   in `core::hostgroup` and `sys::route` and a sabotage entry. Not
+   reproducible end to end here: every IPv4 target has the default route.
+2. A setup failure falls back per group from that group on, so a report can
+   mix raw and connect results. Ledgered in
+   `raw-scan-pcap-feature-gated-fallback`.
+3. A run that dies after a group is written leaves an unclosed `-oX`, where
+   7.94's `fatal` closes it with `exit="error"`. Ledgered in
+   `output-streamed-per-group`.
+

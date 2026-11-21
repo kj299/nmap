@@ -412,7 +412,7 @@
     "cli": {
       "unsafe_audited": {
         "files": 3,
-        "sha256": "dec5ac2f8281d39744f1e1ad988da41a5e3f9b318b76566e2b403099bb1b7f09"
+        "sha256": "3a97b07829dceaa4594e3afb448b53e0fd8479a83f250b01b7e4e4e67a638d04"
       }
     },
     "core::build": {
@@ -468,15 +468,15 @@
     "core::hostgroup": {
       "differential": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
       },
       "ported": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
       },
       "reviewed": {
         "by": "six independent review rounds, 2026-11-21: 10, 4, 6, 2, 1, 0 findings confirmed; the last, on 553c059, confirmed nothing",
@@ -485,11 +485,11 @@
       },
       "sanitized": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
       }
     },
     "core::icmp_quote": {

@@ -509,5 +509,24 @@
     "expect": [
       "the_connect_fallback_is_announced_once"
     ]
+  },
+  {
+    "name": "an unroutable target shares a routed key",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            iface: String::new(),\n            source: match target {\n                IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),\n                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),\n            },\n            direct: false,",
+    "new": "            iface: \"lo\".into(),\n            source: match target {\n                IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),\n                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),\n            },\n            direct: true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::an_unroutable_target_shapes_no_routed_group"
+    ]
   }
 ]

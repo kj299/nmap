@@ -429,9 +429,18 @@ impl GroupRouter {
         }
     }
 
+    /// The key a target of a routed run is grouped by: its route's, or, with
+    /// no route, [`RouteKey::unroutable`](nmap_core::hostgroup::RouteKey::unroutable),
+    /// never no key, which would lift the routing rule for its whole group.
+    /// Such a target fails at scan time (`raw-scan-unroutable-target-reported`).
+    #[must_use]
+    pub fn group_key(&self, target: std::net::IpAddr) -> nmap_core::hostgroup::RouteKey {
+        self.key(target)
+            .unwrap_or_else(|| nmap_core::hostgroup::RouteKey::unroutable(target))
+    }
+
     /// The key a routed host group shares, or `None` for a target with no
-    /// route. Such a target fails at scan time, as it does today; in a group it
-    /// is unrestricted, like an unrouted run's targets.
+    /// route.
     #[must_use]
     pub fn key(&self, target: std::net::IpAddr) -> Option<nmap_core::hostgroup::RouteKey> {
         use nmap_core::hostgroup::RouteKey;
@@ -650,6 +659,15 @@ mod tests {
         no_gw[0].gateway = None;
         let r = GroupRouter::from_interfaces(no_gw, None, None);
         assert_eq!(r.key(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))), None);
+        // Grouped, it has the unroutable key, not none.
+        assert_eq!(
+            r.group_key(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            RouteKey::unroutable(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+        );
+        assert_eq!(
+            r.group_key(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+            r.key(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))).unwrap()
+        );
     }
 
     #[cfg_attr(miri, ignore = "reads /dev/urandom")]

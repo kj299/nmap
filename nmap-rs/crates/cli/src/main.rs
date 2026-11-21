@@ -394,7 +394,7 @@ async fn main() -> ExitCode {
             .chain(source)
             .map(|(address, name)| nmap_core::hostgroup::Member {
                 address,
-                route: router.as_ref().and_then(|r| r.key(address)),
+                route: router.as_ref().map(|r| r.group_key(address)),
                 item: name,
             });
 

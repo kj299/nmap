@@ -132,6 +132,27 @@ pub struct RouteKey {
     pub direct: bool,
 }
 
+impl RouteKey {
+    /// The key of a routed run's target that has no route. 7.94 drops such a
+    /// target before grouping (`targets.cc:409-413`), so it shapes no group;
+    /// the port keeps it, to report it (`raw-scan-unroutable-target-reported`).
+    /// No interface is named "", so this key matches no routed target's:
+    /// unroutable targets share a group with each other alone, and a group
+    /// they start keeps the routing rule. (`None` would mean "not routed", and
+    /// lift the rule for the whole group.)
+    #[must_use]
+    pub fn unroutable(target: IpAddr) -> Self {
+        RouteKey {
+            iface: String::new(),
+            source: match target {
+                IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            },
+            direct: false,
+        }
+    }
+}
+
 /// One target of the run, with what grouping reads of it and whatever the caller
 /// carries along (`item`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,6 +465,40 @@ mod tests {
         };
         let got = groups(vec![member(1, a.clone()), v6, member(2, a)], sizing());
         assert_eq!(got, [vec![1, 2], vec![6]]);
+    }
+
+    /// In a routed run, a target with no route neither joins a routed group nor
+    /// lifts the rule for one it starts: the unroutable ones group alone.
+    #[test]
+    fn an_unroutable_target_shapes_no_routed_group() {
+        let a = lo([127, 0, 0, 1]);
+        let eth = Some(RouteKey {
+            iface: "eth0".into(),
+            ..a.clone().unwrap()
+        });
+        let none = |last: u8| {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, last));
+            Member {
+                address: addr,
+                route: Some(RouteKey::unroutable(addr)),
+                item: last,
+            }
+        };
+        // Starting a group: the lo and eth0 targets still split from it and
+        // from each other.
+        let got = groups(
+            vec![
+                none(1),
+                member(2, a.clone()),
+                member(3, eth.clone()),
+                none(4),
+            ],
+            sizing(),
+        );
+        assert_eq!(got, [vec![1, 4], vec![2], vec![3]]);
+        // Inside a routed group: it waits, as any other route does.
+        let got = groups(vec![member(1, a.clone()), none(2), member(3, a)], sizing());
+        assert_eq!(got, [vec![1, 3], vec![2]]);
     }
 
     /// A scan that does not route its targets has no such rule: mixed sources and

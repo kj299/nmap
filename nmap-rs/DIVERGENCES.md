@@ -286,6 +286,11 @@ narrower *rendering* of the same result.
       specification="X" status="skipped" reason="invalid"/>` to the XML
       (`log_bogus_target`, `output.cc:1305`). The port reports the target: down, or up
       under `-Pn`, with no ports. Both families. *(Found at IPv6 scans step e.)*
+      Since M7 cutover step b such a target is grouped under a key of its own
+      (`RouteKey::unroutable`), with the other unroutable ones, so it shapes no
+      routed group, as 7.94's skipped target shapes none. Before the ninth
+      review of step b it had no key, which lifted the routing rule for any
+      group it started and let it join any group.
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans
@@ -775,6 +780,13 @@ the driver-specific choices.
       hard-fail" posture from the plan. nmap similarly needs libpcap and root for `-sS`.
       A capture that fails once the scan is under way is not a setup failure: the run
       ends, as 7.94's does (`ndp-exchange-bounded-and-fails-loudly`).
+      Since M7 cutover step b the fallback is decided per host group and then
+      kept: a setup failure in one group (an interface that will not open, a
+      framing the sender lacks) makes that group and every later one a connect
+      scan, while the groups before stayed raw. So one report can hold hosts
+      scanned both ways (`syn-ack` beside `conn-refused`) under a single
+      "falling back" notice that does not say which. Before the step the run was
+      one scan and fell back whole. By reading; this host's interfaces all open.
 
 ## Milestone 4 — UDP scan driver (`-sU`)
 
@@ -2826,8 +2838,12 @@ removed: that one was theatre, this one is unobservable.
         an unwritable path ends the run at once (*measured*: both fail within
         a few milliseconds ahead of a pre-scan script that sleeps, and ahead
         of an exclusion name that does not resolve); a run that fails mid-way
-        leaves what it wrote. No output path is ever deleted, as 7.94 deletes
-        none. Any run that ends after the files are opened and before a group
+        leaves what it wrote, and a run that dies after a group is written
+        (a capture that fails, a write that fails) leaves an `-oX` without its
+        closing `<runstats>` and `</nmaprun>`, where 7.94's `fatal` closes the
+        open elements and writes `<runstats>` with `exit="error"`
+        (`nmap_error.cc:104-135`). No output path is ever deleted, as 7.94
+        deletes none. Any run that ends after the files are opened and before a group
         is written leaves them empty and exits 1, where before the step most
         such runs created no file. That covers every refusal from there on —
         an option pair C refuses (`-sL -p 80`, `-F -p 80`, `-p 70000`,

@@ -417,16 +417,16 @@ grouping logic: 119 further random cases against 7.94 showed no difference.
 1. **The fix for "asked again after its end" was the wrong way round.** The fix
    round fused the source. 7.94's source resumes on purpose: when the command
    line's targets are spent it reads the targets scripts have added, and scans
-   them in later groups (*measured*: a script adding two hosts to a run of one
-   gives "Scanning 127.0.0.1" and then "Scanning 2 hosts"). The fuse is undone,
+   them after those (*measured*: a hostrule script adding two hosts to a run of
+   one gives "Scanning 127.0.0.1" and then "Scanning 2 hosts"). The fuse is undone,
    the module says why it asks again, and `nse-new-targets-not-scanned` names
    this as the way in.
 2. **The fuse's unit test could not fail.** Without the fuse it never returned,
    and a hang is not a catch. Its replacement adds targets between two groups,
    as a script would, and a mutation that fuses the source fails it by name.
 3. **`--check` had stopped comparing the golden as a file.** Rewritten to
-   compare case by case, it accepted a stale second line for a case, and any
-   order. It compares the whole file again, and refuses an `--only` that
+   compare case by case, it accepted a stale line ahead of the right one for a
+   case, a duplicate line, and any order. It compares the whole file again, and refuses an `--only` that
    matches no case.
 4. Two sentences were contradicted by the same commit: "the port sends no
    host-discovery probes" (it sends the IPv6 ND ping, after grouping), and
@@ -443,11 +443,33 @@ grouping logic: 119 further random cases against 7.94 showed no difference.
 - **The caller decides `route`.** `Some` when root and `RawScan()` holds, so
   `-sT -O` is routed; and `RouteKey::source` is `-S`'s address when given
   (measured: `-sS -S 127.0.0.1 -e lo` over `l1, own, l2` is one group of 3).
-- **Bounds above `i32::MAX`.** 7.94 aborts on `--max-hostgroup 2147483648`
-  (an assertion in `box`). The CLI should refuse such a value with a message.
-- **Script-added targets.** The module asks its source again for every group.
-  Whether step b feeds it the new-targets queue, or leaves
-  `nse-new-targets-not-scanned` open, is decided there.
+- **Bounds that read negative as a 32-bit `int`.** 7.94 aborts on
+  `--max-hostgroup 2147483648`, and on `-1` (an assertion in `box`;
+  *measured*). The CLI should refuse such a value with a message.
+- **Script-added targets.** The module asks its source again whenever a group
+  wants a target and the batch is spent. Whether step b feeds it the
+  new-targets queue, or leaves `nse-new-targets-not-scanned` open, is decided
+  there. If it does: 7.94 runs its pre-scan scripts before the first group is
+  formed, a prerule's additions share that group when it has room, and a run
+  may have no command-line target at all (*measured in the third round*).
+
+**The third round**, on the second fix round, confirmed six, all low: five
+sentences that were not quite true and one hole in the generator. Nothing in
+the grouping logic, on 500 further random cases with script-added targets
+against 7.94, traced poll for poll against an instrumented build.
+
+1. "Script-added targets are scanned in later groups" is false for a prerule's
+   additions, which share the first group when it has room. Reworded.
+2. "Asked again once for every group" was not the rule: the source is asked
+   whenever a group wants a target and the batch is spent. Reworded.
+3. `--check` skipped its whole-file comparison when any case timed out, and
+   said "the rest match". It now compares the cases that finished with the
+   golden's lines for them.
+4. The sentence the second round corrected ("no host discovery") survived in
+   the generator's header and in one older ledger entry. Both corrected.
+5. The note on `box` named one of the inputs that trip 7.94's assertion; a
+   negative maximum does too.
+6. The second round's item 3 above had the stale line's position backwards.
 
 **Divergences.** Every target takes a place in a group here, and in 7.94 a down
 host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`

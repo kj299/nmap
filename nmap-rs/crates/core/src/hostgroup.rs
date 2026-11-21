@@ -35,12 +35,16 @@
 //!   enters here.
 //! * `--randomize-hosts` (which quadruples the batch) and `-iR` are not ported, nor
 //!   are SCTP scans, whose groups are 128 like UDP's.
-//! * The source is asked again after it has ended, once for every group, as C
-//!   asks `nexthost`. 7.94's source resumes: targets a script adds
-//!   (`target.add`, read by `next_expression` when the command line is spent)
-//!   are scanned in later groups. A source here that yields again after its end
-//!   therefore adds groups, and [`HostGroups`] may likewise yield a group after
-//!   it has yielded `None`. The port does not scan script-added targets yet
+//! * The source is asked again after it has ended: whenever a group wants a
+//!   target and the batch is spent, as `nexthost` calls `refresh_hostbatch`.
+//!   7.94's source resumes. Targets a script adds (`target.add`) are read by
+//!   `next_expression` once the command line is spent, so they follow the
+//!   command line's targets: in the same group if it has room (a prerule's
+//!   additions, made before the first group is formed), otherwise in later
+//!   groups. A source here that yields again after its end does the same, and
+//!   [`HostGroups`] may likewise yield a group after it has yielded `None`.
+//!   7.94's loop ends at the first empty group, so a caller stops at the first
+//!   `None`. The port does not scan script-added targets yet
 //!   (`nse-new-targets-not-scanned`); when it does, this is the way in. A caller
 //!   whose iterator must not be asked past its end fuses it.
 //! * There is no untrusted input here: sizes come from the command line and keys
@@ -106,10 +110,11 @@ pub fn scan_group_size(hosts_scanned: usize, s: &GroupSizing) -> usize {
         }
     }
     // C's `box(min, max, size)`. It asserts `min <= max`. 7.94 refuses a minimum
-    // above the maximum, but lets a value past `i32::MAX` wrap and trip the
-    // assertion. The caller must refuse both; if the two crossed here, this would
-    // return the maximum. The final `max(1)` is not in C: a group of none would
-    // end the run, and nothing valid reaches it.
+    // above the maximum, but a maximum that reads negative as a 32-bit `int`
+    // (`-1`, or anything from 2^31 to 2^32 - 1) passes its checks and trips the
+    // assertion. The caller must refuse both kinds; if the two crossed here,
+    // this would return the maximum. The final `max(1)` is not in C: a group of
+    // none would end the run, and nothing valid reaches it.
     let min = usize::try_from(s.min_hostgroup).unwrap_or(usize::MAX);
     let max = usize::try_from(s.max_hostgroup).unwrap_or(usize::MAX);
     size.max(min).min(max).max(1)
@@ -562,11 +567,11 @@ mod tests {
         assert_eq!(sizes, [5000, 1000]);
     }
 
-    /// The source is asked again for every group, as C asks `nexthost`: one that
-    /// ends and later has more adds groups. 7.94 does this with the targets a
-    /// script adds while a group is scanned (*measured*: `--script-args
-    /// newtargets`, a script adding two hosts to a run of one, scans "127.0.0.1"
-    /// and then "2 hosts").
+    /// The source is asked again when a group wants a target and the batch is
+    /// spent, as `nexthost` calls `refresh_hostbatch`: one that ends and later
+    /// has more adds groups. 7.94 does this with the targets a script adds while
+    /// a group is scanned (*measured*: `--script-args newtargets`, a script
+    /// adding two hosts to a run of one, scans "127.0.0.1" and then "2 hosts").
     #[test]
     fn a_source_that_resumes_adds_groups() {
         use std::cell::RefCell;

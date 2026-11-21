@@ -19,8 +19,8 @@ A token may repeat: nmap scans a repeated address in a later group.
 
 Every run passes -Pn -n, and every target is routed over the loopback, where
 nmap sends no ARP or ND ping: so every target is up, which is the only case in
-which the port, with no host discovery, can form nmap's groups
-(`hostgroup-every-target-counts`). A run in which nmap pings is refused, since
+which the port, with no verdict on a host when it forms a group, can form
+nmap's groups (`hostgroup-every-target-counts`). A run in which nmap pings is refused, since
 its "Scanning N hosts" lines would be read as groups.
 
 As root nmap routes a run's targets whenever RawScan() holds: a raw port scan,
@@ -264,10 +264,14 @@ def main():
         # Case by case above, so that one difference can end a run early. The
         # golden is still compared as a file: a line for a case the matrix no
         # longer has, a second line for one it has, or another order, differ.
-        whole = not unfinished and not (a.fail_fast and differs)
-        if whole and golden != lines and not differs:
+        # A case that did not finish has no line to compare; its golden lines are
+        # left out, and every other line still has to be there, once, in order.
+        hung = set(unfinished)
+        rest = [l for l in golden if l.split(" | ")[0] not in hung]
+        whole = not (a.fail_fast and differs)
+        if whole and rest != lines and not differs:
             differs += 1
-            print(f"DIFFERS: {a.golden} holds {len(golden)} line(s) for these "
+            print(f"DIFFERS: {a.golden} holds {len(rest)} line(s) for these "
                   f"{len(lines)} case(s), or holds them in another order")
         if differs:
             sys.exit(f"FAIL: {a.golden} differs in {differs} case(s)")

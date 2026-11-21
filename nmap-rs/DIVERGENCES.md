@@ -269,8 +269,9 @@ narrower *rendering* of the same result.
       port's `-sT` is a connect scan and does neither: it judges the host by its
       ports. So as root `-sT --reason -p 22 127.0.0.1` says "received syn-ack" where
       7.94 says "received localhost-response", and an on-link neighbor that answers
-      ND but drops TCP is down here and up, `nd-response`, under 7.94. The port sends
-      no host-discovery pings at all (IPv6 scans D1), so these verdicts belong with
+      ND but drops TCP is down here and up, `nd-response`, under 7.94. The port's
+      connect scan sends no host-discovery pings (IPv6 scans D1; the port's one
+      ping, the ND ping, belongs to its raw scans), so these verdicts belong with
       that work. For the same reason 7.94 splits such a scan's targets into host
       groups by route and holds a repeated address for a later group; whether the
       port's `-sT` gives `core::hostgroup` a route then is decided at M7 cutover
@@ -4659,10 +4660,12 @@ of ten points is caught:
       sets does.
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
-      7.94 scans them in later host groups: when the command line's targets are
-      spent, its target source reads the queue (`next_expression`,
-      `targets.cc`). `core::hostgroup` asks its source again for every group
-      for that reason, so the queue can be the tail of the source
+      7.94 scans them after the command line's targets: once those are spent,
+      its target source reads the queue (`next_expression`, `targets.cc`). So a
+      prerule's additions share the first group if it has room, and a hostrule's
+      come in later groups. `core::hostgroup` asks its source again whenever a
+      group wants a target and the batch is spent, for that reason, so the
+      queue can be the tail of the source
       (`a_source_that_resumes_adds_groups`).
 - [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
       `LOG_PLAIN`) go to the terminal as they happen, unless `-v0` or a `-`

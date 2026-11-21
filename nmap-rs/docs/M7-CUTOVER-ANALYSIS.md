@@ -1,7 +1,7 @@
 # M7 cutover gate: host groups and the host timeout — Phase 0
 
 Status: **Phase 0 written; D1–D7 decided 2026-11-21, all as recommended (§8).
-Step a (group formation) is done: §10.** C line numbers are this tree's at `b5bebc249`. Everything marked
+Step a (group formation) is done: §10. Step b (the group loop) is done: §11.** C line numbers are this tree's at `b5bebc249`. Everything marked
 *measured* was run here against the installed oracle, Nmap 7.94SVN, on loopback.
 
 ## 0. Value
@@ -517,3 +517,72 @@ differential job runs the generator's `--check` as root against the distro's
 nmap; that step has not run in CI, which has not run since 3 November, and has
 run here. #161 was merged before the review and before any local CI record;
 both are on the follow-up.
+
+## 11. Step b: the group loop
+
+The CLI now runs its pipeline per host group, as 7.94's main loop does
+(`nmap.cc:2080-2330`): it draws a group from the lazy target source through
+`core::hostgroup`, port-scans it, runs `-sV`, `-O` and the scripts' host phase
+over it, writes its hosts to the terminal and every `-o` file, flushes, and
+drops it. The pre-scan phase runs before the first group, the post-scan phase
+and the totals after the last. `--min-hostgroup` and `--max-hostgroup` are
+accepted and bind; `--host-timeout` stays refused until step f.
+
+**Commits.** b.1 checks the hostgroup bounds as 7.94's setters do, in argv order
+(`hostgroup-bound-past-int-refused`). b.2 splits each renderer into header,
+group and footer, with `RunTotals` summed across groups. b.3 adds
+`sys::route::GroupRouter`, which gives each target its `RouteKey` before the
+scan (with `-S` as the source, and IPv4 direct-connectedness). b.4 holds what a
+run loads or decides once (`RunOnce`: the probe and OS databases, the UDP
+payloads, the connect fallback). b.5 makes the targets a lazy source. b.6 is the
+loop. b.7 is the gates below.
+
+**How §10's open items were settled.**
+
+- *Who decides `route`:* the CLI, as 7.94's `RawScan()` does as root: every raw
+  scan, and a connect scan with `-O` or without `-Pn`. "Root" is "a raw socket
+  opens". A build without `pcap` routes nothing.
+- *`-S`:* the group key's source is `-S`'s address.
+- *Bounds that read negative as an `int`:* refused (b.1).
+- *A down verdict entering `HostGroups`:* not done. The port's one verdict, the
+  IPv6 ND ping's, still arrives after grouping
+  (`hostgroup-every-target-counts`).
+- *Script-added targets:* not done (`nse-new-targets-not-scanned`); the lazy
+  source is where they would join.
+
+**Gates.**
+
+- *End to end against 7.94.* `gen_hostgroup_golden.py --check --port`, as root,
+  runs the port's own binary over the matrix and reads its groups from `-d`'s
+  "host group k: n host(s)". All 61 cases of a kind the port has (`-sT`, `-sS`,
+  `-sA`, `-sU`, `-sT -O`) give 7.94's sizes and report order; the other four
+  are `-sO` and two scan types at once, which the port does not have. In CI's
+  differential job.
+- *Report text across groups.* With and without `-v`, over three groups and
+  over a routed run with a repeat, the report lines and their order match
+  7.94's. One difference predates the step: no blank line between "Host is up"
+  and the port table (`report-no-blank-line-before-port-table`).
+- *Memory.* `scale_check.py` at 4k, 16k and 64k targets: peak RSS 14.6 MiB at
+  every size (7.94: 20.9), time linear. The build before b.6 measured 19, 42
+  and 133 MiB and 0.13, 8.4 and 131 s. In CI, against the port's own bounds; the
+  harness's fit of a flat cost was fixed on the way (LESSONS #059).
+- *The quadratic was bounded, not removed.* One group of n hosts still costs
+  O(n²) in the connect engine (`connect-scan-quadratic-in-group-size`):
+  `--min-hostgroup 65536` gives 135 s at 64k hosts. Default groups keep a run
+  linear. Not fixed in this step.
+- *CLI tests.* `cli/tests/hostgroups.rs`: sizes under `--max-hostgroup`, the
+  default and `--min-hostgroup`; every format whole across groups; a group's
+  report on disk while the run goes on; and, as root, routed grouping by source
+  and repeat. In CI's privileged steps on Linux and FreeBSD.
+- *Sabotage.* 18 mutations across the six commits through `sabotage.py`
+  (`tests/differential/m7/sabotage_stepb.json`), each naming the test that must
+  catch it. The first run caught 17: dropping the service fingerprints from the
+  totals passed, because the test that compares a run written by group with
+  one written whole builds both through the same totals. It now asserts the
+  fingerprint block itself, and all 18 are caught.
+
+**What changed for an operator** (`output-streamed-per-group`): output files are
+created before the first group; "Starting" follows the pre-scan scripts; "scanned
+in" times every phase; a script's stdout lines can fall between groups. For a run
+that forms one group, each format's bytes are as before.
+

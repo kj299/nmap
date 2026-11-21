@@ -2108,6 +2108,10 @@ mod tests {
             totals.add(g);
         }
         assert_eq!(totals, RunTotals::of(&all));
+        // The fingerprint of the second group's host reaches the footer.
+        assert_eq!(totals.fingerprints.len(), 1, "{totals:?}");
+        assert!(normal_footer(&totals, &[], &meta(), false)
+            .starts_with("1 service unrecognized despite returning data."));
         let m = ScanMeta {
             verbose: 1,
             ..meta()

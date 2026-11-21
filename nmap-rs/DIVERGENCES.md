@@ -2761,6 +2761,20 @@ removed: that one was theatre, this one is unobservable.
       (`nse-os-block-after-scripts`) and the unmatched service fingerprints
       before it. Pinned by `cli/tests/hostgroups.rs`.
 
+- [ ] `connect-scan-quadratic-in-group-size` (`sys::scan::run_group`) — **the
+      connect engine's time grows as the square of its group's size.** Each
+      completion walks every host of the group to count the incomplete ones
+      and relaunch (`launch_ready`, `all_done`), so a group of n hosts costs
+      O(n²). *Measured*, `-sT -Pn -n -p 1` over one group of loopback hosts
+      (`--min-hostgroup 65536`): 8.8 s, 34 s and 135 s at 16k, 32k and 64k
+      hosts; 7.94 scans the 32k group in 5.3 s. Default groups hold at most
+      1,024 hosts for this scan, so a run is linear since M7 cutover step b
+      (0.7 s at 64k targets, 7.94 1.0 s); before it the whole run was one group
+      and took 131 s. A large `--min-hostgroup` brings the quadratic back. The
+      raw engine grows more gently over one group (2.7 s at 4k, 15 s at 16k
+      hosts, `-sS`), not measured further. Found at step b; not fixed there,
+      since the scheduler's launch order is the engine's behaviour to keep.
+
 - [ ] `report-no-blank-line-before-port-table` (`core::output`; ports
       `printportoutput`, `output.cc`) — **the normal report has no blank line
       between "Host is up" and the port table.** 7.94 prints one, on the

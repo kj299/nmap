@@ -534,7 +534,9 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    `-v` output; 29 broken variants of the C and 41 of the port are each caught,
    ten of those cases and fourteen of those variants being what its independent
    reviews added.
-   Nothing calls it until step b, and the three options stay refused; then release engineering
+   **Step b done**: the CLI scans and reports the run group by group, the
+   hostgroup options bind, and memory stays flat as the targets grow;
+   `--host-timeout` stays refused until step f; then release engineering
    (SBOM, auditable and reproducible builds, signing, `DIVERGENCES.md` as release
    notes) and `ncat`/`nping`.
 

@@ -230,22 +230,15 @@ narrower *rendering* of the same result.
       host's block ends with one (`nmap.cc:2330`). The port printed every host in
       target order, with a blank line between any two. It now prints the down hosts
       first, ends every scanned host's block with its blank line, the last one's
-      too, and does this in all three formats. 7.94 does it per host group, and the
-      port orders a run as one group (`timing-knobs-not-yet-enforced`). So the two
-      orders agree only while 7.94 makes one group of the run, that is, while:
-      - every target shares one family, interface, source and on-link-ness (7.94
-        splits a ping batch and a scan group on any of them,
-        `target_needs_new_hostgroup`, `targets.cc:276`; `nmap.cc:2192`);
-      - no target repeats (`scan-repeated-target-deferred`);
-      - there are fewer up hosts than one group holds, since a down host after a
-        full group is printed after it (`nmap.cc:2110`). A group holds, for a TCP
-        scan, `max(1024 / ports, 64)` hosts: 64 from 16 to 1,000 ports, more below
-        16, and a first group of 4 (8 at `-T4`) above 1,000 ports; 128 for UDP
-        (`determineScanGroupSize`, `scan_engine.cc:1218`).
-
-      Past that, 7.94 prints a later group's down hosts after an earlier group's up
-      ones. Pinned by `down_hosts_come_first_and_alone`. *(Found in review at IPv6
-      scans step e and fixed there.)*
+      too, and does this in all three formats. 7.94 does it per host group, and
+      since M7 cutover step b so does the port: it forms 7.94's groups
+      (`core::hostgroup`) and orders each one this way, so a later group's down
+      hosts come after an earlier group's up ones, as in 7.94. The two still part
+      where a down host takes a place in a group here and none in 7.94
+      (`hostgroup-every-target-counts`). Pinned by
+      `down_hosts_come_first_and_alone` and `down_hosts_come_first_in_each_group`.
+      *(Found in review at IPv6 scans step e and fixed there; per group since
+      step b.)*
 - [x] `loopback-target-localhost-response` (`sys::group::mark_localhost`; ports
       `targets.cc:588-597`): 7.94 marks every target on a loopback route up before
       any probe, with reason `localhost-response`, or `user-set` under `-Pn`. That
@@ -2683,14 +2676,14 @@ removed: that one was theatre, this one is unobservable.
       spelling instead of a silently chosen template. Pinned by
       `a_malformed_timing_template_is_refused_rather_than_guessed`.
 
-- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`,
-      `--min-hostgroup` and `--max-hostgroup` parse and are then refused.** The
-      engine has no per-host deadline and scans a route's targets as one group,
-      so honouring either would be a claim it cannot keep: a `--host-timeout`
-      that does nothing runs past a bound the operator set, and a
-      `--max-hostgroup` that does nothing scans every target at once. Accepting
-      them would be the M7.0 mistake in a new place, so they refuse with a
-      message that says exactly what is missing. `-T5`'s *implied* 15-minute
+- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`
+      parses and is then refused.** The engine has no per-host deadline, so
+      honouring it would be a claim it cannot keep: a `--host-timeout` that
+      does nothing runs past a bound the operator set. Accepting it would be the
+      M7.0 mistake in a new place, so it refuses with a message that says
+      exactly what is missing. (`--min-hostgroup` and `--max-hostgroup` were
+      refused here too until M7 cutover step b, which scans the run group by
+      group; they bind now, pinned by `cli/tests/hostgroups.rs`.) `-T5`'s *implied* 15-minute
       host timeout is likewise not enforced — it is recorded in
       `TimingParams::host_timeout_ms` and read by nothing yet. Pinned by
       `fail_closed::a_constraint_we_cannot_honour_is_refused`.
@@ -2725,9 +2718,11 @@ removed: that one was theatre, this one is unobservable.
       - `--randomize-hosts`, which quadruples the batch, `-iR` and SCTP scans
         are not ported.
 
-      Nothing calls the module until step b, which decides how a down verdict
-      enters it. `--min-hostgroup` and `--max-hostgroup` stay refused until then
-      (`timing-knobs-not-yet-enforced`).
+      Since step b the CLI scans the run group by group through this module.
+      The port's one down verdict, the IPv6 ND ping's, still arrives after
+      grouping, per route-group within a host group; 7.94's arrives per batch,
+      before. So a silent IPv6 neighbor takes a place in a group here and none
+      in 7.94, as a down IPv4 target does.
 
 - [x] `hostgroup-bound-past-int-refused` (`core::options`, M7 cutover step b;
       ports `NmapOps::setMinHostGroupSz`/`setMaxHostGroupSz`, `NmapOps.cc:573-585`,
@@ -2746,6 +2741,33 @@ removed: that one was theatre, this one is unobservable.
       2^32 - 1 as given. Pinned by
       `hostgroup_bounds_are_checked_as_7_94s_setters_check_them` and
       `an_impossible_hostgroup_bound_is_reported_as_c_reports_it`.
+
+- [x] `output-streamed-per-group` (`cli`, M7 cutover step b, D2; ports the main
+      loop of `nmap.cc:2080-2330`) — **the report is written host group by host
+      group, as 7.94 writes it.** Before, the port scanned every target, then
+      wrote every format once at the end, so a long scan printed nothing until
+      it was over and held every result in memory. Now each group's hosts are
+      written to the terminal and to every `-o` file, and flushed, when the
+      group is done, and dropped; the totals come at the end. What moved with it:
+      - output files are created before the first group is scanned (7.94 opens
+        them at option parsing), so a run that fails mid-way leaves what it
+        wrote, and an unwritable path fails before any scanning;
+      - the "Starting" line is printed after the pre-scan scripts, not after the
+        whole run (7.94 prints it before them);
+      - "scanned in" times every phase of every group, not the port scan alone;
+      - a script's own log lines to stdout can now fall between groups.
+      For a run that forms one group, each format's bytes are as before. Still
+      whole-run, as before: the `-O` block after "Nmap done"
+      (`nse-os-block-after-scripts`) and the unmatched service fingerprints
+      before it. Pinned by `cli/tests/hostgroups.rs`.
+
+- [ ] `report-no-blank-line-before-port-table` (`core::output`; ports
+      `printportoutput`, `output.cc`) — **the normal report has no blank line
+      between "Host is up" and the port table.** 7.94 prints one, on the
+      terminal and in `-oN` (*measured*: `-sT -Pn -n -p 1 127.0.0.1`). Found
+      while comparing step b's multi-group output with 7.94; it predates step b
+      (the build before it prints the same). Not fixed there: it is outside the
+      step, and every normal-output golden would move with it.
 
 - [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
       representable subnormal written in decimal would be refused here and

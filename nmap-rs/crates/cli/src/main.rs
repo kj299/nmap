@@ -18,9 +18,8 @@ use nmap_core::options::{is_stdout_dest, RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
-    exclude_specs, host_specs, parse_args, parse_port_spec, render_grepable, render_normal,
-    render_normal_stdout, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable,
-    TimingParams, TimingTemplate,
+    exclude_specs, host_specs, parse_args, parse_port_spec, Added, ExcludeSet, ScanMeta,
+    ScanResults, ServiceTable, TimingParams, TimingTemplate,
 };
 mod nse;
 mod targets;
@@ -77,12 +76,11 @@ async fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    // Fail closed on the two knobs this engine cannot yet honour. Accepting
-    // them would be the M7.0 mistake in a new place: `--max-hostgroup 5` that
-    // does nothing scans every target at once, which is louder than the
-    // operator asked for, and a `--host-timeout` that does nothing runs past a
-    // bound they set. Refusing is noisy; silently exceeding an explicit limit
-    // is worse. Both are tracked in docs/M7.3-CLI-PARITY.md.
+    // Fail closed on the knob this engine cannot yet honour. Accepting it would
+    // be the M7.0 mistake in a new place: a `--host-timeout` that does nothing
+    // runs past a bound the operator set. Refusing is noisy; silently exceeding
+    // an explicit limit is worse. Tracked in docs/M7.3-CLI-PARITY.md, and lifted
+    // at M7 cutover step f.
     if cfg.host_timeout_ms.is_some() {
         eprintln!(
             "nmap-rs: --host-timeout is parsed but not yet enforced — this engine has no \
@@ -91,17 +89,10 @@ async fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    // Before the refusal below: a value C would quit on is reported as such.
+    // --min-hostgroup/--max-hostgroup bind the host groups (`core::hostgroup`);
+    // a value C would quit on is refused as C refuses it.
     if let Some(msg) = cfg.hostgroup_error() {
         eprintln!("nmap-rs: {msg}");
-        return ExitCode::FAILURE;
-    }
-    if cfg.min_hostgroup.is_some() || cfg.max_hostgroup.is_some() {
-        eprintln!(
-            "nmap-rs: --min-hostgroup/--max-hostgroup are parsed but not yet enforced — this \
-             engine scans a route's targets as one group, so a hostgroup ceiling would not \
-             limit concurrency. Refusing rather than scanning wider than you asked."
-        );
         return ExitCode::FAILURE;
     }
     for msg in cfg.timing_warnings() {
@@ -270,21 +261,21 @@ async fn main() -> ExitCode {
 
     // Parse every target expression and resolve every name, then draw the
     // targets from them lazily, less the excluded ones (`targets::TargetSource`).
+    // The first is drawn now: a run with none ends here, before the script
+    // engine starts or an output file is opened.
     let mut source = targets::TargetSource::new(targets::prepare(&cfg).await, excludes);
-    let targets: Vec<(IpAddr, Option<String>)> = source.by_ref().collect();
-    let excluded_all = source.drawn() > 0 && targets.is_empty();
-    if targets.is_empty() {
+    let Some(first) = source.next() else {
         // Distinguish "nothing resolved" from "you excluded everything". They
         // need opposite reactions from the operator, and reporting a successful
         // exclusion as a resolution failure would send them looking for a bug
         // that is not there.
-        if excluded_all {
+        if source.drawn() > 0 {
             eprintln!("nmap-rs: no targets left to scan — every host matched an exclusion");
         } else {
             eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
         }
         return ExitCode::FAILURE;
-    }
+    };
 
     // NSE (M6.4e): `open_nse`, then the pre-scan phase, before any scanning
     // (`nmap.cc:2084-2099`).
@@ -316,7 +307,6 @@ async fn main() -> ExitCode {
     let template = cfg.timing_template.unwrap_or(TimingTemplate::Normal);
     let max_par = timing.max_parallelism as usize;
 
-    let ips: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
     // One timestamp for the whole run: the banner, the XML, and every `%`
     // escape in an output filename all derive from it. Reading the clock twice
     // would let `-oA scan-%F` and the banner disagree across midnight.
@@ -328,74 +318,13 @@ async fn main() -> ExitCode {
     )
     .unwrap_or(0);
     let started = format!("epoch+{start_epoch}s");
-    let clock = Instant::now();
-    let once = RunOnce::default();
-    let mut results = run_scan(
-        &once, &cfg, &ips, &ports, template, timing, max_par, overrides,
-    )
-    .await;
-    let elapsed = clock.elapsed().as_secs_f64();
-
-    // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
-    for (host, (_, name)) in results.hosts.iter_mut().zip(targets.iter()) {
-        host.hostname = name.clone();
-        host.settle_liveness(cfg.assume_up);
-    }
-
-    // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
-    if cfg.service_version {
-        run_service_version(&once, &cfg, &mut results, services.as_ref()).await;
-    }
-
-    // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so this
-    // reports why it cannot run rather than silently producing nothing.
-    let os_block = if cfg.os_detection {
-        #[cfg(feature = "pcap")]
-        {
-            run_os_detection(&once, &cfg, &mut results).await
-        }
-        #[cfg(not(feature = "pcap"))]
-        {
-            run_os_detection(&once, &cfg, &mut results)
-        }
-    } else {
-        String::new()
-    };
-
-    // The scan phase over the hosts that are up, then post-scan
-    // (`nmap.cc:2288`, `:2349`).
-    if let Some(n) = &nse {
-        let up: Vec<usize> = (0..results.hosts.len())
-            .filter(|&i| results.hosts[i].state == HostState::Up)
-            .collect();
-        let hosts = up
-            .iter()
-            .map(|&i| nse::script_host(&results.hosts[i]))
-            .collect();
-        if let Some(r) = run_phase(n, Phase::Scan, hosts) {
-            for (i, h) in up.iter().zip(r.hosts) {
-                apply_port_states(&mut results.hosts[*i], &h.host);
-                scripts.hosts.insert(
-                    *i,
-                    nmap_core::model::HostScripts {
-                        host: h.results,
-                        ports: h.ports,
-                    },
-                );
-            }
-        }
-        if let Some(r) = run_phase(n, Phase::PostScan, Vec::new()) {
-            scripts.post = r.run;
-        }
-    }
-    results.scripts = scripts;
-
-    let meta = ScanMeta {
+    let args_line = args.join(" ");
+    let mut meta = ScanMeta {
         scanner: "nmap-rs",
         version: env!("CARGO_PKG_VERSION"),
-        args: &args.join(" "),
+        args: &args_line,
         started: &started,
-        elapsed_secs: elapsed,
+        elapsed_secs: 0.0,
         service_version: cfg.service_version,
         open_only: cfg.open_only,
         reason: cfg.reason,
@@ -404,19 +333,302 @@ async fn main() -> ExitCode {
         assume_up: cfg.assume_up,
     };
 
-    if let Err(e) = emit_outputs(
-        &cfg,
-        &results,
-        &meta,
-        services.as_ref(),
-        &os_block,
-        &port_notes,
-        start_epoch,
-    ) {
+    // Every destination is opened, and given its opening lines, before the
+    // first group is scanned; each group's hosts are written as the group is
+    // done (M7 cutover step b, D2).
+    let mut sinks = match Sinks::open(&cfg, start_epoch) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nmap-rs: failed to write output: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = sinks.header(&meta, &scripts.pre, &port_notes) {
+        eprintln!("nmap-rs: failed to write output: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // The host groups 7.94 would form (`core::hostgroup`): sized by scan type,
+    // port count and timing, held within --min/--max-hostgroup, and, when the
+    // run routes its targets, homogeneous in route.
+    let router = if routes_targets(&cfg) {
+        nmap_sys::route::GroupRouter::new(
+            overrides.spoof_src.map(std::net::Ipv4Addr::from),
+            overrides.spoof_src6.map(std::net::Ipv6Addr::from),
+        )
+        .ok()
+    } else {
+        None
+    };
+    let sizing = group_sizing(&cfg, &ports, template, &timing);
+    let members =
+        std::iter::once(first)
+            .chain(source)
+            .map(|(address, name)| nmap_core::hostgroup::Member {
+                address,
+                route: router.as_ref().and_then(|r| r.key(address)),
+                item: name,
+            });
+
+    let once = RunOnce::default();
+    let mut totals = nmap_core::output::RunTotals::default();
+    let mut os_block = String::new();
+    let clock = Instant::now();
+    for (k, group) in nmap_core::hostgroup::HostGroups::new(members, sizing).enumerate() {
+        nmap_core::debug!(
+            1,
+            "host group {}: {} host(s)",
+            k.saturating_add(1),
+            group.len()
+        );
+        let (ips, names): (Vec<IpAddr>, Vec<Option<String>>) =
+            group.into_iter().map(|m| (m.address, m.item)).unzip();
+        let mut results = run_scan(
+            &once, &cfg, &ips, &ports, template, timing, max_par, overrides,
+        )
+        .await;
+
+        // Re-attach hostnames (connect_scan works purely by IP) and honor -Pn.
+        for (host, name) in results.hosts.iter_mut().zip(names) {
+            host.hostname = name;
+            host.settle_liveness(cfg.assume_up);
+        }
+
+        // Milestone 3: `-sV` — probe each open TCP port and fill in service/version.
+        if cfg.service_version {
+            run_service_version(&once, &cfg, &mut results, services.as_ref()).await;
+        }
+
+        // Milestone 5: `-O` — OS detection. The probe battery is raw-socket work, so
+        // this reports why it cannot run rather than silently producing nothing.
+        if cfg.os_detection {
+            #[cfg(feature = "pcap")]
+            os_block.push_str(&run_os_detection(&once, &cfg, &mut results).await);
+            #[cfg(not(feature = "pcap"))]
+            os_block.push_str(&run_os_detection(&once, &cfg, &mut results));
+        }
+
+        // The scan phase over the group's hosts that are up (`nmap.cc:2288`).
+        if let Some(n) = &nse {
+            let up: Vec<usize> = (0..results.hosts.len())
+                .filter(|&i| results.hosts[i].state == HostState::Up)
+                .collect();
+            let hosts = up
+                .iter()
+                .map(|&i| nse::script_host(&results.hosts[i]))
+                .collect();
+            if let Some(r) = run_phase(n, Phase::Scan, hosts) {
+                for (i, h) in up.iter().zip(r.hosts) {
+                    apply_port_states(&mut results.hosts[*i], &h.host);
+                    results.scripts.hosts.insert(
+                        *i,
+                        nmap_core::model::HostScripts {
+                            host: h.results,
+                            ports: h.ports,
+                        },
+                    );
+                }
+            }
+        }
+
+        totals.add(&results);
+        if let Err(e) = sinks.group(&results, &meta, services.as_ref()) {
+            eprintln!("nmap-rs: failed to write output: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Post-scan, after the last group (`nmap.cc:2349`).
+    if let Some(n) = &nse {
+        if let Some(r) = run_phase(n, Phase::PostScan, Vec::new()) {
+            scripts.post = r.run;
+        }
+    }
+    meta.elapsed_secs = clock.elapsed().as_secs_f64();
+    if let Err(e) = sinks.footer(&totals, &scripts.post, &meta, &os_block) {
         eprintln!("nmap-rs: failed to write output: {e}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Whether 7.94 would route this run's targets, and so form its host groups by
+/// route (`target_needs_new_hostgroup`, `targets.cc:276`): as root, whenever
+/// `RawScan()` holds (`NmapOps.cc:354`). That is every raw port scan, and a
+/// connect scan with `-O`, or without `-Pn`, since root's default pings are
+/// raw. "Root" here is what the port can do: open a raw socket. A build without
+/// `pcap` sends nothing raw, so it routes nothing.
+fn routes_targets(cfg: &RunConfig) -> bool {
+    #[cfg(feature = "pcap")]
+    {
+        let raw = match cfg.scan {
+            ScanKind::List => false,
+            ScanKind::Connect => cfg.os_detection || !cfg.assume_up,
+            _ => true,
+        };
+        raw && nmap_sys::rawio::RawIpv4Sender::new().is_ok()
+    }
+    #[cfg(not(feature = "pcap"))]
+    {
+        let _ = cfg;
+        false
+    }
+}
+
+/// What `determineScanGroupSize` reads of the run (`scan_engine.cc:1218`).
+fn group_sizing(
+    cfg: &RunConfig,
+    ports: &[u16],
+    template: TimingTemplate,
+    timing: &TimingParams,
+) -> nmap_core::hostgroup::GroupSizing {
+    let udp = cfg.scan == ScanKind::Udp;
+    let tcp = !matches!(cfg.scan, ScanKind::Udp | ScanKind::List);
+    nmap_core::hostgroup::GroupSizing {
+        udp,
+        tcp,
+        tcp_ports: if tcp { ports.len() } else { 0 },
+        timing_level: template.level(),
+        min_hostgroup: timing.min_hostgroup,
+        max_hostgroup: timing.max_hostgroup,
+    }
+}
+
+/// One output destination: stdout, or a file written as the run goes.
+enum Dest {
+    Stdout,
+    File(std::io::BufWriter<std::fs::File>),
+}
+
+impl Dest {
+    fn open(dest: &str, epoch: i64) -> std::io::Result<Dest> {
+        let dest = expand_dest(dest, epoch);
+        if is_stdout_dest(&dest) {
+            return Ok(Dest::Stdout);
+        }
+        Ok(Dest::File(std::io::BufWriter::new(std::fs::File::create(
+            dest,
+        )?)))
+    }
+
+    /// Write and flush: what a group's hosts are written as, is on disk before
+    /// the next group is scanned.
+    fn write(&mut self, text: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        match self {
+            Dest::Stdout => {
+                let mut out = std::io::stdout().lock();
+                out.write_all(text.as_bytes())?;
+                out.flush()
+            }
+            Dest::File(f) => {
+                f.write_all(text.as_bytes())?;
+                f.flush()
+            }
+        }
+    }
+}
+
+/// The run's report destinations: the terminal and each `-o` format.
+///
+/// The normal output goes to stdout whatever files are also written, because
+/// nmap's `LOG_PLAIN` is `LOG_NORMAL|LOG_SKID|LOG_STDOUT` (`output.h:84`);
+/// only `-v0` or a `-` destination discards it ([`RunConfig::stdout_is_null`]).
+/// The terminal's report can hold lines the `-oN` file's does not (C's
+/// `LOG_STDOUT`).
+struct Sinks {
+    terminal: Option<Dest>,
+    normal: Option<Dest>,
+    xml: Option<Dest>,
+    grep: Option<Dest>,
+}
+
+impl Sinks {
+    /// Open every destination. The strftime escapes are expanded here, against
+    /// the scan's start time, so `-oA scan-%F` and a `-oN scan-%F.txt` in the
+    /// same command cannot disagree about the date, even across midnight.
+    fn open(cfg: &RunConfig, epoch: i64) -> std::io::Result<Sinks> {
+        let open = |d: &Option<String>| d.as_deref().map(|d| Dest::open(d, epoch)).transpose();
+        Ok(Sinks {
+            terminal: (!cfg.stdout_is_null()).then_some(Dest::Stdout),
+            normal: open(&cfg.out_normal)?,
+            xml: open(&cfg.out_xml)?,
+            grep: open(&cfg.out_grep)?,
+        })
+    }
+
+    fn each(&mut self, terminal: &str, normal: &str, xml: &str, grep: &str) -> std::io::Result<()> {
+        for (dest, text) in [
+            (&mut self.terminal, terminal),
+            (&mut self.normal, normal),
+            (&mut self.xml, xml),
+            (&mut self.grep, grep),
+        ] {
+            if let Some(d) = dest {
+                d.write(text)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn header(
+        &mut self,
+        meta: &ScanMeta,
+        pre: &[nmap_core::nse::results::ScriptOutput],
+        notes: &[String],
+    ) -> std::io::Result<()> {
+        use nmap_core::output::{grepable_header, normal_header, xml_header};
+        let normal = normal_header(meta, pre);
+        // The `-oN` file opens with the port warnings the terminal got on stderr.
+        let mut file = String::new();
+        for n in notes {
+            file.push_str(n);
+            file.push('\n');
+        }
+        file.push_str(&normal);
+        self.each(
+            &normal,
+            &file,
+            &xml_header(meta, pre),
+            &grepable_header(meta),
+        )
+    }
+
+    fn group(
+        &mut self,
+        group: &ScanResults,
+        meta: &ScanMeta,
+        services: Option<&ServiceTable>,
+    ) -> std::io::Result<()> {
+        use nmap_core::output::{grepable_group, normal_group, xml_group};
+        let normal = normal_group(group, meta, services);
+        self.each(
+            &normal,
+            &normal,
+            &xml_group(group, meta, services),
+            &grepable_group(group, meta, services),
+        )
+    }
+
+    fn footer(
+        &mut self,
+        totals: &nmap_core::output::RunTotals,
+        post: &[nmap_core::nse::results::ScriptOutput],
+        meta: &ScanMeta,
+        os_block: &str,
+    ) -> std::io::Result<()> {
+        use nmap_core::output::{grepable_footer, normal_footer, xml_footer};
+        // The OS block follows "Nmap done", as it always has
+        // (`nse-os-block-after-scripts`).
+        let terminal = normal_footer(totals, post, meta, true) + os_block;
+        let file = normal_footer(totals, post, meta, false) + os_block;
+        self.each(
+            &terminal,
+            &file,
+            &xml_footer(totals, post, meta),
+            &grepable_footer(totals, meta),
+        )
+    }
 }
 
 /// What a run loads or decides once and every host group shares (M7 cutover
@@ -1602,72 +1814,6 @@ async fn build_excludes(cfg: &RunConfig) -> Result<ExcludeSet, String> {
     Ok(set)
 }
 
-/// Emit the requested output formats. With no `-o` flag, normal output goes to
-/// stdout; otherwise each specified format goes to its destination (`-` =
-/// stdout, else a file).
-/// Write the report: the normal output to stdout, and each format to its
-/// `-o` destination.
-///
-/// The normal output goes to stdout whatever files are also written, because
-/// nmap's `LOG_PLAIN` is `LOG_NORMAL|LOG_SKID|LOG_STDOUT` (`output.h:84`);
-/// only `-v0` or a `-` destination discards it ([`RunConfig::stdout_is_null`]).
-/// The OS block is part of the normal output (`printosscanoutput` writes
-/// `LOG_PLAIN`), so it goes wherever the report goes, after the port table.
-/// `notes` are the `error()` lines printed to standard error before the scan,
-/// which nmap also writes at the top of the normal output file
-/// (`LOG_NORMAL|LOG_STDERR`); stdout does not repeat them.
-fn emit_outputs(
-    cfg: &RunConfig,
-    results: &nmap_core::ScanResults,
-    meta: &ScanMeta,
-    services: Option<&ServiceTable>,
-    os_block: &str,
-    notes: &[String],
-    start_epoch: i64,
-) -> std::io::Result<()> {
-    // The terminal's report can hold lines the `-oN` file's does not (C's
-    // `LOG_STDOUT`), and none of them when stdout is silenced.
-    let normal = |terminal: bool| {
-        let mut s = if terminal {
-            render_normal_stdout(results, meta, services)
-        } else {
-            render_normal(results, meta, services)
-        };
-        s.push_str(os_block);
-        s
-    };
-    if !cfg.stdout_is_null() {
-        print!("{}", normal(true));
-    }
-    // Expand the strftime escapes here rather than in `parse_args`, which is
-    // pure and has no clock. One expansion point for all four options, against
-    // the scan's start time -- so `-oA scan-%F` and a `-oN scan-%F.txt` in the
-    // same command cannot disagree about the date, even across midnight.
-    let stamp = start_epoch;
-    if let Some(dest) = &cfg.out_normal {
-        let mut text = String::new();
-        for n in notes {
-            text.push_str(n);
-            text.push('\n');
-        }
-        text.push_str(&normal(false));
-        write_to(&expand_dest(dest, stamp), &text)?;
-    }
-    if let Some(dest) = &cfg.out_xml {
-        write_to(
-            &expand_dest(dest, stamp),
-            &render_xml(results, meta, services),
-        )?;
-    }
-    if let Some(dest) = &cfg.out_grep {
-        write_to(
-            &expand_dest(dest, stamp),
-            &render_grepable(results, meta, services),
-        )?;
-    }
-    Ok(())
-}
-
 /// Expand a destination's strftime escapes; `-` (stdout) passes through
 /// untouched so it can never become a file named after the clock.
 fn expand_dest(dest: &str, epoch: i64) -> String {
@@ -1675,16 +1821,6 @@ fn expand_dest(dest: &str, epoch: i64) -> String {
         return dest.to_string();
     }
     nmap_core::logfile::expand(dest, epoch)
-}
-
-/// Write `content` to `dest` (`-` = stdout, else a file).
-fn write_to(dest: &str, content: &str) -> std::io::Result<()> {
-    if is_stdout_dest(dest) {
-        print!("{content}");
-        Ok(())
-    } else {
-        std::fs::write(dest, content)
-    }
 }
 
 /// What the script engine reads of the run (`open_nse`, `cnse`).

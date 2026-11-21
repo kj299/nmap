@@ -4661,12 +4661,13 @@ of ten points is caught:
 - [ ] `nse-new-targets-not-scanned` — `nmap.add_targets` queues targets,
       but the scan does not pick them up (nmap's `--script-args newtargets`).
       7.94 draws them after the command line's targets: once those are spent,
-      its target source reads the queue (`next_expression`, `targets.cc`). So a
-      prerule's additions share the first group if it has room, a hostrule's
-      come in later groups, and a command-line target deferred from a batch is
-      scanned after the additions drawn into it. `core::hostgroup` asks its source again whenever a
-      group wants a target and the batch is spent, for that reason, so the
-      queue can be the tail of the source
+      its target source reads the queue (`next_expression`, `targets.cc`).
+      From there they are batched, deferred and grouped like any other target.
+      For example (*measured*, `-sT`): a prerule adding two loopback hosts to a
+      run of one gives one group of three, and a hostrule adding them gives a
+      group of one and then a group of two. `core::hostgroup` asks its source
+      again whenever a group wants a target and the batch is spent, for that
+      reason, so the queue can be the tail of the source
       (`a_source_that_resumes_adds_groups`).
 - [ ] `nse-log-lines-terminal-only` — NSE's own log lines (`LOG_STDOUT`,
       `LOG_PLAIN`) go to the terminal as they happen, unless `-v0` or a `-`

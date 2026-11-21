@@ -39,12 +39,10 @@
 //!   target and the batch is spent, as `nexthost` calls `refresh_hostbatch`.
 //!   7.94's source resumes. Targets a script adds (`target.add`) are read by
 //!   `next_expression` once the command line is spent, so they are drawn after
-//!   the command line's targets: into the same group if it has room (a
-//!   prerule's additions, made before the first group is formed), otherwise
-//!   into later groups. Drawn after is not scanned after: a command-line target
-//!   deferred from that batch waits for the next one, behind them. A source
-//!   here that yields again after its end does the same, and
-//!   [`HostGroups`] may likewise yield a group after it has yielded `None`.
+//!   the command line's targets, and from there are batched, deferred and
+//!   grouped like any other target. The targets a source here yields after its
+//!   end are treated the same way, and [`HostGroups`] may likewise yield a
+//!   group after it has yielded `None`.
 //!   7.94's loop ends at the first empty group, so a caller stops at the first
 //!   `None`. The port does not scan script-added targets yet
 //!   (`nse-new-targets-not-scanned`); when it does, this is the way in. A caller

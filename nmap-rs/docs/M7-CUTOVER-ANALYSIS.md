@@ -453,8 +453,10 @@ grouping logic: 119 further random cases against 7.94 showed no difference.
   wants a target and the batch is spent. Whether step b feeds it the
   new-targets queue, or leaves `nse-new-targets-not-scanned` open, is decided
   there. If it does: 7.94 runs its pre-scan scripts before the first group is
-  formed, a prerule's additions share that group when it has room, and a run
-  may have no command-line target at all (*measured in the third round*).
+  formed, so a prerule's additions can be in the first group, and a run may
+  have no command-line target at all (*measured in the third round*: a prerule
+  adding two loopback hosts gave one group of three with a command-line target
+  and one group of two without).
 
 **The third round**, on the second fix round, confirmed six, all low: five
 sentences that were not quite true and one hole in the generator. Nothing in
@@ -462,7 +464,7 @@ the grouping logic, on 500 further random cases with script-added targets
 against 7.94, traced poll for poll against an instrumented build.
 
 1. "Script-added targets are scanned in later groups" is false for a prerule's
-   additions, which share the first group when it has room. Reworded.
+   additions, which can be in the first group. Reworded.
 2. "Asked again once for every group" was not the rule: the source is asked
    whenever a group wants a target and the batch is spent. Reworded.
 3. `--check` skipped its whole-file comparison when any case timed out, and
@@ -480,13 +482,23 @@ could not make the generator's `--check` give a wrong answer in 504
 combinations of doctored goldens, modes and timed-out cases.
 
 1. "Script-added targets are scanned after the command line's targets" is
-   false when a command-line target is deferred: it waits for the next batch,
-   behind the additions (*measured*: a prerule adding two loopback hosts to
-   `127.0.0.1 192.0.2.2 127.0.0.2` under `-sS` gives a group of four and then
-   192.0.2.2). The port does the same. The three sentences now say "drawn
-   after".
+   false when a command-line target is deferred (*measured*: a prerule adding
+   two loopback hosts to `127.0.0.1 192.0.2.2 127.0.0.2` under `-sS` gives a
+   group of four and then 192.0.2.2). The port does the same. The three
+   sentences now say "drawn after".
 2. §3's "host discovery ... no discovery time to exclude" was the third copy
    of the sentence above. Corrected there.
+
+**The fifth round**, on the fourth fix round, confirmed one, again a sentence.
+The reworded text still stated consequences that do not always hold: that a
+prerule's additions share the first group "if it has room", and that a
+deferred command-line target comes "behind them". *Measured*: with
+`192.0.2.2 127.0.0.1` under `-sS`, the additions do not join the first group,
+which holds 192.0.2.2 alone, and the deferred 127.0.0.1 is ahead of them in
+the next. The port does the same. The module and the ledger now state only
+the mechanism (the additions are drawn after the command line's targets and
+are then batched, deferred and grouped like any other target), and give
+measured cases as examples.
 
 **Divergences.** Every target takes a place in a group here, and in 7.94 a down
 host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`

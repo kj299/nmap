@@ -761,7 +761,8 @@ now names this case, measured. It re-ran all 26 mutations: each caught.
 3. The analysis said the defect could not be reproduced end to end here;
    it can, over IPv6. Corrected.
 
-Both fixes have sabotage entries (29 in all).
+Both fixes have sabotage entries (29 in all). The eleventh round re-anchored
+the second, so it lapsed; the sixteenth restored it.
 
 **The eleventh review** confirmed two, both low:
 
@@ -846,4 +847,19 @@ all low:
 3. `HostGroups`' doc said it draws at most a batch ahead plus the defer
    buffer; with a suspended fill it is a batch of unroutable targets, a
    batch and the defer buffer. Corrected.
+
+**The sixteenth review** found no code defect: it re-read the model of
+7.94's loop against `targets.cc` and `nmap.cc:2103-2337`, the 61 golden
+cases match, and the CLI, scope, timing and output tests pass, among them
+the root tests. It confirmed two, both low:
+
+1. The fifteenth round's order rule was still too broad. A group whose own
+   draw's fill suspends is held, and the unroutable groups come before it,
+   only when it runs out of what that fill placed; when it completes or
+   meets a misfit from those, it comes first (*measured*:
+   `--max-hostgroup 100`, 4,146 routed, 4,096 unroutable, 200 routed). The
+   entry now states the condition.
+2. The mutation for "an unroutable target is not counted as scanned" had
+   lapsed from the sabotage map when the eleventh round re-anchored it.
+   Restored, against the unroutable groups' hand-out.
 

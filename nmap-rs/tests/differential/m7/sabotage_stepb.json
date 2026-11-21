@@ -702,5 +702,24 @@
     "expect": [
       "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
     ]
+  },
+  {
+    "name": "an unroutable group counts as scanned",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                return Some(self.unroutable_group(ideal));",
+    "new": "                let g = self.unroutable_group(ideal);\n                self.scanned = self.scanned.saturating_add(g.len());\n                return Some(g);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
+    ]
   }
 ]

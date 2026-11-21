@@ -291,10 +291,11 @@ narrower *rendering* of the same result.
       routed group, as 7.94's skipped target shapes none: it takes no batch or
       defer slot (`DEFER_LIMIT`), is not counted toward the quick first
       group (`o.numhosts_scanned`, `nmap.cc:2337`), and is handed out in groups
-      of unroutable targets alone, before the next routed group, and also
-      before the group in progress when that group's own draw ran a fill that
-      suspended (the group is held while they go out); when such a fill
-      completes instead, those it set aside come after that group.
+      of unroutable targets alone: before the next routed group, and before
+      the group in progress only when that group runs out of placed targets
+      while its own draw's fill is suspended (it is held while they go out);
+      when the group completes, or meets a misfit, from what that fill placed,
+      or the fill completes, those set aside come after it.
       Those groups 7.94 does not form. Before the ninth review of step b it had
       no key, which lifted the routing rule for any group it started and let
       it join any group; before the tenth it counted toward the quick group;

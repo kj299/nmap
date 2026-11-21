@@ -619,7 +619,8 @@ so the sabotage set needs root to report it.
    lines), and the ledger said otherwise. The file is now read a
    specification at a time, no further than the cap: 17 MiB at every size.
 2. Opening the output files before the script engine left them empty when the
-   engine could not start. A run that ends before writing removes them.
+   engine could not start. A run that ended before writing removed them; the
+   third review found that wrong, below.
 3. "scanned in" and the start time still left out name resolution. Both are
    taken before it now, and the files are opened before it.
 4. The truncation message printed when only an unparsable specification lay
@@ -630,4 +631,21 @@ so the sabotage set needs root to report it.
    uses a name that resolves; the message, at and past the cap, and the files
    left by an early failure have CLI tests; the unwritable-output test also
    runs with a script that cannot load.
+
+**The third review** confirmed six, one serious:
+
+1. Serious: removing the files of a run that ended early deleted whatever the
+   path named, `/dev/null` or a file that was there before. 7.94 deletes no
+   output path, and now neither does the port: the files are left, empty.
+   A test checks that a file that was there survives.
+2. `-iL -` with `--excludefile -` read stdin for one of them and found it
+   empty for the other. Refused now, with a test.
+3. A list that could not be read printed the error's debug form. It prints
+   a sentence now (the C's for a specification too long), for `-iL` and
+   `--excludefile` alike, with tests.
+4. The reader's equivalence check (unit test and fuzz target) compared the
+   error but not how many specifications came before it. It does now.
+5. The ledger said an early failure with no target removed files; a run with
+   no target opens none. The entry now says what each side does, measured.
+6. The sabotage entry for the removal went with it.
 

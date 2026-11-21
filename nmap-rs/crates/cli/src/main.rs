@@ -117,6 +117,16 @@ async fn main() -> ExitCode {
         eprintln!("nmap-rs: only one input filename allowed (-iL given more than once)");
         return ExitCode::FAILURE;
     }
+    // Both lists from stdin cannot be: whichever read it first would leave the
+    // other empty. 7.94 refuses the exclusion list ("Failed to open exclude
+    // file - for reading").
+    if cfg.input_file.as_deref() == Some("-") && cfg.exclude_file.as_deref() == Some("-") {
+        eprintln!(
+            "nmap-rs: -iL - and --excludefile - cannot both read stdin; refusing rather than \
+             excluding nothing"
+        );
+        return ExitCode::FAILURE;
+    }
     // Target specs from `-iL`, after the positional ones. That order is the C's:
     // `grab_next_host_spec` (libnetutil/netutil.cc:3786) returns argv entries
     // while `optind < argc` and only then reads the input file. The file is
@@ -298,8 +308,7 @@ async fn main() -> ExitCode {
     let prepared = match targets::prepare(positional.chain(listed), ipv6).await {
         Ok(p) => p,
         Err((path, e)) => {
-            eprintln!("nmap-rs: failed to read input file \"{path}\": {e:?}");
-            sinks.discard();
+            eprintln!("nmap-rs: failed to read input file \"{path}\": {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -307,7 +316,6 @@ async fn main() -> ExitCode {
         // An `-iL` file that held no specification at all.
         eprintln!("nmap-rs: no targets specified");
         print_usage();
-        sinks.discard();
         return ExitCode::FAILURE;
     }
     let mut source = targets::TargetSource::new(prepared.exprs, ipv6, excludes);
@@ -321,7 +329,6 @@ async fn main() -> ExitCode {
         } else {
             eprintln!("nmap-rs: no scannable targets (all failed to resolve or expand)");
         }
-        sinks.discard();
         return ExitCode::FAILURE;
     };
 
@@ -332,7 +339,6 @@ async fn main() -> ExitCode {
             Ok(n) => Some(n),
             Err(e) => {
                 eprintln!("NSE: failed to initialize the script engine:\n{e}\n\nQUITTING!");
-                sinks.discard();
                 return ExitCode::FAILURE;
             }
         }
@@ -538,8 +544,7 @@ fn group_sizing(
 /// One output destination: stdout, or a file written as the run goes.
 enum Dest {
     Stdout,
-    /// The file, and the path it was created at.
-    File(std::io::BufWriter<std::fs::File>, String),
+    File(std::io::BufWriter<std::fs::File>),
 }
 
 impl Dest {
@@ -548,8 +553,9 @@ impl Dest {
         if is_stdout_dest(&dest) {
             return Ok(Dest::Stdout);
         }
-        let file = std::fs::File::create(&dest)?;
-        Ok(Dest::File(std::io::BufWriter::new(file), dest))
+        Ok(Dest::File(std::io::BufWriter::new(std::fs::File::create(
+            dest,
+        )?)))
     }
 
     /// Write and flush: what a group's hosts are written as, is on disk before
@@ -562,7 +568,7 @@ impl Dest {
                 out.write_all(text.as_bytes())?;
                 out.flush()
             }
-            Dest::File(f, _) => {
+            Dest::File(f) => {
                 f.write_all(text.as_bytes())?;
                 f.flush()
             }
@@ -596,18 +602,6 @@ impl Sinks {
             xml: open(&cfg.out_xml)?,
             grep: open(&cfg.out_grep)?,
         })
-    }
-
-    /// The run ended before writing anything: remove the files it created, so
-    /// none is left empty. (7.94 has written its opening lines by then and adds
-    /// the error; `output-streamed-per-group`.)
-    fn discard(self) {
-        for d in [self.normal, self.xml, self.grep].into_iter().flatten() {
-            if let Dest::File(f, path) = d {
-                drop(f);
-                let _ = std::fs::remove_file(path);
-            }
-        }
     }
 
     fn each(&mut self, terminal: &str, normal: &str, xml: &str, grep: &str) -> std::io::Result<()> {
@@ -1809,7 +1803,7 @@ fn read_host_list(path: &str) -> Result<Vec<String>, String> {
     }
     match host_specs(&bytes) {
         Ok(specs) => Ok(specs.into_iter().map(str::to_string).collect()),
-        Err(e) => Err(format!("{e:?}")),
+        Err(e) => Err(e.to_string()),
     }
 }
 

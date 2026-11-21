@@ -2753,9 +2753,11 @@ removed: that one was theatre, this one is unobservable.
         engine starts or a probe is sent, so an unwritable path ends the run at
         once, as in 7.94 (*measured*: both fail within a few milliseconds ahead
         of a pre-scan script that sleeps); a run that fails mid-way leaves what
-        it wrote. A run that fails before writing anything (no target, or a
-        script engine that cannot start) removes the files it created; 7.94
-        has written its opening lines by then and adds the error to them;
+        it wrote. No output path is ever deleted, as 7.94 deletes none: a run
+        whose script engine cannot start leaves its files empty, where 7.94
+        has written its opening line by then and adds the error to it. A run
+        given no target at all prints the usage and opens no file, where 7.94
+        warns, writes a zero-host report and exits 0 (*measured*);
       - "scanned in" counts from before name resolution and the pre-scan
         scripts, as 7.94's `o.start` does (*measured*: a prerule that sleeps
         2 s gives 2.06 s, 7.94 2.07 s; 20,000 names give 0.70 s of a 0.72 s

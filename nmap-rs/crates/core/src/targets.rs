@@ -452,6 +452,26 @@ pub enum HostListError {
     Read(String),
 }
 
+impl std::fmt::Display for HostListError {
+    /// The too-long wording is the C's (`libnetutil/netutil.cc:3797`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpecTooLong { .. } => write!(
+                f,
+                "One of the host specifications from your input file is too long (>= {MAX_HOST_SPEC} chars)"
+            ),
+            Self::NotUtf8 { index } => write!(
+                f,
+                "host specification {} of the input file is not valid UTF-8",
+                index.saturating_add(1)
+            ),
+            Self::Read(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for HostListError {}
+
 /// Split a `-iL` / `--excludefile` list into host specifications.
 ///
 /// A direct port of `read_host_from_file` (`libnetutil/netutil.cc:3750`), which
@@ -889,6 +909,19 @@ mod tests {
 
     /// The streaming reader agrees with [`host_specs`], specs and errors alike.
     #[test]
+    fn host_list_errors_read_as_sentences() {
+        assert_eq!(
+            HostListError::SpecTooLong { index: 3 }.to_string(),
+            "One of the host specifications from your input file is too long (>= 1024 chars)"
+        );
+        assert_eq!(
+            HostListError::NotUtf8 { index: 0 }.to_string(),
+            "host specification 1 of the input file is not valid UTF-8"
+        );
+        assert_eq!(HostListError::Read("gone".into()).to_string(), "gone");
+    }
+
+    #[test]
     fn the_host_spec_reader_agrees_with_host_specs() {
         let long = "a".repeat(MAX_HOST_SPEC);
         let fit = "b".repeat(MAX_HOST_SPEC - 1);
@@ -909,7 +942,17 @@ mod tests {
                     let got: Vec<&str> = streamed.iter().map(|r| r.as_deref().unwrap()).collect();
                     assert_eq!(got, specs, "{c:?}");
                 }
-                Err(e) => assert_eq!(streamed.last(), Some(&Err(e)), "{c:?}"),
+                Err(e) => {
+                    assert_eq!(streamed.last(), Some(&Err(e.clone())), "{c:?}");
+                    // Every spec before the error was read, and only those.
+                    let index = match e {
+                        HostListError::SpecTooLong { index } | HostListError::NotUtf8 { index } => {
+                            index
+                        }
+                        HostListError::Read(_) => unreachable!(),
+                    };
+                    assert_eq!(streamed.len(), index + 1, "{c:?}");
+                }
             }
         }
     }

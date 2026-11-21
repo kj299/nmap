@@ -268,7 +268,10 @@ fn an_over_long_spec_in_a_list_refuses_to_scan() {
     let (stdout, stderr, ok) = run(&["-iL", list.path(), "-sT", "-p", "80"]);
     assert!(!ok);
     assert!(hosts_in(&stdout).is_empty());
-    assert!(stderr.contains("SpecTooLong"), "got: {stderr}");
+    assert!(
+        stderr.contains("is too long (>= 1024 chars)"),
+        "got: {stderr}"
+    );
 }
 
 /// The 65,536-target cap is reported before the scan, and only when a target
@@ -297,13 +300,15 @@ fn the_target_cap_is_reported_only_when_a_target_lies_past_it() {
     assert!(!err.contains("failed to resolve"), "{err}");
 }
 
-/// A run that ends before writing anything leaves no output file behind: here
-/// the script engine cannot start.
+/// A run that ends before writing anything never deletes an output path: a
+/// file that was there stays (emptied, as 7.94 truncates it too), and so would
+/// `/dev/null`. Here the script engine cannot start.
 #[test]
-fn a_run_that_fails_before_writing_leaves_no_file() {
+fn an_early_failure_never_deletes_an_output_path() {
     let dir = std::env::temp_dir().join(format!("nmap-rs-scope-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let (n, x) = (dir.join("f.nmap"), dir.join("f.xml"));
+    let n = dir.join("kept.nmap");
+    std::fs::write(&n, "earlier contents\n").unwrap();
     let (_, err, ok) = run(&[
         "-sT",
         "-Pn",
@@ -314,13 +319,42 @@ fn a_run_that_fails_before_writing_leaves_no_file() {
         "no-such-script-anywhere",
         "-oN",
         n.to_str().unwrap(),
-        "-oX",
-        x.to_str().unwrap(),
         "127.0.0.1",
     ]);
     assert!(!ok, "{err}");
-    assert!(
-        !n.exists() && !x.exists(),
-        "an empty output file was left: {err}"
-    );
+    assert!(n.exists(), "the output path was deleted: {err}");
+}
+
+/// `-iL -` and `--excludefile -` cannot both read stdin: refused, as 7.94
+/// refuses, rather than leaving one of them empty.
+#[test]
+fn both_lists_from_stdin_are_refused() {
+    let mut child = Command::new(bin())
+        .args(["-sL", "-n", "-iL", "-", "--excludefile", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"127.0.0.1\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("cannot both read stdin"), "{err}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("Nmap scan report"));
+}
+
+/// A list that cannot be read says why in words, not as a type's dump.
+#[test]
+fn an_unreadable_list_says_why() {
+    let dir = std::env::temp_dir();
+    let (_, err, ok) = run(&["-sL", "-n", "-iL", dir.to_str().unwrap()]);
+    assert!(!ok, "{err}");
+    assert!(err.contains("failed to read input file"), "{err}");
+    assert!(!err.contains("Read(\""), "{err}");
 }

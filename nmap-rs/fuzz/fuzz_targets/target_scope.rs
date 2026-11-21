@@ -79,7 +79,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // The streaming reader `-iL` uses gives the same specs, or the same
-    // error after the same specs.
+    // error after the same number of specs.
     let streamed: Vec<Result<String, HostListError>> =
         nmap_core::targets::HostSpecReader::new(list_bytes).collect();
     match &first {
@@ -90,7 +90,13 @@ fuzz_target!(|data: &[u8]| {
                 .collect();
             assert_eq!(&got, specs, "the reader and host_specs disagree");
         }
-        Err(e) => assert_eq!(streamed.last(), Some(&Err(e.clone())), "errors disagree"),
+        Err(e) => {
+            assert_eq!(streamed.last(), Some(&Err(e.clone())), "errors disagree");
+            // The error comes after exactly the specs host_specs counted.
+            if let HostListError::SpecTooLong { index } | HostListError::NotUtf8 { index } = e {
+                assert_eq!(streamed.len(), index.saturating_add(1), "error position disagrees");
+            }
+        }
     }
 
     // --- the exclusion matcher ----------------------------------------------

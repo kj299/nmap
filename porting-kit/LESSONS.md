@@ -1918,6 +1918,13 @@ reports, and four retrospective audits (history, harnesses, step e, consistency)
   The step's CI gate declares its own bounds and a `--max-rss-mb` ceiling,
   and records the oracle comparison in the analysis rather than gating on it.
 - **Section amended:** `harnesses/scaling/scale_check.py`.
+- **Addendum (the step's fifth review):** the flat rule is itself a blind
+  spot. Growth under 5% of the baseline across the sizes run is reported as
+  flat whatever its shape: a linear leak of ~11 bytes a target, 0.7 MiB over
+  4k..64k on 14.6 MiB, passes. Three sizes cannot tell that from page-sized
+  noise, so the harness no longer pretends to: the fit method reads
+  "flat (+x.x%)", naming how far the cost moved, and a gate that must see
+  finer growth widens its sizes or sets an absolute ceiling.
 
 ## Meta — M6.6's gates were green and its reviews were not
 

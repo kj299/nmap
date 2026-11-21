@@ -126,14 +126,19 @@ def growth_exponent(sizes, values):
     The last matters for a flat peak RSS: 14.6, 14.6, 14.9 MiB has positive
     differences of 0.01 and 0.3, whose fit is n^2 (nmap M7 cutover step b,
     LESSONS #059). Below FLAT, a 5% change across every size, a cost is flat
-    and fitted as values. Returns (k, method)."""
+    and fitted as values. That is a blind spot, and the method says so: growth
+    under 5% of the baseline across the sizes run (0.7 MiB on 14.6 MiB, a
+    linear leak of ~11 bytes a target over 4k..64k) is not resolved, so the
+    method reads "flat (+x.x%)" and a gate that must see finer growth needs a
+    wider size range or an absolute bound (`--max-rss-mb`). Returns (k, method)."""
     if len(sizes) >= 3 and all(n > 0 for n in sizes):
         ratios = [b / a for a, b in zip(sizes, sizes[1:])]
         diffs = [b - a for a, b in zip(values, values[1:])]
         lo = min(values)
-        flat = lo > 0 and (max(values) - lo) / lo < FLAT
-        if (not flat and max(ratios) - min(ratios) < 0.01 * ratios[0]
-                and all(d > 0 for d in diffs)):
+        moved = (max(values) - lo) / lo if lo > 0 else None
+        if moved is not None and moved < FLAT:
+            return fit_exponent(sizes, values), f"flat (+{100 * moved:.1f}%)"
+        if max(ratios) - min(ratios) < 0.01 * ratios[0] and all(d > 0 for d in diffs):
             return fit_exponent(sizes[:-1], diffs), "differences"
     return fit_exponent(sizes, values), "values"
 
@@ -318,7 +323,7 @@ def _self_test():
           abs(fit_exponent([1, 2, 4, 8], [3 * n ** 2 for n in (1, 2, 4, 8)]) - 2) < 1e-9)
     k, how = growth_exponent([4096, 16384, 65536], [14.60, 14.61, 14.90])
     check("a flat cost with noise-sized rises is flat, not n^2",
-          how == "values" and abs(k) < 0.05)
+          how == "flat (+2.1%)" and abs(k) < 0.05)
     k, how = growth_exponent([1, 2, 4, 8], [50 + 3 * n ** 2 for n in (1, 2, 4, 8)])
     check("fitting differences cancels a constant start-up cost",
           how == "differences" and abs(k - 2) < 1e-9)

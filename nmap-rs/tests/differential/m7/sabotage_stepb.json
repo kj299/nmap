@@ -801,5 +801,26 @@
     "expect": [
       "a_routed_run_groups_by_route"
     ]
+  },
+  {
+    "name": "a connect scan keys its groups on -S",
+    "file": "crates/cli/src/main.rs",
+    "old": "        let honours_s = cfg.scan != ScanKind::Connect;",
+    "new": "        let honours_s = true;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
   }
 ]

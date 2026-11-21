@@ -379,10 +379,20 @@ async fn main() -> ExitCode {
     // The host groups 7.94 would form (`core::hostgroup`): sized by scan type,
     // port count and timing, held within --min/--max-hostgroup, and, when the
     // run routes its targets, homogeneous in route.
+    // `-S` is a group's source only for a scan that sends from it: a connect
+    // scan does not honour it (it says so above), so its key is the routed
+    // source, which is how its probes leave.
     let router = if routes_targets(&cfg) {
+        let honours_s = cfg.scan != ScanKind::Connect;
         nmap_sys::route::GroupRouter::new(
-            overrides.spoof_src.map(std::net::Ipv4Addr::from),
-            overrides.spoof_src6.map(std::net::Ipv6Addr::from),
+            overrides
+                .spoof_src
+                .filter(|_| honours_s)
+                .map(std::net::Ipv4Addr::from),
+            overrides
+                .spoof_src6
+                .filter(|_| honours_s)
+                .map(std::net::Ipv6Addr::from),
         )
         .ok()
     } else {

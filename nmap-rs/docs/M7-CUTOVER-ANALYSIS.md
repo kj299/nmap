@@ -928,3 +928,13 @@ the cargo tests miss all caught by the golden gate) and one, low: nothing
 pinned that a list scan routes nothing. The root test now checks `-sL`'s
 input order, as 7.94 lists them, with a sabotage entry.
 
+**The twenty-second review** confirmed two, both low:
+
+1. A connect scan without `-Pn`, routed since this step, still keyed its
+   groups on `-S`'s address, which it does not send from: `-sT -S 192.0.2.2`
+   made one group of 3 where 7.94 and the port without `-S` make two. Its
+   key now takes the routed source, with a root test and a sabotage entry.
+2. `raw-scan-unroutable-target-reported` said 7.94 skips an unroutable
+   target "for a raw scan"; it does so whenever `RawScan()` holds, a root
+   connect scan without `-Pn` among them. Corrected.
+

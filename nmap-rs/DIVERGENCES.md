@@ -284,8 +284,9 @@ narrower *rendering* of the same result.
       `group::tests::targets_are_grouped_by_family_and_route`. *(Found in review at
       IPv6 scans step e and fixed there; it dated from M4's group engine.)*
 - [ ] `raw-scan-unroutable-target-reported` (`cli`, `sys::group`; ports
-      `targets.cc:409-413`) — for a raw scan, 7.94 skips a target it has no route
-      to. It says "setup_target: failed to determine route to X" and writes `<target
+      `targets.cc:409-413`) — whenever `RawScan()` holds (a raw scan, or as
+      root a connect scan with `-O` or without `-Pn`, `NmapOps.cc:353-362`),
+      7.94 skips a target it has no route to. It says "setup_target: failed to determine route to X" and writes `<target
       specification="X" status="skipped" reason="invalid"/>` to the XML
       (`log_bogus_target`, `output.cc:1305`). The port reports the target: down, or up
       under `-Pn`, with no ports. Both families. *(Found at IPv6 scans step e.)*
@@ -2856,8 +2857,15 @@ removed: that one was theatre, this one is unobservable.
         pair off-link and 192.0.2.2 direct, so two groups reported 1, 3, 2
         (by reading: running it would send packets off the machine).
       With `-S 127.0.0.1` the two agree (*measured*, over 127.0.0.1,
-      192.0.2.2 and 127.0.0.3: one group of 3 each). It goes when the engine
-      forces `-S`'s device as C does.
+      192.0.2.2 and 127.0.0.3: one group of 3 each). This is for the raw
+      scans, which send from `-S`. A connect scan does not honour `-S`
+      (`nmap.cc:1817`'s refusal of raw options, which the port repeats), so
+      since the twenty-second review of step b its key takes the routed
+      source: `-sT -S 192.0.2.2` without `-Pn` over 127.0.0.1, 192.0.2.2 and
+      127.0.0.2 makes the loopback pair and then 192.0.2.2 (*measured*), as
+      7.94 does by the routes above, where it had made one group of 3 by a
+      source its probes never used. It goes when the engine forces `-S`'s
+      device as C does.
 
 - [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
       65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a

@@ -335,6 +335,24 @@ fn a_routed_run_groups_by_route() {
     assert_eq!(sizes(&err), [2, 1], "{err}");
     assert_eq!(reports(&out), ["127.0.0.1", "127.0.0.2", own.as_str()]);
 
+    // A connect scan does not honour `-S`, so `-S` does not key its groups:
+    // the same two as without it. 7.94 here forces `-S`'s device, whose
+    // routes split the same way (`spoof-source-groups-by-route`).
+    let (_, err, ok) = run(&[
+        "-d",
+        "-sT",
+        "-n",
+        "-S",
+        &own,
+        "-p",
+        "1",
+        "127.0.0.1",
+        &own,
+        "127.0.0.2",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(sizes(&err), [2, 1], "{err}");
+
     // A list scan routes nothing (its ping type is none, `nmap.cc:1307`, so
     // `RawScan()` is false): input order, as 7.94 lists them (*measured*).
     let (out, err, ok) = run(&["-sL", "-n", "127.0.0.1", &own, "127.0.0.2"]);

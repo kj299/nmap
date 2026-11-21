@@ -2755,6 +2755,24 @@ removed: that one was theatre, this one is unobservable.
       after the bounds pass (*measured*, the fifth review of step b). Either
       way the run is refused; only which message comes differs.
 
+- [ ] `spoof-source-groups-by-route` (`sys::route::GroupRouter::key`, M7
+      cutover step b) — **under `-S` without `-e`, the port's host groups
+      still split by each target's routed interface; 7.94's do not.** 7.94
+      sets the device to the one holding the `-S` address
+      (`ipaddr2devname`, `nmap.cc:1734-1737`), and `route_dst` then keeps only
+      that device's routes (`libnetutil/netutil.cc:2401-2406`), so every
+      target has the same interface and `target_needs_new_hostgroup`'s
+      interface test (`targets.cc:291-295`) never splits a group. The port's
+      key takes `-S`'s address as the source but the interface its own
+      routing picks per target, which is the interface its probes then take
+      (`spoof-source-receives-too`): grouping follows the port's engine, not
+      7.94's. So `-sS -S 192.0.2.2 192.0.2.2 192.0.2.5` makes two groups
+      (lo, as an own address, and eth0) where 7.94 makes one. By reading; a
+      run against 7.94 needs an off-host target. Over loopback and an own
+      address the two agree (*measured*, `-S 127.0.0.1` over 127.0.0.1,
+      192.0.2.2 and 127.0.0.3: one group of 3 each). It goes when the
+      engine forces `-S`'s device as C does.
+
 - [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
       65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a
       mistyped netmask. Past it the port prints "target list truncated at 65536
@@ -2876,8 +2894,9 @@ removed: that one was theatre, this one is unobservable.
       where 7.94 reads it as it fills each batch (`grab_next_host_spec`,
       `libnetutil/netutil.cc:3786`, from the loop at `nmap.cc:2110`): the names
       up to the cap are resolved first; and a bad specification anywhere
-      before the cap (too long, not UTF-8, a read error) ends the run before
-      anything is scanned, where 7.94 scans and reports the batches before it
+      before the cap, or the first one past it, which is read to tell whether
+      the list goes on (too long, not UTF-8, a read error), ends the run
+      before anything is scanned, where 7.94 scans and reports the batches before it
       and then quits (*measured*: 5,000 addresses then a 1,100-byte token;
       7.94 lists 4,096 hosts, the port none, as it did before the step). A
       slow `-iL -` likewise starts no scan until it ends or reaches the cap.

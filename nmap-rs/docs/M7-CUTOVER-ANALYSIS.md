@@ -542,7 +542,9 @@ loop. b.7 is the gates below.
 - *Who decides `route`:* the CLI, as 7.94's `RawScan()` does as root: every raw
   scan, and a connect scan with `-O` or without `-Pn`. "Root" is "a raw socket
   opens". A build without `pcap` routes nothing.
-- *`-S`:* the group key's source is `-S`'s address.
+- *`-S`:* the group key's source is `-S`'s address; its interface stays the
+  one the port routes each target by, where 7.94 forces `-S`'s device for
+  every target (`spoof-source-groups-by-route`, found by the seventh review).
 - *Bounds that read negative as an `int`:* refused (b.1).
 - *A down verdict entering `HostGroups`:* not done. The port's one verdict, the
   IPv6 ND ping's, still arrives after grouping
@@ -709,4 +711,16 @@ so the sabotage set needs root to report it.
    Each has a test and a sabotage entry now (26 in all); the first mutation
    tried for the fallback was equivalent, the guard being doubled, and was
    replaced.
+
+**The seventh review** confirmed one and reported one by reading, both low,
+both ledgered without a code change:
+
+1. Under `-S` without `-e`, groups split by each target's routed interface,
+   where 7.94 forces `-S`'s device and so never splits on it. The port's
+   probes take the routed interface too, so its grouping follows its own
+   engine (`spoof-source-groups-by-route`); by reading, since a check
+   against 7.94 needs an off-host target.
+2. The specification read just past the cap, to tell whether the list goes
+   on, ends the run as one before it does. The ledger said "before the cap";
+   it now names both.
 

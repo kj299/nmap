@@ -42,10 +42,13 @@ many **up** hosts:
     100,000, `NmapOps.cc:256-257`).
 
   UDP is tested first, so `-sS -sU` takes 128.
-- **Down hosts do not count.** A host found down is reported and dropped as it is
-  pulled (`nmap.cc:2151-2164`), and the loop continues.
+- **Down hosts take no place.** A host found down is reported and dropped as it is
+  pulled (`nmap.cc:2151-2164`), and the loop continues. It is still added to
+  `o.numhosts_scanned`, which the size rule reads for its quick group
+  (*corrected at step a's review; this said they "do not count"*).
 - **A group is homogeneous** (`target_needs_new_hostgroup`, `targets.cc:276-314`).
-  For a raw scan as root, a host that differs from the group's first in address
+  As root with `RawScan()` true (every raw port scan, and a connect scan with
+  `-O` or `--traceroute`, or without `-Pn`), a host that differs from the group's first in address
   family, interface, source address or direct-connectedness, or that repeats an
   address already in the group, is handed back and starts the next group
   (`nmap.cc:2192-2196`). `--min-hostgroup` does not override this.
@@ -340,41 +343,87 @@ matrix measured each part:
   (`o.numhosts_scanned`), so only the run's second group is shortened.
 
 **The gate.** `tests/differential/m7/gen_hostgroup_golden.py` runs 7.94 under
-`-Pn -n -v` over 55 cases and reads each group's size and the order of reports
+`-Pn -n -v` over 65 cases and reads each group's size and the order of reports
 from nmap's own output. The cases cover:
 
-- six scan-type combinations: `-sT`, `-sS`, `-sA`, `-sU`, `-sS -sU`, `-sU -sS`;
+- eight scan kinds: `-sT`, `-sS`, `-sA`, `-sU`, `-sS -sU`, `-sU -sS`, `-sO`
+  (neither TCP nor UDP) and `-sT -O` (a routed connect scan);
 - port counts 1, 2, 15, 16, 17, 20, 64, 1000, 1001 and 2000;
-- `-T3`, `-T4` and `-T5`;
+- `-T0` to `-T5`;
 - `--min-hostgroup` and `--max-hostgroup`, each alone, together, and absent;
-- a second source, repeated addresses, the defer buffer at 63, 64 and 65, and
-  the batch at 4,095, 4,096 and 4,097 hosts.
+- a second source, repeated addresses (the group's first and a later one), the
+  defer buffer at 63, 64 and 65, and the batch at 4,095, 4,096, 4,097 and at
+  `--min-hostgroup 5000` exactly.
 
 `crates/core/tests/hostgroup_differential.rs` requires the port to give the same
 sizes and the same order on every case. It does. The golden was generated from
-the installed 7.94SVN, and matches a build of this repository's 7.94 commit
-(`3be01efb1`) and a build of the tree's current C.
+the installed 7.94SVN and matches a build of this repository's 7.94 commit
+(`3be01efb1`). The first 55 cases also matched a build of the tree's current C.
 
-**The golden can tell broken C apart.** `sabotage_c_hostgroup.py` builds 23
-variants of the C, one changed rule each, and requires the generator's `--check`
-to fail on each. It found one gap: a C that shortens every later group, not only
-the second, passed, because no case had a third full group. The case
-`-p 1-1001`, 130 hosts (4, 60, 64, 2) was added, and all 23 are now caught. One
-variant as first written produced an nmap that scanned nothing; it was
-rewritten to one that runs.
+**The golden can tell broken C apart, as far as it has been tried.**
+`sabotage_c_hostgroup.py` builds 29 variants of the C, one changed rule each, and
+requires the generator's `--check` to fail on each. All 29 are caught. That
+number was reached in rounds, and each found the golden or its harness short:
 
-**The tests can tell a broken port apart.** 33 mutations of `hostgroup.rs`
+- my own first 23 variants found one gap (every later group shortened, not only
+  the second), closed by `-p 1-1001` over 130 hosts;
+- one variant as first written produced an nmap that scanned nothing, and was
+  rewritten to one that runs;
+- the independent review then built four broken variants that passed all 55
+  cases, and named two more; they are the last six of the 29, and ten cases
+  were added for them;
+- two variants that let an address into a group twice then hung the broken nmap
+  on a new case (it waits out every probe of the copy). A hang is not a catch
+  (LESSONS #044), so the generator now passes over a case that does not finish
+  and goes on comparing; both variants are caught by a case that ran to its end.
+
+So "all caught" is a statement about these 29, not about every wrong C.
+
+**The tests can tell a broken port apart.** 40 mutations of `hostgroup.rs`
 through the kit's `sabotage.py` (`tests/differential/m7/sabotage_hostgroup.json`),
-33 caught, 29 of them by the differential by name. The other four are rules
-loopback cannot show 7.94 exercising, and are pinned by unit tests only:
-a different interface, a different direct-connectedness, a different address
-family, and `numhosts_scanned` accumulating (it takes three routes to end a
-batch on a group of exactly four).
+40 caught, 37 of them by the differential by name. The other three are rules
+loopback cannot show 7.94 exercising, and are pinned by unit tests only: a
+different interface, a different direct-connectedness and a different address
+family. The source is fused, which has a unit test and no mutation: undoing it
+changes a type and a call, and the harness mutates one span.
 
-**Divergences.** The port counts every target toward a group, since it sends no
-host-discovery probes; 7.94 counts up hosts (`hostgroup-every-target-counts`).
-As root without `-Pn`, 7.94 also splits a `-sT` scan by route
-(`privileged-connect-scan-no-implicit-verdicts`). `--randomize-hosts`, `-iR`
+**The review.** One independent review, of the step as first written. It could
+not make the port's sizes or order differ from 7.94 on any input in which every
+target is up: it read the C line by line, ran 362 random cases against the 7.94
+build with no difference, and replayed the mutations. What it found, all
+confirmed here and fixed in the follow-up to #161:
+
+1. The ledger said the port and 7.94 agree under `-Pn`. They do not where 7.94
+   pings anyway: an on-link Ethernet target is put to the ARP or ND ping under
+   `-Pn`, and a silent one takes no place in a group. Measured, 4/64/2 against
+   the module's 4/60/10 (`hostgroup-every-target-counts`, rewritten).
+2. Four broken variants of the C and four of the port passed every test. See
+   above.
+3. The claim that `numhosts_scanned` accumulating could not be shown on loopback
+   was false: repeats on one route end a batch on a group of four. It is now a
+   golden case and its mutation is caught by the differential.
+4. "A connect scan routes nothing" is true only under `-Pn` without `-O` or
+   `--traceroute`: 7.94 routes whenever `RawScan()` holds. The docs say so now
+   and the golden holds a `-sT -O` case.
+5. Smaller: a stale case count in two comments; the generator would have read
+   an ARP ping's "Scanning N hosts" as groups, and now refuses a run in which
+   nmap pings; the source iterator was asked again after its end, and is fused.
+
+**For step b**, from the review:
+
+- **A down verdict has no way into `HostGroups`.** 7.94 gives a down host no
+  place and adds it to `numhosts_scanned`. The port has such verdicts for IPv6
+  on-link neighbors (its ND ping), and reaches them after grouping, for a whole
+  route-group at once. Step b decides whether the ND ping moves ahead of group
+  formation, per batch, as in 7.94, or the difference is ledgered.
+- **The caller decides `route`.** `Some` when root and `RawScan()` holds, so
+  `-sT -O` is routed; and `RouteKey::source` is `-S`'s address when given
+  (measured: `-sS -S 127.0.0.1 -e lo` over `l1, own, l2` is one group of 3).
+- **Bounds above `i32::MAX`.** 7.94 aborts on `--max-hostgroup 2147483648`
+  (an assertion in `box`). The CLI should refuse such a value with a message.
+
+**Divergences.** Every target takes a place in a group here, and in 7.94 a down
+host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`
 and SCTP scans are not ported.
 
 **Gates.** Fuzzing is exempt with a reason: the module reads sizes from the
@@ -382,4 +431,5 @@ command line and route keys from this host's routing table, and no bytes from
 the network. Miri passes on its unit tests. It has no `unsafe`. In CI the
 differential job runs the generator's `--check` as root against the distro's
 nmap; that step has not run in CI, which has not run since 3 November, and has
-run here.
+run here. #161 was merged before the review and before any local CI record;
+both are on the follow-up.

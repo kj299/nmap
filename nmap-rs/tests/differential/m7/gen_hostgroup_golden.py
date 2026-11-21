@@ -17,16 +17,27 @@ Targets are tokens, so the golden holds no address of the machine that made it:
   own   this host's own non-loopback IPv4 address (route: lo, source itself)
 A token may repeat: nmap scans a repeated address in a later group.
 
-Every run passes -Pn -n: the port sends no host-discovery probes, so the groups
-it forms are the ones nmap forms when every target is up. As root, -sT without
--Pn also splits by route (RawScan() holds for its pings); the port's connect
-scan does not, which `privileged-connect-scan-no-implicit-verdicts` records.
+Every run passes -Pn -n, and every target is routed over the loopback, where
+nmap sends no ARP or ND ping: so every target is up, which is the only case in
+which the port, with no host discovery, can form nmap's groups
+(`hostgroup-every-target-counts`). A run in which nmap pings is refused, since
+its "Scanning N hosts" lines would be read as groups.
+
+As root nmap routes a run's targets whenever RawScan() holds: a raw port scan,
+and also -sT with -O or --traceroute, or without -Pn. Scan `T` is the one
+unrouted kind here and `TO` (-sT -O) a routed connect scan.
 
 Needs root (raw scans) and an own non-loopback IPv4 address.
 
-Usage: gen_hostgroup_golden.py [--nmap PATH] [--check] [--only SUBSTR] [GOLDEN]
+Usage: gen_hostgroup_golden.py [--nmap PATH] [--check [--fail-fast]] [--only SUBSTR]
+                                [--timeout SECONDS] [GOLDEN]
   default: write GOLDEN (hostgroup_golden.txt beside this file)
   --check: generate, compare with GOLDEN, exit 1 on any difference
+  --fail-fast: with --check, stop at the first case that differs
+  --timeout: per run of nmap (default 300). A run that does not finish is not a
+    difference: --check goes on, and exits 3 if that is all that went wrong. A
+    broken nmap can hang on a case (one that puts an address in a group twice
+    waits out every probe of the copy), and a hang is not a catch (LESSONS #044).
 """
 import argparse
 import os
@@ -37,7 +48,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCANS = {"T": ["-sT"], "S": ["-sS"], "A": ["-sA"], "U": ["-sU"], "SU": ["-sS", "-sU"],
-         "US": ["-sU", "-sS"]}
+         "US": ["-sU", "-sS"], "O": ["-sO"], "TO": ["-sT", "-O", "--max-os-tries", "1"]}
+# What nmap calls the port scan each kind starts with. Group sizes are read from
+# these phases only.
+PORT_SCANS = ("Connect Scan", "SYN Stealth Scan", "ACK Scan", "UDP Scan", "IPProto Scan")
 
 
 def own_address():
@@ -89,6 +103,16 @@ def matrix():
     c += [case("T", 1001, "l1-l69", t) for t in (3, 4, 5)]
     # Only the second group is shortened: the third is whole again.
     c += [case("T", 1001, "l1-l130")]
+    # -T0 to -T2 have the quick group too.
+    c += [case("S", 1001, "l1-l9", t) for t in (0, 1, 2)]
+    # A first group cut short of the quick size (a repeat ends its batch) shortens
+    # nothing: the second is 64, not 60.
+    c += [case("S", 1001, "l1-l3,l1x64,l4-l70")]
+    # The rule reads the hosts of every group so far: a later group of four (a
+    # batch ended by repeats) is followed by a whole one.
+    c += [case("S", 1001, "l1-l68,l65x64,l69-l140")]
+    # Neither TCP nor UDP: 16.
+    c += [case("O", 3, "l1-l20")]
     c += [case("T", 1001, "l1-l3"), case("T", 1001, "l1-l4"), case("T", 1001, "l1-l5")]
     c += [case("T", 2000, "l1-l12")]
     # Raw TCP scans size like connect scans; UDP is 128, and wins when both run,
@@ -112,6 +136,10 @@ def matrix():
           case("S", 1, "l1,l1,l2", mx=1), case("S", 1, "l1,own,l2,own,l3", mx=2),
           case("T", 1, "l1,own,l2"), case("T", 1, "l1,l1,l2"), case("U", 1, "l1,own,l2,l1"),
           case("A", 1, "own,own,l1")]
+    # The repeat test reads every address of the group, not its first.
+    c += [case("S", 1, "l1,l2,l2,l3"), case("S", 1, "l1,l2,l3,l2,l3,l4")]
+    # A connect scan with -O is routed (RawScan() holds), so both rules apply.
+    c += [case("TO", 1, "l1,own,l2,l1")]
     # The defer buffer holds 64 (targets.h:75): when it fills, the batch ends early.
     c += [case("S", 1, "l1,own,l1x63,l2,l3"), case("S", 1, "l1,own,l1x62,l2,l3"),
           case("S", 1, "l1,ownx64,l2"), case("S", 1, "l1,ownx65,l2")]
@@ -120,6 +148,8 @@ def matrix():
     # waits behind it; in a larger batch `own` is deferred and l4097 overtakes it.
     c += [case("S", 1, "l1-l4096,own,l4097"), case("S", 1, "l1-l4096,own,l4097", mn=5000),
           case("S", 1, "l1-l4095,own,l4096")]
+    # The batch is raised to exactly --min-hostgroup: `own` leads the next one.
+    c += [case("S", 1, "l1-l5000,own,l5001", mn=5000)]
     return c
 
 
@@ -129,25 +159,36 @@ def name(c):
             f"max={c['max'] if c['max'] is not None else '-'} targets={c['targets']}")
 
 
-def run(nmap, c, own):
+def run(nmap, c, own, timeout):
+    """(sizes, order), or None if nmap did not finish in `timeout` seconds."""
     tokens = expand(c["targets"])
     addr = {t: (own if t == "own" else loopback(int(t[1:]))) for t in set(tokens)}
     back = {a: t for t, a in addr.items()}
     cmd = [nmap] + SCANS[c["scan"]] + ["-Pn", "-n", "-v", f"-T{c['T']}", "-p", f"1-{c['ports']}"]
+    if c["T"] < 3:
+        # -T0 waits five minutes between probes. The delay is not what is measured.
+        cmd += ["--scan-delay", "1ms", "--max-scan-delay", "1ms"]
     if c["min"] is not None:
         cmd += ["--min-hostgroup", str(c["min"])]
     if c["max"] is not None:
         cmd += ["--max-hostgroup", str(c["max"])]
     cmd += [addr[t] for t in tokens]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=900).stdout
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except subprocess.TimeoutExpired:
+        return None
     sizes, order, first, current = [], [], None, None
     for line in out.splitlines():
         m = re.match(r"Initiating (.+) at ", line)
         if m:
             current = m[1]
-            first = first or current
+            if "Ping" in current:
+                sys.exit(f"FAIL: {name(c)}: nmap ran a {current}; a target is not routed "
+                         "over the loopback, and its groups cannot be read this way")
+            if first is None and current in PORT_SCANS:
+                first = current
             continue
-        if current == first:
+        if first is not None and current == first:
             m = re.match(r"Scanning (\d+) hosts \[", line)
             if m:
                 sizes.append(int(m[1]))
@@ -187,30 +228,51 @@ def main():
     ap.add_argument("--nmap", default="nmap")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--only")
+    ap.add_argument("--fail-fast", action="store_true")
+    ap.add_argument("--timeout", type=int, default=300)
     a = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("FAIL: needs root, for the raw scans")
     own = own_address()
     if own is None:
         sys.exit("FAIL: needs a non-loopback IPv4 address of this host's own")
-    lines = []
-    for c in matrix():
-        if a.only and a.only not in name(c):
+    cases = [c for c in matrix() if not a.only or a.only in name(c)]
+    want = {}
+    if a.check:
+        for l in open(a.golden).read().splitlines():
+            want[l.split(" | ")[0]] = l
+    lines, differs, unfinished = [], 0, []
+    for c in cases:
+        got = run(a.nmap, c, own, a.timeout)
+        if got is None:
+            unfinished.append(name(c))
+            print(f"DID NOT FINISH in {a.timeout}s: {name(c)}", flush=True)
             continue
-        sizes, order = run(a.nmap, c, own)
+        sizes, order = got
         lines.append(f"{name(c)} | groups={','.join(map(str, sizes))} | order={compress(order)}")
         print(lines[-1], file=sys.stderr, flush=True)
-    text = "".join(l + "\n" for l in lines)
+        if a.check and want.get(name(c)) != lines[-1]:
+            differs += 1
+            print(f"DIFFERS:\n  golden: {want.get(name(c), '(no such case)')}\n"
+                  f"  now:    {lines[-1]}", flush=True)
+            if a.fail_fast:
+                break
     if a.check:
-        want = [l for l in open(a.golden).read().splitlines()
-                if not a.only or a.only in l]
-        if want != lines:
-            for w, g in zip(want, lines):
-                if w != g:
-                    print(f"DIFFERS:\n  golden: {w}\n  now:    {g}")
-            sys.exit(f"FAIL: {a.golden} differs ({len(want)} golden, {len(lines)} now)")
+        extra = [] if a.only or a.fail_fast and differs else \
+            sorted(set(want) - {name(c) for c in cases})
+        for n in extra:
+            differs += 1
+            print(f"DIFFERS:\n  golden: {want[n]}\n  now:    (no such case)")
+        if differs:
+            sys.exit(f"FAIL: {a.golden} differs in {differs} case(s)")
+        if unfinished:
+            print(f"INCONCLUSIVE: {len(unfinished)} case(s) did not finish; the rest match")
+            sys.exit(3)
         print(f"hostgroup golden: {len(lines)} cases match {a.golden}")
     else:
+        if unfinished:
+            sys.exit(f"FAIL: {len(unfinished)} case(s) did not finish; nothing written")
+        text = "".join(l + "\n" for l in lines)
         open(a.golden, "w").write(text)
         print(f"wrote {len(lines)} cases to {a.golden}")
 

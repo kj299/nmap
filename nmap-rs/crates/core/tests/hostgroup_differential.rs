@@ -86,7 +86,8 @@ fn groups_and_order_match_nmap() {
             min_hostgroup: bound("min", 1),
             max_hostgroup: bound("max", 100_000),
         };
-        // A connect scan under -Pn routes nothing; every other scan here is raw.
+        // As root, 7.94 routes a run's targets unless it is a connect scan under
+        // -Pn with neither -O nor --traceroute: `T`. `TO` is -sT -O.
         let routed = scan != "T";
         let targets: Vec<Member<String>> = expand(field["targets"])
             .iter()
@@ -102,5 +103,5 @@ fn groups_and_order_match_nmap() {
         cases += 1;
     }
     // Pinned so that an emptied or truncated golden cannot pass.
-    assert_eq!(cases, 55, "cases in the golden");
+    assert_eq!(cases, 65, "cases in the golden");
 }

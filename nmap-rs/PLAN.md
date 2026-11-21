@@ -530,8 +530,10 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    [`docs/M7-CUTOVER-ANALYSIS.md`](docs/M7-CUTOVER-ANALYSIS.md) (7.94's group
    formation and host clock, measured on loopback; steps a–f; D1–D7 decided
    2026-11-21 as recommended). **Step a done**: `core::hostgroup` forms 7.94's
-   groups, in 7.94's order, on all 55 cases of a matrix read from nmap's own
-   `-v` output; 23 broken variants of the C and 33 of the port are each caught.
+   groups, in 7.94's order, on all 65 cases of a matrix read from nmap's own
+   `-v` output; 29 broken variants of the C and 40 of the port are each caught,
+   ten of those cases and thirteen of those variants being what its independent
+   review added.
    Nothing calls it until step b, and the three options stay refused; then release engineering
    (SBOM, auditable and reproducible builds, signing, `DIVERGENCES.md` as release
    notes) and `ncat`/`nping`.

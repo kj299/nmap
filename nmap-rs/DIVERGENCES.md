@@ -2875,6 +2875,23 @@ removed: that one was theatre, this one is unobservable.
       kernel choose the source. Older than M7 step b; the step's host groups
       still key on `-S`, as 7.94's do.
 
+- [ ] `special-address-routes` (`sys::route::choose_route`, grouping since M7
+      cutover step b) — **for 0.0.0.0, multicast and the limited broadcast,
+      the port's route is not 7.94's, so a routed run groups them apart from
+      where 7.94 does.** 7.94's `route_dst` takes the kernel's answer
+      (*measured* with `--route-dst`, which sends nothing: 0.0.0.0 `lo srcaddr
+      127.0.0.1 direct`; 224.0.0.1 and 255.255.255.255 `eth0 srcaddr
+      192.0.2.2 direct`). The port's `choose_route` calls any address that is
+      not loopback, not the host's own and not in an interface's subnet
+      off-link by the default route, so all three key as 8.8.8.8 does (`eth0`,
+      192.0.2.2, not direct; *measured* by a unit-level call). Grouping
+      compares interface, source and directness (`targets.cc:291-305`), so
+      `-sS -Pn 8.8.8.8 224.0.0.1 8.8.4.4` is two groups in 7.94 and one in
+      the port, and `127.0.0.1 0.0.0.0 127.0.0.2` one in 7.94 and two in the
+      port (by reading: running them would send packets off the machine). The
+      routes are older than the step and are the ones the port's scan engine
+      takes; the step made grouping read them.
+
 - [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
       65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a
       mistyped netmask. Past it the port prints "target list truncated at 65536

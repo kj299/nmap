@@ -949,3 +949,13 @@ own older difference, that its connect scan does not bind to `-S`, is
 ledgered (`connect-scan-ignores-spoof-source`). The `-S 192.0.2.2` split
 falls under the existing `spoof-source-groups-by-route`.
 
+**The twenty-fourth review** found no code defect in the grouping: 68
+randomised runs against 7.94 itself (1 to 150 targets over the loopback
+range and 192.0.2.2 with heavy repeats; `-sS`, `-sU`, `-sA`, `-sT` with and
+without `-Pn`; random `--min`/`--max-hostgroup`) gave 0 differences in
+report order, and nine more mutations of `core::hostgroup` were all caught.
+It confirmed one, low: for 0.0.0.0, multicast and the limited broadcast the
+port's route is not 7.94's, which grouping now reads. Ledgered, measured
+(`special-address-routes`); the routes are older than the step and shared
+with the scan engine.
+

@@ -500,6 +500,12 @@ the mechanism (the additions are drawn after the command line's targets and
 are then batched, deferred and grouped like any other target), and give
 measured cases as examples.
 
+**The sixth round**, on the fifth fix round, confirmed nothing. Six rounds
+confirmed 10, 4, 6, 2, 1 and 0 findings. No round found the grouping rules as
+first written to differ from 7.94. The one defect in the module's code was the
+fuse, which the first fix round introduced and the second removed; the rest
+were sentences, test gaps and the test tools.
+
 **Divergences.** Every target takes a place in a group here, and in 7.94 a down
 host takes none (`hostgroup-every-target-counts`). `--randomize-hosts`, `-iR`
 and SCTP scans are not ported.

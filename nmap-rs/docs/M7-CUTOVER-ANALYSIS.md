@@ -521,7 +521,7 @@ both are on the follow-up.
 ## 11. Step b: the group loop
 
 The CLI now runs its pipeline per host group, as 7.94's main loop does
-(`nmap.cc:2080-2330`): it draws a group from the lazy target source through
+(`nmap.cc:2104-2346`): it draws a group from the lazy target source through
 `core::hostgroup`, port-scans it, runs `-sV`, `-O` and the scripts' host phase
 over it, writes its hosts to the terminal and every `-o` file, flushes, and
 drops it. The pre-scan phase runs before the first group, the post-scan phase
@@ -873,4 +873,19 @@ low: `spoof-source-groups-by-route` cited `netutil.cc:2401-2406` (the
 the CLI's sizing inputs (port count, timing level, which scans route) are
 pinned by the root golden gate in CI's differential job and by no cargo
 test.
+
+**The eighteenth review** found no code defect (the 61 golden cases, all 37
+mutations of the sabotage map caught as root, `hostgroup.rs` unchanged since
+the seventeenth round's 400-run comparison) and three, all low:
+
+1. With no scan type, as root, under `-Pn`, 7.94 SYN-scans and routes its
+   targets where the port connect-scans and routes none, so their groups and
+   report order differ; the step had dropped the caveat that said so.
+   Ledgered in `default-scan-connect-even-privileged`, measured, and
+   `output-down-hosts-first` points to it.
+2. The unit test's claim that a minimum above the batch raises the batch
+   could not fail: over an unrouted source the batch does not shape the
+   groups. It now uses routed targets, where it does, with a sabotage entry.
+3. The main loop was cited as `nmap.cc:2080-2330` and the write loop as
+   `:2292-2330`; they are `:2104-2346` and `:2293-2335`.
 

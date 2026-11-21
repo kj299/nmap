@@ -363,7 +363,7 @@ fn render_normal_to(
 
 /// What a run's closing lines need from the hosts of every group, counted as
 /// each group is written: nmap writes a group's hosts when the group is done
-/// and the totals at the end (`nmap.cc:2292-2330`, `printfinaloutput`). It
+/// and the totals at the end (`nmap.cc:2293-2335`, `printfinaloutput`). It
 /// holds counts only, so it does not grow with the run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunTotals {

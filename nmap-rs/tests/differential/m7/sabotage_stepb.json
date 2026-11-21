@@ -721,5 +721,24 @@
     "expect": [
       "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
     ]
+  },
+  {
+    "name": "--min-hostgroup does not raise the batch",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            batch_size: PING_GROUP_SZ.max(min),",
+    "new": "            batch_size: PING_GROUP_SZ,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::the_source_is_drawn_lazily"
+    ]
   }
 ]

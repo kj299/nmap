@@ -977,18 +977,26 @@ mod tests {
         let mut g = HostGroups::new(source, capped);
         assert_eq!(g.next().map(|v| v.len()), Some(10));
         assert_eq!(drawn.get(), PING_GROUP_SZ, "one batch, not the run");
-        // A minimum above the batch raises the batch to it.
+        // A minimum above the batch raises the batch to it. Routed, so the
+        // batch shapes the groups: 4,096 on one route, one on another, 900
+        // more on the first. A batch of 5,000 defers the odd one and keeps the
+        // 4,996 together; one of 4,096 would end at it.
         let wide = GroupSizing {
             min_hostgroup: 5000,
             ..sizing()
         };
-        let source = (0u32..6000).map(|i| Member {
+        let a = lo([127, 0, 0, 1]);
+        let b = Some(RouteKey {
+            iface: "eth0".into(),
+            ..a.clone().unwrap()
+        });
+        let source = (0u32..4997).map(|i| Member {
             address: IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)),
-            route: None,
+            route: if i == 4096 { b.clone() } else { a.clone() },
             item: i,
         });
         let sizes: Vec<usize> = HostGroups::new(source, wide).map(|v| v.len()).collect();
-        assert_eq!(sizes, [5000, 1000]);
+        assert_eq!(sizes, [4996, 1]);
     }
 
     /// The source is asked again when a group wants a target and the batch is

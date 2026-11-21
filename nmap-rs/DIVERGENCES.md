@@ -235,7 +235,10 @@ narrower *rendering* of the same result.
       (`core::hostgroup`) and orders each one this way, so a later group's down
       hosts come after an earlier group's up ones, as in 7.94. The two still part
       where a down host takes a place in a group here and none in 7.94
-      (`hostgroup-every-target-counts`). Pinned by
+      (`hostgroup-every-target-counts`), and where the two scan differently: with
+      no scan type, as root, 7.94 SYN-scans and so routes its targets, where the
+      port connect-scans and under `-Pn` does not
+      (`default-scan-connect-even-privileged`). Pinned by
       `down_hosts_come_first_and_alone` and `down_hosts_come_first_in_each_group`.
       *(Found in review at IPv6 scans step e and fixed there; per group since
       step b.)*
@@ -345,7 +348,14 @@ narrower *rendering* of the same result.
       way), so the M1 matrix, run as root in the FreeBSD VM, did not show it.
       It showed through a fixture instead: the connect probe's reset fails
       `accept()` on FreeBSD (`ECONNABORTED`), which 7.94's SYN probe never
-      reaches. Found in FreeBSD step d.
+      reaches. Found in FreeBSD step d. Since M7 cutover step b it also changes
+      the host groups and so the report order: 7.94's SYN scan makes
+      `RawScan()` hold, so it routes its targets (`NmapOps.cc:354`,
+      `targets.cc:276`), where the port's connect scan under `-Pn` routes none
+      (`routes_targets`). *Measured* as root: `-Pn -n -p 1 127.0.0.1 127.0.0.1
+      127.0.0.2` is reported 1, 2, 1 by 7.94 and 1, 1, 2 by the port; `-Pn -n
+      -p 1 127.0.0.1 192.0.2.2 127.0.0.2` is two groups (the loopback pair,
+      then 192.0.2.2) in 7.94 and one, in input order, in the port.
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets
@@ -2873,7 +2883,7 @@ removed: that one was theatre, this one is unobservable.
       written is the worse failure.
 
 - [x] `output-streamed-per-group` (`cli`, M7 cutover step b, D2; ports the main
-      loop of `nmap.cc:2080-2330`) — **the report is written host group by host
+      loop of `nmap.cc:2104-2346`) — **the report is written host group by host
       group, as 7.94 writes it.** Before, the port scanned every target, then
       wrote every format once at the end, so a long scan printed nothing until
       it was over and held every result in memory. Now each group's hosts are

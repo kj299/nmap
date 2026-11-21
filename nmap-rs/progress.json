@@ -468,15 +468,15 @@
     "core::hostgroup": {
       "differential": {
         "files": 1,
-        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
+        "sha256": "daed53e73f5ef21284c9966dd9d86c99b8e868ebc466186c74f4f02c814c779a"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
+        "sha256": "daed53e73f5ef21284c9966dd9d86c99b8e868ebc466186c74f4f02c814c779a"
       },
       "ported": {
         "files": 1,
-        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
+        "sha256": "daed53e73f5ef21284c9966dd9d86c99b8e868ebc466186c74f4f02c814c779a"
       },
       "reviewed": {
         "by": "six independent review rounds, 2026-11-21: 10, 4, 6, 2, 1, 0 findings confirmed; the last, on 553c059, confirmed nothing",
@@ -485,11 +485,11 @@
       },
       "sanitized": {
         "files": 1,
-        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
+        "sha256": "daed53e73f5ef21284c9966dd9d86c99b8e868ebc466186c74f4f02c814c779a"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "aa007e1fc130bef9a48b895a80edb4cb062593c5d2cae6256bc7ea14213d757c"
+        "sha256": "daed53e73f5ef21284c9966dd9d86c99b8e868ebc466186c74f4f02c814c779a"
       }
     },
     "core::icmp_quote": {

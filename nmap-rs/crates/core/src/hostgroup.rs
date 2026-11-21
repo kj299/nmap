@@ -151,6 +151,12 @@ impl RouteKey {
             direct: false,
         }
     }
+
+    /// Whether this is [`RouteKey::unroutable`]'s key: no interface is named "".
+    #[must_use]
+    pub fn is_unroutable(&self) -> bool {
+        self.iface.is_empty()
+    }
 }
 
 /// One target of the run, with what grouping reads of it and whatever the caller
@@ -300,7 +306,14 @@ where
         if group.is_empty() {
             return None;
         }
-        self.scanned = self.scanned.saturating_add(group.len());
+        // `o.numhosts_scanned` (`nmap.cc:2327`) counts the targets 7.94 scans.
+        // It never sees an unroutable one, dropped in `setup_target`
+        // (`targets.cc:409-413`), so neither does the quick-group rule here.
+        let routed = group
+            .iter()
+            .filter(|m| !m.route.as_ref().is_some_and(RouteKey::is_unroutable))
+            .count();
+        self.scanned = self.scanned.saturating_add(routed);
         Some(group)
     }
 }
@@ -499,6 +512,31 @@ mod tests {
         // Inside a routed group: it waits, as any other route does.
         let got = groups(vec![member(1, a.clone()), none(2), member(3, a)], sizing());
         assert_eq!(got, [vec![1, 3], vec![2]]);
+    }
+
+    /// An unroutable target is not counted as scanned, as 7.94 never scans it:
+    /// the quick first group (`-T4`, over 1,000 ports: 8) still comes first
+    /// for the routed targets after it.
+    #[test]
+    fn an_unroutable_target_does_not_count_toward_the_quick_group() {
+        let quick = GroupSizing {
+            tcp_ports: 65_535,
+            timing_level: 4,
+            ..sizing()
+        };
+        let a = lo([127, 0, 0, 1]);
+        let routed: Vec<Member<u8>> = (1..=20).map(|i| member(i, a.clone())).collect();
+        let alone: Vec<usize> = groups(routed.clone(), quick).iter().map(Vec::len).collect();
+        assert_eq!(alone, [8, 12]);
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+        let mut with = vec![Member {
+            address: addr,
+            route: Some(RouteKey::unroutable(addr)),
+            item: 0,
+        }];
+        with.extend(routed);
+        let got: Vec<usize> = groups(with, quick).iter().map(Vec::len).collect();
+        assert_eq!(got, [1, 8, 12]);
     }
 
     /// A scan that does not route its targets has no such rule: mixed sources and

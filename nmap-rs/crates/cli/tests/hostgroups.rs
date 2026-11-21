@@ -483,3 +483,45 @@ fn the_connect_fallback_is_announced_once() {
         3
     );
 }
+
+/// Whether this host has an IPv6 default route, by `/proc/net/ipv6_route`;
+/// with `/proc/net` but no such file, IPv6 is off and there is none. `None`
+/// when it cannot tell (not Linux).
+fn has_ipv6_default_route() -> Option<bool> {
+    let Ok(table) = std::fs::read_to_string("/proc/net/ipv6_route") else {
+        return std::path::Path::new("/proc/net/route")
+            .exists()
+            .then_some(false);
+    };
+    Some(table.lines().any(|l| {
+        let mut f = l.split_whitespace();
+        f.next() == Some("00000000000000000000000000000000") && f.next() == Some("00")
+    }))
+}
+
+/// In a routed run, a target with no route groups with the other unroutable
+/// ones alone, and the routed target is not drawn into their group: 7.94
+/// drops unroutable targets before grouping (`targets.cc:409-413`). Over IPv6,
+/// where `::1` routes by loopback and, with no IPv6 default route, `::2` and
+/// `::3` route nowhere. Needs root, for a routed run.
+#[test]
+#[ignore = "needs root"]
+fn an_unroutable_target_groups_apart_from_routed_ones() {
+    if has_ipv6_default_route() != Some(false) {
+        eprintln!("skipping: this host may route ::2 (an IPv6 default route, or none known)");
+        return;
+    }
+    let (out, err, _) = run(&[
+        "-6", "-d", "-sS", "-Pn", "-n", "-p", "80", "::2", "::1", "::3",
+    ]);
+    if err.contains("falling back to a") || err.contains("lacks raw-scan support") {
+        assert!(
+            std::env::var_os("REQUIRE_RAW").is_none(),
+            "REQUIRE_RAW is set, but the scan did not run raw: {err}"
+        );
+        eprintln!("skipping the routed grouping check: {err}");
+        return;
+    }
+    assert_eq!(sizes(&err), [2, 1], "{err}");
+    assert_eq!(reports(&out), ["::2", "::3", "::1"], "{out}");
+}

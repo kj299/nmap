@@ -737,11 +737,29 @@ now names this case, measured. It re-ran all 26 mutations: each caught.
    could join any group. It now has a key of its own
    (`RouteKey::unroutable`, by `GroupRouter::group_key`), with unit tests
    in `core::hostgroup` and `sys::route` and a sabotage entry. Not
-   reproducible end to end here: every IPv4 target has the default route.
+   reproducible end to end over IPv4 here, every target having the default
+   route; the tenth review reproduced it over IPv6, below.
 2. A setup failure falls back per group from that group on, so a report can
    mix raw and connect results. Ledgered in
    `raw-scan-pcap-feature-gated-fallback`.
 3. A run that dies after a group is written leaves an unclosed `-oX`, where
    7.94's `fatal` closes it with `exit="error"`. Ledgered in
    `output-streamed-per-group`.
+
+**The tenth review** confirmed three, all low, on the ninth round's fix:
+
+1. A group of unroutable targets still counted toward the targets scanned,
+   which the quick first group reads, where 7.94 never scans them
+   (`targets.cc:409-413`, `nmap.cc:2327`): one unroutable target first made
+   a `-T4 -p-` run's 20 routed targets one group instead of 8 and 12. They
+   are no longer counted, with a unit test.
+2. Nothing failed if the CLI went back to grouping an unroutable target by
+   no key: the tests checked the key and `group_key` alone. A root CLI test
+   now runs the reviewer's reproduction over IPv6 (`::2 ::1 ::3`, with no
+   IPv6 route: groups [::2, ::3] and [::1]; one group without the fix),
+   skipping where `::2` may have a route.
+3. The analysis said the defect could not be reproduced end to end here;
+   it can, over IPv6. Corrected.
+
+Both fixes have sabotage entries (29 in all).
 

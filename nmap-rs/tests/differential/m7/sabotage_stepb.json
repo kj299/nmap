@@ -528,5 +528,45 @@
     "expect": [
       "hostgroup::tests::an_unroutable_target_shapes_no_routed_group"
     ]
+  },
+  {
+    "name": "the CLI groups an unroutable target as unrouted",
+    "file": "crates/cli/src/main.rs",
+    "old": "route: router.as_ref().map(|r| r.group_key(address)),",
+    "new": "route: router.as_ref().and_then(|r| r.key(address)),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "an_unroutable_target_groups_apart_from_routed_ones"
+    ]
+  },
+  {
+    "name": "an unroutable target counts as scanned",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "        self.scanned = self.scanned.saturating_add(routed);",
+    "new": "        self.scanned = self.scanned.saturating_add(group.len() + routed * 0);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
+    ]
   }
 ]

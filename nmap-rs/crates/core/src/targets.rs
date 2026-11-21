@@ -93,6 +93,18 @@ impl Ipv4Ranges {
         Self { octets }
     }
 
+    /// [`Ipv4Ranges::iter`], owning what it walks: for a target source that
+    /// outlives the parsed expression.
+    pub fn into_addresses(self) -> impl Iterator<Item = Ipv4Addr> {
+        let lists = [
+            self.octets[0].values(),
+            self.octets[1].values(),
+            self.octets[2].values(),
+            self.octets[3].values(),
+        ];
+        Ipv4RangesIter::new(lists)
+    }
+
     /// Lazily yield every address, octet 0 slowest-changing and octet 3
     /// fastest — the order of `NetBlockIPv4Ranges::next`.
     pub fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + '_ {

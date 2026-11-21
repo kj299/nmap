@@ -411,8 +411,8 @@
   "stamps": {
     "cli": {
       "unsafe_audited": {
-        "files": 2,
-        "sha256": "e91adf18aeb1b84762d1fab02a7df76c726f47cec0a8bd20c673441060f5c5fc"
+        "files": 3,
+        "sha256": "db06c294927eb0c7829c3ca01d8088d8789b973222cd770ab74dc48ad6dfafcb"
       }
     },
     "core::build": {

@@ -18,11 +18,12 @@ use nmap_core::options::{is_stdout_dest, RunConfig, ScanKind};
 use nmap_core::probedb::ProbeDb;
 use nmap_core::servicescan::VersionResult;
 use nmap_core::{
-    exclude_specs, host_specs, parse_args, parse_port_spec, parse_target, render_grepable,
-    render_normal, render_normal_stdout, render_xml, Added, ExcludeSet, ScanMeta, ScanResults,
-    ServiceTable, TargetSpec, TimingParams, TimingTemplate,
+    exclude_specs, host_specs, parse_args, parse_port_spec, render_grepable, render_normal,
+    render_normal_stdout, render_xml, Added, ExcludeSet, ScanMeta, ScanResults, ServiceTable,
+    TimingParams, TimingTemplate,
 };
 mod nse;
+mod targets;
 
 use nmap_sys::datadir::{read_data_file as read_regular_file, DataDirs, DataRead, DATA_FILE_MAX};
 use nmap_sys::net::resolve_host;
@@ -31,9 +32,6 @@ use nmap_sys::{connect_scan, service_scan, ConnectScanConfig, ServiceScanConfig}
 /// Default number of top TCP ports scanned when no `-p` is given (nmap's -F is
 /// 100; the default is 1000 — we use 1000 when the services table is available).
 const DEFAULT_TOP_PORTS: usize = 1000;
-/// Safety cap on expanded target count for the MVP (avoids a `/0` materializing
-/// billions of hosts); a streaming host iterator is a later refinement.
-const MAX_TARGETS: usize = 65_536;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
@@ -270,18 +268,11 @@ async fn main() -> ExitCode {
         eprintln!("{w}");
     }
 
-    // Resolve every target expression into (ip, optional hostname).
-    let mut targets = resolve_targets(&cfg).await;
-    let mut excluded_all = false;
-    if !excludes.is_empty() {
-        let before = targets.len();
-        targets.retain(|(ip, _)| !excludes.contains(*ip));
-        let dropped = before.saturating_sub(targets.len());
-        if dropped > 0 {
-            nmap_core::verbose!(1, "excluded {dropped} host(s)");
-        }
-        excluded_all = before > 0 && targets.is_empty();
-    }
+    // Parse every target expression and resolve every name, then draw the
+    // targets from them lazily, less the excluded ones (`targets::TargetSource`).
+    let mut source = targets::TargetSource::new(targets::prepare(&cfg).await, excludes);
+    let targets: Vec<(IpAddr, Option<String>)> = source.by_ref().collect();
+    let excluded_all = source.drawn() > 0 && targets.is_empty();
     if targets.is_empty() {
         // Distinguish "nothing resolved" from "you excluded everything". They
         // need opposite reactions from the operator, and reporting a successful
@@ -1609,40 +1600,6 @@ async fn build_excludes(cfg: &RunConfig) -> Result<ExcludeSet, String> {
         }
     }
     Ok(set)
-}
-
-/// Expand and resolve all target expressions into scannable IPs (with the name
-/// they came from, for display). Bounded by [`MAX_TARGETS`].
-async fn resolve_targets(cfg: &RunConfig) -> Vec<(IpAddr, Option<String>)> {
-    let mut out: Vec<(IpAddr, Option<String>)> = Vec::new();
-    for expr in &cfg.targets {
-        if out.len() >= MAX_TARGETS {
-            eprintln!("nmap-rs: target list truncated at {MAX_TARGETS} hosts (MVP cap)");
-            break;
-        }
-        match parse_target(expr, cfg.ipv6) {
-            Ok(TargetSpec::Ipv4(ranges)) => {
-                for ip in ranges.iter() {
-                    if out.len() >= MAX_TARGETS {
-                        break;
-                    }
-                    out.push((IpAddr::V4(ip), None));
-                }
-            }
-            Ok(TargetSpec::Ipv6(ip)) => out.push((IpAddr::V6(ip), None)),
-            Ok(TargetSpec::Hostname { name, .. }) => match resolve_host(&name).await {
-                Ok(ips) if !ips.is_empty() => {
-                    // Scan the first resolved address (nmap's default), tagged
-                    // with the name for the report.
-                    out.push((ips[0], Some(name)));
-                }
-                Ok(_) => eprintln!("nmap-rs: failed to resolve \"{name}\": no addresses"),
-                Err(e) => eprintln!("nmap-rs: failed to resolve \"{name}\": {e}"),
-            },
-            Err(e) => eprintln!("nmap-rs: bad target \"{expr}\": {e:?}"),
-        }
-    }
-    out
 }
 
 /// Emit the requested output formats. With no `-o` flag, normal output goes to

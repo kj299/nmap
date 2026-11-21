@@ -781,9 +781,9 @@ Both fixes have sabotage entries (29 in all).
    gave `[A1], [B2], [A3]` where 7.94 gives `[A1, A3], [B2]`. The fill is
    now suspended when the queue is full and resumed, with its first target
    and addresses, once they are handed out. One case remains, a group that
-   runs into a new batch whose first 4,096 are unroutable, since a group in
-   progress cannot hand them out without unbounded memory: ledgered
-   (`hostgroup-spans-a-suspended-fill`). A randomised comparison, 300 runs
+   runs into a new batch whose fill suspends, which the thirteenth review
+   corrected and then removed, below: ledgered then as
+   `hostgroup-spans-a-suspended-fill`. A randomised comparison, 300 runs
    of up to 12,000 targets against the same runs with the unroutable
    removed, found no difference.
 2. Removing the queue's cap failed no test. A test now draws 100,000
@@ -793,4 +793,25 @@ Both fixes have sabotage entries (29 in all).
    lost it and failed no test. A test now checks none is lost.
 
 Each has a sabotage entry (32 in all).
+
+**The thirteenth review** found no other difference from 7.94's grouping: a
+faithful model of `refresh_hostbatch`, `nexthost`, `returnhost` and `defer`,
+fed the same runs without the unroutable targets, matched in all but 6 of
+5,000 runs biased to small `--max-hostgroup` and long lists, all six the
+ledgered case. It confirmed four, all low:
+
+1. That case was misstated: it comes whenever a fill is suspended (a
+   batch's worth, `max(4096, --min-hostgroup)`, set aside at any point
+   before the fill completes) and the group has used what the fill placed,
+   and the group ends part way into the batch, not where it ends.
+2. It was not forced, as the entry said: keeping the partial group (at most
+   a group, as 7.94's `Targets` is) while the unroutable targets are handed
+   out removes it with memory still bounded. Done; the entry is resolved.
+3. The ledger said the IPv6 CLI test pinned it; with three targets it
+   cannot. Corrected.
+4. The resumed fill's first target, addresses and count were unpinned:
+   forgetting any of them passed every test. A unit test now pins each,
+   and the reviewer's case.
+
+Each has a sabotage entry.
 

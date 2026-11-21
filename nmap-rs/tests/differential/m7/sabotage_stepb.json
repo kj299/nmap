@@ -626,5 +626,62 @@
     "expect": [
       "hostgroup::tests::no_unroutable_target_is_lost"
     ]
+  },
+  {
+    "name": "a group is not kept across a suspended fill",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                        self.partial =\n                            Some((std::mem::take(&mut group), std::mem::take(&mut addresses)));",
+    "new": "                        let _ = (&group, &addresses);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "a resumed fill forgets its first target and addresses",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "        let mut fill = if let Some(fill) = self.fill.take() {\n            fill\n",
+    "new": "        let mut fill = if let Some(fill) = self.fill.take() {\n            Fill { placed: fill.placed, ..Fill::default() }\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "a resumed fill forgets how many it placed",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "        let mut fill = if let Some(fill) = self.fill.take() {\n            fill\n",
+    "new": "        let mut fill = if let Some(fill) = self.fill.take() {\n            Fill { placed: 0, ..fill }\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
   }
 ]

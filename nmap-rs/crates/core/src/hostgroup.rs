@@ -139,8 +139,8 @@ impl RouteKey {
     /// No interface is named "", so this key matches no routed target's, and
     /// [`HostGroups`] sets a target with it aside as it is drawn: it takes no
     /// batch or defer slot, is not counted as scanned, and is handed out in
-    /// groups of unroutable targets alone; it ends no batch, save in one case
-    /// (`hostgroup-spans-a-suspended-fill`). (`None` would mean "not routed",
+    /// groups of unroutable targets alone; it ends no batch and no group.
+    /// (`None` would mean "not routed",
     /// and lift the rule for the whole group.)
     #[must_use]
     pub fn unroutable(target: IpAddr) -> Self {
@@ -253,6 +253,11 @@ where
     /// waiting: it resumes, with its first target and addresses, once they
     /// are handed out, so they end no batch (7.94 never sees them).
     fill: Option<Fill>,
+    /// A routed group that ran dry while its fill was suspended, with its
+    /// addresses: kept (at most a group, as 7.94's `Targets` is) while the
+    /// unroutable targets are handed out, then completed from the resumed
+    /// fill, as 7.94's group goes on into a batch that holds none of them.
+    partial: Option<(Vec<Member<T>>, HashSet<IpAddr>)>,
     /// Hosts in the groups handed out so far (`o.numhosts_scanned`).
     scanned: usize,
 }
@@ -274,6 +279,7 @@ where
             undeferred: VecDeque::new(),
             unroutable: VecDeque::new(),
             fill: None,
+            partial: None,
             scanned: 0,
         }
     }
@@ -342,9 +348,9 @@ where
         group
     }
 
-    /// The next target in batch order (`nexthost`).
-    /// While a fill is suspended no new one starts, so a group that reaches
-    /// the end of its batch then ends (`hostgroup-spans-a-suspended-fill`).
+    /// The next target in batch order (`nexthost`). While a fill is suspended
+    /// no new one starts: the group in progress is kept (`partial`) until it
+    /// resumes.
     fn next_host(&mut self) -> Option<Member<T>> {
         if self.batch.is_empty() && self.fill.is_none() {
             self.refresh();
@@ -369,16 +375,26 @@ where
             // Finish the fill under way, or start one, before a routed group is
             // formed; the unroutable targets it sets aside come out first, as
             // groups of their own, not counted as scanned.
-            if self.unroutable.is_empty() && (self.fill.is_some() || self.batch.is_empty()) {
+            if self.unroutable.is_empty()
+                && (self.fill.is_some() || (self.batch.is_empty() && self.partial.is_none()))
+            {
                 self.refresh();
             }
             if !self.unroutable.is_empty() {
                 return Some(self.unroutable_group(ideal));
             }
-            let mut group: Vec<Member<T>> = Vec::new();
-            let mut addresses: HashSet<IpAddr> = HashSet::new();
+            // A group kept while its fill was suspended goes on where it was;
+            // `scanned` has not moved since, so neither has `ideal`.
+            let (mut group, mut addresses) = self.partial.take().unwrap_or_default();
             while group.len() < ideal {
                 let Some(target) = self.next_host() else {
+                    if self.fill.is_some() {
+                        // Dry with the fill suspended: keep the group, hand out
+                        // the unroutable targets, resume, and go on.
+                        self.partial =
+                            Some((std::mem::take(&mut group), std::mem::take(&mut addresses)));
+                        break;
+                    }
                     break;
                 };
                 if group
@@ -390,6 +406,9 @@ where
                 }
                 addresses.insert(target.address);
                 group.push(target);
+            }
+            if self.partial.is_some() {
+                continue;
             }
             if group.is_empty() {
                 if self.unroutable.is_empty() && self.fill.is_none() {
@@ -707,6 +726,81 @@ mod tests {
                 "{n}: none lost"
             );
         }
+    }
+
+    /// A group that runs into a new batch goes on through it, however many
+    /// unroutable targets that batch holds before its routed ones, and a
+    /// resumed fill keeps the first target and addresses it had and the count
+    /// it placed: the routed groups are those of the same run without them.
+    #[test]
+    fn a_suspended_fill_resumes_where_it_was() {
+        let a = lo([127, 0, 0, 1]);
+        let b = Some(RouteKey {
+            iface: "eth0".into(),
+            ..a.clone().unwrap()
+        });
+        let at = |i: u32, route: &Option<RouteKey>| Member {
+            address: IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)),
+            route: route.clone(),
+            item: i,
+        };
+        let unroutable = |i: u32| {
+            let addr = IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i));
+            Member {
+                address: addr,
+                route: Some(RouteKey::unroutable(addr)),
+                item: u32::MAX,
+            }
+        };
+        let routed_groups = |v: Vec<Member<u32>>, sizing: GroupSizing| -> Vec<Vec<u32>> {
+            HostGroups::new(v.into_iter(), sizing)
+                .map(|g| g.into_iter().map(|m| m.item).collect::<Vec<_>>())
+                .filter(|g: &Vec<u32>| !g.contains(&u32::MAX))
+                .collect()
+        };
+        let thousand = GroupSizing {
+            max_hostgroup: 1000,
+            ..sizing()
+        };
+        let batch = u32::try_from(PING_GROUP_SZ).unwrap();
+        // A group crossing into a batch whose fill suspends after one routed
+        // target: 6,097 routed ones make six groups of 1,000 and one of 97.
+        let mut with: Vec<Member<u32>> = (0..=batch).map(|i| at(i, &a)).collect();
+        with.extend((0..batch).map(unroutable));
+        with.extend((batch + 1..batch + 2001).map(|i| at(i, &a)));
+        let without: Vec<Member<u32>> = with
+            .iter()
+            .filter(|m| m.item != u32::MAX)
+            .cloned()
+            .collect();
+        let got = routed_groups(with, thousand);
+        assert_eq!(got, routed_groups(without, thousand));
+        assert_eq!(
+            got.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1000, 1000, 1000, 1000, 1000, 1000, 97]
+        );
+        // The resumed fill's first target and addresses: A1, a batch of
+        // unroutable, B2, A3 gives [A1, A3], [B2].
+        let mut with = vec![at(1, &a)];
+        with.extend((0..batch).map(unroutable));
+        with.extend([at(2, &b), at(3, &a)]);
+        assert_eq!(routed_groups(with, sizing()), [vec![1, 3], vec![2]]);
+        // The count it placed: a batch's worth, with a suspension at the
+        // middle, still ends the batch after 4,096 placed. A misfit then
+        // waits for the next batch rather than being drawn into this one.
+        let mut with: Vec<Member<u32>> = (0..batch / 2).map(|i| at(i, &a)).collect();
+        with.push(at(batch * 4, &b));
+        with.extend((0..batch).map(unroutable));
+        with.extend((batch / 2..batch + 1).map(|i| at(i, &a)));
+        let without: Vec<Member<u32>> = with
+            .iter()
+            .filter(|m| m.item != u32::MAX)
+            .cloned()
+            .collect();
+        assert_eq!(
+            routed_groups(with, sizing()),
+            routed_groups(without, sizing())
+        );
     }
 
     /// However many targets are unroutable, the groups draw from the source no

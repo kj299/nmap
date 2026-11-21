@@ -298,26 +298,28 @@ narrower *rendering* of the same result.
       before the eleventh it took defer slots, so 64 of them could end a
       routed batch early; before the twelfth a batch's worth (4,096) ended
       it. Now the batch fill is suspended while a batch's worth are handed
-      out and then resumed, with its first target and addresses, so memory
-      stays bounded by a batch of them and they end no batch, except in a
-      group that runs into a new batch (`hostgroup-spans-a-suspended-fill`).
-      A randomised comparison of 300 runs of up to 12,000 targets against the
-      same runs with the unroutable targets removed found no difference.
+      out and then resumed, with its first target, addresses and count, and
+      a group in progress is kept across it, so memory stays bounded by a
+      batch of them and they end no batch and no group
+      (`hostgroup-spans-a-suspended-fill`, resolved). Pinned in
+      `core::hostgroup`'s unit tests; the end-to-end test over IPv6,
+      `an_unroutable_target_groups_apart_from_routed_ones` (root), pins only
+      that unroutable targets group apart, with three targets.
 
-- [ ] `hostgroup-spans-a-suspended-fill` (`core::hostgroup`, M7 cutover step b)
-      — **a routed group that runs past the end of its batch can end early
-      when the next batch holds 4,096 or more unroutable targets before its
-      next routed one.** 7.94 drops unroutable targets before the batch
-      (`targets.cc:409-413`), so its group goes on into the next batch
-      (`nexthost` refreshing it). The port sets them aside, at most a batch
-      of them, to keep memory flat; when that queue fills in the middle of a
-      group, the group cannot hand them out, so it ends where its batch does,
-      and the routed targets that would have joined it start the next group.
-      By reading: it needs a group to cross a batch boundary with a batch of
-      unroutable targets right after, which a randomised comparison (300
-      runs) never produced, and a routed run with unroutable targets needs
-      hosts without a default route. Pinned end to end over IPv6 by
-      `an_unroutable_target_groups_apart_from_routed_ones` (root).
+- [x] `hostgroup-spans-a-suspended-fill` (`core::hostgroup`, M7 cutover step b)
+      — **resolved in the same step.** For a while a routed group could end
+      early when its batch's fill was suspended (a batch's worth,
+      `max(4096, --min-hostgroup)`, of unroutable targets set aside at any
+      point before the fill completed) and the group had used every target
+      placed so far: it ended part way into that batch, and the routed
+      targets that would have joined it started the next group (*measured*
+      by the thirteenth review: `--max-hostgroup 1000` over 4,096 routed, 1
+      routed, 4,096 unroutable, 2,000 routed gave groups ending
+      1000 ×4, 97, 1000, 1000 where 7.94 gives 1000 ×6, 97). The group is now
+      kept, at most a group as 7.94's `Targets` is, while the unroutable
+      targets are handed out, then completed from the resumed fill. Pinned by
+      `a_suspended_fill_resumes_where_it_was`, which also pins the resumed
+      fill's first target, addresses and count.
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans

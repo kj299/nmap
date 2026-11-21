@@ -291,9 +291,10 @@ narrower *rendering* of the same result.
       routed group, as 7.94's skipped target shapes none: it takes no batch or
       defer slot (`DEFER_LIMIT`), is not counted toward the quick first
       group (`o.numhosts_scanned`, `nmap.cc:2337`), and is handed out in groups
-      of unroutable targets alone: before the next routed group when the fill
-      ran between groups, after the group in progress when that group's own
-      draw ran it.
+      of unroutable targets alone, before the next routed group, and also
+      before the group in progress when that group's own draw ran a fill that
+      suspended (the group is held while they go out); when such a fill
+      completes instead, those it set aside come after that group.
       Those groups 7.94 does not form. Before the ninth review of step b it had
       no key, which lifted the routing rule for any group it started and let
       it join any group; before the tenth it counted toward the quick group;
@@ -307,6 +308,19 @@ narrower *rendering* of the same result.
       `core::hostgroup`'s unit tests; the end-to-end test over IPv6,
       `an_unroutable_target_groups_apart_from_routed_ones` (root), pins only
       that unroutable targets group apart, with three targets.
+
+- [ ] `ipv6-loopback-routed-without-stack` (`sys::route::choose_route6`'s
+      loopback branch) — **with no IPv6 stack, the port still routes and scans
+      `::1` over `lo`; 7.94 skips it.** 7.94's `route_dst` finds no IPv6
+      route, so `setup_target` drops `::1` like any unroutable target
+      ("setup_target: failed to determine route to ::1", `status="skipped"`,
+      `targets.cc:409-413`) and reports 0 hosts (*measured*: `-6 -sS -Pn -n
+      -p 80 ::2 ::1 ::3` on a host without IPv6). The port takes the loopback
+      interface for any loopback-scope target whenever `lo` is up, as the IPv6
+      scans milestone chose (`docs/IPV6-SCAN-ANALYSIS.md`, "Live, without an
+      IPv6 stack"), so it scans `::1` (80/tcp filtered) and reports 3 hosts up.
+      Older than M7 step b; that step's
+      `an_unroutable_target_groups_apart_from_routed_ones` relies on it.
 
 - [x] `hostgroup-spans-a-suspended-fill` (`core::hostgroup`, M7 cutover step b)
       — **resolved in the same step.** For a while a routed group could end

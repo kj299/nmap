@@ -502,8 +502,9 @@ fn has_ipv6_default_route() -> Option<bool> {
 /// In a routed run, a target with no route groups with the other unroutable
 /// ones alone, and the routed target is not drawn into their group: 7.94
 /// drops unroutable targets before grouping (`targets.cc:409-413`). Over IPv6,
-/// where `::1` routes by loopback and, with no IPv6 default route, `::2` and
-/// `::3` route nowhere. Needs root, for a routed run.
+/// where, with no IPv6 default route, `::2` and `::3` route nowhere and the
+/// port routes `::1` by loopback; 7.94 on such a host routes `::1` nowhere
+/// too (`ipv6-loopback-routed-without-stack`). Needs root, for a routed run.
 #[test]
 #[ignore = "needs root"]
 fn an_unroutable_target_groups_apart_from_routed_ones() {

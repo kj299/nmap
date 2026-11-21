@@ -828,5 +828,22 @@ the harness was sensitive enough that a defer limit of 63 differed in 215 of
    pins it, with a sabotage entry.
 2. The ledger said the unroutable groups come ahead of the routed targets
    drawn with them; when a group's own draw runs the fill, they come after
-   that group. Corrected.
+   that group. Corrected (and corrected again by the fifteenth review).
+
+**The fifteenth review** found no defect in the grouping (0 differences in 300
+more randomised runs against a model it re-read against `targets.cc`; the 61
+golden cases; the ten unroutable-target mutations caught) and three in text,
+all low:
+
+1. The IPv6 CLI test relies on the port routing `::1` over `lo` with no IPv6
+   stack, which 7.94 does not (it skips `::1` too). Older than the step;
+   ledgered now (`ipv6-loopback-routed-without-stack`), and the test's doc
+   says so.
+2. The fourteenth round's correction was half right: when a group's own draw
+   runs a fill that suspends, the group is held and the unroutable groups
+   come before it; only a fill that completes puts them after. The entry
+   names both.
+3. `HostGroups`' doc said it draws at most a batch ahead plus the defer
+   buffer; with a suspended fill it is a batch of unroutable targets, a
+   batch and the defer buffer. Corrected.
 

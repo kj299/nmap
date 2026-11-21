@@ -229,7 +229,8 @@ fn is_unroutable<T>(m: &Member<T>) -> bool {
 /// A run's targets as the groups nmap scans them in: an iterator of groups.
 ///
 /// It draws from `source` only as far as the next group needs (at most a batch
-/// ahead, plus the defer buffer), so a large target list is never held whole.
+/// ahead and the defer buffer, and with them a batch of unroutable targets set
+/// aside), so a large target list is never held whole.
 pub struct HostGroups<I, T>
 where
     I: Iterator<Item = Member<T>>,

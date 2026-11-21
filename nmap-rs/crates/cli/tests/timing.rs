@@ -221,6 +221,34 @@ fn options_the_engine_cannot_honour_are_refused_not_ignored() {
     }
 }
 
+/// A hostgroup bound C would quit on is reported in C's words, ahead of the
+/// refusal above, which would otherwise hide it.
+#[test]
+fn an_impossible_hostgroup_bound_is_reported_as_c_reports_it() {
+    for (args, expect) in [
+        (
+            vec!["--max-hostgroup", "3", "--min-hostgroup", "5"],
+            "Minimum host group size may not be set to greater than maximum size (currently 3)",
+        ),
+        (
+            vec!["--max-hostgroup", "0"],
+            "Maximum host group size may not be set to less than the minimum size (currently 1)",
+        ),
+        // 7.94 aborts on an assertion here; the port refuses.
+        (
+            vec!["--max-hostgroup", "-1"],
+            "--max-hostgroup -1 is out of range",
+        ),
+    ] {
+        let mut full = args.clone();
+        full.extend_from_slice(&["-sL", "-n", "127.0.0.1"]);
+        let (stdout, stderr, ok) = run(&full);
+        assert!(!ok, "{args:?} must fail");
+        assert!(stderr.contains(expect), "{args:?}: {stderr}");
+        assert!(!stdout.contains("Nmap scan report"), "{args:?}:\n{stdout}");
+    }
+}
+
 // ---- warnings (C's error(), which prints and carries on) -------------------
 
 #[test]

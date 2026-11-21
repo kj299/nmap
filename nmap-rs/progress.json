@@ -412,7 +412,7 @@
     "cli": {
       "unsafe_audited": {
         "files": 2,
-        "sha256": "deed642ddc4ec2f7bee1f6e2c346c8b8c0f9ac7e1813664289067c41219b147e"
+        "sha256": "bcac553b25582142becd4e4486032d9584a54d2e099822985eb6ff55ce06bfb4"
       }
     },
     "core::build": {

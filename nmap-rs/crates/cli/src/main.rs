@@ -93,16 +93,17 @@ async fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    // Before the refusal below: a value C would quit on is reported as such.
+    if let Some(msg) = cfg.hostgroup_error() {
+        eprintln!("nmap-rs: {msg}");
+        return ExitCode::FAILURE;
+    }
     if cfg.min_hostgroup.is_some() || cfg.max_hostgroup.is_some() {
         eprintln!(
             "nmap-rs: --min-hostgroup/--max-hostgroup are parsed but not yet enforced — this \
              engine scans a route's targets as one group, so a hostgroup ceiling would not \
              limit concurrency. Refusing rather than scanning wider than you asked."
         );
-        return ExitCode::FAILURE;
-    }
-    if let Some(msg) = cfg.hostgroup_error() {
-        eprintln!("nmap-rs: {msg}");
         return ExitCode::FAILURE;
     }
     for msg in cfg.timing_warnings() {

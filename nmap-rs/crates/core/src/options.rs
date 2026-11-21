@@ -198,9 +198,14 @@ pub struct RunConfig {
     /// `--min-parallelism` / `--max-parallelism` (also spelled `-M`).
     pub min_parallelism: Option<u32>,
     pub max_parallelism: Option<u32>,
-    /// `--min-hostgroup` / `--max-hostgroup`.
+    /// `--min-hostgroup` / `--max-hostgroup`, as C's setters store them: the
+    /// `int` from `atoi`, converted to `unsigned` (`NmapOps.cc:573-585`).
     pub min_hostgroup: Option<u32>,
     pub max_hostgroup: Option<u32>,
+    /// The first of the two setters' fatal errors, in command-line order. C
+    /// checks each value against the *other* value as it stands when the option
+    /// is read, and quits at the first failure.
+    pub hostgroup_fatal: Option<String>,
     /// Options we recognize but whose argument is unusable. Distinct from
     /// [`RunConfig::unrecognized`] because the two need different messages: one
     /// is "I do not know this option", the other is "I know it and your value
@@ -322,21 +327,34 @@ impl RunConfig {
         out
     }
 
-    /// `--min-hostgroup` may not exceed `--max-hostgroup`, and the maximum may
-    /// not be zero. C enforces both inside the setters, where the check is
-    /// against whatever the *other* value happens to be at the time; here the
-    /// whole command line is known, so the comparison is against the final
-    /// pair.
+    /// Why `--min-hostgroup`/`--max-hostgroup` cannot be used, if they cannot.
+    ///
+    /// First, the setters' own checks, made in command-line order as C makes
+    /// them (`hostgroup_fatal`). Then one C does not make: a value that reads
+    /// negative as a 32-bit `int` (`-1`, or 2^31 and above, which `atoi`
+    /// truncates). C stores it unsigned, so it passes the setters, and reads it
+    /// back signed, where `box` asserts `min <= max` and aborts the run
+    /// (`utils.h:93`; *measured*: `--max-hostgroup -1` and `2147483648`). The
+    /// port refuses it with a message (`hostgroup-bound-past-int-refused`).
     pub fn hostgroup_error(&self) -> Option<String> {
-        let p = self.timing_params();
-        if p.max_hostgroup == 0 {
-            return Some("Max host size must be at least 1".to_string());
+        if let Some(msg) = &self.hostgroup_fatal {
+            return Some(msg.clone());
         }
-        if p.min_hostgroup > p.max_hostgroup {
-            return Some(format!(
-                "Minimum host group size may not be set to greater than maximum size (currently {})",
-                p.max_hostgroup
-            ));
+        for (name, v) in [
+            ("--min-hostgroup", self.min_hostgroup),
+            ("--max-hostgroup", self.max_hostgroup),
+        ] {
+            if let Some(v) = v {
+                if i32::try_from(v).is_err() {
+                    return Some(format!(
+                        "{name} {} is out of range: a host group holds at most {} hosts",
+                        // How C's `int` reads it, which is what was typed for any
+                        // value that fits.
+                        v.cast_signed(),
+                        i32::MAX
+                    ));
+                }
+            }
         }
         None
     }
@@ -401,6 +419,7 @@ impl Default for RunConfig {
             max_parallelism: None,
             min_hostgroup: None,
             max_hostgroup: None,
+            hostgroup_fatal: None,
             invalid: Vec::new(),
             warnings: Vec::new(),
             unrecognized: Vec::new(),
@@ -723,6 +742,20 @@ fn time_option(
         return None;
     }
     Some(ms)
+}
+
+/// What C's `atoi` returns on an LP64 system: `(int) strtol(s, NULL, 10)`.
+/// `strtol` saturates at the `long` bounds and the cast keeps the low 32 bits,
+/// so `4294967297` is 1 and `99999999999999999999` is -1 (*measured* against
+/// 7.94 through `--max-hostgroup`). [`atoi`] saturates a negative overflow at
+/// `-i64::MAX`, one short of `LONG_MIN`; that is corrected here, at the cost of
+/// reading a typed `-9223372036854775807` as `LONG_MIN` too (0, where C has 1).
+fn c_int(n: i64) -> i32 {
+    let n = if n == -i64::MAX { i64::MIN } else { n };
+    // Truncation is the point: this is the C cast.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = n as i32;
+    v
 }
 
 /// C's `atoi` for a count option: a leading integer, or 0 when there is no
@@ -1070,19 +1103,50 @@ pub fn parse_args(args: &[String]) -> RunConfig {
                 let key = long_flag(s, "max-hostgroup", &mut keybuf2).unwrap_or("--max-hostgroup");
                 let (v, adv) = long_opt_value(args, i, key);
                 consumed_extra = adv;
-                cfg.max_hostgroup = u32::try_from(atoi(&v)).ok();
+                // `o.setMaxHostGroupSz(atoi(optarg))` (`nmap.cc:704`;
+                // `NmapOps.cc:579-585`). The `int` becomes the `unsigned` the
+                // setter takes, and is compared unsigned.
+                let sz = c_int(atoi(&v)).cast_unsigned();
+                let min = cfg.min_hostgroup.unwrap_or(1);
+                if cfg.hostgroup_fatal.is_none() {
+                    if sz < min {
+                        cfg.hostgroup_fatal = Some(format!(
+                            "Maximum host group size may not be set to less than the minimum size (currently {})",
+                            min.cast_signed()
+                        ));
+                    } else if sz == 0 {
+                        // Reached only after `--min-hostgroup 0`.
+                        cfg.hostgroup_fatal = Some("Max host size must be at least 1".to_string());
+                    } else {
+                        cfg.max_hostgroup = Some(sz);
+                    }
+                }
             }
             _ if long_flag(s, "min-hostgroup", &mut keybuf).is_some() => {
                 let key = long_flag(s, "min-hostgroup", &mut keybuf2).unwrap_or("--min-hostgroup");
                 let (v, adv) = long_opt_value(args, i, key);
                 consumed_extra = adv;
-                let n = atoi(&v);
-                if n > 100 {
-                    cfg.warnings.push(
-                        "Warning: You specified a highly aggressive --min-hostgroup.".to_string(),
-                    );
+                // `o.setMinHostGroupSz(atoi(optarg))`, then the warning
+                // (`nmap.cc:706-708`; `NmapOps.cc:573-577`).
+                let n = c_int(atoi(&v));
+                let sz = n.cast_unsigned();
+                let max = cfg.max_hostgroup.unwrap_or(100_000);
+                if cfg.hostgroup_fatal.is_none() {
+                    if sz > max {
+                        cfg.hostgroup_fatal = Some(format!(
+                            "Minimum host group size may not be set to greater than maximum size (currently {})",
+                            max.cast_signed()
+                        ));
+                    } else {
+                        cfg.min_hostgroup = Some(sz);
+                        if n > 100 {
+                            cfg.warnings.push(
+                                "Warning: You specified a highly aggressive --min-hostgroup."
+                                    .to_string(),
+                            );
+                        }
+                    }
                 }
-                cfg.min_hostgroup = u32::try_from(n).ok();
             }
             "-sV" => cfg.service_version = true,
             "-O" => cfg.os_detection = true,
@@ -1505,6 +1569,73 @@ mod tests {
 
     fn cfg(args: &[&str]) -> RunConfig {
         parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// `--min-hostgroup`/`--max-hostgroup` as 7.94's setters check them.
+    #[test]
+    fn hostgroup_bounds_are_checked_as_7_94s_setters_check_them() {
+        let err = |args: &[&str]| cfg(args).hostgroup_error();
+        let less = |n: i32| {
+            format!(
+                "Maximum host group size may not be set to less than the minimum size (currently {n})"
+            )
+        };
+        let greater = |n: i32| {
+            format!(
+                "Minimum host group size may not be set to greater than maximum size (currently {n})"
+            )
+        };
+        // Each line *measured* against 7.94.
+        assert_eq!(err(&["--max-hostgroup", "0"]), Some(less(1)));
+        assert_eq!(
+            err(&["--min-hostgroup", "5", "--max-hostgroup", "3"]),
+            Some(less(5))
+        );
+        assert_eq!(
+            err(&["--max-hostgroup", "3", "--min-hostgroup", "5"]),
+            Some(greater(3))
+        );
+        assert_eq!(err(&["--min-hostgroup", "-1"]), Some(greater(100_000)));
+        assert_eq!(
+            err(&["--max-hostgroup", "4294967296"]),
+            Some(less(1)),
+            "wraps to 0"
+        );
+        assert_eq!(
+            err(&["--max-hostgroup", "abc"]),
+            Some(less(1)),
+            "atoi gives 0"
+        );
+        assert_eq!(err(&["--max-hostgroup", "4294967297"]), None, "wraps to 1");
+        assert_eq!(
+            cfg(&["--max-hostgroup", "4294967297"]).max_hostgroup,
+            Some(1)
+        );
+        assert_eq!(cfg(&["--max-hostgroup", "2x"]).max_hostgroup, Some(2));
+        assert_eq!(err(&["--min-hostgroup", "0"]), None);
+        // Reached only through a minimum of 0.
+        assert_eq!(
+            err(&["--min-hostgroup", "0", "--max-hostgroup", "0"]),
+            Some("Max host size must be at least 1".to_string())
+        );
+        // The first failure wins, as C quits at it.
+        assert_eq!(
+            err(&["--max-hostgroup", "0", "--min-hostgroup", "999999"]),
+            Some(less(1))
+        );
+        // 7.94 aborts on these (an assertion in `box`); the port refuses them.
+        for v in ["-1", "2147483648", "99999999999999999999"] {
+            let e = err(&["--max-hostgroup", v]).expect(v);
+            assert!(e.contains("out of range"), "{v}: {e}");
+        }
+        assert!(err(&["--max-hostgroup", "-1", "--min-hostgroup", "-5"])
+            .is_some_and(|e| e.starts_with("--min-hostgroup -5 is out of range")));
+        assert_eq!(err(&["--max-hostgroup", "2147483647"]), None);
+        // The warning follows the value, and only one that was stored.
+        assert!(cfg(&["--min-hostgroup", "101"])
+            .warnings
+            .iter()
+            .any(|w| w.contains("highly aggressive")));
     }
 
     /// The NSE options as `nmap.cc:657-676` and `NmapOps::chooseScripts`

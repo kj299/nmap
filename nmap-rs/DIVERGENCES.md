@@ -2729,6 +2729,24 @@ removed: that one was theatre, this one is unobservable.
       enters it. `--min-hostgroup` and `--max-hostgroup` stay refused until then
       (`timing-knobs-not-yet-enforced`).
 
+- [x] `hostgroup-bound-past-int-refused` (`core::options`, M7 cutover step b;
+      ports `NmapOps::setMinHostGroupSz`/`setMaxHostGroupSz`, `NmapOps.cc:573-585`,
+      and `box`, `utils.h:93`) — **a `--min-hostgroup` or `--max-hostgroup`
+      that reads negative as a 32-bit `int` is refused; 7.94 aborts.** C takes
+      `atoi`'s `int`, stores it `unsigned`, and reads it back as `int`. So `-1`,
+      or anything from 2^31 to 2^32 - 1, passes the setters and then trips the
+      assertion `bmin <= bmax` in `box` (*measured*: `--max-hostgroup -1`,
+      `2147483648` and `99999999999999999999` each abort, exit 134). A negative
+      maximum beside a smaller negative minimum passes both and runs. The port
+      refuses any such value with a message naming it. Everything else is C's:
+      the setters' checks are made in command-line order with C's unsigned
+      comparisons and messages, and `atoi`'s truncation is reproduced, so
+      `4294967296` is 0 and refused as C refuses it, and `4294967297` is 1.
+      Before this the port dropped a negative value silently and took 2^31 to
+      2^32 - 1 as given. Pinned by
+      `hostgroup_bounds_are_checked_as_7_94s_setters_check_them` and
+      `an_impossible_hostgroup_bound_is_reported_as_c_reports_it`.
+
 - [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
       representable subnormal written in decimal would be refused here and
       accepted by C.** glibc raises the IEEE underflow signal (and so sets

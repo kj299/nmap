@@ -139,7 +139,8 @@ impl RouteKey {
     /// No interface is named "", so this key matches no routed target's, and
     /// [`HostGroups`] sets a target with it aside as it is drawn: it takes no
     /// batch or defer slot, is not counted as scanned, and is handed out in
-    /// groups of unroutable targets alone. (`None` would mean "not routed",
+    /// groups of unroutable targets alone; it ends no batch, save in one case
+    /// (`hostgroup-spans-a-suspended-fill`). (`None` would mean "not routed",
     /// and lift the rule for the whole group.)
     #[must_use]
     pub fn unroutable(target: IpAddr) -> Self {
@@ -181,13 +182,24 @@ pub struct Member<T> {
 /// Whether `target` must wait for a later group than the one `first` began and
 /// `addresses` lists (`target_needs_new_hostgroup`).
 fn needs_new_group<T>(first: &Member<T>, addresses: &HashSet<IpAddr>, target: &Member<T>) -> bool {
+    misfits(first.address, first.route.as_ref(), addresses, target)
+}
+
+/// [`needs_new_group`] against a first target known by its address and route,
+/// as a suspended batch fill remembers it.
+fn misfits<T>(
+    first_address: IpAddr,
+    first_route: Option<&RouteKey>,
+    addresses: &HashSet<IpAddr>,
+    target: &Member<T>,
+) -> bool {
     let Some(route) = &target.route else {
         return false;
     };
-    if first.address.is_ipv4() != target.address.is_ipv4() {
+    if first_address.is_ipv4() != target.address.is_ipv4() {
         return true;
     }
-    if let Some(group) = &first.route {
+    if let Some(group) = first_route {
         if group.iface != route.iface
             || group.source != route.source
             || group.direct != route.direct
@@ -198,6 +210,15 @@ fn needs_new_group<T>(first: &Member<T>, addresses: &HashSet<IpAddr>, target: &M
     // "ultra_scan doesn't cope with that, because it uses IP addresses to look up
     // targets from replies."
     addresses.contains(&target.address)
+}
+
+/// A batch fill under way (`refresh_hostbatch`'s locals), kept while it is
+/// suspended: the batch's first target, the addresses placed, how many.
+#[derive(Default)]
+struct Fill {
+    first: Option<(IpAddr, Option<RouteKey>)>,
+    addresses: HashSet<IpAddr>,
+    placed: usize,
 }
 
 /// Whether `m` is a routed run's target with no route ([`RouteKey::unroutable`]).
@@ -228,6 +249,10 @@ where
     /// reaches the batch, so it takes no batch or defer slot; the port keeps it
     /// to report it, in groups of its own, at most a batch ahead.
     unroutable: VecDeque<Member<T>>,
+    /// A fill suspended because a batch's worth of unroutable targets are
+    /// waiting: it resumes, with its first target and addresses, once they
+    /// are handed out, so they end no batch (7.94 never sees them).
+    fill: Option<Fill>,
     /// Hosts in the groups handed out so far (`o.numhosts_scanned`).
     scanned: usize,
 }
@@ -248,6 +273,7 @@ where
             deferred: Vec::new(),
             undeferred: VecDeque::new(),
             unroutable: VecDeque::new(),
+            fill: None,
             scanned: 0,
         }
     }
@@ -256,9 +282,13 @@ where
     /// first, then the source. One that does not fit the batch is deferred; when
     /// [`DEFER_LIMIT`] are waiting, the batch ends.
     fn refresh(&mut self) {
-        self.undeferred.extend(self.deferred.drain(..));
-        let mut addresses: HashSet<IpAddr> = HashSet::new();
-        while self.batch.len() < self.batch_size {
+        let mut fill = if let Some(fill) = self.fill.take() {
+            fill
+        } else {
+            self.undeferred.extend(self.deferred.drain(..));
+            Fill::default()
+        };
+        while fill.placed < self.batch_size {
             let Some(target) = self.undeferred.pop_front().or_else(|| self.source.next()) else {
                 break;
             };
@@ -267,12 +297,13 @@ where
                 if self.unroutable.len() < self.batch_size {
                     continue;
                 }
-                break;
+                // A batch's worth waiting: suspend, to resume once they are out.
+                self.fill = Some(fill);
+                return;
             }
-            let misfit = self
-                .batch
-                .front()
-                .is_some_and(|first| needs_new_group(first, &addresses, &target));
+            let misfit = fill.first.as_ref().is_some_and(|(address, route)| {
+                misfits(*address, route.as_ref(), &fill.addresses, &target)
+            });
             if misfit {
                 self.deferred.push(target);
                 if self.deferred.len() < DEFER_LIMIT {
@@ -280,14 +311,42 @@ where
                 }
                 break;
             }
-            addresses.insert(target.address);
+            if fill.first.is_none() {
+                fill.first = Some((target.address, target.route.clone()));
+            }
+            fill.addresses.insert(target.address);
+            fill.placed = fill.placed.saturating_add(1);
             self.batch.push_back(target);
         }
     }
 
+    /// The unroutable targets set aside, as a group of their own: one family,
+    /// no address twice; one that cannot join waits for the next.
+    fn unroutable_group(&mut self, ideal: usize) -> Vec<Member<T>> {
+        let mut group: Vec<Member<T>> = Vec::new();
+        let mut addresses: HashSet<IpAddr> = HashSet::new();
+        while group.len() < ideal {
+            let Some(target) = self.unroutable.pop_front() else {
+                break;
+            };
+            if group
+                .first()
+                .is_some_and(|first| needs_new_group(first, &addresses, &target))
+            {
+                self.unroutable.push_front(target);
+                break;
+            }
+            addresses.insert(target.address);
+            group.push(target);
+        }
+        group
+    }
+
     /// The next target in batch order (`nexthost`).
+    /// While a fill is suspended no new one starts, so a group that reaches
+    /// the end of its batch then ends (`hostgroup-spans-a-suspended-fill`).
     fn next_host(&mut self) -> Option<Member<T>> {
-        if self.batch.is_empty() {
+        if self.batch.is_empty() && self.fill.is_none() {
             self.refresh();
         }
         self.batch.pop_front()
@@ -305,53 +364,44 @@ where
     /// a group with those drawn, in which case it is handed back (`returnhost`)
     /// and starts the next group.
     fn next(&mut self) -> Option<Self::Item> {
-        let ideal = scan_group_size(self.scanned, &self.sizing);
-        let mut group: Vec<Member<T>> = Vec::new();
-        let mut addresses: HashSet<IpAddr> = HashSet::new();
-        // The unroutable targets set aside come out first, as groups of their
-        // own: still one family, no address twice.
-        if self.batch.is_empty() && self.unroutable.is_empty() {
-            self.refresh();
-        }
-        if !self.unroutable.is_empty() {
+        loop {
+            let ideal = scan_group_size(self.scanned, &self.sizing);
+            // Finish the fill under way, or start one, before a routed group is
+            // formed; the unroutable targets it sets aside come out first, as
+            // groups of their own, not counted as scanned.
+            if self.unroutable.is_empty() && (self.fill.is_some() || self.batch.is_empty()) {
+                self.refresh();
+            }
+            if !self.unroutable.is_empty() {
+                return Some(self.unroutable_group(ideal));
+            }
+            let mut group: Vec<Member<T>> = Vec::new();
+            let mut addresses: HashSet<IpAddr> = HashSet::new();
             while group.len() < ideal {
-                let Some(target) = self.unroutable.pop_front() else {
+                let Some(target) = self.next_host() else {
                     break;
                 };
                 if group
                     .first()
                     .is_some_and(|first| needs_new_group(first, &addresses, &target))
                 {
-                    self.unroutable.push_front(target);
+                    self.batch.push_front(target);
                     break;
                 }
                 addresses.insert(target.address);
                 group.push(target);
             }
+            if group.is_empty() {
+                if self.unroutable.is_empty() && self.fill.is_none() {
+                    return None;
+                }
+                continue;
+            }
+            // `o.numhosts_scanned` (`nmap.cc:2337`) counts the targets 7.94
+            // scans; a routed group holds no unroutable one.
+            self.scanned = self.scanned.saturating_add(group.len());
             return Some(group);
         }
-        while group.len() < ideal {
-            let Some(target) = self.next_host() else {
-                break;
-            };
-            if group
-                .first()
-                .is_some_and(|first| needs_new_group(first, &addresses, &target))
-            {
-                self.batch.push_front(target);
-                break;
-            }
-            addresses.insert(target.address);
-            group.push(target);
-        }
-        if group.is_empty() {
-            return None;
-        }
-        // `o.numhosts_scanned` (`nmap.cc:2337`) counts the targets 7.94 scans.
-        // An unroutable one never reaches here (it was set aside), and its
-        // groups above are not counted, as 7.94 never scans it.
-        self.scanned = self.scanned.saturating_add(group.len());
-        Some(group)
     }
 }
 
@@ -617,6 +667,93 @@ mod tests {
         ];
         assert_eq!(routed_groups, groups(without, sizing()));
         assert_eq!(routed_groups, [vec![1, 2, 4], vec![3]]);
+    }
+
+    /// A batch's worth of unroutable targets or more, inside one batch, end it
+    /// no earlier than 7.94, which never sees them: the fill is suspended
+    /// while they are handed out, and resumed. Below, at and past the cap.
+    #[test]
+    fn a_batch_of_unroutable_targets_ends_no_batch() {
+        let route = |n: &str| {
+            Some(RouteKey {
+                iface: n.into(),
+                source: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                direct: true,
+            })
+        };
+        let unroutable = |i: u32| {
+            let addr = IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i));
+            Member {
+                address: addr,
+                route: Some(RouteKey::unroutable(addr)),
+                item: 0,
+            }
+        };
+        for n in [
+            PING_GROUP_SZ - 1,
+            PING_GROUP_SZ,
+            PING_GROUP_SZ + 904,
+            3 * PING_GROUP_SZ,
+        ] {
+            let mut with = vec![member(1, route("a")), member(2, route("b"))];
+            with.extend((0..u32::try_from(n).unwrap()).map(unroutable));
+            with.push(member(3, route("a")));
+            let got = groups(with, sizing());
+            let routed: Vec<&Vec<u8>> = got.iter().filter(|g| !g.contains(&0)).collect();
+            assert_eq!(routed, [&vec![1, 3], &vec![2]], "{n} unroutable");
+            assert_eq!(
+                got.iter().map(Vec::len).sum::<usize>(),
+                n + 3,
+                "{n}: none lost"
+            );
+        }
+    }
+
+    /// However many targets are unroutable, the groups draw from the source no
+    /// further than a batch of them, a batch and the defer buffer ahead.
+    #[test]
+    fn unroutable_targets_are_held_a_batch_at_most() {
+        let drawn = std::cell::Cell::new(0usize);
+        let source = (0..100_000u32).map(|i| {
+            drawn.set(drawn.get() + 1);
+            let addr = IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i));
+            Member {
+                address: addr,
+                route: Some(RouteKey::unroutable(addr)),
+                item: 0u8,
+            }
+        });
+        let mut groups = HostGroups::new(source, sizing());
+        let first = groups.next().expect("a group");
+        assert!(!first.is_empty());
+        assert!(
+            drawn.get() <= PING_GROUP_SZ + DEFER_LIMIT,
+            "drew {} for the first group",
+            drawn.get()
+        );
+        assert_eq!(
+            groups.map(|g| g.len()).sum::<usize>() + first.len(),
+            100_000
+        );
+    }
+
+    /// An unroutable target that cannot join the unroutable group being formed
+    /// (its address again, or the other family) waits for the next; none is
+    /// lost.
+    #[test]
+    fn no_unroutable_target_is_lost() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1));
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let u = |addr: IpAddr, item: u8| Member {
+            address: addr,
+            route: Some(RouteKey::unroutable(addr)),
+            item,
+        };
+        let got = groups(
+            vec![u(v4, 1), u(v4, 2), u(v6, 3), member(4, lo([127, 0, 0, 1]))],
+            sizing(),
+        );
+        assert_eq!(got, [vec![1], vec![2], vec![3], vec![4]]);
     }
 
     /// A scan that does not route its targets has no such rule: mixed sources and

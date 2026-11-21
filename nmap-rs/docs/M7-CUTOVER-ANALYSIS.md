@@ -774,3 +774,23 @@ Both fixes have sabotage entries (29 in all).
    A unit test runs the reviewer's case.
 2. `o.numhosts_scanned` was cited as `nmap.cc:2327`; it is `:2337`.
 
+**The twelfth review** confirmed three, all low:
+
+1. A batch's worth of unroutable targets (4,096) still ended a routed batch,
+   since the side queue's cap broke the fill: `A1, B2, 4096 unroutable, A3`
+   gave `[A1], [B2], [A3]` where 7.94 gives `[A1, A3], [B2]`. The fill is
+   now suspended when the queue is full and resumed, with its first target
+   and addresses, once they are handed out. One case remains, a group that
+   runs into a new batch whose first 4,096 are unroutable, since a group in
+   progress cannot hand them out without unbounded memory: ledgered
+   (`hostgroup-spans-a-suspended-fill`). A randomised comparison, 300 runs
+   of up to 12,000 targets against the same runs with the unroutable
+   removed, found no difference.
+2. Removing the queue's cap failed no test. A test now draws 100,000
+   unroutable targets and checks the first group drew at most a batch and
+   the defer buffer.
+3. Dropping an unroutable target that could not join the unroutable group
+   lost it and failed no test. A test now checks none is lost.
+
+Each has a sabotage entry (32 in all).
+

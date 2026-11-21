@@ -569,5 +569,62 @@
       "hostgroup::tests::unroutable_targets_take_no_defer_slot",
       "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
     ]
+  },
+  {
+    "name": "a batch of unroutable targets ends the batch",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                // A batch's worth waiting: suspend, to resume once they are out.\n                self.fill = Some(fill);\n                return;",
+    "new": "                // A batch's worth waiting: suspend, to resume once they are out.\n                break;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_batch_of_unroutable_targets_ends_no_batch"
+    ]
+  },
+  {
+    "name": "the unroutable queue is unbounded",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                if self.unroutable.len() < self.batch_size {",
+    "new": "                if self.unroutable.len() < usize::MAX {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::unroutable_targets_are_held_a_batch_at_most"
+    ]
+  },
+  {
+    "name": "an unroutable target that cannot join is dropped",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                self.unroutable.push_front(target);",
+    "new": "                drop(target);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::no_unroutable_target_is_lost"
+    ]
   }
 ]

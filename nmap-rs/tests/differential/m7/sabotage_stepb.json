@@ -740,5 +740,45 @@
     "expect": [
       "hostgroup::tests::the_source_is_drawn_lazily"
     ]
+  },
+  {
+    "name": "a connect scan without -Pn is not routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            ScanKind::Connect => cfg.os_detection || !cfg.assume_up,",
+    "new": "            ScanKind::Connect => cfg.os_detection,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  },
+  {
+    "name": "the deferred come back reversed",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            self.undeferred.extend(self.deferred.drain(..));",
+    "new": "            self.undeferred.extend(self.deferred.drain(..).rev());",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_routed_group_is_homogeneous"
+    ]
   }
 ]

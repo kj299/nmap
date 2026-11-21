@@ -869,10 +869,10 @@ loop (0 differences), the root CLI tests, and one-group output byte for byte
 against the build before the step in all three formats. It confirmed one,
 low: `spoof-source-groups-by-route` cited `netutil.cc:2401-2406` (the
 `spoofss` copy) for `route_dst`'s device filter, which is `:2451` and
-`:2473-2475`. Corrected. It noted, without a false claim to correct, that
-the CLI's sizing inputs (port count, timing level, which scans route) are
-pinned by the root golden gate in CI's differential job and by no cargo
-test.
+`:2473-2475`. Corrected. It noted that the CLI's sizing inputs (port
+count, timing level, which scans route) are pinned by the root golden gate
+in CI's differential job and by no cargo test; the twentieth review found
+that only half true (below).
 
 **The eighteenth review** found no code defect (the 61 golden cases, all 37
 mutations of the sabotage map caught as root, `hostgroup.rs` unchanged since
@@ -905,4 +905,19 @@ three, all low:
 3. CI's progress audit fails on the branch while `core::hostgroup`'s review
    stamp waits for a clean round. That is the gate doing its job: the stamp
    is set, and the branch pushed, after a round confirms nothing.
+
+**The twentieth review** found no code defect and no unledgered difference,
+and two, both low:
+
+1. Nothing pinned that a connect scan without `-Pn` is routed: every golden
+   case passes `-Pn`, and the root CLI test checked `-sS` and `-sT -Pn`
+   only, so the seventeenth round's note that the golden gate pins which
+   scans route was half true. The root test now runs `-sT` without `-Pn`
+   over the loopback pair and 192.0.2.2 (7.94: groups of 2 and 1, measured),
+   with a sabotage entry.
+2. `Member::route`'s doc left out the list scan among runs with no route.
+   Added.
+
+It also found that undeferring in reverse order passed the unit tests; a
+case now pins the order, with a sabotage entry.
 

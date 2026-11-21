@@ -327,6 +327,14 @@ fn a_routed_run_groups_by_route() {
     assert_eq!(sizes(&err), [2, 1], "{err}");
     assert_eq!(reports(&out), ["127.0.0.1", "127.0.0.2", own.as_str()]);
 
+    // A connect scan without `-Pn` is routed too, its pings being raw
+    // (`RawScan()`, `NmapOps.cc:354-358`): 7.94 scans the loopback pair, then
+    // 192.0.2.2 alone (*measured*).
+    let (out, err, ok) = run(&["-d", "-sT", "-n", "-p", "1", "127.0.0.1", &own, "127.0.0.2"]);
+    assert!(ok, "{err}");
+    assert_eq!(sizes(&err), [2, 1], "{err}");
+    assert_eq!(reports(&out), ["127.0.0.1", "127.0.0.2", own.as_str()]);
+
     // A repeated address waits for a later group.
     let (out, err, ok) = run(&[
         "-d",

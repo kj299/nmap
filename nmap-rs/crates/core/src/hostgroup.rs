@@ -172,7 +172,8 @@ pub struct Member<T> {
     /// restrictions on non-root scans"). 7.94 routes a target when it is root and
     /// `o.RawScan()` holds (`targets.cc`, `NmapOps.cc`). That is every raw port
     /// scan, and also a connect scan with `-O` or `--traceroute`, or without
-    /// `-Pn`, whose pings are raw. Only an unprivileged run, or a connect scan
+    /// `-Pn`, whose pings are raw. Only an unprivileged run, a list scan
+    /// (`-sL`, whose ping type is none, `nmap.cc:1307`), or a connect scan
     /// under `-Pn` with neither, has no route.
     pub route: Option<RouteKey>,
     /// The caller's own data for this target.
@@ -567,6 +568,17 @@ mod tests {
                 "a different {name} waits, and is overtaken"
             );
         }
+        // The deferred come back in the order they were deferred.
+        let got = groups(
+            vec![
+                member(1, a.clone()),
+                member(2, lo([192, 0, 2, 2])),
+                member(3, lo([192, 0, 2, 2])),
+                member(4, a.clone()),
+            ],
+            sizing(),
+        );
+        assert_eq!(got, [vec![1, 4], vec![2, 3]], "undeferred in order");
         // The same address again waits too.
         let got = groups(
             vec![

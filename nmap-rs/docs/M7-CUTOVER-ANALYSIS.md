@@ -931,10 +931,21 @@ input order, as 7.94 lists them, with a sabotage entry.
 **The twenty-second review** confirmed two, both low:
 
 1. A connect scan without `-Pn`, routed since this step, still keyed its
-   groups on `-S`'s address, which it does not send from: `-sT -S 192.0.2.2`
-   made one group of 3 where 7.94 and the port without `-S` make two. Its
-   key now takes the routed source, with a root test and a sabotage entry.
+   groups on `-S`'s address, which the round took for one it does not send
+   from, and dropped `-S` from its key. The twenty-third review found that
+   wrong (below), and it was undone.
 2. `raw-scan-unroutable-target-reported` said 7.94 skips an unroutable
    target "for a raw scan"; it does so whenever `RawScan()` holds, a root
    connect scan without `-Pn` among them. Corrected.
+
+**The twenty-third review** found the twenty-second's first fix wrong, and
+confirmed it by running both sides: 7.94 does use `-S` in a connect scan, as
+every target's source (`nmap.cc:2144-2147`) and as its sockets' bound
+address (`scan_engine_connect.cc:436-442`); `nmap.cc:1817` only warns. With
+`-S 127.0.0.1`, `-sT` without `-Pn` over 127.0.0.1, 192.0.2.2 and 127.0.0.3
+is one group in 7.94, and the fix had made it two. The fix is undone, the
+root test now pins that case, its sabotage entry follows, and the port's
+own older difference, that its connect scan does not bind to `-S`, is
+ledgered (`connect-scan-ignores-spoof-source`). The `-S 192.0.2.2` split
+falls under the existing `spoof-source-groups-by-route`.
 

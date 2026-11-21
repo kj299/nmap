@@ -803,10 +803,10 @@
     ]
   },
   {
-    "name": "a connect scan keys its groups on -S",
+    "name": "a connect scan's groups ignore -S",
     "file": "crates/cli/src/main.rs",
-    "old": "        let honours_s = cfg.scan != ScanKind::Connect;",
-    "new": "        let honours_s = true;",
+    "old": "            overrides.spoof_src.map(std::net::Ipv4Addr::from),\n            overrides.spoof_src6.map(std::net::Ipv6Addr::from),",
+    "new": "            overrides.spoof_src.filter(|_| cfg.scan != ScanKind::Connect).map(std::net::Ipv4Addr::from),\n            overrides.spoof_src6.filter(|_| cfg.scan != ScanKind::Connect).map(std::net::Ipv6Addr::from),",
     "cmd": [
       "cargo",
       "test",

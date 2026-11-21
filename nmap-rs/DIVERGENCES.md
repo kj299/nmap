@@ -2857,15 +2857,23 @@ removed: that one was theatre, this one is unobservable.
         pair off-link and 192.0.2.2 direct, so two groups reported 1, 3, 2
         (by reading: running it would send packets off the machine).
       With `-S 127.0.0.1` the two agree (*measured*, over 127.0.0.1,
-      192.0.2.2 and 127.0.0.3: one group of 3 each). This is for the raw
-      scans, which send from `-S`. A connect scan does not honour `-S`
-      (`nmap.cc:1817`'s refusal of raw options, which the port repeats), so
-      since the twenty-second review of step b its key takes the routed
-      source: `-sT -S 192.0.2.2` without `-Pn` over 127.0.0.1, 192.0.2.2 and
-      127.0.0.2 makes the loopback pair and then 192.0.2.2 (*measured*), as
-      7.94 does by the routes above, where it had made one group of 3 by a
-      source its probes never used. It goes when the engine forces `-S`'s
-      device as C does.
+      192.0.2.2 and 127.0.0.3: one group of 3 each, `-sS -Pn` and `-sT`
+      without `-Pn` alike). All of this holds for a routed connect scan too:
+      7.94 sets `-S` as every target's source whatever the scan
+      (`nmap.cc:2144-2147`), and so does the port's key. (The twenty-second
+      review of step b had dropped `-S` from a connect scan's key, reading
+      `nmap.cc:1817`'s warning as 7.94 ignoring it; the twenty-third found
+      that wrong, measured, and it was undone.) It goes when the engine
+      forces `-S`'s device as C does.
+
+- [ ] `connect-scan-ignores-spoof-source` (`cli`) — **a connect scan's
+      sockets are not bound to `-S`; 7.94 binds them.** 7.94's connect engine
+      binds each socket to `-S`'s address (`scan_engine_connect.cc:436-442`),
+      which takes effect when it is one of the host's own addresses, as its
+      warning says (`NmapOps.cc:405`). The port treats `-S` as a raw-only
+      option for a connect scan, says it "will not be honored", and lets the
+      kernel choose the source. Older than M7 step b; the step's host groups
+      still key on `-S`, as 7.94's do.
 
 - [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
       65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a

@@ -244,6 +244,16 @@ pub struct Host {
     /// With `-Pn` C reports `user-set`: the operator asserted liveness, so the
     /// honest answer is "because you said so" rather than a probe result.
     pub reason: Option<Reason>,
+    /// Whether the host ran out of its `--host-timeout` budget
+    /// (`Target::timedOut`, `core::hosttimeout`). Such a host is still up, and
+    /// counts as up, but its results are not reported: every format writes its
+    /// header and "timed out" instead, and its ports are dropped
+    /// (`nmap.cc:2296-2310`; decision D3). Any port left on it is ignored.
+    pub timed_out: bool,
+    /// The host's `--host-timeout` clock (`core::hosttimeout`), carried with
+    /// it through every phase of its group so its budget is spent across them,
+    /// as 7.94's lives on the `Target`.
+    pub clock: crate::hosttimeout::HostClock,
 }
 
 impl Host {
@@ -255,6 +265,8 @@ impl Host {
             reason: None,
             ports: Vec::new(),
             os: None,
+            timed_out: false,
+            clock: crate::hosttimeout::HostClock::new(0),
         }
     }
 

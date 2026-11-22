@@ -144,7 +144,18 @@ fn host_is_reportable(host: &Host, meta: &ScanMeta) -> bool {
     if host.state == crate::model::HostState::Down && meta.verbose == 0 {
         return false;
     }
+    // A timed-out host is reported whatever `--open` says: C tests `--open` only
+    // on the hosts that did not time out (`nmap.cc:2296`, `:2312`).
+    if timed_out(host) {
+        return true;
+    }
     !meta.open_only || host.ports.iter().any(|p| p.state == PortState::Open)
+}
+
+/// Whether `host` is reported as timed out: an up host whose budget ran out
+/// (`nmap.cc:2296`). A down or list-scan host is reported as it is.
+fn timed_out(host: &Host) -> bool {
+    host.timed_out && host.state == crate::model::HostState::Up
 }
 
 /// Service name for a port: the port's own info if present, else a lookup in the
@@ -429,7 +440,9 @@ pub fn normal_group(
             continue;
         }
         render_host_normal(&mut out, host, group.scripts.hosts.get(&i), services, meta);
-        if host.state == crate::model::HostState::Up {
+        // A timed-out host's block gets no blank line after it (`nmap.cc:2306`:
+        // the closing `log_write("\n")` is in the other branch).
+        if host.state == crate::model::HostState::Up && !timed_out(host) {
             out.push('\n');
         }
     }
@@ -584,6 +597,12 @@ fn render_host_normal(
         _ => {
             let _ = writeln!(out, "Host is up.");
         }
+    }
+    // A timed-out host is its header and this line: none of its results
+    // (`nmap.cc:2306`, `NameIP`'s "name (address)" or the address).
+    if timed_out(host) {
+        let _ = writeln!(out, "Skipping host {name} due to host timeout");
+        return;
     }
 
     // "Not shown" summary of ignored states. The protocol label follows the host's
@@ -799,6 +818,16 @@ pub fn grepable_group(
         // scanned, so has no `Ports:` record, even if a probe the scan sent before
         // finding it down left a port behind.
         if host.state == crate::model::HostState::Down {
+            continue;
+        }
+        // A timed-out host is a second status record instead of its ports
+        // (`nmap.cc:2308`).
+        if timed_out(host) {
+            let _ = writeln!(
+                out,
+                "Host: {} ({})\tStatus: Timeout",
+                host.address, hostname
+            );
             continue;
         }
 
@@ -1138,7 +1167,12 @@ pub fn xml_group(
         if !host_is_reportable(host, meta) {
             continue;
         }
-        let _ = writeln!(out, "<host>");
+        // A timed-out host says so on its element (`nmap.cc:2300`).
+        if timed_out(host) {
+            let _ = writeln!(out, "<host timedout=\"true\">");
+        } else {
+            let _ = writeln!(out, "<host>");
+        }
         let addrtype = if host.address.is_ipv6() {
             "ipv6"
         } else {
@@ -1167,8 +1201,9 @@ pub fn xml_group(
             );
         }
         // A down host is its status, address and names alone (`nmap.cc:2155`): no
-        // `<ports>`, OS or script elements.
-        if host.state == crate::model::HostState::Down {
+        // `<ports>`, OS or script elements. So is a timed-out one (`nmap.cc:2297-
+        // 2305`: the header and `<times>`, which the port does not write).
+        if host.state == crate::model::HostState::Down || timed_out(host) {
             let _ = writeln!(out, "</host>");
             continue;
         }
@@ -2343,5 +2378,92 @@ mod tests {
         assert!(!xml.contains("portid=\"443\""), "{xml}");
         assert_eq!(xml.matches("<ports>").count(), 2, "{xml}");
         assert!(xml.contains("<hosts up=\"2\" down=\"1\" total=\"3\"/>"));
+    }
+
+    /// A timed-out host in every format, as 7.94 writes one (`nmap.cc:2296-2310`;
+    /// *measured*, `-sT -Pn -n -p 1-3000 --scan-delay 20ms --host-timeout 1s`):
+    /// its header, then "Skipping host" with no blank line after it in normal
+    /// output, a second `Status: Timeout` record in grepable, and
+    /// `timedout="true"` with no `<ports>` in XML; its ports dropped, `--open`
+    /// not applied to it, and still counted up. The port's own differences are
+    /// the ledgered ones: no latency, and no `reason`, `<times>` or start and end
+    /// times in XML.
+    #[test]
+    fn a_timed_out_host_is_its_header_and_the_timeout() {
+        let timed = |last: u8| {
+            let mut h = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), HostState::Up);
+            // Closed, so `--open` would drop the host if it applied.
+            h.ports.push(Port::new(
+                80,
+                Protocol::Tcp,
+                PortState::Closed,
+                Reason::ConnRefused,
+            ));
+            h.reason = Some(Reason::UserSet);
+            h.timed_out = true;
+            h
+        };
+        let mut done = Host::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)), HostState::Up);
+        done.ports.push(Port::new(
+            22,
+            Protocol::Tcp,
+            PortState::Closed,
+            Reason::ConnRefused,
+        ));
+        let results = ScanResults {
+            hosts: vec![timed(1), timed(2), done],
+            ..Default::default()
+        };
+        let m = meta();
+        let normal = normal_group(&results, &m, None);
+        assert_eq!(
+            normal,
+            "Nmap scan report for 127.0.0.1\nHost is up.\nSkipping host 127.0.0.1 due to host timeout\n\
+             Nmap scan report for 127.0.0.2\nHost is up.\nSkipping host 127.0.0.2 due to host timeout\n\
+             Nmap scan report for 127.0.0.3\nHost is up.\nPORT   STATE  SERVICE\n22/tcp closed unknown\n\n"
+        );
+        let grepable = grepable_group(&results, &m, None);
+        assert!(
+            grepable.starts_with(
+                "Host: 127.0.0.1 ()\tStatus: Up\nHost: 127.0.0.1 ()\tStatus: Timeout\n\
+             Host: 127.0.0.2 ()\tStatus: Up\nHost: 127.0.0.2 ()\tStatus: Timeout\n\
+             Host: 127.0.0.3 ()\tStatus: Up\nHost: 127.0.0.3 ()\tPorts: 22/closed/tcp//"
+            ),
+            "{grepable}"
+        );
+        let xml = xml_group(&results, &m, None);
+        assert!(
+            xml.starts_with(
+                "<host timedout=\"true\">\n<status state=\"up\"/>\n\
+             <address addr=\"127.0.0.1\" addrtype=\"ipv4\"/>\n</host>\n"
+            ),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("timedout").count(), 2, "{xml}");
+        assert_eq!(
+            xml.matches("<ports").count(),
+            1,
+            "only the host that finished: {xml}"
+        );
+        // `--open` does not drop a timed-out host, though it has no open port to
+        // show; it drops the host that finished with none.
+        let open = ScanMeta {
+            open_only: true,
+            ..meta()
+        };
+        let opened = normal_group(&results, &open, None);
+        let reports = opened.matches("Nmap scan report").count();
+        assert_eq!(reports, 2, "{opened}");
+        // `--reason` keeps the header's reason.
+        let why = ScanMeta {
+            reason: true,
+            ..meta()
+        };
+        assert!(normal_group(&results, &why, None).contains(
+            "Host is up, received user-set.\nSkipping host 127.0.0.1 due to host timeout\n"
+        ));
+        // Counted up in every footer.
+        let t = RunTotals::of(&results);
+        assert_eq!((t.hosts, t.up, t.down), (3, 3, 0));
     }
 }

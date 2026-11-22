@@ -68,13 +68,35 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // An error must name a token index that could exist.
-    match first {
+    match &first {
         Err(HostListError::SpecTooLong { index } | HostListError::NotUtf8 { index }) => {
             // Nothing stronger is available without re-tokenizing, but the index
             // must at least be a plausible position rather than a sentinel.
-            assert!(index < list_bytes.len().saturating_add(1));
+            assert!(*index < list_bytes.len().saturating_add(1));
         }
+        Err(HostListError::Read(_)) => panic!("host_specs reads nothing"),
         Ok(_) => {}
+    }
+
+    // The streaming reader `-iL` uses gives the same specs, or the same
+    // error after the same number of specs.
+    let streamed: Vec<Result<String, HostListError>> =
+        nmap_core::targets::HostSpecReader::new(list_bytes).collect();
+    match &first {
+        Ok(specs) => {
+            let got: Vec<&str> = streamed
+                .iter()
+                .map(|r| r.as_deref().expect("the reader failed where host_specs did not"))
+                .collect();
+            assert_eq!(&got, specs, "the reader and host_specs disagree");
+        }
+        Err(e) => {
+            assert_eq!(streamed.last(), Some(&Err(e.clone())), "errors disagree");
+            // The error comes after exactly the specs host_specs counted.
+            if let HostListError::SpecTooLong { index } | HostListError::NotUtf8 { index } = e {
+                assert_eq!(streamed.len(), index.saturating_add(1), "error position disagrees");
+            }
+        }
     }
 
     // --- the exclusion matcher ----------------------------------------------

@@ -1,0 +1,826 @@
+[
+  {
+    "name": "--min-hostgroup does not reach the groups",
+    "file": "crates/cli/src/main.rs",
+    "old": "        min_hostgroup: timing.min_hostgroup,",
+    "new": "        min_hostgroup: 1,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "the_groups_take_the_sizes_7_94_gives_them"
+    ]
+  },
+  {
+    "name": "--max-hostgroup does not reach the groups",
+    "file": "crates/cli/src/main.rs",
+    "old": "        max_hostgroup: timing.max_hostgroup,",
+    "new": "        max_hostgroup: 100_000,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "the_groups_take_the_sizes_7_94_gives_them",
+      "every_format_is_whole_across_groups"
+    ]
+  },
+  {
+    "name": "the run is never routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "        raw && nmap_sys::rawio::RawIpv4Sender::new().is_ok()",
+    "new": "        raw && false",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  },
+  {
+    "name": "a connect scan under -Pn is routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            ScanKind::Connect => cfg.os_detection || !cfg.assume_up,",
+    "new": "            ScanKind::Connect => true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  },
+  {
+    "name": "a group's file is not flushed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            Dest::File(f) => {\n                f.write_all(text.as_bytes())?;\n                f.flush()\n            }",
+    "new": "            Dest::File(f) => f.write_all(text.as_bytes()),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_group_is_written_before_the_next_is_scanned"
+    ]
+  },
+  {
+    "name": "the totals are the last group's",
+    "file": "crates/cli/src/main.rs",
+    "old": "        totals.add(&results);",
+    "new": "        totals = nmap_core::output::RunTotals::of(&results);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "the_groups_take_the_sizes_7_94_gives_them",
+      "every_format_is_whole_across_groups"
+    ]
+  },
+  {
+    "name": "the XML header is written per group",
+    "file": "crates/cli/src/main.rs",
+    "old": "            &xml_group(group, meta, services),",
+    "new": "            &(nmap_core::output::xml_header(meta, &[]) + &xml_group(group, meta, services)),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "every_format_is_whole_across_groups"
+    ]
+  },
+  {
+    "name": "a group's hosts are dropped from the files",
+    "file": "crates/cli/src/main.rs",
+    "old": "        self.each(\n            &normal,\n            &normal,",
+    "new": "        self.each(\n            &normal,\n            \"\",",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "every_format_is_whole_across_groups",
+      "a_group_is_written_before_the_next_is_scanned"
+    ]
+  },
+  {
+    "name": "down hosts are not moved first",
+    "file": "crates/core/src/output.rs",
+    "old": "    for (i, host) in report_order(&group.hosts) {\n        if !host_is_reportable(host, meta) {\n            continue;\n        }\n        render_host_normal(",
+    "new": "    for (i, host) in group.hosts.iter().enumerate() {\n        if !host_is_reportable(host, meta) {\n            continue;\n        }\n        render_host_normal(",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "output::"
+    ],
+    "expect": [
+      "down_hosts_come_first_in_each_group",
+      "down_hosts_come_first_and_alone"
+    ]
+  },
+  {
+    "name": "the totals do not count down hosts",
+    "file": "crates/core/src/output.rs",
+    "old": "            .saturating_add(count(crate::model::HostState::Down));",
+    "new": "            .saturating_add(0);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "output::"
+    ],
+    "expect": [
+      "down_hosts_come_first_in_each_group"
+    ]
+  },
+  {
+    "name": "-S is not the group's source",
+    "file": "crates/sys/src/route.rs",
+    "old": "                source: IpAddr::V4(self.spoof4.unwrap_or(r.src)),",
+    "new": "                source: IpAddr::V4(r.src),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--no-fail-fast",
+      "--lib",
+      "route::"
+    ],
+    "expect": [
+      "a_group_key_is_the_route_its_probes_take"
+    ]
+  },
+  {
+    "name": "a gateway route is direct",
+    "file": "crates/sys/src/route.rs",
+    "old": "                    loopback: false,\n                    direct: false,",
+    "new": "                    loopback: false,\n                    direct: true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--no-fail-fast",
+      "--lib",
+      "route::"
+    ],
+    "expect": [
+      "a_group_key_is_the_route_its_probes_take",
+      "on_link_and_off_link_targets"
+    ]
+  },
+  {
+    "name": "an excluded target is scanned",
+    "file": "crates/cli/src/targets.rs",
+    "old": "            if self.excludes.contains(ip) {",
+    "new": "            if false && self.excludes.contains(ip) {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--bin",
+      "nmap-rs",
+      "targets::"
+    ],
+    "expect": [
+      "targets_come_in_order_less_the_excluded",
+      "everything_excluded_yields_nothing"
+    ]
+  },
+  {
+    "name": "the cap is not applied",
+    "file": "crates/cli/src/targets.rs",
+    "old": "            if self.drawn >= MAX_TARGETS {",
+    "new": "            if self.drawn >= usize::MAX {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--bin",
+      "nmap-rs",
+      "targets::"
+    ],
+    "expect": [
+      "a_range_is_expanded_lazily_and_capped"
+    ]
+  },
+  {
+    "name": "the maximum is compared inclusively",
+    "file": "crates/core/src/options.rs",
+    "old": "                    if sz < min {",
+    "new": "                    if sz <= min {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "options::"
+    ],
+    "expect": [
+      "hostgroup_bounds_are_checked_as_7_94s_setters_check_them"
+    ]
+  },
+  {
+    "name": "atoi's truncation is not reproduced",
+    "file": "crates/core/src/options.rs",
+    "old": "    let v = n as i32;",
+    "new": "    let v = i32::try_from(n).unwrap_or(i32::MAX);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "options::"
+    ],
+    "expect": [
+      "hostgroup_bounds_are_checked_as_7_94s_setters_check_them"
+    ]
+  },
+  {
+    "name": "a value past i32::MAX is accepted",
+    "file": "crates/core/src/options.rs",
+    "old": "                if i32::try_from(v).is_err() {",
+    "new": "                if false && i32::try_from(v).is_err() {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "timing"
+    ],
+    "expect": [
+      "an_impossible_hostgroup_bound_is_reported_as_c_reports_it"
+    ]
+  },
+  {
+    "name": "a host's fingerprints are not capped at nine",
+    "file": "crates/core/src/output.rs",
+    "old": "pub const MAX_SERVICE_FPS_PER_HOST: usize = 9;",
+    "new": "pub const MAX_SERVICE_FPS_PER_HOST: usize = 10;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "output::"
+    ],
+    "expect": [
+      "fingerprints_follow_their_hosts_table_at_most_nine"
+    ]
+  },
+  {
+    "name": "a host's fingerprints are not printed",
+    "file": "crates/core/src/output.rs",
+    "old": "        out.push_str(&service_fingerprint_block(&fps));\n",
+    "new": "        let _ = service_fingerprint_block(&fps);\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--no-fail-fast",
+      "--lib",
+      "output::"
+    ],
+    "expect": [
+      "fingerprints_follow_their_hosts_table_at_most_nine"
+    ]
+  },
+  {
+    "name": "prepare goes on past the cap",
+    "file": "crates/cli/src/targets.rs",
+    "old": "        if planned >= cap {",
+    "new": "        if false && planned >= cap {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--bin",
+      "nmap-rs",
+      "targets::"
+    ],
+    "expect": [
+      "prepare_stops_past_the_cap"
+    ]
+  },
+  {
+    "name": "a spec past the cap that is no target is a truncation",
+    "file": "crates/cli/src/targets.rs",
+    "old": "                Err(e) => {\n                    eprintln!(\"nmap-rs: bad target \\\"{expr}\\\": {e:?}\");\n                    continue;\n                }",
+    "new": "                Err(_) => {\n                    truncated = true;\n                    break;\n                }",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "target_scope"
+    ],
+    "expect": [
+      "the_target_cap_is_reported_only_when_a_target_lies_past_it"
+    ]
+  },
+  {
+    "name": "--excludefile - reads stdin",
+    "file": "crates/cli/src/main.rs",
+    "old": "    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;\n    match host_specs(&bytes) {",
+    "new": "    let bytes = if path == \"-\" {\n        let mut b = Vec::new();\n        std::io::Read::read_to_end(&mut std::io::stdin(), &mut b).map_err(|e| e.to_string())?;\n        b\n    } else {\n        std::fs::read(path).map_err(|e| e.to_string())?\n    };\n    match host_specs(&bytes) {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "target_scope"
+    ],
+    "expect": [
+      "an_exclude_file_named_dash_is_a_file_not_stdin"
+    ]
+  },
+  {
+    "name": "each group repeats the normal header",
+    "file": "crates/core/src/output.rs",
+    "old": "    let mut out = String::new();\n    // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last",
+    "new": "    let mut out = normal_header(meta, &[]);\n    // C ends each scanned host's block with a blank line (`nmap.cc:2330`), the last",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_run_written_by_group_is_the_run_written_whole"
+    ]
+  },
+  {
+    "name": "\"scanned in\" starts after the pre-scan",
+    "file": "crates/cli/src/main.rs",
+    "old": "    let clock = Instant::now();\n",
+    "new": "    let clock = Instant::now() + std::time::Duration::from_secs(5);\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "scanned_in_counts_the_pre_scan_scripts"
+    ]
+  },
+  {
+    "name": "the Exclude count is the last group's",
+    "file": "crates/cli/src/main.rs",
+    "old": "        .set(once.sv_excluded.get().saturating_add(skipped_excluded));",
+    "new": "        .set(skipped_excluded);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "the_version_exclude_note_is_once_for_the_run"
+    ]
+  },
+  {
+    "name": "the fallback is not remembered",
+    "file": "crates/cli/src/main.rs",
+    "old": "        if !self.connect_fallback.replace(true) {",
+    "new": "        if !self.connect_fallback.get() {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups"
+    ],
+    "expect": [
+      "the_connect_fallback_is_announced_once"
+    ]
+  },
+  {
+    "name": "an unroutable target shares a routed key",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            iface: String::new(),\n            source: match target {\n                IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),\n                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),\n            },\n            direct: false,",
+    "new": "            iface: \"lo\".into(),\n            source: match target {\n                IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),\n                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),\n            },\n            direct: true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::an_unroutable_target_shapes_no_routed_group"
+    ]
+  },
+  {
+    "name": "the CLI groups an unroutable target as unrouted",
+    "file": "crates/cli/src/main.rs",
+    "old": "route: router.as_ref().map(|r| r.group_key(address)),",
+    "new": "route: router.as_ref().and_then(|r| r.key(address)),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "an_unroutable_target_groups_apart_from_routed_ones"
+    ]
+  },
+  {
+    "name": "an unroutable target is batched and deferred",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            if is_unroutable(&target) {\n                self.unroutable.push_back(target);",
+    "new": "            if false && is_unroutable(&target) {\n                self.unroutable.push_back(target);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::unroutable_targets_take_no_defer_slot",
+      "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
+    ]
+  },
+  {
+    "name": "a batch of unroutable targets ends the batch",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                // A batch's worth waiting: suspend, to resume once they are out.\n                self.fill = Some(fill);\n                return;",
+    "new": "                // A batch's worth waiting: suspend, to resume once they are out.\n                break;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_batch_of_unroutable_targets_ends_no_batch"
+    ]
+  },
+  {
+    "name": "the unroutable queue is unbounded",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                if self.unroutable.len() < self.batch_size {",
+    "new": "                if self.unroutable.len() < usize::MAX {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::unroutable_targets_are_held_a_batch_at_most"
+    ]
+  },
+  {
+    "name": "an unroutable target that cannot join is dropped",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                self.unroutable.push_front(target);",
+    "new": "                drop(target);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::no_unroutable_target_is_lost"
+    ]
+  },
+  {
+    "name": "a group is not kept across a suspended fill",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                        self.partial =\n                            Some((std::mem::take(&mut group), std::mem::take(&mut addresses)));",
+    "new": "                        let _ = (&group, &addresses);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "a resumed fill forgets its first target and addresses",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "        let mut fill = if let Some(fill) = self.fill.take() {\n            fill\n",
+    "new": "        let mut fill = if let Some(fill) = self.fill.take() {\n            Fill { placed: fill.placed, ..Fill::default() }\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "a resumed fill forgets how many it placed",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "        let mut fill = if let Some(fill) = self.fill.take() {\n            fill\n",
+    "new": "        let mut fill = if let Some(fill) = self.fill.take() {\n            Fill { placed: 0, ..fill }\n",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "a kept group forgets its addresses",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "Some((std::mem::take(&mut group), std::mem::take(&mut addresses)));",
+    "new": "Some((std::mem::take(&mut group), HashSet::new()));",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_suspended_fill_resumes_where_it_was"
+    ]
+  },
+  {
+    "name": "an unroutable group counts as scanned",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "                return Some(self.unroutable_group(ideal));",
+    "new": "                let g = self.unroutable_group(ideal);\n                self.scanned = self.scanned.saturating_add(g.len());\n                return Some(g);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::an_unroutable_target_does_not_count_toward_the_quick_group"
+    ]
+  },
+  {
+    "name": "--min-hostgroup does not raise the batch",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            batch_size: PING_GROUP_SZ.max(min),",
+    "new": "            batch_size: PING_GROUP_SZ,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::the_source_is_drawn_lazily"
+    ]
+  },
+  {
+    "name": "a connect scan without -Pn is not routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            ScanKind::Connect => cfg.os_detection || !cfg.assume_up,",
+    "new": "            ScanKind::Connect => cfg.os_detection,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  },
+  {
+    "name": "the deferred come back reversed",
+    "file": "crates/core/src/hostgroup.rs",
+    "old": "            self.undeferred.extend(self.deferred.drain(..));",
+    "new": "            self.undeferred.extend(self.deferred.drain(..).rev());",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hostgroup::tests"
+    ],
+    "expect": [
+      "hostgroup::tests::a_routed_group_is_homogeneous"
+    ]
+  },
+  {
+    "name": "a list scan is routed",
+    "file": "crates/cli/src/main.rs",
+    "old": "            ScanKind::List => false,",
+    "new": "            ScanKind::List => true,",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  },
+  {
+    "name": "a connect scan's groups ignore -S",
+    "file": "crates/cli/src/main.rs",
+    "old": "            overrides.spoof_src.map(std::net::Ipv4Addr::from),\n            overrides.spoof_src6.map(std::net::Ipv6Addr::from),",
+    "new": "            overrides.spoof_src.filter(|_| cfg.scan != ScanKind::Connect).map(std::net::Ipv4Addr::from),\n            overrides.spoof_src6.filter(|_| cfg.scan != ScanKind::Connect).map(std::net::Ipv6Addr::from),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "hostgroups",
+      "--",
+      "--include-ignored"
+    ],
+    "expect": [
+      "a_routed_run_groups_by_route"
+    ]
+  }
+]

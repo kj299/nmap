@@ -268,5 +268,133 @@ fn an_over_long_spec_in_a_list_refuses_to_scan() {
     let (stdout, stderr, ok) = run(&["-iL", list.path(), "-sT", "-p", "80"]);
     assert!(!ok);
     assert!(hosts_in(&stdout).is_empty());
-    assert!(stderr.contains("SpecTooLong"), "got: {stderr}");
+    assert!(
+        stderr.contains("is too long (>= 1024 chars)"),
+        "got: {stderr}"
+    );
+}
+
+/// The 65,536-target cap is reported before the scan, and only when a target
+/// lies past it: not at exactly the cap, and not for a specification past it
+/// that is no target at all (which is reported as such). M7 cutover step b.
+#[test]
+fn the_target_cap_is_reported_only_when_a_target_lies_past_it() {
+    const CUT: &str = "target list truncated at 65536 hosts";
+    let (out, err, ok) = run(&["-sL", "-n", "127.0.0.0/16", "127.1.0.1"]);
+    assert!(ok, "{err}");
+    assert!(err.contains(CUT), "{err}");
+    assert_eq!(out.matches("Nmap scan report").count(), 65_536);
+
+    let (_, err, ok) = run(&["-sL", "-n", "127.0.0.0/16"]);
+    assert!(ok, "{err}");
+    assert!(!err.contains(CUT), "exactly the cap: {err}");
+
+    let (_, err, ok) = run(&["-sL", "-n", "127.0.0.0/16", "10.0.0.1/abc"]);
+    assert!(ok, "{err}");
+    assert!(!err.contains(CUT), "{err}");
+    assert!(err.contains("bad target \"10.0.0.1/abc\""), "{err}");
+
+    // A name past the cap counts, unresolved.
+    let (_, err, _) = run(&["-sL", "-n", "127.0.0.0/16", "no-such-name.invalid"]);
+    assert!(err.contains(CUT), "{err}");
+    assert!(!err.contains("failed to resolve"), "{err}");
+}
+
+/// A run that ends before writing anything never deletes an output path: a
+/// file that was there stays (emptied, as 7.94 truncates it too), and so would
+/// `/dev/null`. Here the script engine cannot start.
+#[test]
+fn an_early_failure_never_deletes_an_output_path() {
+    let dir = std::env::temp_dir().join(format!("nmap-rs-scope-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let n = dir.join("kept.nmap");
+    std::fs::write(&n, "earlier contents\n").unwrap();
+    let (_, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "--script",
+        "no-such-script-anywhere",
+        "-oN",
+        n.to_str().unwrap(),
+        "127.0.0.1",
+    ]);
+    assert!(!ok, "{err}");
+    assert!(n.exists(), "the output path was deleted: {err}");
+}
+
+/// `--excludefile -` names a file called `-`, as 7.94's `fopen` reads it
+/// (`nmap.cc:1752`), not stdin: with no such file the run is refused, whatever
+/// stdin holds, and nothing is scanned.
+#[test]
+fn an_exclude_file_named_dash_is_a_file_not_stdin() {
+    let dir = std::env::temp_dir().join(format!("nmap-rs-dash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = Command::new(bin())
+        .current_dir(&dir)
+        .args(["-sL", "-n", "--excludefile", "-", "127.0.0.1-2"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"127.0.0.1\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("failed to read exclude file \"-\""), "{err}");
+    assert!(hosts_in(&String::from_utf8_lossy(&out.stdout)).is_empty());
+
+    // With a file of that name, it is the file that is read.
+    std::fs::write(dir.join("-"), "127.0.0.2\n").unwrap();
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["-sL", "-n", "--excludefile", "-", "127.0.0.1-2"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(hosts_in(&stdout), vec!["127.0.0.1".to_string()], "{stdout}");
+}
+
+/// An unwritable output path ends the run before an exclusion name is
+/// resolved, as 7.94 opens its logs first (`nmap.cc:1534-1546`).
+#[test]
+fn an_unwritable_output_is_reported_before_an_exclusion_is_resolved() {
+    let (_, err, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-p",
+        "1",
+        "--exclude",
+        "nonexist.invalid",
+        "-oX",
+        "/nonexistent-dir/x.xml",
+        "127.0.0.1",
+    ]);
+    assert!(!ok);
+    assert!(err.contains("failed to open output"), "{err}");
+    assert!(!err.contains("excluded name"), "{err}");
+}
+
+/// A list that cannot be read says why in words, not as a type's dump.
+#[test]
+fn an_unreadable_list_says_why() {
+    let dir = std::env::temp_dir();
+    let (_, err, ok) = run(&["-sL", "-n", "-iL", dir.to_str().unwrap()]);
+    assert!(!ok, "{err}");
+    assert!(err.contains("failed to read input file"), "{err}");
+    assert!(!err.contains("Read(\""), "{err}");
 }

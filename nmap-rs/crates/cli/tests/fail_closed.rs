@@ -103,8 +103,6 @@ fn a_constraint_we_cannot_honour_is_refused() {
         // No per-host deadline in the engine, so a --host-timeout would be a
         // bound we run straight past.
         &["--host-timeout", "30s", "-sT", "-p", "80", "127.0.0.1"][..],
-        // No hostgroup batching, so a ceiling on concurrency would not bind.
-        &["--max-hostgroup", "2", "-sT", "-p", "80", "127.0.0.1"][..],
         // A value-taking option we do not implement at all.
         &["--source-port", "53", "-sT", "-p", "80", "127.0.0.1"][..],
     ] {

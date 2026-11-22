@@ -144,6 +144,12 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
           REQUIRE_RAW: "1"
           REQUIRE_IPV6: "1"
+      # M7 cutover step b: a routed run's host groups share a source and hold no
+      # address twice, as 7.94's do. The CLI as root; REQUIRE_RAW as above.
+      - run: cargo test -p nmap-cli --all-features --test hostgroups -- --ignored
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          REQUIRE_RAW: "1"
       # F5: netdev's default gateway is the one /proc/net/route gives.
       - run: cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
 
@@ -580,6 +586,19 @@ jobs:
       # Needs raw sockets and a pcap build; the script SKIPs cleanly without them.
       - run: sudo apt-get install -y libpcap-dev
       - run: cargo build --release --features pcap
+      # M7 cutover step b, end to end: the port's own binary, as root, over the
+      # host-group matrix of the step above, must form the groups and report
+      # order 7.94 formed (every case of a scan kind the port has).
+      - run: sudo python3 tests/differential/m7/gen_hostgroup_golden.py --check --port target/release/nmap-rs
+      # And the run's memory stays flat as the targets grow: under 64 MiB, and
+      # growing as n^0.25 at most. The whole-run pipeline before step b grew as
+      # n (and its time as n^2). Measured against 7.94 at these sizes when the
+      # step landed (0.7x its peak memory); its time exponent varies too much
+      # between runs to gate on, so the bounds are the port's own.
+      - run: >
+          python3 ../porting-kit/harnesses/scaling/scale_check.py --sizes 4096,16384,65536
+          --cmd "sh -c 'exec target/release/nmap-rs -sT -Pn -n -p 1 127.0.0.0/\$(python3 -c \"import math;print(32-int(math.log2({n})))\") >/dev/null 2>&1'"
+          --repeat 3 --mem-exp 0.25 --time-exp 1 --tolerance 0.25 --max-rss-mb 64 --timeout 1200
       - run: sudo -E env "PATH=$PATH" bash tests/differential/m5/run_os_differential.sh
       # FreeBSD step d: the host's own non-loopback address, which C nmap scans over
       # the loopback (`route_dst`) at distance 0 (`islocalhost`); before step d the
@@ -975,6 +994,8 @@ jobs:
             gate env REQUIRE_IPV6=1 cargo test -p nmap-sys --all-features --no-fail-fast --test rawio_capture_e2e --test synscan_e2e --test udpscan_e2e --test flagscan_e2e --test group_e2e --test scan6_e2e -- --ignored
             # A loopback target is up whatever its ports say (`targets.cc:588`).
             gate env REQUIRE_RAW=1 REQUIRE_IPV6=1 cargo test -p nmap-cli --all-features --test loopback_liveness -- --ignored
+            # Host groups split by route as 7.94's do (M7 cutover step b).
+            gate env REQUIRE_RAW=1 cargo test -p nmap-cli --all-features --test hostgroups -- --ignored
             # F5: netdev's gateway is the one `route get default` gives.
             gate cargo test -p nmap-sys --all-features --lib the_default_gateway -- --ignored --nocapture
             # Raw scans and -O of the VM's own address (over lo0, as the C

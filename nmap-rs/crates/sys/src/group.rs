@@ -2265,6 +2265,7 @@ mod tests {
                     iface: "lo".into(),
                     src: t,
                     loopback: true,
+                    direct: true,
                 }))
             },
             |t| {

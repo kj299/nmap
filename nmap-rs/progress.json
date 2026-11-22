@@ -411,8 +411,8 @@
   "stamps": {
     "cli": {
       "unsafe_audited": {
-        "files": 2,
-        "sha256": "deed642ddc4ec2f7bee1f6e2c346c8b8c0f9ac7e1813664289067c41219b147e"
+        "files": 3,
+        "sha256": "61613be044ef44c813aaead5c5aaef20e3b9dfb27c3c7c80f4bc049e949a0f8a"
       }
     },
     "core::build": {
@@ -468,28 +468,28 @@
     "core::hostgroup": {
       "differential": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       },
       "fuzzed": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       },
       "ported": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       },
       "reviewed": {
-        "by": "six independent review rounds, 2026-11-21: 10, 4, 6, 2, 1, 0 findings confirmed; the last, on 553c059, confirmed nothing",
+        "by": "twenty-five independent review rounds of M7 cutover step b, 2026-11-21/22; the last, on b1ba15e, confirmed nothing (docs/M7-CUTOVER-ANALYSIS.md \u00a711)",
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       },
       "sanitized": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       },
       "unsafe_audited": {
         "files": 1,
-        "sha256": "c52942c5a7b3cd0979a49400e6c1142112cfc0ae7f6a4ca62536023dc4a3ea6c"
+        "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
       }
     },
     "core::icmp_quote": {

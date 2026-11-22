@@ -230,22 +230,18 @@ narrower *rendering* of the same result.
       host's block ends with one (`nmap.cc:2330`). The port printed every host in
       target order, with a blank line between any two. It now prints the down hosts
       first, ends every scanned host's block with its blank line, the last one's
-      too, and does this in all three formats. 7.94 does it per host group, and the
-      port orders a run as one group (`timing-knobs-not-yet-enforced`). So the two
-      orders agree only while 7.94 makes one group of the run, that is, while:
-      - every target shares one family, interface, source and on-link-ness (7.94
-        splits a ping batch and a scan group on any of them,
-        `target_needs_new_hostgroup`, `targets.cc:276`; `nmap.cc:2192`);
-      - no target repeats (`scan-repeated-target-deferred`);
-      - there are fewer up hosts than one group holds, since a down host after a
-        full group is printed after it (`nmap.cc:2110`). A group holds, for a TCP
-        scan, `max(1024 / ports, 64)` hosts: 64 from 16 to 1,000 ports, more below
-        16, and a first group of 4 (8 at `-T4`) above 1,000 ports; 128 for UDP
-        (`determineScanGroupSize`, `scan_engine.cc:1218`).
-
-      Past that, 7.94 prints a later group's down hosts after an earlier group's up
-      ones. Pinned by `down_hosts_come_first_and_alone`. *(Found in review at IPv6
-      scans step e and fixed there.)*
+      too, and does this in all three formats. 7.94 does it per host group, and
+      since M7 cutover step b so does the port: it forms 7.94's groups
+      (`core::hostgroup`) and orders each one this way, so a later group's down
+      hosts come after an earlier group's up ones, as in 7.94. The two still part
+      where a down host takes a place in a group here and none in 7.94
+      (`hostgroup-every-target-counts`), and where the two scan differently: with
+      no scan type, as root, 7.94 SYN-scans and so routes its targets, where the
+      port connect-scans and under `-Pn` does not
+      (`default-scan-connect-even-privileged`). Pinned by
+      `down_hosts_come_first_and_alone` and `down_hosts_come_first_in_each_group`.
+      *(Found in review at IPv6 scans step e and fixed there; per group since
+      step b.)*
 - [x] `loopback-target-localhost-response` (`sys::group::mark_localhost`; ports
       `targets.cc:588-597`): 7.94 marks every target on a loopback route up before
       any probe, with reason `localhost-response`, or `user-set` under `-Pn`. That
@@ -288,11 +284,63 @@ narrower *rendering* of the same result.
       `group::tests::targets_are_grouped_by_family_and_route`. *(Found in review at
       IPv6 scans step e and fixed there; it dated from M4's group engine.)*
 - [ ] `raw-scan-unroutable-target-reported` (`cli`, `sys::group`; ports
-      `targets.cc:409-413`) — for a raw scan, 7.94 skips a target it has no route
-      to. It says "setup_target: failed to determine route to X" and writes `<target
+      `targets.cc:409-413`) — whenever `RawScan()` holds (a raw scan, or as
+      root a connect scan with `-O` or without `-Pn`, `NmapOps.cc:353-362`),
+      7.94 skips a target it has no route to. It says "setup_target: failed to determine route to X" and writes `<target
       specification="X" status="skipped" reason="invalid"/>` to the XML
       (`log_bogus_target`, `output.cc:1305`). The port reports the target: down, or up
       under `-Pn`, with no ports. Both families. *(Found at IPv6 scans step e.)*
+      Since M7 cutover step b such a target has a key of its own
+      (`RouteKey::unroutable`) and is set aside as it is drawn, so it shapes no
+      routed group, as 7.94's skipped target shapes none: it takes no batch or
+      defer slot (`DEFER_LIMIT`), is not counted toward the quick first
+      group (`o.numhosts_scanned`, `nmap.cc:2337`), and is handed out in groups
+      of unroutable targets alone: before the next routed group, and before
+      the group in progress only when that group runs out of placed targets
+      while its own draw's fill is suspended (it is held while they go out);
+      when the group completes, or meets a misfit, from what that fill placed,
+      or the fill completes, those set aside come after it.
+      Those groups 7.94 does not form. Before the ninth review of step b it had
+      no key, which lifted the routing rule for any group it started and let
+      it join any group; before the tenth it counted toward the quick group;
+      before the eleventh it took defer slots, so 64 of them could end a
+      routed batch early; before the twelfth a batch's worth (4,096) ended
+      it. Now the batch fill is suspended while a batch's worth are handed
+      out and then resumed, with its first target, addresses and count, and
+      a group in progress is kept across it, so memory stays bounded by a
+      batch of them and they end no batch and no group
+      (`hostgroup-spans-a-suspended-fill`, resolved). Pinned in
+      `core::hostgroup`'s unit tests; the end-to-end test over IPv6,
+      `an_unroutable_target_groups_apart_from_routed_ones` (root), pins only
+      that unroutable targets group apart, with three targets.
+
+- [ ] `ipv6-loopback-routed-without-stack` (`sys::route::choose_route6`'s
+      loopback branch) — **with no IPv6 stack, the port still routes and scans
+      `::1` over `lo`; 7.94 skips it.** 7.94's `route_dst` finds no IPv6
+      route, so `setup_target` drops `::1` like any unroutable target
+      ("setup_target: failed to determine route to ::1", `status="skipped"`,
+      `targets.cc:409-413`) and reports 0 hosts (*measured*: `-6 -sS -Pn -n
+      -p 80 ::2 ::1 ::3` on a host without IPv6). The port takes the loopback
+      interface for any loopback-scope target whenever `lo` is up, as the IPv6
+      scans milestone chose (`docs/IPV6-SCAN-ANALYSIS.md`, "Live, without an
+      IPv6 stack"), so it scans `::1` (80/tcp filtered) and reports 3 hosts up.
+      Older than M7 step b; that step's
+      `an_unroutable_target_groups_apart_from_routed_ones` relies on it.
+
+- [x] `hostgroup-spans-a-suspended-fill` (`core::hostgroup`, M7 cutover step b)
+      — **resolved in the same step.** For a while a routed group could end
+      early when its batch's fill was suspended (a batch's worth,
+      `max(4096, --min-hostgroup)`, of unroutable targets set aside at any
+      point before the fill completed) and the group had used every target
+      placed so far: it ended part way into that batch, and the routed
+      targets that would have joined it started the next group (*measured*
+      by the thirteenth review: `--max-hostgroup 1000` over 4,096 routed, 1
+      routed, 4,096 unroutable, 2,000 routed gave groups ending
+      1000 ×4, 97, 1000, 1000 where 7.94 gives 1000 ×6, 97). The group is now
+      kept, at most a group as 7.94's `Targets` is, while the unroutable
+      targets are handed out, then completed from the resumed fill. Pinned by
+      `a_suspended_fill_resumes_where_it_was`, which also pins the resumed
+      fill's first target, addresses and count.
 - [ ] `default-scan-connect-even-privileged` (`cli`, owner `core::options`;
       `NmapOps::ValidateOptions`) — with no scan type, nmap SYN-scans when
       privileged (`isr00t`: root, or `--privileged`) and connect-scans
@@ -301,7 +349,14 @@ narrower *rendering* of the same result.
       way), so the M1 matrix, run as root in the FreeBSD VM, did not show it.
       It showed through a fixture instead: the connect probe's reset fails
       `accept()` on FreeBSD (`ECONNABORTED`), which 7.94's SYN probe never
-      reaches. Found in FreeBSD step d.
+      reaches. Found in FreeBSD step d. Since M7 cutover step b it also changes
+      the host groups and so the report order: 7.94's SYN scan makes
+      `RawScan()` hold, so it routes its targets (`NmapOps.cc:354`,
+      `targets.cc:276`), where the port's connect scan under `-Pn` routes none
+      (`routes_targets`). *Measured* as root: `-Pn -n -p 1 127.0.0.1 127.0.0.1
+      127.0.0.2` is reported 1, 2, 1 by 7.94 and 1, 1, 2 by the port; `-Pn -n
+      -p 1 127.0.0.1 192.0.2.2 127.0.0.2` is two groups (the loopback pair,
+      then 192.0.2.2) in 7.94 and one, in input order, in the port.
 - [x] `no-op-dns-flag` (`cli`, owner `core::options`): nmap-rs accepts `-n`
       (never-do-DNS) but prints a `warning: ignoring unrecognized option '-n'` to
       stderr because forward resolution is only performed for hostname targets
@@ -782,6 +837,13 @@ the driver-specific choices.
       hard-fail" posture from the plan. nmap similarly needs libpcap and root for `-sS`.
       A capture that fails once the scan is under way is not a setup failure: the run
       ends, as 7.94's does (`ndp-exchange-bounded-and-fails-loudly`).
+      Since M7 cutover step b the fallback is decided per host group and then
+      kept: a setup failure in one group (an interface that will not open, a
+      framing the sender lacks) makes that group and every later one a connect
+      scan, while the groups before stayed raw. So one report can hold hosts
+      scanned both ways (`syn-ack` beside `conn-refused`) under a single
+      "falling back" notice that does not say which. Before the step the run was
+      one scan and fell back whole. By reading; this host's interfaces all open.
 
 ## Milestone 4 — UDP scan driver (`-sU`)
 
@@ -2683,14 +2745,14 @@ removed: that one was theatre, this one is unobservable.
       spelling instead of a silently chosen template. Pinned by
       `a_malformed_timing_template_is_refused_rather_than_guessed`.
 
-- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`,
-      `--min-hostgroup` and `--max-hostgroup` parse and are then refused.** The
-      engine has no per-host deadline and scans a route's targets as one group,
-      so honouring either would be a claim it cannot keep: a `--host-timeout`
-      that does nothing runs past a bound the operator set, and a
-      `--max-hostgroup` that does nothing scans every target at once. Accepting
-      them would be the M7.0 mistake in a new place, so they refuse with a
-      message that says exactly what is missing. `-T5`'s *implied* 15-minute
+- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`
+      parses and is then refused.** The engine has no per-host deadline, so
+      honouring it would be a claim it cannot keep: a `--host-timeout` that
+      does nothing runs past a bound the operator set. Accepting it would be the
+      M7.0 mistake in a new place, so it refuses with a message that says
+      exactly what is missing. (`--min-hostgroup` and `--max-hostgroup` were
+      refused here too until M7 cutover step b, which scans the run group by
+      group; they bind now, pinned by `cli/tests/hostgroups.rs`.) `-T5`'s *implied* 15-minute
       host timeout is likewise not enforced — it is recorded in
       `TimingParams::host_timeout_ms` and read by nothing yet. Pinned by
       `fail_closed::a_constraint_we_cannot_honour_is_refused`.
@@ -2725,9 +2787,267 @@ removed: that one was theatre, this one is unobservable.
       - `--randomize-hosts`, which quadruples the batch, `-iR` and SCTP scans
         are not ported.
 
-      Nothing calls the module until step b, which decides how a down verdict
-      enters it. `--min-hostgroup` and `--max-hostgroup` stay refused until then
-      (`timing-knobs-not-yet-enforced`).
+      Since step b the CLI scans the run group by group through this module.
+      The port's one down verdict, the IPv6 ND ping's, still arrives after
+      grouping, per route-group within a host group; 7.94's arrives per batch,
+      before. So a silent IPv6 neighbor takes a place in a group here and none
+      in 7.94, as a down IPv4 target does.
+
+- [x] `hostgroup-bound-past-int-refused` (`core::options`, M7 cutover step b;
+      ports `NmapOps::setMinHostGroupSz`/`setMaxHostGroupSz`, `NmapOps.cc:578-589`,
+      and `box`, `utils.h:93`) — **a `--min-hostgroup` or `--max-hostgroup`
+      that reads negative as a 32-bit `int` is refused; 7.94 aborts.** C takes
+      `atoi`'s `int`, stores it `unsigned`, and reads it back as `int`. So `-1`,
+      or anything from 2^31 to 2^32 - 1, passes the setters and then trips the
+      assertion `bmin <= bmax` in `box` (*measured*: `--max-hostgroup -1`,
+      `2147483648` and `99999999999999999999` each abort, exit 134). A negative
+      maximum beside a smaller negative minimum passes both and runs. The port
+      refuses any such value with a message naming it. One more value 7.94
+      quits on, the port runs: a `--min-hostgroup` of 2^28 or more, with a
+      maximum no smaller. 7.94 raises its batch to the minimum
+      (`nmap.cc:2102-2103`) and allocates a pointer per slot
+      (`targets.cc:328`), and `safe_zalloc` quits when the size reads
+      negative as an `int` (`nbase/nbase_memalloc.c:110-111`): "Tried to
+      malloc negative amount of memory!!! QUITTING!", exit 1, before any
+      target (*measured*: 268435456 for both quits, 268435455 runs). The
+      port's batch is bounded by the target cap, so it runs (59 MiB at a /16
+      with 2^31 - 1 for both). Otherwise, everything is C's:
+      the two setters' checks are made in command-line order, between
+      themselves, with C's unsigned comparisons and messages, and `atoi`'s truncation is reproduced, so
+      `4294967296` is 0 and refused as C refuses it, and `4294967297` is 1.
+      Before this the port dropped a negative value silently and took 2^31 to
+      2^32 - 1 as given. Pinned by
+      `hostgroup_bounds_are_checked_as_7_94s_setters_check_them` and
+      `an_impossible_hostgroup_bound_is_reported_as_c_reports_it`.
+
+- [ ] `startup-errors-not-in-argv-order` (`cli`) — **of two start-up errors,
+      7.94 reports the first on the command line; the port reports them by
+      kind.** 7.94 quits inside its option loop at the first bad value
+      (`nmap.cc:710-715` → `NmapOps.cc:578-589` for the host-group bounds). The
+      port parses every option, then refuses in a fixed order: an unusable
+      argument, `--host-timeout`, the host-group bounds, the rest. So
+      `--max-hostgroup 0 -T9` prints `-T9`'s error, where 7.94 prints
+      "Maximum host group size may not be set to less than the minimum size
+      (currently 1)"; and `--min-hostgroup 101 --max-hostgroup 0` loses 7.94's
+      "highly aggressive --min-hostgroup" warning, which the port prints only
+      after the bounds pass (*measured*, the fifth review of step b). Either
+      way the run is refused; only which message comes differs.
+
+- [ ] `spoof-source-groups-by-route` (`sys::route::GroupRouter::key`, M7
+      cutover step b) — **under `-S` without `-e`, the port groups by each
+      target's own route; 7.94 sends every target out the device holding the
+      `-S` address, so their groups differ in both directions.** 7.94 sets the
+      device to the one holding `-S` (`ipaddr2devname`, `nmap.cc:1734-1737`),
+      and `route_dst` then keeps only that device's routes and skips the
+      loopback unless it is that device (`libnetutil/netutil.cc:2451`,
+      `:2473-2475`). So with `-S 192.0.2.2` even loopback targets go out `eth0`,
+      by the gateway, not direct (*measured* with `--route-dst`, which sends
+      nothing: 192.0.2.2 `eth0 … direct`, 127.0.0.1 and 127.0.0.3 `eth0
+      srcaddr 192.0.2.2 nexthop 192.0.2.1`). The port's key takes `-S`'s
+      address as the source but the interface and directness its own routing
+      picks per target, which is how its probes then go
+      (`spoof-source-receives-too`): grouping follows the port's engine, not
+      7.94's. Two ways it shows:
+      - the port splits where 7.94 does not: `-sS -S 192.0.2.2 192.0.2.2
+        192.0.2.5` is two groups (lo, as an own address, and eth0), one in
+        7.94, since both go out eth0 direct;
+      - 7.94 splits where the port does not: `-sS -S 192.0.2.2 127.0.0.1
+        192.0.2.2 127.0.0.3` is one group of 3 over lo in the port (reported
+        1, 2, 3, *measured*), and in 7.94, by its routes above, the loopback
+        pair off-link and 192.0.2.2 direct, so two groups reported 1, 3, 2
+        (*measured* by the twenty-fifth review of step b).
+      With `-S 127.0.0.1` the two agree (*measured*, over 127.0.0.1,
+      192.0.2.2 and 127.0.0.3: one group of 3 each, `-sS -Pn` and `-sT`
+      without `-Pn` alike). All of this holds for a routed connect scan too:
+      7.94 sets `-S` as every target's source whatever the scan
+      (`nmap.cc:2144-2147`), and so does the port's key. (The twenty-second
+      review of step b had dropped `-S` from a connect scan's key, reading
+      `nmap.cc:1817`'s warning as 7.94 ignoring it; the twenty-third found
+      that wrong, measured, and it was undone.) It goes when the engine
+      forces `-S`'s device as C does.
+
+- [ ] `connect-scan-ignores-spoof-source` (`cli`) — **a connect scan's
+      sockets are not bound to `-S`; 7.94 binds them.** 7.94's connect engine
+      binds each socket to `-S`'s address (`scan_engine_connect.cc:436-442`),
+      which takes effect when it is one of the host's own addresses, as its
+      warning says (`NmapOps.cc:405`). The port treats `-S` as a raw-only
+      option for a connect scan, says it "will not be honored", and lets the
+      kernel choose the source. Older than M7 step b; the step's host groups
+      still key on `-S`, as 7.94's do.
+
+- [ ] `special-address-routes` (`sys::route::choose_route`, grouping since M7
+      cutover step b) — **for 0.0.0.0, multicast and the limited broadcast,
+      the port's route is not 7.94's, so a routed run groups them apart from
+      where 7.94 does.** 7.94's `route_dst` takes the kernel's answer
+      (*measured* with `--route-dst`, which sends nothing: 0.0.0.0 `lo srcaddr
+      127.0.0.1 direct`; 224.0.0.1 and 255.255.255.255 `eth0 srcaddr
+      192.0.2.2 direct`). The port's `choose_route` calls any address that is
+      not loopback, not the host's own and not in an interface's subnet
+      off-link by the default route, so all three key as 8.8.8.8 does (`eth0`,
+      192.0.2.2, not direct; *measured* by a unit-level call). Grouping
+      compares interface, source and directness (`targets.cc:291-305`), so
+      `-sS -Pn 8.8.8.8 224.0.0.1 8.8.4.4` is two groups in 7.94 and one in
+      the port, and `127.0.0.1 0.0.0.0 127.0.0.2` one in 7.94 and two in the
+      port (by reading: running them would send packets off the machine). The
+      routes are older than the step and are the ones the port's scan engine
+      takes; the step made grouping read them.
+
+- [ ] `target-cap-65536` (`cli::targets::MAX_TARGETS`) — **a run draws at most
+      65,536 targets; 7.94 has no cap.** Kept from the MVP as a bound on a
+      mistyped netmask. Past it the port prints "target list truncated at 65536
+      hosts (MVP cap)" before the scan and scans the first 65,536 (*measured*:
+      `-sL -n 10.0.0.0/15` lists 65,536 addresses, 7.94 131,072). Excluded
+      targets count toward it, since the cap is applied as the list is
+      expanded: `-sL -n 10.0.0.0/8 --exclude 10.0.0.0/9` stops inside the
+      excluded half and scans nothing ("no targets left to scan"), where 7.94
+      lists 8,388,608 addresses. Pinned by
+      `the_target_cap_is_reported_only_when_a_target_lies_past_it`; lifting it
+      is a cutover decision, since memory is now flat in the target count.
+
+- [ ] `input-list-unreadable-refused` (`cli`) — **an `-iL` path that cannot be
+      read ends the run; 7.94 warns and scans nothing.** Given a directory,
+      7.94's `fopen` succeeds and its reads fail quietly, so it prints
+      "WARNING: No targets were specified, so 0 hosts scanned." and exits 0
+      (*measured*, `-iL /tmp`). The port says `failed to read input file
+      "/tmp": Is a directory` and exits 1, as it did before step b; a read
+      that fails part way is refused likewise rather than taken as the end of
+      the list. Pinned by `an_unreadable_list_says_why`.
+
+- [ ] `output-write-failure-fatal` (`cli`) — **a failed write to an output file
+      ends the run with exit 1; 7.94 ignores it.** 7.94 checks `fwrite`
+      (`output.cc:956-958`), which succeeds into stdio's buffer, and not the
+      `fflush` that fails (`output.cc:1030`, `:1042`), so `-oN /dev/full`
+      scans and exits 0 (*measured*). The port reports "failed to write output:
+      No space left on device" and exits 1. Before step b that came after the
+      scan; now the header is written first, so it comes before anything is
+      scanned. Refusing is the safe direction: a report that silently was not
+      written is the worse failure.
+
+- [x] `output-streamed-per-group` (`cli`, M7 cutover step b, D2; ports the main
+      loop of `nmap.cc:2104-2346`) — **the report is written host group by host
+      group, as 7.94 writes it.** Before, the port scanned every target, then
+      wrote every format once at the end, so a long scan printed nothing until
+      it was over and held every result in memory. Now each group's hosts are
+      written to the terminal and to every `-o` file, and flushed, when the
+      group is done, and dropped; the totals come at the end. What moved with it:
+      - every output file is opened before the exclusions are read, a name is
+        resolved, the script engine starts or a probe is sent, as 7.94 opens
+        its logs (`nmap.cc:1534-1546`) before the exclude file (`:1752`), so
+        an unwritable path ends the run at once (*measured*: both fail within
+        a few milliseconds ahead of a pre-scan script that sleeps, and ahead
+        of an exclusion name that does not resolve); a run that fails mid-way
+        leaves what it wrote: a capture that fails after a group is written
+        leaves an `-oX` without its closing `<runstats>` and `</nmaprun>`, as
+        7.94's does, since it ends in `netutil_fatal`, which writes only to
+        stderr (`libnetutil/netutil.cc:3337`, `:153-167`), not in `fatal`; a
+        write that fails ends the port's run there, where 7.94 goes on
+        (`output-write-failure-fatal`). No output path is ever deleted, as
+        7.94 deletes none. Any run that ends after the files are opened and before a group
+        is written leaves them empty and exits 1, where before the step most
+        such runs created no file. That covers every refusal from there on —
+        an option pair C refuses (`-sL -p 80`, `-F -p 80`, `-p 70000`,
+        `--port-ratio 0`, a second `--exclude-ports`), an exclude file that
+        cannot be read, a bad `-iL` specification, a script engine that
+        cannot start — and a run left with no target to scan (an `-iL` file
+        with none, every target excluded, every name unresolved). 7.94's
+        `fatal` writes its message into the files: `-oN` gets the error and
+        "QUITTING!", `-oX` a closing `<runstats>` with `exit="error"` and the
+        message (*measured*: `-sL -p 80` leaves 99 and 370 bytes against the
+        port's 0 and 0). With no target, 7.94 warns "No targets were
+        specified", writes a zero-host report and exits 0 (*measured*, 813 to
+        853 bytes of XML). A run given no target at all on the command line
+        prints the usage before opening any file;
+      - "scanned in" counts from before the data files are read, names are
+        resolved and the pre-scan scripts run; 7.94's `o.start` is taken at
+        start-up (`NmapOps.cc:291`), a few option checks earlier (*measured*:
+        a prerule that sleeps 2 s gives 2.06 s, 7.94 2.07 s; 20,000 names give
+        0.70 s of a 0.72 s run). Before, it timed the port scan alone;
+      - the "Starting" line is printed after the pre-scan scripts (7.94 prints
+        it before them);
+      - two formats sent to stdout (`-oN - -oX -`) interleave group by group,
+        where the port wrote one whole and then the other. 7.94 interleaves
+        them at each write, so its lines can mix mid-line (*measured*:
+        "# # Nmap 7.94SVN scan initiated"); the port keeps each group of each
+        format whole;
+      - a script's own log lines to stdout can fall between groups;
+      - the unmatched service fingerprints are printed after each host's port
+        table, at most nine, as `printportoutput` prints them
+        (`output.cc:723-724`, `:831-842`; *measured* with two hosts behind an
+        unrecognised banner). Before, one block for the whole run followed the
+        last host, uncapped;
+      - `-sV`'s count of ports left alone under the probe file's Exclude is
+        reported once, after the last group;
+      - the port's own `-v` line "excluded N host(s)" (7.94 has none) comes
+        when the target source runs dry, which can fall between groups or
+        before the first; before, it came before the scan.
+      Otherwise a run that forms one group writes each format's bytes as
+      before. Still whole-run: the `-O` block after "Nmap done"
+      (`nse-os-block-after-scripts`), which is held until then
+      (`os-block-held-for-the-run`). Pinned by `cli/tests/hostgroups.rs` and
+      `fingerprints_follow_their_hosts_table_at_most_nine`.
+
+- [ ] `os-block-held-for-the-run` (`cli`, M7 cutover step b) — **with `-O`,
+      every up host's OS text is kept until the run ends.** The OS block is
+      written after "Nmap done" (`nse-os-block-after-scripts`), so each
+      group's part of it is appended to one string and held: memory grows
+      with the number of hosts `-O` reports on, a few hundred bytes each,
+      where the rest of the report is dropped as each group is written. 7.94
+      prints each host's OS lines in its report and holds none. Not measured;
+      it goes when the OS block moves into the host's report.
+
+- [x] `exclude-file-dash-is-a-file` (`cli`, M7 cutover step b) — **`--excludefile
+      -` names a file called `-`.** 7.94 `fopen`s the name as given
+      (`nmap.cc:1752`), so with no such file it fails ("Failed to open exclude
+      file - for reading"). The port read stdin for it, and so scanned with an
+      exclusion 7.94 would have refused to run without. Now it reads the file
+      `-`, and refuses when there is none (*measured* both ways; a test).
+      `-iL -` still reads stdin, as 7.94's does (`nmap.cc:1096-1097`).
+
+- [x] `target-list-file-read-whole` (`cli`, M7 cutover step b) — **`-iL`'s file
+      is read as the target list is checked, and no further than the cap.** 7.94
+      reads it as it draws (`grab_next_host_spec`). The port reads it a
+      specification at a time (`core::targets::HostSpecReader`, the same rules
+      as `host_specs`, pinned equal by a unit test and the `target_scope` fuzz
+      target), keeps each numeric one as text and parses it again when it is
+      drawn, and stops at the first target past `MAX_TARGETS`'s worth. Peak RSS
+      is flat in the list's length: *measured*, 17 MiB at 256k, 1M and 4M lines,
+      where 7.94 holds 16 MiB. Before step b the port read the file whole and
+      held every line (102 MiB for a million); step b first parsed every line
+      up front as well (1.2 GiB), and its reviews found both. Two differences
+      remain, both from reading the list up to the cap before the first group
+      where 7.94 reads it as it fills each batch (`grab_next_host_spec`,
+      `libnetutil/netutil.cc:3786`, from the loop at `nmap.cc:2110`): the names
+      up to the cap are resolved first; and a bad specification anywhere
+      before the cap, or the first one past it, which is read to tell whether
+      the list goes on (too long, not UTF-8, a read error), ends the run
+      before anything is scanned, where 7.94 scans and reports the batches before it
+      and then quits (*measured*: 5,000 addresses then a 1,100-byte token;
+      7.94 lists 4,096 hosts, the port none, as it did before the step). A
+      slow `-iL -` likewise starts no scan until it ends or reaches the cap.
+
+- [ ] `connect-scan-quadratic-in-group-size` (`sys::scan::run_group`) — **the
+      connect engine's time grows as the square of its group's size.** Each
+      completion walks every host of the group to count the incomplete ones
+      and relaunch (`launch_ready`, `all_done`), so a group of n hosts costs
+      O(n²). *Measured*, `-sT -Pn -n -p 1` over one group of loopback hosts
+      (`--min-hostgroup 65536`): 8.8 s, 34 s and 135 s at 16k, 32k and 64k
+      hosts; 7.94 scans the 32k group in 5.3 s. Default groups hold at most
+      1,024 hosts for this scan, so a run is linear since M7 cutover step b
+      (0.7 s at 64k targets, 7.94 1.0 s); before it the whole run was one group
+      and took 131 s. A large `--min-hostgroup` brings the quadratic back. The
+      raw engine grows more gently over one group (2.7 s at 4k, 15 s at 16k
+      hosts, `-sS`), not measured further. Found at step b; not fixed there,
+      since the scheduler's launch order is the engine's behaviour to keep.
+
+- [ ] `report-no-blank-line-before-port-table` (`core::output`; ports
+      `printportoutput`, `output.cc`) — **the normal report has no blank line
+      between "Host is up" and the port table.** 7.94 prints one, on the
+      terminal and in `-oN` (*measured*: `-sT -Pn -n -p 1 127.0.0.1`), when no
+      "Not shown:" line comes between them; after one, neither prints a blank
+      line, and the two agree (*measured*: `-p 1-30,8081`). Found
+      while comparing step b's multi-group output with 7.94; it predates step b
+      (the build before it prints the same). Not fixed there: it is outside the
+      step, and every normal-output golden would move with it.
 
 - [ ] `timespec-decimal-subnormal` (`core::timespec`, M7.7) — **an exactly
       representable subnormal written in decimal would be refused here and

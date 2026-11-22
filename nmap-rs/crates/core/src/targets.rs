@@ -93,6 +93,18 @@ impl Ipv4Ranges {
         Self { octets }
     }
 
+    /// [`Ipv4Ranges::iter`], owning what it walks: for a target source that
+    /// outlives the parsed expression.
+    pub fn into_addresses(self) -> impl Iterator<Item = Ipv4Addr> {
+        let lists = [
+            self.octets[0].values(),
+            self.octets[1].values(),
+            self.octets[2].values(),
+            self.octets[3].values(),
+        ];
+        Ipv4RangesIter::new(lists)
+    }
+
     /// Lazily yield every address, octet 0 slowest-changing and octet 3
     /// fastest — the order of `NetBlockIPv4Ranges::next`.
     pub fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + '_ {
@@ -436,7 +448,29 @@ pub enum HostListError {
         /// Index of the offending token.
         index: usize,
     },
+    /// The list could not be read past some point ([`HostSpecReader`] only).
+    Read(String),
 }
+
+impl std::fmt::Display for HostListError {
+    /// The too-long wording is the C's (`libnetutil/netutil.cc:3797`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpecTooLong { .. } => write!(
+                f,
+                "One of the host specifications from your input file is too long (>= {MAX_HOST_SPEC} chars)"
+            ),
+            Self::NotUtf8 { index } => write!(
+                f,
+                "host specification {} of the input file is not valid UTF-8",
+                index.saturating_add(1)
+            ),
+            Self::Read(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for HostListError {}
 
 /// Split a `-iL` / `--excludefile` list into host specifications.
 ///
@@ -493,6 +527,97 @@ pub fn host_specs(text: &[u8]) -> Result<Vec<&str>, HostListError> {
         }
     }
     Ok(out)
+}
+
+/// [`host_specs`] over a reader, one specification at a time: the same rules,
+/// without holding the list. 7.94 reads its `-iL` file as it draws targets
+/// (`grab_next_host_spec`), so a list of millions of lines costs it nothing;
+/// this lets the port stop reading where it stops drawing.
+///
+/// Yields each specification, then ends; or yields one error and ends. A read
+/// error ends it with [`HostListError::Read`]'s message.
+pub struct HostSpecReader<R: std::io::BufRead> {
+    bytes: std::iter::Peekable<std::io::Bytes<R>>,
+    index: usize,
+    done: bool,
+}
+
+impl<R: std::io::BufRead> HostSpecReader<R> {
+    /// Read specifications from `reader`, a byte at a time from its buffer.
+    pub fn new(reader: R) -> Self {
+        HostSpecReader {
+            bytes: reader.bytes().peekable(),
+            index: 0,
+            done: false,
+        }
+    }
+
+    fn peek(&mut self) -> Result<Option<u8>, HostListError> {
+        match self.bytes.peek() {
+            None => Ok(None),
+            Some(Ok(b)) => Ok(Some(*b)),
+            Some(Err(e)) => Err(HostListError::Read(e.to_string())),
+        }
+    }
+}
+
+impl<R: std::io::BufRead> Iterator for HostSpecReader<R> {
+    type Item = Result<String, HostListError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let out = self.next_spec();
+        if !matches!(out, Some(Ok(_))) {
+            self.done = true;
+        }
+        out
+    }
+}
+
+impl<R: std::io::BufRead> HostSpecReader<R> {
+    fn next_spec(&mut self) -> Option<Result<String, HostListError>> {
+        let is_sep = |c: u8| c == b' ' || c == b'\r' || c == b'\n' || c == b'\t' || c == 0;
+        // Skip separators and whole comments, in any interleaving.
+        loop {
+            match self.peek() {
+                Err(e) => return Some(Err(e)),
+                Ok(None) => return None,
+                Ok(Some(b'#')) => loop {
+                    match self.peek() {
+                        Err(e) => return Some(Err(e)),
+                        Ok(None) | Ok(Some(b'\n')) => break,
+                        Ok(Some(_)) => {
+                            self.bytes.next();
+                        }
+                    }
+                },
+                Ok(Some(c)) if is_sep(c) => {
+                    self.bytes.next();
+                }
+                Ok(Some(_)) => break,
+            }
+        }
+        let mut tok: Vec<u8> = Vec::new();
+        loop {
+            match self.peek() {
+                Err(e) => return Some(Err(e)),
+                Ok(Some(c)) if !is_sep(c) && c != b'#' => {
+                    // `>=`, as in [`host_specs`]: no room left for C's NUL.
+                    if tok.len().saturating_add(1) >= MAX_HOST_SPEC {
+                        return Some(Err(HostListError::SpecTooLong { index: self.index }));
+                    }
+                    tok.push(c);
+                    self.bytes.next();
+                }
+                Ok(_) => break,
+            }
+        }
+        let index = self.index;
+        self.index = self.index.saturating_add(1);
+        Some(String::from_utf8(tok).map_err(|_| HostListError::NotUtf8 { index }))
+    }
 }
 
 /// Split an `--exclude` argument into host specifications.
@@ -781,6 +906,57 @@ mod tests {
     }
 
     use super::*;
+
+    /// A list error reads as a sentence: the C's for a spec too long.
+    #[test]
+    fn host_list_errors_read_as_sentences() {
+        assert_eq!(
+            HostListError::SpecTooLong { index: 3 }.to_string(),
+            "One of the host specifications from your input file is too long (>= 1024 chars)"
+        );
+        assert_eq!(
+            HostListError::NotUtf8 { index: 0 }.to_string(),
+            "host specification 1 of the input file is not valid UTF-8"
+        );
+        assert_eq!(HostListError::Read("gone".into()).to_string(), "gone");
+    }
+
+    /// The streaming reader agrees with [`host_specs`], specs and errors alike.
+    #[test]
+    fn the_host_spec_reader_agrees_with_host_specs() {
+        let long = "a".repeat(MAX_HOST_SPEC);
+        let fit = "b".repeat(MAX_HOST_SPEC - 1);
+        let cases: Vec<Vec<u8>> = vec![
+            b"".to_vec(),
+            b"10.0.0.1 10.0.0.2\n#c\n10.0.0.3#x 10.0.0.4\r\n\t\0name".to_vec(),
+            b"###\n# only comments\n".to_vec(),
+            format!("ok {long} after").into_bytes(),
+            format!("{fit} ok").into_bytes(),
+            b"good \xff\xfe bad".to_vec(),
+            b"x#".to_vec(),
+        ];
+        for c in &cases {
+            let streamed: Vec<Result<String, HostListError>> =
+                HostSpecReader::new(c.as_slice()).collect();
+            match host_specs(c) {
+                Ok(specs) => {
+                    let got: Vec<&str> = streamed.iter().map(|r| r.as_deref().unwrap()).collect();
+                    assert_eq!(got, specs, "{c:?}");
+                }
+                Err(e) => {
+                    assert_eq!(streamed.last(), Some(&Err(e.clone())), "{c:?}");
+                    // Every spec before the error was read, and only those.
+                    let index = match e {
+                        HostListError::SpecTooLong { index } | HostListError::NotUtf8 { index } => {
+                            index
+                        }
+                        HostListError::Read(_) => unreachable!(),
+                    };
+                    assert_eq!(streamed.len(), index + 1, "{c:?}");
+                }
+            }
+        }
+    }
 
     fn v4(spec: &str) -> Vec<Ipv4Addr> {
         match parse_target(spec, false).unwrap() {

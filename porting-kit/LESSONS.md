@@ -1890,6 +1890,42 @@ reports, and four retrospective audits (history, harnesses, step e, consistency)
 - **Section amended:** PLAYBOOK · Phase 3 (gate identity); `REVIEW-GATE.md`
   (merge preconditions); `hooks/pre-push`; `skills/porting-kit-audit/SKILL.md`.
 
+## 059. A flat cost was fitted as n^2
+
+- **Date:** 2026-11-21
+- **Codebase:** nmap — M7 cutover step b
+- **What happened:** The step made the CLI scan a run group by group, so peak
+  memory should stay flat as the targets grow. `scale_check.py` measured
+  14.6, 14.6 and 14.9 MiB at 4k, 16k and 64k targets. It fitted the
+  successive differences, as it does for geometric sizes to cancel start-up
+  cost, and so reported n^2.09 on one run in three: rises of 0.01 and 0.3 MiB
+  are noise, and their ratio is all the fit saw. The same gate on the build
+  before the step measured 19, 42 and 133 MiB, n^1.0, and its time grew as
+  n^1.95: 131 s at 64k targets, against 0.7 s after the step and 1.0 s for
+  7.94. The step did not remove that quadratic, it bounded it. The connect
+  engine walks every host of its group on each completion, so it is quadratic
+  in the group's size; groups of at most 1,024 make a run linear, and
+  `--min-hostgroup 65536` brings the 135 s back (7.94: 5 s for a 32k group).
+  It had shipped since M1 because nothing scaled the size of one group. The
+  measurement that tells "fixed" from "bounded" is the cost of one group
+  at n and 4n, not only of the run.
+  A second instability: with `--oracle-cmd`, 7.94's own time exponent varied
+  from 0.69 to 0.93 between runs at sub-second times, which fails a
+  port-against-oracle exponent bound by chance.
+- **Kit change:** `growth_exponent` fits the values, not the differences, when
+  they change by less than 5% across every size (`FLAT`), with a self-test of
+  the measured case. RESOURCE-BOUNDS gains no rule: the fix is in the harness.
+  The step's CI gate declares its own bounds and a `--max-rss-mb` ceiling,
+  and records the oracle comparison in the analysis rather than gating on it.
+- **Section amended:** `harnesses/scaling/scale_check.py`.
+- **Addendum (the step's fifth review):** the flat rule is itself a blind
+  spot. Growth under 5% of the baseline across the sizes run is reported as
+  flat whatever its shape: a linear leak of ~11 bytes a target, 0.7 MiB over
+  4k..64k on 14.6 MiB, passes. Three sizes cannot tell that from page-sized
+  noise, so the harness no longer pretends to: the fit method reads
+  "flat (+x.x%)", naming how far the cost moved, and a gate that must see
+  finer growth widens its sizes or sets an absolute ceiling.
+
 ## Meta — M6.6's gates were green and its reviews were not
 
 Every automated gate passed at every step commit, and every review found defects.

@@ -1,7 +1,7 @@
 # M7 cutover gate: host groups and the host timeout — Phase 0
 
 Status: **Phase 0 written; D1–D7 decided 2026-11-21, all as recommended (§8).
-Step a (group formation) is done: §10.** C line numbers are this tree's at `b5bebc249`. Everything marked
+Step a (group formation) is done: §10. Step b (the group loop) is done: §11.** C line numbers are this tree's at `b5bebc249`. Everything marked
 *measured* was run here against the installed oracle, Nmap 7.94SVN, on loopback.
 
 ## 0. Value
@@ -517,3 +517,458 @@ differential job runs the generator's `--check` as root against the distro's
 nmap; that step has not run in CI, which has not run since 3 November, and has
 run here. #161 was merged before the review and before any local CI record;
 both are on the follow-up.
+
+## 11. Step b: the group loop
+
+The CLI now runs its pipeline per host group, as 7.94's main loop does
+(`nmap.cc:2104-2346`): it draws a group from the lazy target source through
+`core::hostgroup`, port-scans it, runs `-sV`, `-O` and the scripts' host phase
+over it, writes its hosts to the terminal and every `-o` file, flushes, and
+drops it. The pre-scan phase runs before the first group, the post-scan phase
+and the totals after the last. `--min-hostgroup` and `--max-hostgroup` are
+accepted and bind; `--host-timeout` stays refused until step f.
+
+**Commits.** b.1 checks the hostgroup bounds as 7.94's setters do, in argv order
+(`hostgroup-bound-past-int-refused`). b.2 splits each renderer into header,
+group and footer, with `RunTotals` summed across groups. b.3 adds
+`sys::route::GroupRouter`, which gives each target its `RouteKey` before the
+scan (with `-S` as the source, and IPv4 direct-connectedness). b.4 holds what a
+run loads or decides once (`RunOnce`: the probe and OS databases, the UDP
+payloads, the connect fallback). b.5 makes the targets a lazy source. b.6 is the
+loop. b.7 is the gates below.
+
+**How §10's open items were settled.**
+
+- *Who decides `route`:* the CLI, as 7.94's `RawScan()` does as root: every raw
+  scan, and a connect scan with `-O` or without `-Pn`. "Root" is "a raw socket
+  opens". A build without `pcap` routes nothing.
+- *`-S`:* the group key's source is `-S`'s address; its interface stays the
+  one the port routes each target by, where 7.94 forces `-S`'s device for
+  every target (`spoof-source-groups-by-route`, found by the seventh review).
+- *Bounds that read negative as an `int`:* refused (b.1).
+- *A down verdict entering `HostGroups`:* not done. The port's one verdict, the
+  IPv6 ND ping's, still arrives after grouping
+  (`hostgroup-every-target-counts`).
+- *Script-added targets:* not done (`nse-new-targets-not-scanned`); the lazy
+  source is where they would join.
+
+**Gates.**
+
+- *End to end against 7.94.* `gen_hostgroup_golden.py --check --port`, as root,
+  runs the port's own binary over the matrix and reads its groups from `-d`'s
+  "host group k: n host(s)". All 61 cases of a kind the port has (`-sT`, `-sS`,
+  `-sA`, `-sU`, `-sT -O`) give 7.94's sizes and report order; the other four
+  are `-sO` and two scan types at once, which the port does not have. In CI's
+  differential job.
+- *Report text across groups.* With and without `-v`, over three groups and
+  over a routed run with a repeat, the report lines and their order match
+  7.94's. One difference predates the step: no blank line between "Host is up"
+  and the port table (`report-no-blank-line-before-port-table`).
+- *Memory.* `scale_check.py` at 4k, 16k and 64k targets: peak RSS 14.6 MiB at
+  every size (7.94: 20.9), time linear. The build before b.6 measured 19, 42
+  and 133 MiB and 0.13, 8.4 and 131 s. In CI, against the port's own bounds; the
+  harness's fit of a flat cost was fixed on the way (LESSONS #059).
+- *The quadratic was bounded, not removed.* One group of n hosts still costs
+  O(n²) in the connect engine (`connect-scan-quadratic-in-group-size`):
+  `--min-hostgroup 65536` gives 135 s at 64k hosts. Default groups keep a run
+  linear. Not fixed in this step.
+- *CLI tests.* `cli/tests/hostgroups.rs`: sizes under `--max-hostgroup`, the
+  default and `--min-hostgroup`; every format whole across groups; a group's
+  report on disk while the run goes on; and, as root, routed grouping by source
+  and repeat. In CI's privileged steps on Linux and FreeBSD.
+- *Sabotage (before the review).* 18 mutations across the six commits through `sabotage.py`
+  (`tests/differential/m7/sabotage_stepb.json`), each naming the test that must
+  catch it. The first run caught 17: dropping the service fingerprints from the
+  totals passed, because the test that compares a run written by group with
+  one written whole builds both through the same totals. It now asserts the
+  fingerprint block itself, and all 18 are caught.
+
+**What changed for an operator** (`output-streamed-per-group`): output files are
+opened before anything runs; "Starting" follows the pre-scan scripts; "scanned
+in" counts from before them; two formats on stdout interleave by group (7.94's
+at each write); a
+script's stdout lines can fall between groups; the unmatched service
+fingerprints follow each host's table, at most nine, as in 7.94. Otherwise a run
+that forms one group writes each format's bytes as before.
+
+**The first review** confirmed eight findings, and the fix round answers each:
+
+1. `-iL` memory grew a kilobyte per line, since every line was parsed before
+   the first target was drawn: 1.2 GiB for a million lines, against 102 MiB
+   before the step. Lines are kept as text and parsed when reached: 87 MiB
+   (`target-list-file-read-whole`; 7.94 holds 16 MiB).
+2. The unmatched service fingerprints stayed one run-wide, uncapped block,
+   where 7.94 prints at most nine per host after its table. Moved, and the
+   mutation that pinned the old placement replaced.
+3. Output files were opened after the pre-scan scripts, so an unwritable path
+   failed only after them. Opened first now.
+4. "scanned in" did not count the pre-scan phase. It does now.
+5. "Each format's bytes are as before" was false for two formats on stdout,
+   which now interleave, as in 7.94. The claim is corrected.
+6. `-sV`'s Exclude note printed once per group. Once per run now.
+7. The truncation message came when the source ran dry. It comes before the
+   scan now. The `-v` "excluded N host(s)" line comes when the source runs
+   dry, which grouping can reach before the first group is written (the
+   fourth review corrected "at the end"); 7.94 prints no such line.
+8. Comments: the capture-failure function's doc, the blank-line ledger entry
+   (7.94 prints none after "Not shown:"), and a test's sizing comment.
+
+A ninth, noted: the mutation of `routes_targets` is caught only by a root test,
+so the sabotage set needs root to report it.
+
+**The second review** confirmed five, all low:
+
+1. The `-iL` fix still held every line: the file was read whole before
+   `prepare` ran, so memory grew with the list past the cap (351 MiB at 4M
+   lines), and the ledger said otherwise. The file is now read a
+   specification at a time, no further than the cap: 17 MiB at every size.
+2. Opening the output files before the script engine left them empty when the
+   engine could not start. A run that ended before writing removed them; the
+   third review found that wrong, below.
+3. "scanned in" and the start time still left out name resolution. Both are
+   taken before it now, and the files are opened before it.
+4. The truncation message printed when only an unparsable specification lay
+   past the cap, and that specification's error went unreported. Now a name
+   past the cap counts, unresolved; a specification that does not parse is
+   reported, and does not.
+5. Two tests could not fail for part of what they claimed. `prepare`'s test
+   uses a name that resolves; the message, at and past the cap, and the files
+   left by an early failure have CLI tests; the unwritable-output test also
+   runs with a script that cannot load.
+
+**The third review** confirmed six, one serious:
+
+1. Serious: removing the files of a run that ended early deleted whatever the
+   path named, `/dev/null` or a file that was there before. 7.94 deletes no
+   output path, and now neither does the port: the files are left, empty.
+   A test checks that a file that was there survives.
+2. `-iL -` with `--excludefile -` read stdin for one of them and found it
+   empty for the other. Refused then; the fourth review found the premise
+   wrong, below.
+3. A list that could not be read printed the error's debug form. It prints
+   a sentence now (the C's for a specification too long), for `-iL` and
+   `--excludefile` alike, with tests.
+4. The reader's equivalence check (unit test and fuzz target) compared the
+   error but not how many specifications came before it. It does now.
+5. The ledger said an early failure with no target removed files; a run with
+   no target opens none. The entry now says what each side does, measured.
+6. The sabotage entry for the removal went with it.
+
+**The fourth review** confirmed six, all low:
+
+1. The exclusions were read and their names resolved before the output files
+   were opened, so an unresolvable exclusion was reported ahead of an
+   unwritable path, where 7.94 opens its logs first (`nmap.cc:1534-1546`,
+   `:1752`). The files and the clock now come first, with a test.
+2. A run left with no target after the files were opened (an empty `-iL`,
+   every target excluded, every name unresolved) left them empty and exited
+   1, unrecorded; 7.94 writes a zero-host report and exits 0. Ledgered,
+   measured, in `output-streamed-per-group`.
+3. `--excludefile -` read stdin; 7.94 `fopen`s a file named `-`. It does now
+   (`exclude-file-dash-is-a-file`), so the both-on-stdin refusal goes, its
+   test replaced by one for the file named `-`.
+4. Text: the "excluded N host(s)" timing (above), the stdout interleaving
+   (7.94 mixes at each write, not by group), and five C line numbers.
+5. With `-O`, the OS block is held for the run, so memory grows with the
+   hosts it covers: ledgered (`os-block-held-for-the-run`).
+6. The test comparing a run written by group with one written whole could
+   fail only through the totals, since the whole-run renderers are that
+   composition. It now asserts one header and footer per format, every host
+   once and in order, and the fingerprint between its table and the next
+   host; two test docs sat on the wrong tests.
+
+**The fifth review** confirmed six, all low; none needed a code change:
+
+1. The 65,536-target cap had no ledger entry, and excluded targets count
+   toward it. Ledgered, measured (`target-cap-65536`).
+2. Start-up errors are reported by kind, not in command-line order, and a
+   failing host-group bound drops the "highly aggressive" warning before it.
+   Ledgered (`startup-errors-not-in-argv-order`); the host-group entry's
+   "command-line order" now says it holds between the two options.
+3. `TargetSource::finish`'s comment still said the "excluded" line comes at
+   the end. Corrected.
+4. `-iL` given a directory is refused, where 7.94 warns and scans nothing;
+   older than the step, and pinned by its new test. Ledgered
+   (`input-list-unreadable-refused`).
+5. A failed output write exits 1 where 7.94 exits 0, and since this step it
+   comes before the scan. Ledgered (`output-write-failure-fatal`).
+6. The kit's flat rule hides growth under 5% of the baseline. The harness
+   now names a flat fit and how far the cost moved (a kit commit; LESSONS
+   #059 addendum).
+
+**The sixth review** confirmed four, all low:
+
+1. The ledger named two early exits that leave the files empty; every
+   refusal after they are opened does, where 7.94 writes its fatal message
+   into them. The entry now lists them, measured.
+2. `target-list-file-read-whole` said one difference remained; a bad
+   specification before the cap also ends the run before any batch is
+   scanned. Recorded, measured.
+3. The "excluded N host(s)" line's new timing was in no ledger entry. It is
+   in `output-streamed-per-group` now.
+4. Three earlier fixes had no test: the connect fallback announced once, the
+   `-sV` Exclude note once, and "scanned in" counting the pre-scan scripts.
+   Each has a test and a sabotage entry now (26 in all); the first mutation
+   tried for the fallback was equivalent, the guard being doubled, and was
+   replaced.
+
+**The seventh review** confirmed one and reported one by reading, both low,
+both ledgered without a code change:
+
+1. Under `-S` without `-e`, groups split by each target's routed interface,
+   where 7.94 forces `-S`'s device and so never splits on it. The port's
+   probes take the routed interface too, so its grouping follows its own
+   engine (`spoof-source-groups-by-route`); by reading, since a check
+   against 7.94 needs an off-host target.
+2. The specification read just past the cap, to tell whether the list goes
+   on, ends the run as one before it does. The ledger said "before the cap";
+   it now names both.
+
+**The eighth review** confirmed one, low, ledgered: a `--min-hostgroup` of
+2^28 or more makes 7.94 quit in `safe_zalloc` (its batch of pointers reads
+negative as an `int`), where the port, its batch bounded by the target cap,
+runs. `hostgroup-bound-past-int-refused` said everything else was C's; it
+now names this case, measured. It re-ran all 26 mutations: each caught.
+
+**The ninth review** reported three, all low, all by reading:
+
+1. An unroutable target in a routed run had no group key, the marker of an
+   unrouted run, so a group it started took targets of any route and it
+   could join any group. It now has a key of its own
+   (`RouteKey::unroutable`, by `GroupRouter::group_key`), with unit tests
+   in `core::hostgroup` and `sys::route` and a sabotage entry. Not
+   reproducible end to end over IPv4 here, every target having the default
+   route; the tenth review reproduced it over IPv6, below.
+2. A setup failure falls back per group from that group on, so a report can
+   mix raw and connect results. Ledgered in
+   `raw-scan-pcap-feature-gated-fallback`.
+3. A run that dies after a group is written leaves an unclosed `-oX`, where
+   7.94's `fatal` closes it with `exit="error"`. Ledgered in
+   `output-streamed-per-group`.
+
+**The tenth review** confirmed three, all low, on the ninth round's fix:
+
+1. A group of unroutable targets still counted toward the targets scanned,
+   which the quick first group reads, where 7.94 never scans them
+   (`targets.cc:409-413`, `nmap.cc:2337`): one unroutable target first made
+   a `-T4 -p-` run's 20 routed targets one group instead of 8 and 12. They
+   are no longer counted, with a unit test.
+2. Nothing failed if the CLI went back to grouping an unroutable target by
+   no key: the tests checked the key and `group_key` alone. A root CLI test
+   now runs the reviewer's reproduction over IPv6 (`::2 ::1 ::3`, with no
+   IPv6 route: groups [::2, ::3] and [::1]; one group without the fix),
+   skipping where `::2` may have a route.
+3. The analysis said the defect could not be reproduced end to end here;
+   it can, over IPv6. Corrected.
+
+Both fixes have sabotage entries (29 in all). The eleventh round re-anchored
+the second, so it lapsed; the sixteenth restored it.
+
+**The eleventh review** confirmed two, both low:
+
+1. Unroutable targets still took defer slots: against a routed batch they
+   were misfits, so 64 of them ended the batch early and split routed
+   targets 7.94 would group (`[A1], [A2, A3], [B1]` where 7.94, dropping
+   them, gives `[A1, A2, A3], [B1]`). `HostGroups` now sets an unroutable
+   target aside as it is drawn, before the batch and the defer buffer, and
+   hands those out first, in groups of their own, at most a batch ahead.
+   A unit test runs the reviewer's case.
+2. `o.numhosts_scanned` was cited as `nmap.cc:2327`; it is `:2337`.
+
+**The twelfth review** confirmed three, all low:
+
+1. A batch's worth of unroutable targets (4,096) still ended a routed batch,
+   since the side queue's cap broke the fill: `A1, B2, 4096 unroutable, A3`
+   gave `[A1], [B2], [A3]` where 7.94 gives `[A1, A3], [B2]`. The fill is
+   now suspended when the queue is full and resumed, with its first target
+   and addresses, once they are handed out. One case remains, a group that
+   runs into a new batch whose fill suspends, which the thirteenth review
+   corrected and then removed, below: ledgered then as
+   `hostgroup-spans-a-suspended-fill`. A randomised comparison, 300 runs
+   of up to 12,000 targets against the same runs with the unroutable
+   removed, found no difference.
+2. Removing the queue's cap failed no test. A test now draws 100,000
+   unroutable targets and checks the first group drew at most a batch and
+   the defer buffer.
+3. Dropping an unroutable target that could not join the unroutable group
+   lost it and failed no test. A test now checks none is lost.
+
+Each has a sabotage entry (32 in all).
+
+**The thirteenth review** found no other difference from 7.94's grouping: a
+faithful model of `refresh_hostbatch`, `nexthost`, `returnhost` and `defer`,
+fed the same runs without the unroutable targets, matched in all but 6 of
+5,000 runs biased to small `--max-hostgroup` and long lists, all six the
+ledgered case. It confirmed four, all low:
+
+1. That case was misstated: it comes whenever a fill is suspended (a
+   batch's worth, `max(4096, --min-hostgroup)`, set aside at any point
+   before the fill completes) and the group has used what the fill placed,
+   and the group ends part way into the batch, not where it ends.
+2. It was not forced, as the entry said: keeping the partial group (at most
+   a group, as 7.94's `Targets` is) while the unroutable targets are handed
+   out removes it with memory still bounded. Done; the entry is resolved.
+3. The ledger said the IPv6 CLI test pinned it; with three targets it
+   cannot. Corrected.
+4. The resumed fill's first target, addresses and count were unpinned:
+   forgetting any of them passed every test. A unit test now pins each,
+   and the reviewer's case.
+
+Each has a sabotage entry.
+
+**The fourteenth review** found no defect in the grouping: a model of 7.94's
+loop (`refresh_hostbatch`, `defer`, `nexthost`, `returnhost`, the main
+loop's check against `Targets[0]`), fed the same runs without the unroutable
+targets, matched in 8,300 randomised runs, with bursts of up to 13,000
+unroutable, `--min-hostgroup` above the batch and `--max-hostgroup` from 1;
+the harness was sensitive enough that a defer limit of 63 differed in 215 of
+300. It confirmed two, both low:
+
+1. Nothing pinned the kept group's own addresses: forgetting them let a
+   group hold an address twice after the fill resumed. The resume test now
+   pins it, with a sabotage entry.
+2. The ledger said the unroutable groups come ahead of the routed targets
+   drawn with them; when a group's own draw runs the fill, they come after
+   that group. Corrected (and corrected again by the fifteenth review).
+
+**The fifteenth review** found no defect in the grouping (0 differences in 300
+more randomised runs against a model it re-read against `targets.cc`; the 61
+golden cases; the ten unroutable-target mutations caught) and three in text,
+all low:
+
+1. The IPv6 CLI test relies on the port routing `::1` over `lo` with no IPv6
+   stack, which 7.94 does not (it skips `::1` too). Older than the step;
+   ledgered now (`ipv6-loopback-routed-without-stack`), and the test's doc
+   says so.
+2. The fourteenth round's correction was half right: when a group's own draw
+   runs a fill that suspends, the group is held and the unroutable groups
+   come before it; only a fill that completes puts them after. The entry
+   names both.
+3. `HostGroups`' doc said it draws at most a batch ahead plus the defer
+   buffer; with a suspended fill it is a batch of unroutable targets, a
+   batch and the defer buffer. Corrected.
+
+**The sixteenth review** found no code defect: it re-read the model of
+7.94's loop against `targets.cc` and `nmap.cc:2103-2337`, the 61 golden
+cases match, and the CLI, scope, timing and output tests pass, among them
+the root tests. It confirmed two, both low:
+
+1. The fifteenth round's order rule was still too broad. A group whose own
+   draw's fill suspends is held, and the unroutable groups come before it,
+   only when it runs out of what that fill placed; when it completes or
+   meets a misfit from those, it comes first (*measured*:
+   `--max-hostgroup 100`, 4,146 routed, 4,096 unroutable, 200 routed). The
+   entry now states the condition.
+2. The mutation for "an unroutable target is not counted as scanned" had
+   lapsed from the sabotage map when the eleventh round re-anchored it.
+   Restored, against the unroutable groups' hand-out.
+
+**The seventeenth review** found no code defect and no unledgered difference:
+the 61 golden cases, 400 more randomised runs against the model of 7.94's
+loop (0 differences), the root CLI tests, and one-group output byte for byte
+against the build before the step in all three formats. It confirmed one,
+low: `spoof-source-groups-by-route` cited `netutil.cc:2401-2406` (the
+`spoofss` copy) for `route_dst`'s device filter, which is `:2451` and
+`:2473-2475`. Corrected. It noted that the CLI's sizing inputs (port
+count, timing level, which scans route) are pinned by the root golden gate
+in CI's differential job and by no cargo test; the twentieth review found
+that only half true (below).
+
+**The eighteenth review** found no code defect (the 61 golden cases, all 37
+mutations of the sabotage map caught as root, `hostgroup.rs` unchanged since
+the seventeenth round's 400-run comparison) and three, all low:
+
+1. With no scan type, as root, under `-Pn`, 7.94 SYN-scans and routes its
+   targets where the port connect-scans and routes none, so their groups and
+   report order differ; the step had dropped the caveat that said so.
+   Ledgered in `default-scan-connect-even-privileged`, measured, and
+   `output-down-hosts-first` points to it.
+2. The unit test's claim that a minimum above the batch raises the batch
+   could not fail: over an unrouted source the batch does not shape the
+   groups. It now uses routed targets, where it does, with a sabotage entry.
+3. The main loop was cited as `nmap.cc:2080-2330` and the write loop as
+   `:2292-2330`; they are `:2104-2346` and `:2293-2335`.
+
+**The nineteenth review** found no code defect (the 61 golden cases, the root
+CLI tests, the IPv6 reproduction, a multi-group `-oG` run against 7.94) and
+three, all low:
+
+1. Under `-S 192.0.2.2`, 7.94 sends loopback targets out `eth0` by the
+   gateway, so it can split groups the port keeps together, the reverse of
+   the case `spoof-source-groups-by-route` recorded; and the entry said
+   `route_dst` keeps the loopback, which it skips. Rewritten with both
+   directions, 7.94's routes measured with `--route-dst`.
+2. The ninth round's ledger line that 7.94's `fatal` closes an `-oX` a capture
+   failure leaves open was wrong: that path is `netutil_fatal`, which writes
+   only to stderr, so 7.94 leaves it unclosed too, as `main.rs` says. And a
+   failed write is no fatal error in 7.94. Corrected.
+3. CI's progress audit fails on the branch while `core::hostgroup`'s review
+   stamp waits for a clean round. That is the gate doing its job: the stamp
+   is set, and the branch pushed, after a round confirms nothing.
+
+**The twentieth review** found no code defect and no unledgered difference,
+and two, both low:
+
+1. Nothing pinned that a connect scan without `-Pn` is routed: every golden
+   case passes `-Pn`, and the root CLI test checked `-sS` and `-sT -Pn`
+   only, so the seventeenth round's note that the golden gate pins which
+   scans route was half true. The root test now runs `-sT` without `-Pn`
+   over the loopback pair and 192.0.2.2 (7.94: groups of 2 and 1, measured),
+   with a sabotage entry.
+2. `Member::route`'s doc left out the list scan among runs with no route.
+   Added.
+
+It also found that undeferring in reverse order passed the unit tests; a
+case now pins the order, with a sabotage entry.
+
+**The twenty-first review** found no code defect and no unledgered
+difference (the 61 golden cases; the root CLI tests; report order over
+several groups and `-oG` lines against 7.94; ten more mutations, the four
+the cargo tests miss all caught by the golden gate) and one, low: nothing
+pinned that a list scan routes nothing. The root test now checks `-sL`'s
+input order, as 7.94 lists them, with a sabotage entry.
+
+**The twenty-second review** confirmed two, both low:
+
+1. A connect scan without `-Pn`, routed since this step, still keyed its
+   groups on `-S`'s address, which the round took for one it does not send
+   from, and dropped `-S` from its key. The twenty-third review found that
+   wrong (below), and it was undone.
+2. `raw-scan-unroutable-target-reported` said 7.94 skips an unroutable
+   target "for a raw scan"; it does so whenever `RawScan()` holds, a root
+   connect scan without `-Pn` among them. Corrected.
+
+**The twenty-third review** found the twenty-second's first fix wrong, and
+confirmed it by running both sides: 7.94 does use `-S` in a connect scan, as
+every target's source (`nmap.cc:2144-2147`) and as its sockets' bound
+address (`scan_engine_connect.cc:436-442`); `nmap.cc:1817` only warns. With
+`-S 127.0.0.1`, `-sT` without `-Pn` over 127.0.0.1, 192.0.2.2 and 127.0.0.3
+is one group in 7.94, and the fix had made it two. The fix is undone, the
+root test now pins that case, its sabotage entry follows, and the port's
+own older difference, that its connect scan does not bind to `-S`, is
+ledgered (`connect-scan-ignores-spoof-source`). The `-S 192.0.2.2` split
+falls under the existing `spoof-source-groups-by-route`.
+
+**The twenty-fourth review** found no code defect in the grouping: 68
+randomised runs against 7.94 itself (1 to 150 targets over the loopback
+range and 192.0.2.2 with heavy repeats; `-sS`, `-sU`, `-sA`, `-sT` with and
+without `-Pn`; random `--min`/`--max-hostgroup`) gave 0 differences in
+report order, and nine more mutations of `core::hostgroup` were all caught.
+It confirmed one, low: for 0.0.0.0, multicast and the limited broadcast the
+port's route is not 7.94's, which grouping now reads. Ledgered, measured
+(`special-address-routes`); the routes are older than the step and shared
+with the scan engine.
+
+**The twenty-fifth review** confirmed nothing. Among what it ran: the root
+CLI tests; a new randomised comparison against 7.94 over the quick first
+group (`-p 1-1001` and `1-1100` at `-T3` to `-T5`), `-sT -sV`, `-S 127.0.0.1`
+and random `--min`/`--max-hostgroup` (59 runs, no difference); multi-group
+`-oG`, `-oN` and `-oX` against 7.94; and the C citations, all holding. One
+of its 7.94 runs used `-S 192.0.2.2` over loopback targets and so, as
+`spoof-source-groups-by-route` says, likely sent some 25 SYNs to `127.0.0.x`
+out `eth0` towards the gateway; it was stopped and the harness kept to
+`-S 127.0.0.1` after. That run measured the half of the entry left by
+reading: with `-S 192.0.2.2`, 7.94 splits the loopback targets from
+192.0.2.2 and the port does not. With this round step b's review is done:
+twenty-five rounds, the last confirming nothing.
+

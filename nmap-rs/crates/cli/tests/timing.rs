@@ -9,11 +9,12 @@
 //!      `--scan-delay`, "11.1 hours" for `--host-timeout`).
 //!   2. **An explicit knob beats `-T`, whichever came first.** C applies them
 //!      after the whole argument loop, so argv order does not decide.
-//!   3. **Nothing is accepted that does not take effect.** `--host-timeout` and
-//!      the hostgroup pair are parsed and then *refused*, because this engine
-//!      has no per-host deadline and no hostgroup batching. Accepting them
-//!      would repeat the M7.0 mistake: an option that silently does nothing is
-//!      an option that silently scans past the limit you set.
+//!   3. **Nothing is accepted that does not take effect.** `--host-timeout` is
+//!      parsed and then *refused*, because this engine has no per-host
+//!      deadline yet. Accepting it would repeat the M7.0 mistake: an option
+//!      that silently does nothing is an option that silently scans past the
+//!      limit you set. The hostgroup pair binds since M7 cutover step b
+//!      (`cli/tests/hostgroups.rs`).
 //!
 //! Every message below was compared against the installed C nmap, not against a
 //! reading of `nmap.cc`.
@@ -204,20 +205,39 @@ fn the_polite_template_carries_its_delay() {
 
 #[test]
 fn options_the_engine_cannot_honour_are_refused_not_ignored() {
+    let (stdout, stderr, ok) = run(&["--host-timeout", "30s", "-sL", "-n", "127.0.0.1"]);
+    assert!(!ok, "--host-timeout must be refused while it does nothing");
+    assert!(stderr.contains("per-host deadline"), "{stderr}");
+    assert!(
+        !stdout.contains("Nmap scan report"),
+        "--host-timeout scanned anyway:\n{stdout}"
+    );
+}
+
+/// A hostgroup bound C would quit on is refused in C's words.
+#[test]
+fn an_impossible_hostgroup_bound_is_reported_as_c_reports_it() {
     for (args, expect) in [
-        (vec!["--host-timeout", "30s"], "per-host deadline"),
-        (vec!["--max-hostgroup", "5"], "hostgroup ceiling"),
-        (vec!["--min-hostgroup", "2"], "hostgroup ceiling"),
+        (
+            vec!["--max-hostgroup", "3", "--min-hostgroup", "5"],
+            "Minimum host group size may not be set to greater than maximum size (currently 3)",
+        ),
+        (
+            vec!["--max-hostgroup", "0"],
+            "Maximum host group size may not be set to less than the minimum size (currently 1)",
+        ),
+        // 7.94 aborts on an assertion here; the port refuses.
+        (
+            vec!["--max-hostgroup", "-1"],
+            "--max-hostgroup -1 is out of range",
+        ),
     ] {
         let mut full = args.clone();
         full.extend_from_slice(&["-sL", "-n", "127.0.0.1"]);
         let (stdout, stderr, ok) = run(&full);
-        assert!(!ok, "{args:?} must be refused while it does nothing");
+        assert!(!ok, "{args:?} must fail");
         assert!(stderr.contains(expect), "{args:?}: {stderr}");
-        assert!(
-            !stdout.contains("Nmap scan report"),
-            "{args:?} scanned anyway:\n{stdout}"
-        );
+        assert!(!stdout.contains("Nmap scan report"), "{args:?}:\n{stdout}");
     }
 }
 

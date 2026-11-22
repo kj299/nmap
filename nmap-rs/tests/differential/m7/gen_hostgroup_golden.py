@@ -29,11 +29,15 @@ unrouted kind here and `TO` (-sT -O) a routed connect scan.
 
 Needs root (raw scans) and an own non-loopback IPv4 address.
 
-Usage: gen_hostgroup_golden.py [--nmap PATH] [--check [--fail-fast]] [--only SUBSTR]
-                                [--timeout SECONDS] [GOLDEN]
+Usage: gen_hostgroup_golden.py [--nmap PATH | --port PATH] [--check [--fail-fast]]
+                                [--only SUBSTR] [--timeout SECONDS] [GOLDEN]
   default: write GOLDEN (hostgroup_golden.txt beside this file)
   --check: generate, compare with GOLDEN, exit 1 on any difference
   --fail-fast: with --check, stop at the first case that differs
+  --port: run nmap-rs instead, and read its groups from `-d`'s "host group k:
+    n host(s)" lines (M7 cutover step b). Only the scan kinds it has are run
+    (PORT_KINDS); the golden's other lines are not compared. With --check this
+    is the end-to-end gate: the port's binary forms 7.94's groups.
   --timeout: per run of nmap (default 300). A run that does not finish is not a
     difference: --check goes on, and exits 3 if that is all that went wrong. A
     broken nmap can hang on a case (one that puts an address in a group twice
@@ -49,6 +53,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCANS = {"T": ["-sT"], "S": ["-sS"], "A": ["-sA"], "U": ["-sU"], "SU": ["-sS", "-sU"],
          "US": ["-sU", "-sS"], "O": ["-sO"], "TO": ["-sT", "-O", "--max-os-tries", "1"]}
+# The kinds nmap-rs has: one scan type per run, and no -sO.
+PORT_KINDS = ("T", "S", "A", "U", "TO")
 # What nmap calls the port scan each kind starts with. Group sizes are read from
 # these phases only.
 PORT_SCANS = ("Connect Scan", "SYN Stealth Scan", "ACK Scan", "UDP Scan", "IPProto Scan")
@@ -159,7 +165,7 @@ def name(c):
             f"max={c['max'] if c['max'] is not None else '-'} targets={c['targets']}")
 
 
-def run(nmap, c, own, timeout):
+def run(nmap, c, own, timeout, port=False):
     """(sizes, order), or None if nmap did not finish in `timeout` seconds."""
     tokens = expand(c["targets"])
     addr = {t: (own if t == "own" else loopback(int(t[1:]))) for t in set(tokens)}
@@ -172,11 +178,23 @@ def run(nmap, c, own, timeout):
         cmd += ["--min-hostgroup", str(c["min"])]
     if c["max"] is not None:
         cmd += ["--max-hostgroup", str(c["max"])]
+    if port:
+        cmd += ["-d"]
     cmd += [addr[t] for t in tokens]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None
+    out = r.stdout
+    if port:
+        if "falling back to a" in r.stderr or "lacks raw-scan support" in r.stderr:
+            sys.exit(f"FAIL: {name(c)}: nmap-rs did not scan raw:\n{r.stderr[-800:]}")
+        sizes = [int(m[1]) for m in re.finditer(r"\] host group \d+: (\d+) host", r.stderr)]
+        order = [back[m[1]] for m in re.finditer(r"(?m)^Nmap scan report for (\S+)", out)]
+        if sum(sizes) != len(tokens) or len(order) != len(tokens):
+            sys.exit(f"FAIL: {name(c)}: {sum(sizes)} hosts in groups, {len(order)} reported, "
+                     f"{len(tokens)} given\n{r.stderr[-1500:]}")
+        return sizes, order
     sizes, order, first, current = [], [], None, None
     for line in out.splitlines():
         m = re.match(r"Initiating (.+) at ", line)
@@ -230,23 +248,30 @@ def main():
     ap.add_argument("--only")
     ap.add_argument("--fail-fast", action="store_true")
     ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--port", metavar="PATH")
     a = ap.parse_args()
+    if a.port and not a.check:
+        sys.exit("FAIL: --port only checks; the golden is written from nmap itself")
     if os.geteuid() != 0:
         sys.exit("FAIL: needs root, for the raw scans")
     own = own_address()
     if own is None:
         sys.exit("FAIL: needs a non-loopback IPv4 address of this host's own")
     cases = [c for c in matrix() if not a.only or a.only in name(c)]
+    if a.port:
+        cases = [c for c in cases if c["scan"] in PORT_KINDS]
     if not cases:
         sys.exit(f"FAIL: no case matches --only {a.only!r}")
     want, golden = {}, []
     if a.check:
+        names = {name(c) for c in cases} if a.port else None
         golden = [l for l in open(a.golden).read().splitlines()
-                  if not a.only or a.only in l.split(" | ")[0]]
+                  if (not a.only or a.only in l.split(" | ")[0])
+                  and (names is None or l.split(" | ")[0] in names)]
         want = {l.split(" | ")[0]: l for l in golden}
     lines, differs, unfinished = [], 0, []
     for c in cases:
-        got = run(a.nmap, c, own, a.timeout)
+        got = run(a.port or a.nmap, c, own, a.timeout, port=bool(a.port))
         if got is None:
             unfinished.append(name(c))
             print(f"DID NOT FINISH in {a.timeout}s: {name(c)}", flush=True)

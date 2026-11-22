@@ -535,8 +535,11 @@ the update/submission paths are new behavior → golden + negative tests, ledger
    ten of those cases and fourteen of those variants being what its independent
    reviews added.
    **Step b done**: the CLI scans and reports the run group by group, the
-   hostgroup options bind, and memory stays flat as the targets grow;
-   `--host-timeout` stays refused until step f; then release engineering
+   hostgroup options bind, and memory stays flat as the targets grow.
+   **Step c** (in review): the port scans keep `--host-timeout`, a timed-out
+   host is reported as 7.94 reports it, and the option is accepted for runs
+   with no `-sV`, `-O` or scripts, refused with them until steps d and e;
+   `-T5`'s implied 15 minutes at step f; then release engineering
    (SBOM, auditable and reproducible builds, signing, `DIVERGENCES.md` as release
    notes) and `ncat`/`nping`.
 

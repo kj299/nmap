@@ -2745,17 +2745,53 @@ removed: that one was theatre, this one is unobservable.
       spelling instead of a silently chosen template. Pinned by
       `a_malformed_timing_template_is_refused_rather_than_guessed`.
 
-- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout`
-      parses and is then refused.** The engine has no per-host deadline, so
-      honouring it would be a claim it cannot keep: a `--host-timeout` that
-      does nothing runs past a bound the operator set. Accepting it would be the
-      M7.0 mistake in a new place, so it refuses with a message that says
-      exactly what is missing. (`--min-hostgroup` and `--max-hostgroup` were
-      refused here too until M7 cutover step b, which scans the run group by
-      group; they bind now, pinned by `cli/tests/hostgroups.rs`.) `-T5`'s *implied* 15-minute
-      host timeout is likewise not enforced — it is recorded in
-      `TimingParams::host_timeout_ms` and read by nothing yet. Pinned by
+- [ ] `timing-knobs-not-yet-enforced` (`cli`, M7.7) — **`--host-timeout` is
+      refused with `-sV`, `-O` or scripts, and `-T5`'s implied 15 minutes are
+      not enforced.** Since M7 cutover step c the port scans keep a
+      `--host-timeout` (connect and raw engines, `core::hosttimeout`), so it is
+      accepted with them alone. `-sV`, `-O` and the scripts do not keep it yet
+      (steps d and e), so with any of them it is refused, the message naming
+      them: a bound kept for the port scan and run past in the next phase
+      would be the M7.0 mistake in a new place. `-T5`'s implied host timeout
+      (`nmap.cc:1392`) is recorded in `TimingParams::host_timeout_ms` and not
+      passed to the engines until step f (decision D5). (`--min-hostgroup` and
+      `--max-hostgroup` were refused here too until step b; they bind now,
+      pinned by `cli/tests/hostgroups.rs`.) Pinned by
+      `timing::options_the_engine_cannot_honour_are_refused_not_ignored`,
+      `timing::a_host_timeout_binds_the_port_scan` and
       `fail_closed::a_constraint_we_cannot_honour_is_refused`.
+
+- [x] `host-timeout-discards-the-host` (`core::output`, the engines; ports
+      `nmap.cc:2296-2310`; decision D3) — **a host out of time is reported as
+      skipped, its results dropped, as in 7.94.** Its header, then "Skipping
+      host X due to host timeout" with no blank line after it in normal
+      output; a second `Status: Timeout` record in grepable; `timedout="true"`
+      and no `<ports>` in XML. It still counts as up, the exit status is 0, and
+      `--open` is not applied to it. Reproduced, not fixed: a report marking
+      partial results would be friendlier, and is not what tools reading
+      nmap's output expect. The port's XML leaves out `starttime`, `endtime`
+      and `<times>` for every host (the XML preamble entry). Pinned by
+      `output::tests::a_timed_out_host_is_its_header_and_the_timeout`, and end
+      to end against 7.94 by `tests/differential/m7/host_timeout_diff.py`.
+
+- [ ] `host-timeout-enforced-at-the-deadline` (`sys::scan`, `sys::group`;
+      decision D4) — **a host's port scan stops at its deadline: its probes in
+      flight are cancelled.** 7.94's `ultra_scan` stops sending to a host out
+      of time (`sendOK`, `scan_engine.cc:546`) and retires it on its next pass
+      (`:1151`), but leaves its outstanding probes counted against the group
+      until the completed host is removed later (`:1136`). The port cancels
+      them when it retires the host and frees their group slots without
+      shrinking the window (`GroupScheduler::on_cancel`), and every wait in the
+      engines is bounded by the earliest host deadline. The verdict is the same
+      either way; what differs is how long a run with a slow host lasts, which
+      is what the option bounds (*measured*: 1.05 s for 7.94 and 1.09 s for the
+      port under `--host-timeout 1s` over 3,000 delayed ports). Deliberate.
+
+- [ ] `host-timeout-verbose-lines` (`cli`; decision D6) — **under `-v` the
+      port prints neither "X timed out during Connect Scan (N hosts left)" nor
+      "Completed … (N hosts timed out)".** Both belong to the
+      "Initiating"/"Completed" progress family (`scan_engine.cc:1159-1167`),
+      which the port does not print at all; they go with it.
 
 - [ ] `hostgroup-every-target-counts` (`core::hostgroup`, M7 cutover step a;
       ports `nmap.cc`'s main loop, `determineScanGroupSize`,

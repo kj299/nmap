@@ -1,7 +1,8 @@
 # M7 cutover gate: host groups and the host timeout — Phase 0
 
 Status: **Phase 0 written; D1–D7 decided 2026-11-21, all as recommended (§8).
-Step a (group formation) is done: §10. Step b (the group loop) is done: §11.** C line numbers are this tree's at `b5bebc249`. Everything marked
+Step a (group formation) is done: §10. Step b (the group loop) is done: §11.
+Step c (the clock in port scans) is in review: §12.** C line numbers are this tree's at `b5bebc249`. Everything marked
 *measured* was run here against the installed oracle, Nmap 7.94SVN, on loopback.
 
 ## 0. Value
@@ -971,4 +972,61 @@ out `eth0` towards the gateway; it was stopped and the harness kept to
 reading: with `-S 192.0.2.2`, 7.94 splits the loopback targets from
 192.0.2.2 and the port does not. With this round step b's review is done:
 twenty-five rounds, the last confirming nothing.
+
+## 12. Step c: the clock in port scans
+
+**What it delivers.**
+
+- `core::hosttimeout`: `Target::startTimeOutClock`, `stopTimeOutClock` and
+  `timedOut` (`Target.cc:420-453`) as a pure stopwatch over `timeval`
+  timestamps the caller supplies. Milliseconds accumulate with
+  `TIMEVAL_MSEC_SUBTRACT`'s truncation toward zero, per interval, and a host
+  is out of time only strictly past its budget; 0 is none. It also gives the
+  wait to a host's deadline, so an engine never sleeps past it.
+  `sys::hostclock` reads it against one monotonic epoch for the process.
+- `Host` carries its clock and a `timed_out` verdict, so the budget can be
+  spent across phases at steps d and e.
+- Both engines keep it. The connect engine (`sys::scan`) and the raw engine
+  (`sys::group`: SYN, flag, UDP, IPv6) start a host's clock at its first
+  probe (`scan_engine.cc:2247`), stop sending to a host out of time (`:546`),
+  retire it on each pass (`:1151`), and stop its clock when its ports are
+  done (`:1202`). Every wait is bounded by the earliest deadline, and a
+  retired host's probes in flight are cancelled, their group slots freed
+  without shrinking the window (D4, `host-timeout-enforced-at-the-deadline`).
+  A host is judged at the end on its total, as at output (`nmap.cc:2296`),
+  and its partial results are dropped (D3). Liveness is decided before they
+  are, so a host that answered and then ran out of time is up and skipped.
+  The IPv6 ND ping runs before the port scan and is not charged, as 7.94
+  charges no discovery (§2.2).
+- The three formats: "Skipping host X due to host timeout" with no blank line
+  after it, a second `Status: Timeout` grepable record, `timedout="true"` with
+  no `<ports>`; still up, and outside `--open`'s filter
+  (`host-timeout-discards-the-host`).
+- The CLI accepts `--host-timeout` for a run with no `-sV`, `-O` or scripts
+  (decided 2026-11-22), and refuses it with any of them, naming them, until
+  steps d and e. Only an explicit value reaches the engines: `-T5`'s 15
+  minutes wait for step f (D5).
+
+The port runs one port-scan type per run, so Q5 (a second port-scan type
+skipping a timed-out host) does not arise here; it does at step d, for `-sV`
+and `-O`, which is why the clock lives on `Host`.
+
+**Gates.**
+
+- *Against 7.94 itself* (`tests/differential/m7/host_timeout_diff.py`, root,
+  loopback): eight cases (connect and SYN, routed, one host per group,
+  `--open`, `-v --reason`, a 1 ms budget that is met, no budget), comparing
+  per format which hosts are skipped, the up count, the ports and the exit
+  status: 8 of 8 match. Added to CI's differential job.
+- *Unit tests*: the clock's arithmetic at its edges (truncation both ways,
+  strictness, accumulation, the wake-up, a stray start or stop, saturation),
+  also under Miri; every format; `GroupScheduler::on_cancel`; both engines on
+  loopback or a mock capture (a host past its budget, one within it, Q4, no
+  budget, two hosts each on its own clock, a host that answered and then ran
+  out); the CLI's refusals and the binding.
+- *Sabotage* (`tests/differential/m7/sabotage_stepc.json`): 17 mutations,
+  each caught by the test it names. Of the first run's 17, one was missed
+  (the `--open` exemption, since the test's timed-out hosts had an open port
+  anyway) and one timed out (a raw clock that never runs made its test scan
+  for minutes); the tests were changed and both are caught.
 

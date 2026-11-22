@@ -253,6 +253,14 @@ impl GroupScheduler {
         self.timing.drop_group(in_flight, &self.perf);
     }
 
+    /// `n` probes in the group were cancelled, as `destroyOutstandingProbe`
+    /// drops a timed-out host's (`scan_engine.cc:1552-1567`): free their slots
+    /// and leave the window as it is, since a cancelled probe says nothing about
+    /// the network.
+    pub fn on_cancel(&mut self, n: u32) {
+        self.active = self.active.saturating_sub(n);
+    }
+
     /// Probes in flight across the group.
     pub fn in_flight(&self) -> u32 {
         self.active
@@ -537,6 +545,24 @@ mod tests {
         g.on_timeout(); // drop_group: cwnd 10 -> max(1, 10/2) = 5
         assert_eq!(g.cwnd(), 5.0);
         assert_eq!(g.in_flight(), 9);
+    }
+
+    /// A timed-out host's cancelled probes free their group slots and leave the
+    /// window as it was (`destroyOutstandingProbe`): the other hosts can send
+    /// again at once, and nothing is read as loss.
+    #[test]
+    fn cancelled_probes_free_slots_and_keep_the_window() {
+        let mut g = GroupScheduler::new(TimingTemplate::Normal, 0, 0); // group cwnd 10
+        for _ in 0..10 {
+            g.on_send();
+        }
+        assert!(!g.may_admit(2), "full");
+        g.on_cancel(4);
+        assert_eq!(g.in_flight(), 6);
+        assert_eq!(g.cwnd(), 10.0, "a cancel is not a drop");
+        assert!(g.may_admit(2), "room again");
+        g.on_cancel(100);
+        assert_eq!(g.in_flight(), 0, "saturates");
     }
 
     // ---- RateLimiter ----

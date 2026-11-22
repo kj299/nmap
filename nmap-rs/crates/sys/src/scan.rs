@@ -17,10 +17,15 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use nmap_core::engine::{GroupScheduler, HostScheduler, Probe, RateLimiter, RateVerdict};
+use nmap_core::hosttimeout::HostClock;
 use nmap_core::model::{Host, HostState, Port, PortState, Protocol, Reason, ScanResults};
 use nmap_core::timing::{TimingParams, TimingTemplate};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, Id, JoinSet};
+
+use crate::hostclock;
 
 use crate::net::{tcp_connect, ConnectResult};
 
@@ -67,6 +72,17 @@ struct HostCtx {
     next_send_us: i64,
 }
 
+impl HostCtx {
+    /// Done with this host: every port resolved, or its time ran out.
+    fn finished(&self) -> bool {
+        self.sched.is_done() || self.host.timed_out
+    }
+}
+
+/// The probes in flight, by task, with the host each is for and the handle
+/// that cancels it. Bounded by the probes in flight, so by the windows.
+type InFlight = HashMap<Id, (usize, AbortHandle)>;
+
 /// Run an unprivileged TCP connect scan over `targets` (already-resolved IPs) as a
 /// single congestion-controlled host group, returning the populated
 /// [`ScanResults`] in target order.
@@ -85,7 +101,12 @@ pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> Sca
                 min_par,
                 max_par,
             ),
-            host: Host::new(ip, HostState::Down),
+            host: {
+                let mut h = Host::new(ip, HostState::Down);
+                // `--host-timeout`: 0 (none) unless the caller set one.
+                h.clock = HostClock::new(u64::try_from(config.params.host_timeout_ms).unwrap_or(0));
+                h
+            },
             finals: Vec::new(),
             next_send_us: 0,
         })
@@ -100,7 +121,19 @@ pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> Sca
     run_group(&mut ctxs, &mut group, &mut rate, scan_delay_us).await;
 
     let mut results = ScanResults::new();
+    let end = hostclock::now();
     for mut ctx in ctxs {
+        // A host that finished in the loop has its clock stopped there; one
+        // whose last result came in after its deadline is out of time all the
+        // same, as 7.94 judges at output on the total (`nmap.cc:2296`).
+        ctx.host.clock.stop(end);
+        if ctx.host.clock.timed_out(end) {
+            ctx.host.timed_out = true;
+        }
+        // A timed-out host's partial results are discarded (decision D3).
+        if ctx.host.timed_out {
+            ctx.finals.clear();
+        }
         for (port, state, reason) in ctx.finals.drain(..) {
             ctx.host
                 .ports
@@ -122,9 +155,25 @@ async fn run_group(
 ) {
     let start = Instant::now();
     let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();
+    let mut in_flight: InFlight = HashMap::new();
 
     loop {
-        launch_ready(ctxs, group, rate, start, &mut set, scan_delay_us);
+        // Each pass over the incomplete hosts retires those out of time
+        // (`removeCompletedHosts`, `scan_engine.cc:1151`).
+        retire_timed_out(ctxs, group, &mut in_flight);
+        launch_ready(
+            ctxs,
+            group,
+            rate,
+            start,
+            &mut set,
+            &mut in_flight,
+            scan_delay_us,
+        );
+
+        // The earliest host deadline: no wait below runs past it, so a host's
+        // work stops at its timeout (decision D4).
+        let deadline = earliest_deadline(ctxs);
 
         if set.is_empty() {
             // Nothing in flight. Either the whole group is finished, or the rate
@@ -148,7 +197,8 @@ async fn run_group(
             //
             // With `--scan-delay` there is a second thing that can hold every
             // host back, so the sleep is until whichever reopens first. Missing
-            // the delay here would busy-loop instead of waiting.
+            // the delay here would busy-loop instead of waiting. A host's
+            // deadline is a third.
             let now = now_us(start);
             let rate_wait = match rate.verdict(now) {
                 RateVerdict::TooEarly(t) => Some(t.saturating_sub(now)),
@@ -156,43 +206,96 @@ async fn run_group(
             };
             let delay_wait = ctxs
                 .iter()
-                .filter(|c| !c.sched.is_done())
+                .filter(|c| !c.finished())
                 .map(|c| c.next_send_us.saturating_sub(now))
                 .min()
                 .filter(|w| *w > 0);
-            match (rate_wait, delay_wait) {
-                (Some(a), Some(b)) => {
-                    tokio::time::sleep(micros_to_duration(a.min(b))).await;
-                }
-                (Some(w), None) | (None, Some(w)) => {
-                    tokio::time::sleep(micros_to_duration(w)).await;
-                }
-                (None, None) => {}
+            let wait = [rate_wait, delay_wait, deadline]
+                .into_iter()
+                .flatten()
+                .min();
+            if let Some(w) = wait {
+                tokio::time::sleep(micros_to_duration(w)).await;
             }
             continue;
         }
 
-        if let Some(Ok((idx, probe, res))) = set.join_next().await {
-            let ctx = &mut ctxs[idx];
-            match res.state {
-                PortState::Open | PortState::Closed => {
-                    ctx.sched.on_reply(probe, rtt_micros(&res));
-                    group.on_reply();
-                    ctx.finals.push((probe.port, res.state, res.reason));
-                    ctx.host.state = HostState::Up;
+        let joined = match deadline {
+            Some(w) => {
+                tokio::select! {
+                    j = set.join_next_with_id() => j,
+                    () = tokio::time::sleep(micros_to_duration(w)) => continue,
                 }
-                _ => {
-                    let before = ctx.sched.resolved();
-                    ctx.sched.on_timeout(probe);
-                    group.on_timeout();
-                    if ctx.sched.resolved() > before {
-                        ctx.finals
-                            .push((probe.port, PortState::Filtered, res.reason));
-                    }
+            }
+            None => set.join_next_with_id().await,
+        };
+        let Some(Ok((id, (idx, probe, res)))) = joined else {
+            // A cancelled probe: its slot was freed when its host timed out.
+            continue;
+        };
+        // A probe whose host has timed out was cancelled and its slot freed;
+        // one that finished in the race is dropped like the rest.
+        if in_flight.remove(&id).is_none() {
+            continue;
+        }
+        let ctx = &mut ctxs[idx];
+        match res.state {
+            PortState::Open | PortState::Closed => {
+                ctx.sched.on_reply(probe, rtt_micros(&res));
+                group.on_reply();
+                ctx.finals.push((probe.port, res.state, res.reason));
+                ctx.host.state = HostState::Up;
+            }
+            _ => {
+                let before = ctx.sched.resolved();
+                ctx.sched.on_timeout(probe);
+                group.on_timeout();
+                if ctx.sched.resolved() > before {
+                    ctx.finals
+                        .push((probe.port, PortState::Filtered, res.reason));
                 }
             }
         }
+        // A host whose last port resolved stops its clock (`scan_engine.cc:1202`).
+        if ctx.sched.is_done() {
+            ctx.host.clock.stop(hostclock::now());
+        }
     }
+}
+
+/// Retire every incomplete host that is out of time: mark it, stop its clock,
+/// and cancel its probes in flight, freeing their group slots
+/// (`destroyAllOutstandingProbes`). Its results are discarded at the end.
+fn retire_timed_out(ctxs: &mut [HostCtx], group: &mut GroupScheduler, in_flight: &mut InFlight) {
+    let now = hostclock::now();
+    for (idx, ctx) in ctxs.iter_mut().enumerate() {
+        if ctx.finished() || !ctx.host.clock.timed_out(now) {
+            continue;
+        }
+        ctx.host.timed_out = true;
+        ctx.host.clock.stop(now);
+        let mine: Vec<Id> = in_flight
+            .iter()
+            .filter(|(_, (i, _))| *i == idx)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &mine {
+            if let Some((_, handle)) = in_flight.remove(id) {
+                handle.abort();
+            }
+        }
+        group.on_cancel(u32::try_from(mine.len()).unwrap_or(u32::MAX));
+    }
+}
+
+/// The time to the first incomplete host's deadline, in microseconds, if any
+/// host has one running.
+fn earliest_deadline(ctxs: &[HostCtx]) -> Option<i64> {
+    let now = hostclock::now();
+    ctxs.iter()
+        .filter(|c| !c.finished())
+        .filter_map(|c| c.host.clock.micros_until_timeout(now))
+        .min()
 }
 
 /// Launch as many probes as the rate limiter, the group window, and each host's
@@ -203,10 +306,11 @@ fn launch_ready(
     rate: &mut RateLimiter,
     start: Instant,
     set: &mut JoinSet<(usize, Probe, ConnectResult)>,
+    in_flight: &mut InFlight,
     scan_delay_us: i64,
 ) {
     loop {
-        let incomplete = ctxs.iter().filter(|c| !c.sched.is_done()).count();
+        let incomplete = ctxs.iter().filter(|c| !c.finished()).count();
         let verdict = rate.verdict(now_us(start));
         if matches!(verdict, RateVerdict::TooEarly(_)) {
             return;
@@ -221,8 +325,14 @@ fn launch_ready(
         // own congestion gate, so a host at its window is skipped.
         let mut launched = false;
         let now = now_us(start);
+        let clock_now = hostclock::now();
         for (idx, ctx) in ctxs.iter_mut().enumerate() {
-            if ctx.sched.is_done() {
+            if ctx.finished() {
+                continue;
+            }
+            // A host out of time sends nothing more (`sendOK`,
+            // `scan_engine.cc:546`); the next pass retires it.
+            if ctx.host.clock.timed_out(clock_now) {
                 continue;
             }
             // `--scan-delay`: this host sent too recently. Skip it rather than
@@ -231,12 +341,17 @@ fn launch_ready(
                 continue;
             }
             if let Some(probe) = ctx.sched.next_probe() {
+                // The host's clock starts with its first probe
+                // (`ultrascan_host_timeout_init`, `scan_engine.cc:2247`).
+                ctx.host.clock.start(clock_now);
                 group.on_send();
                 rate.record_send(now_us(start));
                 ctx.next_send_us = now.saturating_add(scan_delay_us);
                 let timeout = micros_to_duration(ctx.sched.probe_timeout_us());
                 let addr = SocketAddr::new(ctx.host.address, probe.port);
-                set.spawn(async move { (idx, probe, tcp_connect(addr, timeout).await) });
+                let handle =
+                    set.spawn(async move { (idx, probe, tcp_connect(addr, timeout).await) });
+                in_flight.insert(handle.id(), (idx, handle));
                 launched = true;
                 break;
             }
@@ -248,7 +363,7 @@ fn launch_ready(
 }
 
 fn all_done(ctxs: &[HostCtx]) -> bool {
-    ctxs.iter().all(|c| c.sched.is_done())
+    ctxs.iter().all(HostCtx::finished)
 }
 
 /// Microseconds since the scan started, saturating into `i64` (a scan never runs
@@ -431,5 +546,99 @@ mod tests {
         c.max_rate = Some(5000.0); // 200 µs spacing
         let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
         assert_eq!(results.hosts[0].ports.len(), ports.len());
+    }
+
+    /// A host slowed by `--scan-delay` past its `--host-timeout` is marked timed
+    /// out near its budget, its ports discarded (D3), and the scan ends then,
+    /// not when the ports would have run out (D4): 3,000 ports at 20 ms apart
+    /// is a minute; the budget is 300 ms.
+    #[tokio::test]
+    async fn a_host_past_its_budget_times_out_at_the_deadline() {
+        let mut c = cfg((1..=3000).collect());
+        c.params.scan_delay_ms = 20;
+        c.params.host_timeout_ms = 300;
+        let started = Instant::now();
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        let took = started.elapsed();
+        let h = &results.hosts[0];
+        assert!(h.timed_out, "{h:?}");
+        assert!(
+            h.ports.is_empty(),
+            "partial results discarded: {:?}",
+            h.ports.len()
+        );
+        assert!(h.clock.used_ms(hostclock::now()) > 300);
+        assert!(!h.clock.is_running(), "stopped when retired");
+        assert!(
+            took < Duration::from_secs(5),
+            "ended at the deadline, took {took:?}"
+        );
+        assert!(
+            took >= Duration::from_millis(300),
+            "not before it, took {took:?}"
+        );
+    }
+
+    /// A budget the scan fits in changes nothing.
+    #[tokio::test]
+    async fn a_host_within_its_budget_is_reported_whole() {
+        let mut c = cfg(vec![1, 2, 3]);
+        c.params.host_timeout_ms = 60_000;
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        let h = &results.hosts[0];
+        assert!(!h.timed_out);
+        assert_eq!(h.ports.len(), 3);
+        assert!(h.clock.used_ms(hostclock::now()) <= 60_000);
+    }
+
+    /// Q4: a host that finishes inside its budget is kept, however small the
+    /// budget (7.94 keeps a one-port host under `--host-timeout 1ms`). Here
+    /// 50 ms, so a loaded machine does not make the test flaky.
+    #[tokio::test]
+    async fn a_small_budget_that_is_met_keeps_the_host() {
+        let mut c = cfg(vec![1]);
+        c.params.host_timeout_ms = 50;
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        let h = &results.hosts[0];
+        assert!(!h.timed_out, "{h:?}");
+        assert_eq!(h.ports.len(), 1);
+    }
+
+    /// With no budget (the default) a host never times out, and its clock has
+    /// none.
+    #[tokio::test]
+    async fn no_budget_no_timeout() {
+        let mut c = cfg(vec![1, 2]);
+        c.params.scan_delay_ms = 5;
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        let h = &results.hosts[0];
+        assert!(!h.timed_out);
+        assert_eq!(h.clock.budget_ms(), 0);
+        assert_eq!(h.ports.len(), 2);
+    }
+
+    /// Each host has its own clock, started at its own first probe: of two
+    /// hosts under the same budget and delay, both time out, and the group
+    /// ends near one budget, not two.
+    #[tokio::test]
+    async fn each_host_has_its_own_clock() {
+        let mut c = cfg((1..=2000).collect());
+        c.params.scan_delay_ms = 20;
+        c.params.host_timeout_ms = 300;
+        let started = Instant::now();
+        let results = connect_scan(
+            &[
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            ],
+            &c,
+        )
+        .await;
+        assert!(
+            results.hosts.iter().all(|h| h.timed_out),
+            "{:?}",
+            results.hosts
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

@@ -19,6 +19,7 @@ pub mod datadir;
 pub mod flagscan;
 pub mod fpengine;
 pub mod group;
+pub mod hostclock;
 pub mod ndp;
 pub mod net;
 pub mod netif;

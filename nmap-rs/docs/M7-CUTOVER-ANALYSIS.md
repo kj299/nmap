@@ -959,3 +959,16 @@ port's route is not 7.94's, which grouping now reads. Ledgered, measured
 (`special-address-routes`); the routes are older than the step and shared
 with the scan engine.
 
+**The twenty-fifth review** confirmed nothing. Among what it ran: the root
+CLI tests; a new randomised comparison against 7.94 over the quick first
+group (`-p 1-1001` and `1-1100` at `-T3` to `-T5`), `-sT -sV`, `-S 127.0.0.1`
+and random `--min`/`--max-hostgroup` (59 runs, no difference); multi-group
+`-oG`, `-oN` and `-oX` against 7.94; and the C citations, all holding. One
+of its 7.94 runs used `-S 192.0.2.2` over loopback targets and so, as
+`spoof-source-groups-by-route` says, likely sent some 25 SYNs to `127.0.0.x`
+out `eth0` towards the gateway; it was stopped and the harness kept to
+`-S 127.0.0.1` after. That run measured the half of the entry left by
+reading: with `-S 192.0.2.2`, 7.94 splits the loopback targets from
+192.0.2.2 and the port does not. With this round step b's review is done:
+twenty-five rounds, the last confirming nothing.
+

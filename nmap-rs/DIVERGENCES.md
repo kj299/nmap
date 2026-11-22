@@ -2855,7 +2855,7 @@ removed: that one was theatre, this one is unobservable.
         192.0.2.2 127.0.0.3` is one group of 3 over lo in the port (reported
         1, 2, 3, *measured*), and in 7.94, by its routes above, the loopback
         pair off-link and 192.0.2.2 direct, so two groups reported 1, 3, 2
-        (by reading: running it would send packets off the machine).
+        (*measured* by the twenty-fifth review of step b).
       With `-S 127.0.0.1` the two agree (*measured*, over 127.0.0.1,
       192.0.2.2 and 127.0.0.3: one group of 3 each, `-sS -Pn` and `-sT`
       without `-Pn` alike). All of this holds for a routed connect scan too:

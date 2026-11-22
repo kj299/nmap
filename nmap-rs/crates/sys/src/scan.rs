@@ -131,7 +131,9 @@ pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> Sca
             ctx.host.timed_out = true;
         }
         // A timed-out host's partial results are discarded (decision D3).
+        // Its liveness reason is kept: the first port that answered.
         if ctx.host.timed_out {
+            ctx.host.discarded_reason = first_answer(&ctx.finals);
             ctx.finals.clear();
         }
         for (port, state, reason) in ctx.finals.drain(..) {
@@ -143,6 +145,16 @@ pub async fn connect_scan(targets: &[IpAddr], config: &ConnectScanConfig) -> Sca
         results.hosts.push(ctx.host);
     }
     results
+}
+
+/// The reason of the first port in `finals` that answered (not one of the two
+/// silence states), as `Host::settle_liveness` would take it from the ports.
+fn first_answer(finals: &[(u16, PortState, Reason)]) -> Option<Reason> {
+    let mut v: Vec<_> = finals.iter().collect();
+    v.sort_by_key(|f| f.0);
+    v.into_iter()
+        .find(|f| !matches!(f.1, PortState::Filtered | PortState::OpenFiltered))
+        .map(|f| f.2)
 }
 
 /// The group event loop: launch every probe the gates permit, then await the next
@@ -640,5 +652,140 @@ mod tests {
             results.hosts
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A host context for the group loop, with its own ports and budget.
+    fn ctx(ip: Ipv4Addr, ports: &[u16], budget_ms: u64, max_par: u32) -> HostCtx {
+        let mut host = Host::new(IpAddr::V4(ip), HostState::Down);
+        host.clock = HostClock::new(budget_ms);
+        HostCtx {
+            sched: HostScheduler::with_params(
+                ports,
+                TimingTemplate::Normal,
+                TimingParams::default(),
+                0,
+                max_par,
+            ),
+            host,
+            finals: Vec::new(),
+            next_send_us: 0,
+        }
+    }
+
+    /// A host's clock stops when its last port resolves (`scan_engine.cc:1202`),
+    /// not when its group ends: a one-port host sharing a group with a slow
+    /// one has spent a moment, not the slow host's time, and is not out of a
+    /// budget the slow host's scan alone would exceed.
+    #[tokio::test]
+    async fn a_host_that_finishes_stops_its_clock() {
+        let mut ctxs = vec![
+            ctx(Ipv4Addr::LOCALHOST, &[1], 200, 0),
+            ctx(
+                Ipv4Addr::new(127, 0, 0, 2),
+                &(1..=2000).collect::<Vec<_>>(),
+                600,
+                0,
+            ),
+        ];
+        let mut group = GroupScheduler::new(TimingTemplate::Normal, 0, 0);
+        let mut rate = RateLimiter::new(None, None);
+        run_group(&mut ctxs, &mut group, &mut rate, 20_000).await;
+        let now = hostclock::now();
+        let fast = &ctxs[0].host.clock;
+        assert!(!fast.is_running());
+        assert!(fast.used_ms(now) < 100, "used {} ms", fast.used_ms(now));
+        assert!(!fast.timed_out(now));
+        assert!(ctxs[1].host.timed_out, "the slow host ran out");
+    }
+
+    /// A host's clock starts at its own first probe (`scan_engine.cc:2247`),
+    /// not when its group does. One probe in flight at a time, the first host
+    /// sends all its ports before the second sends any, so the second has
+    /// used a moment, not the first host's whole scan. (Milliseconds, as
+    /// `start_time` is whole seconds, like 7.94's `StartTime`.)
+    #[tokio::test]
+    async fn a_host_clock_starts_at_its_first_probe() {
+        let mut ctxs = vec![
+            ctx(Ipv4Addr::LOCALHOST, &(1..=2000).collect::<Vec<_>>(), 0, 1),
+            ctx(Ipv4Addr::new(127, 0, 0, 2), &[1], 0, 1),
+        ];
+        let mut group = GroupScheduler::new(TimingTemplate::Normal, 0, 1);
+        let mut rate = RateLimiter::new(None, None);
+        run_group(&mut ctxs, &mut group, &mut rate, 0).await;
+        let now = hostclock::now();
+        let (first, second) = (
+            ctxs[0].host.clock.used_ms(now),
+            ctxs[1].host.clock.used_ms(now),
+        );
+        assert!(first >= 10, "the first host's scan took {first} ms");
+        assert!(
+            second.saturating_mul(4) < first,
+            "second used {second} ms, first {first} ms"
+        );
+    }
+
+    /// Retiring a host out of time cancels its probes in flight and frees the
+    /// group slots they held (`destroyAllOutstandingProbes`), leaving other
+    /// hosts' probes alone.
+    #[tokio::test]
+    async fn retiring_a_host_frees_its_slots() {
+        let mut ctxs = vec![
+            ctx(Ipv4Addr::LOCALHOST, &[1, 2, 3], 1, 0),
+            ctx(Ipv4Addr::new(127, 0, 0, 2), &[1], 0, 0),
+        ];
+        let mut group = GroupScheduler::new(TimingTemplate::Normal, 0, 0);
+        let mut set: JoinSet<()> = JoinSet::new();
+        let mut in_flight: InFlight = HashMap::new();
+        for idx in [0, 0, 1] {
+            group.on_send();
+            let h = set.spawn(std::future::pending());
+            in_flight.insert(h.id(), (idx, h));
+        }
+        ctxs[0].host.clock.start(hostclock::now());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        retire_timed_out(&mut ctxs, &mut group, &mut in_flight);
+        assert!(ctxs[0].host.timed_out);
+        assert!(!ctxs[1].host.timed_out);
+        assert_eq!(
+            group.in_flight(),
+            1,
+            "the retired host's two slots are freed"
+        );
+        assert_eq!(in_flight.len(), 1);
+        assert!(in_flight.values().all(|(i, _)| *i == 1));
+        let mut cancelled = 0;
+        set.abort_all();
+        while let Some(r) = set.join_next().await {
+            if r.is_err_and(|e| e.is_cancelled()) {
+                cancelled += 1;
+            }
+        }
+        assert_eq!(cancelled, 3);
+    }
+
+    /// A timed-out host keeps why it is up, the first port that answered,
+    /// when its ports are dropped (D3), so `--reason` without `-Pn` can say it.
+    #[tokio::test]
+    async fn a_timed_out_host_keeps_its_liveness_reason() {
+        let mut c = cfg((1..=3000).collect());
+        c.params.scan_delay_ms = 20;
+        c.params.host_timeout_ms = 300;
+        let results = connect_scan(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], &c).await;
+        let mut h = results.hosts.into_iter().next().unwrap();
+        assert!(h.timed_out && h.ports.is_empty());
+        assert_eq!(h.discarded_reason, Some(Reason::ConnRefused));
+        h.settle_liveness(false);
+        assert_eq!(h.reason, Some(Reason::ConnRefused));
+    }
+
+    #[test]
+    fn first_answer_is_the_lowest_answering_port() {
+        let finals = [
+            (9, PortState::Closed, Reason::ConnRefused),
+            (3, PortState::Filtered, Reason::NoResponse),
+            (5, PortState::Open, Reason::ConnAccept),
+        ];
+        assert_eq!(first_answer(&finals), Some(Reason::ConnAccept));
+        assert_eq!(first_answer(&finals[1..2]), None);
     }
 }

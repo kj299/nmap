@@ -82,7 +82,7 @@ async fn main() -> ExitCode {
     // a new place: a bound kept for one phase and run past in the next.
     // Refusing is noisy; silently exceeding an explicit limit is worse.
     // Tracked in docs/M7.3-CLI-PARITY.md.
-    if cfg.host_timeout_ms.is_some() {
+    if cfg.host_timeout_ms.is_some_and(|ms| ms > 0) {
         let unbound: Vec<&str> = [
             (cfg.service_version, "-sV"),
             (cfg.os_detection, "-O"),

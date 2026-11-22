@@ -2767,11 +2767,17 @@ removed: that one was theatre, this one is unobservable.
       host X due to host timeout" with no blank line after it in normal
       output; a second `Status: Timeout` record in grepable; `timedout="true"`
       and no `<ports>` in XML. It still counts as up, the exit status is 0, and
-      `--open` is not applied to it. Reproduced, not fixed: a report marking
+      `--open` is not applied to it. Its `--reason` survives the dropped ports:
+      without `-Pn` it is that of the first port that answered
+      (`Host::discarded_reason`), as for a host kept whole, so a connect scan's
+      routed loopback target says `conn-refused` where 7.94 says
+      `localhost-response`, as it does with no timeout
+      (`privileged-connect-scan-no-implicit-verdicts`). Reproduced, not fixed: a report marking
       partial results would be friendlier, and is not what tools reading
       nmap's output expect. The port's XML leaves out `starttime`, `endtime`
       and `<times>` for every host (the XML preamble entry). Pinned by
-      `output::tests::a_timed_out_host_is_its_header_and_the_timeout`, and end
+      `output::tests::a_timed_out_host_is_its_header_and_the_timeout` and
+      `scan::tests::a_timed_out_host_keeps_its_liveness_reason`, and end
       to end against 7.94 by `tests/differential/m7/host_timeout_diff.py`.
 
 - [ ] `host-timeout-enforced-at-the-deadline` (`sys::scan`, `sys::group`;

@@ -327,5 +327,119 @@
     "expect": [
       "a_host_timeout_binds_the_port_scan"
     ]
+  },
+  {
+    "name": "the connect engine starts every clock with the group",
+    "file": "crates/sys/src/scan.rs",
+    "old": "    let start = Instant::now();\n    let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();",
+    "new": "    let start = Instant::now();\n    for c in ctxs.iter_mut() {\n        c.host.clock.start(hostclock::now());\n    }\n    let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_clock_starts_at_its_first_probe"
+    ]
+  },
+  {
+    "name": "the connect engine does not stop a finished host's clock",
+    "file": "crates/sys/src/scan.rs",
+    "old": "        if ctx.sched.is_done() {\n            ctx.host.clock.stop(hostclock::now());\n        }",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_that_finishes_stops_its_clock"
+    ]
+  },
+  {
+    "name": "the connect engine keeps a retired host's group slots",
+    "file": "crates/sys/src/scan.rs",
+    "old": "        group.on_cancel(u32::try_from(mine.len()).unwrap_or(u32::MAX));",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::retiring_a_host_frees_its_slots"
+    ]
+  },
+  {
+    "name": "a timed-out connect host loses its liveness reason",
+    "file": "crates/sys/src/scan.rs",
+    "old": "            ctx.host.discarded_reason = first_answer(&ctx.finals);",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_timed_out_host_keeps_its_liveness_reason"
+    ]
+  },
+  {
+    "name": "liveness ignores a timed-out host's kept reason",
+    "file": "crates/core/src/model.rs",
+    "old": "                .map(|p| p.reason)\n                .or(self.discarded_reason),",
+    "new": "                .map(|p| p.reason),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_timed_out_host_keeps_its_liveness_reason"
+    ]
+  },
+  {
+    "name": "--host-timeout 0 is refused with -sV",
+    "file": "crates/cli/src/main.rs",
+    "old": "if cfg.host_timeout_ms.is_some_and(|ms| ms > 0) {",
+    "new": "if cfg.host_timeout_ms.is_some() {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "timing"
+    ],
+    "expect": [
+      "a_zero_host_timeout_is_no_bound_and_not_refused"
+    ]
   }
 ]

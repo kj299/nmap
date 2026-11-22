@@ -495,6 +495,14 @@ where
                 .finals
                 .iter()
                 .any(|(_, s, _)| !matches!(s, PortState::OpenFiltered | PortState::Filtered));
+            // Kept for a timed-out host: why it is up (`Host::discarded_reason`).
+            let mut answered: Vec<_> = ctx.finals.iter().collect();
+            answered.sort_by_key(|f| f.0);
+            let discarded_reason = answered
+                .into_iter()
+                .find(|(_, s, _)| !matches!(s, PortState::OpenFiltered | PortState::Filtered))
+                .map(|f| f.2)
+                .filter(|_| timed_out);
             if timed_out {
                 ctx.finals.clear();
             }
@@ -502,6 +510,7 @@ where
                 ctx.target.into(),
                 if up { HostState::Up } else { HostState::Down },
             );
+            host.discarded_reason = discarded_reason;
             for (port, state, reason) in ctx.finals.drain(..) {
                 host.ports.push(Port::new(port, proto, state, reason));
             }

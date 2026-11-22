@@ -231,6 +231,30 @@ fn options_the_engine_cannot_honour_are_refused_not_ignored() {
     }
 }
 
+/// `--host-timeout 0` sets no budget (`Target::timedOut`, `Target.cc:448`),
+/// so there is nothing for `-sV`, `-O` or a script to run past: it is
+/// accepted with them, as 7.94 accepts it.
+#[test]
+fn a_zero_host_timeout_is_no_bound_and_not_refused() {
+    let (stdout, stderr, ok) = run(&[
+        "--host-timeout",
+        "0",
+        "-sT",
+        "-sV",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "127.0.0.1",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("--host-timeout"), "{stderr}");
+    assert!(
+        stdout.contains("Nmap scan report for 127.0.0.1"),
+        "{stdout}"
+    );
+}
+
 /// With a port scan alone `--host-timeout` binds: a host slowed past it is
 /// skipped as 7.94 skips it, and the run ends near the budget, not after its
 /// 3,000 ports at 20 ms apart, a minute. (Against 7.94 itself:

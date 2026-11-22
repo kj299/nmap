@@ -218,6 +218,12 @@ struct HostCtx<A> {
     sched: HostScheduler,
     target: A,
     finals: Vec<(u16, PortState, Reason)>,
+    /// The host's `--host-timeout` clock (`core::hosttimeout`), started at its
+    /// first probe.
+    clock: nmap_core::hosttimeout::HostClock,
+    /// Whether it ran out of time: it sends nothing more, and its replies and
+    /// results are dropped (decisions D3, D4).
+    timed_out: bool,
     /// `--scan-delay`: earliest time (microseconds since the scan started) this
     /// host may be probed again. Per host, as nmap's scan delay is — `-T0`
     /// waits five minutes between probes *to a host*.
@@ -269,6 +275,10 @@ where
             sched: HostScheduler::with_params(ports, template, params, min_par, max_par),
             target: t,
             finals: Vec::new(),
+            clock: nmap_core::hosttimeout::HostClock::new(
+                u64::try_from(params.host_timeout_ms).unwrap_or(0),
+            ),
+            timed_out: false,
             next_send_us: 0,
         })
         .collect();
@@ -293,16 +303,45 @@ where
     let mut capture_live = true;
 
     loop {
+        // Each pass retires the hosts out of time (`removeCompletedHosts`,
+        // `scan_engine.cc:1151`): marked, their clocks stopped, their probes
+        // dropped from the table so a late reply is ignored, and the group
+        // slots those held freed (`destroyAllOutstandingProbes`). A host whose
+        // last port resolved stops its clock (`:1202`).
+        let clock_now = crate::hostclock::now();
+        for (idx, ctx) in ctxs.iter_mut().enumerate() {
+            if ctx.timed_out {
+                continue;
+            }
+            if ctx.sched.is_done() {
+                ctx.clock.stop(clock_now);
+            } else if ctx.clock.timed_out(clock_now) {
+                ctx.timed_out = true;
+                ctx.clock.stop(clock_now);
+                let before = outstanding.len();
+                outstanding.retain(|&(i, _, _), _| i != idx);
+                group.on_cancel(
+                    u32::try_from(before.saturating_sub(outstanding.len())).unwrap_or(u32::MAX),
+                );
+            }
+        }
+
         // Launch every probe the group window + each host's own window permit.
         loop {
-            let incomplete = ctxs.iter().filter(|c| !c.sched.is_done()).count();
+            let incomplete = ctxs.iter().filter(|c| !c.finished()).count();
             if !group.may_admit(incomplete) {
                 break;
             }
             let mut launched = false;
             let now_launch = now_us(start);
+            let clock_now = crate::hostclock::now();
             for (idx, ctx) in ctxs.iter_mut().enumerate() {
-                if ctx.sched.is_done() || !ctx.sched.may_send() {
+                if ctx.finished() || !ctx.sched.may_send() {
+                    continue;
+                }
+                // A host out of time sends nothing more (`sendOK`,
+                // `scan_engine.cc:546`); the next pass retires it.
+                if ctx.clock.timed_out(clock_now) {
                     continue;
                 }
                 // `--scan-delay`: skip this host, not the whole group, so one
@@ -323,6 +362,9 @@ where
                     // it takes — a reply is matched by (port, tryno), and for UDP we
                     // cannot tell which payload provoked it anyway.
                     Ok(pkts) if !pkts.is_empty() => {
+                        // The host's clock starts with its first probe
+                        // (`ultrascan_host_timeout_init`, `scan_engine.cc:2247`).
+                        ctx.clock.start(clock_now);
                         for pkt in &pkts {
                             let _ = sender.send(pkt);
                         }
@@ -353,7 +395,7 @@ where
             }
         }
 
-        if ctxs.iter().all(|c| c.sched.is_done()) && outstanding.is_empty() {
+        if ctxs.iter().all(HostCtx::finished) && outstanding.is_empty() {
             break;
         }
 
@@ -367,9 +409,18 @@ where
             .map(|(_, d)| *d)
             .chain(
                 ctxs.iter()
-                    .filter(|c| !c.sched.is_done() && c.next_send_us > now)
+                    .filter(|c| !c.finished() && c.next_send_us > now)
                     .map(|c| c.next_send_us),
             )
+            // A host's deadline: no wait runs past it, so its work stops at its
+            // timeout (decision D4).
+            .chain({
+                let clock_now = crate::hostclock::now();
+                ctxs.iter()
+                    .filter(|c| !c.finished())
+                    .filter_map(move |c| c.clock.micros_until_timeout(clock_now))
+                    .map(move |w| now.saturating_add(w))
+            })
             .min();
         let sleep_dur = next_deadline
             .map(|d| micros_to_duration(d.saturating_sub(now)))
@@ -428,24 +479,54 @@ where
     capture.stop();
 
     let proto = kind.protocol();
+    let end = crate::hostclock::now();
     Ok(ctxs
         .into_iter()
         .map(|mut ctx| {
+            // As at output in 7.94 (`nmap.cc:2296`): a host is out of time on
+            // its total, whether it was retired in the loop or its last result
+            // came in past the deadline. Its partial results are discarded (D3).
+            ctx.clock.stop(end);
+            let timed_out = ctx.timed_out || ctx.clock.timed_out(end);
+            // Liveness from what answered, before the results are dropped: a
+            // host that replied and then ran out of time is up and skipped, as
+            // in 7.94, not down.
             let up = ctx
                 .finals
                 .iter()
                 .any(|(_, s, _)| !matches!(s, PortState::OpenFiltered | PortState::Filtered));
+            // Kept for a timed-out host: why it is up (`Host::discarded_reason`).
+            let mut answered: Vec<_> = ctx.finals.iter().collect();
+            answered.sort_by_key(|f| f.0);
+            let discarded_reason = answered
+                .into_iter()
+                .find(|(_, s, _)| !matches!(s, PortState::OpenFiltered | PortState::Filtered))
+                .map(|f| f.2)
+                .filter(|_| timed_out);
+            if timed_out {
+                ctx.finals.clear();
+            }
             let mut host = Host::new(
                 ctx.target.into(),
                 if up { HostState::Up } else { HostState::Down },
             );
+            host.discarded_reason = discarded_reason;
             for (port, state, reason) in ctx.finals.drain(..) {
                 host.ports.push(Port::new(port, proto, state, reason));
             }
             host.ports.sort_by_key(|p| (p.protocol, p.number));
+            host.clock = ctx.clock;
+            host.timed_out = timed_out;
             host
         })
         .collect())
+}
+
+impl<A> HostCtx<A> {
+    /// Done with this host: every port resolved, or its time ran out.
+    fn finished(&self) -> bool {
+        self.sched.is_done() || self.timed_out
+    }
 }
 
 fn now_us(start: Instant) -> i64 {
@@ -1269,6 +1350,129 @@ mod tests {
         )
         .await
         .expect("a mock capture does not fail")
+    }
+
+    /// `run` with timing of the test's own: a scan delay and a host timeout.
+    async fn run_timed<K: RawScanKind>(
+        kind: &K,
+        targets: &[Ipv4Addr],
+        ports: &[u16],
+        base: u16,
+        frames: Vec<Vec<u8>>,
+        scan_delay_ms: i64,
+        host_timeout_ms: i64,
+    ) -> Vec<Host> {
+        let mut params = TimingParams::for_template(TimingTemplate::Insane);
+        params.scan_delay_ms = scan_delay_ms;
+        params.host_timeout_ms = host_timeout_ms;
+        group_scan(
+            Ipv4Addr::from(US),
+            targets,
+            ports,
+            MockSender::default(),
+            MockSource {
+                frames: Arc::new(Mutex::new(frames)),
+            },
+            kind,
+            TimingTemplate::Insane,
+            params,
+            0,
+            base,
+            true,
+            Default::default(),
+        )
+        .await
+        .expect("a mock capture does not fail")
+    }
+
+    /// A silent host slowed past its `--host-timeout` is retired at its
+    /// deadline: marked, nothing reported (D3), and the scan ends then (D4),
+    /// not after its 200 ports at 20 ms apart.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn a_silent_host_times_out_at_its_deadline() {
+        // 200 ports at 20 ms apart is 4 s; the budget is 300 ms. Small enough
+        // that a clock that never runs finishes, and fails, rather than hangs.
+        let ports: Vec<u16> = (1..=200).collect();
+        let started = Instant::now();
+        let hosts = run_timed(
+            &SynKind { seqmask: 1 },
+            &[Ipv4Addr::new(127, 0, 0, 2)],
+            &ports,
+            40000,
+            Vec::new(),
+            20,
+            300,
+        )
+        .await;
+        let took = started.elapsed();
+        assert!(hosts[0].timed_out, "{:?}", hosts[0]);
+        assert!(hosts[0].ports.is_empty());
+        assert!(hosts[0].clock.used_ms(crate::hostclock::now()) > 300);
+        assert!(
+            took < Duration::from_secs(3),
+            "ended at the deadline, took {took:?}"
+        );
+        assert!(took >= Duration::from_millis(300), "took {took:?}");
+    }
+
+    /// A host that answered and then ran out of time is up, as 7.94 reports it
+    /// ("Host is up", "Skipping host"), with its results dropped.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn a_host_that_answered_and_timed_out_is_up_without_its_ports() {
+        let seqmask = 0x5555_AAAA;
+        let base = 40000u16;
+        let target = Ipv4Addr::new(127, 0, 0, 2);
+        let mut ports = vec![81];
+        ports.extend(2000..=2200);
+        let hosts = run_timed(
+            &SynKind { seqmask },
+            &[target],
+            &ports,
+            base,
+            vec![tcp_reply(
+                seqmask,
+                target.octets(),
+                81,
+                base,
+                TH_RST | TH_ACK,
+                0,
+            )],
+            20,
+            300,
+        )
+        .await;
+        assert!(hosts[0].timed_out);
+        assert_eq!(hosts[0].state, HostState::Up);
+        assert!(hosts[0].ports.is_empty());
+    }
+
+    /// A budget the scan fits in changes nothing.
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a capture thread; miri cannot run real threads/time"
+    )]
+    #[tokio::test]
+    async fn a_host_within_its_budget_is_kept_whole() {
+        let hosts = run_timed(
+            &SynKind { seqmask: 1 },
+            &[Ipv4Addr::new(127, 0, 0, 2)],
+            &[9, 10],
+            40000,
+            Vec::new(),
+            0,
+            60_000,
+        )
+        .await;
+        assert!(!hosts[0].timed_out);
+        assert_eq!(hosts[0].ports.len(), 2);
     }
 
     /// Look up one port's resolved state on one host.

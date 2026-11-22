@@ -244,6 +244,21 @@ pub struct Host {
     /// With `-Pn` C reports `user-set`: the operator asserted liveness, so the
     /// honest answer is "because you said so" rather than a probe result.
     pub reason: Option<Reason>,
+    /// Whether the host ran out of its `--host-timeout` budget
+    /// (`Target::timedOut`, `core::hosttimeout`). Such a host is still up, and
+    /// counts as up, but its results are not reported: every format writes its
+    /// header and "timed out" instead, and its ports are dropped
+    /// (`nmap.cc:2296-2310`; decision D3). Any port left on it is ignored.
+    pub timed_out: bool,
+    /// The host's `--host-timeout` clock (`core::hosttimeout`), carried with
+    /// it through every phase of its group so its budget is spent across them,
+    /// as 7.94's lives on the `Target`.
+    pub clock: crate::hosttimeout::HostClock,
+    /// For a timed-out host, the reason its first answering port gave, kept
+    /// when its ports are dropped (D3): without `-Pn` that port is why the host
+    /// is up, and 7.94 still prints why (`Host is up, received …`) on the
+    /// header it writes for a timed-out host. `None` otherwise.
+    pub discarded_reason: Option<Reason>,
 }
 
 impl Host {
@@ -255,6 +270,9 @@ impl Host {
             reason: None,
             ports: Vec::new(),
             os: None,
+            timed_out: false,
+            clock: crate::hosttimeout::HostClock::new(0),
+            discarded_reason: None,
         }
     }
 
@@ -297,7 +315,8 @@ impl Host {
                 .ports
                 .iter()
                 .find(|p| !matches!(p.state, PortState::Filtered | PortState::OpenFiltered))
-                .map(|p| p.reason),
+                .map(|p| p.reason)
+                .or(self.discarded_reason),
             HostState::Down => Some(Reason::NoResponse),
             HostState::Unknown => None,
         };

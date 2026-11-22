@@ -188,6 +188,9 @@
     "core::hostgroup": {
       "fuzzed": "Pure arithmetic over the operator's own options and this host's routing keys: group sizes from the command line, route keys from the routing table. It parses no bytes and reads nothing from the network, so there is no untrusted input to fuzz. Bounds are unit-tested (a million-target source is drawn one batch at a time)."
     },
+    "core::hosttimeout": {
+      "fuzzed": "A stopwatch over the caller's timestamps and the operator's --host-timeout budget: it parses no bytes and reads nothing from the network, so there is no untrusted input to fuzz. Its arithmetic (TIMEVAL_MSEC_SUBTRACT's truncation, saturating sums, the strict comparison) is unit-tested at its edges and under Miri."
+    },
     "core::ipfamily": {
       "differential": "A per-family adapter with no C function of its own: get_pcap_result's family split is reproduced by the matchers built on it. Its IPv4 side is the code the IPv4 matchers ran before it existed, compared with 7.94 on the wire by the raw differential; its IPv6 side meets 7.94 when the engine sends IPv6 probes (IPv6 scans step d), and until then is covered by the matchers' unit tests over crafted IPv6 replies and the classify differential."
     },
@@ -248,6 +251,10 @@
     "sys::fpengine": {
       "fuzzed": "I/O driver for the IPv6 fingerprint battery. Every byte-level decision delegates to core::fp6_match::is_response (fuzz target fp6_match); its only local slicing is network_layer(), a total frame.get(14..).unwrap_or(&[])."
     },
+    "sys::hostclock": {
+      "differential": "No C counterpart to compare: 7.94 reads gettimeofday, this reads Instant (monotonic, the divergence core::hosttimeout records). What it feeds is compared with 7.94 end to end by host_timeout_diff.py.",
+      "fuzzed": "Reads a monotonic clock against a process-wide epoch and converts it to a timeval; it takes no input at all."
+    },
     "sys::ndp": {
       "fuzzed": "Neighbour-discovery I/O driver. Frame parsing is core::ndp::resolve_from_frame, covered by fuzz target ndp_advert; this module only drives the capture and the timeout."
     },
@@ -299,6 +306,7 @@
     "core::headers::tcp": "unsafe_audited",
     "core::headers::udp": "unsafe_audited",
     "core::hostgroup": "unsafe_audited",
+    "core::hosttimeout": "unsafe_audited",
     "core::icmp_quote": "unsafe_audited",
     "core::ipfamily": "unsafe_audited",
     "core::ipid": "unsafe_audited",
@@ -388,6 +396,7 @@
     "sys::flagscan": "unsafe_audited",
     "sys::fpengine": "unsafe_audited",
     "sys::group": "unsafe_audited",
+    "sys::hostclock": "unsafe_audited",
     "sys::ndp": "unsafe_audited",
     "sys::netif": "unsafe_audited",
     "sys::nsefs": "unsafe_audited",
@@ -412,7 +421,7 @@
     "cli": {
       "unsafe_audited": {
         "files": 3,
-        "sha256": "61613be044ef44c813aaead5c5aaef20e3b9dfb27c3c7c80f4bc049e949a0f8a"
+        "sha256": "27ecb4587388b72ead57ff5160f0e671a21a9d905b6918c4c821fa6571f71682"
       }
     },
     "core::build": {
@@ -490,6 +499,28 @@
       "unsafe_audited": {
         "files": 1,
         "sha256": "5149e5a48d5fcbe944067717c7738b7a0e3669163432e92b09b0bc74e3b6e70e"
+      }
+    },
+    "core::hosttimeout": {
+      "differential": {
+        "files": 1,
+        "sha256": "06aeebd88557f6870cdb50e6bdb58a1988ef878cb738cc51e462ab6a93063145"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "06aeebd88557f6870cdb50e6bdb58a1988ef878cb738cc51e462ab6a93063145"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "06aeebd88557f6870cdb50e6bdb58a1988ef878cb738cc51e462ab6a93063145"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "06aeebd88557f6870cdb50e6bdb58a1988ef878cb738cc51e462ab6a93063145"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "06aeebd88557f6870cdb50e6bdb58a1988ef878cb738cc51e462ab6a93063145"
       }
     },
     "core::icmp_quote": {
@@ -838,6 +869,28 @@
       "unsafe_audited": {
         "files": 1,
         "sha256": "93bce24c6ec58e1d790fcf3e82c4dfadb2ab7f0860519360850d1346fc3ffad3"
+      }
+    },
+    "sys::hostclock": {
+      "differential": {
+        "files": 1,
+        "sha256": "f6e49e2dfdb3d30152b3811e12d11c029d592cc34c7a11bbc63d779ad93fcb54"
+      },
+      "fuzzed": {
+        "files": 1,
+        "sha256": "f6e49e2dfdb3d30152b3811e12d11c029d592cc34c7a11bbc63d779ad93fcb54"
+      },
+      "ported": {
+        "files": 1,
+        "sha256": "f6e49e2dfdb3d30152b3811e12d11c029d592cc34c7a11bbc63d779ad93fcb54"
+      },
+      "sanitized": {
+        "files": 1,
+        "sha256": "f6e49e2dfdb3d30152b3811e12d11c029d592cc34c7a11bbc63d779ad93fcb54"
+      },
+      "unsafe_audited": {
+        "files": 1,
+        "sha256": "f6e49e2dfdb3d30152b3811e12d11c029d592cc34c7a11bbc63d779ad93fcb54"
       }
     },
     "sys::nsefs": {

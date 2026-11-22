@@ -100,9 +100,17 @@ fn the_excluded_address_is_never_scanned() {
 #[test]
 fn a_constraint_we_cannot_honour_is_refused() {
     for args in [
-        // No per-host deadline in the engine, so a --host-timeout would be a
-        // bound we run straight past.
-        &["--host-timeout", "30s", "-sT", "-p", "80", "127.0.0.1"][..],
+        // The port scans keep a --host-timeout (M7 cutover step c), -sV does
+        // not yet, so with -sV it would be a bound run straight past.
+        &[
+            "--host-timeout",
+            "30s",
+            "-sT",
+            "-sV",
+            "-p",
+            "80",
+            "127.0.0.1",
+        ][..],
         // A value-taking option we do not implement at all.
         &["--source-port", "53", "-sT", "-p", "80", "127.0.0.1"][..],
     ] {

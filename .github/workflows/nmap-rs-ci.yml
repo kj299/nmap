@@ -590,6 +590,10 @@ jobs:
       # host-group matrix of the step above, must form the groups and report
       # order 7.94 formed (every case of a scan kind the port has).
       - run: sudo python3 tests/differential/m7/gen_hostgroup_golden.py --check --port target/release/nmap-rs
+      # M7 cutover step c: --host-timeout in the port scans, against 7.94 itself:
+      # which hosts are skipped, per format, the up count, the ports and the
+      # exit status, over eight loopback cases.
+      - run: sudo python3 tests/differential/m7/host_timeout_diff.py --port target/release/nmap-rs
       # And the run's memory stays flat as the targets grow: under 64 MiB, and
       # growing as n^0.25 at most. The whole-run pipeline before step b grew as
       # n (and its time as n^2). Measured against 7.94 at these sizes when the

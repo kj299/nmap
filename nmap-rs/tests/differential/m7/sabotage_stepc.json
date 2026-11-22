@@ -1,0 +1,445 @@
+[
+  {
+    "name": "the budget is compared inclusively",
+    "file": "crates/core/src/hosttimeout.rs",
+    "old": "self.budget_ms != 0 && self.used_ms(now) > self.budget_ms",
+    "new": "self.budget_ms != 0 && self.used_ms(now) >= self.budget_ms",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hosttimeout::tests"
+    ],
+    "expect": [
+      "hosttimeout::tests::the_budget_is_exceeded_only_past_it"
+    ]
+  },
+  {
+    "name": "intervals are rounded down, not truncated toward zero",
+    "file": "crates/core/src/hosttimeout.rs",
+    "old": "let usecs = a.usec.saturating_sub(b.usec) / 1000;",
+    "new": "let usecs = a.usec.saturating_sub(b.usec).div_euclid(1000);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hosttimeout::tests"
+    ],
+    "expect": [
+      "hosttimeout::tests::intervals_truncate_as_c_does"
+    ]
+  },
+  {
+    "name": "a stopped interval is not added",
+    "file": "crates/core/src/hosttimeout.rs",
+    "old": "self.used_ms = self.used_ms.saturating_add(interval_ms(now, since));",
+    "new": "let _ = interval_ms(now, since);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hosttimeout::tests"
+    ],
+    "expect": [
+      "hosttimeout::tests::intervals_accumulate_and_a_stopped_clock_spends_nothing"
+    ]
+  },
+  {
+    "name": "the wake-up is a millisecond early",
+    "file": "crates/core/src/hosttimeout.rs",
+    "old": "let left_ms = budget.saturating_add(1).saturating_sub(before).max(0);",
+    "new": "let left_ms = budget.saturating_sub(before).max(0);",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "hosttimeout::tests"
+    ],
+    "expect": [
+      "hosttimeout::tests::the_wake_up_is_the_deadline"
+    ]
+  },
+  {
+    "name": "a timed-out host is filtered by --open",
+    "file": "crates/core/src/output.rs",
+    "old": "    if timed_out(host) {\n        return true;\n    }",
+    "new": "    if false {\n        return true;\n    }",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "a timed-out host gets a blank line",
+    "file": "crates/core/src/output.rs",
+    "old": "if host.state == crate::model::HostState::Up && !timed_out(host) {",
+    "new": "if host.state == crate::model::HostState::Up {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "normal output reports a timed-out host's ports",
+    "file": "crates/core/src/output.rs",
+    "old": "    if timed_out(host) {\n        let _ = writeln!(out, \"Skipping host {name} due to host timeout\");\n        return;\n    }",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "grepable has no Timeout record",
+    "file": "crates/core/src/output.rs",
+    "old": "        if timed_out(host) {\n            let _ = writeln!(\n                out,\n                \"Host: {} ({})\\tStatus: Timeout\",",
+    "new": "        if false {\n            let _ = writeln!(\n                out,\n                \"Host: {} ({})\\tStatus: Timeout\",",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "XML has no timedout attribute",
+    "file": "crates/core/src/output.rs",
+    "old": "            let _ = writeln!(out, \"<host timedout=\\\"true\\\">\");",
+    "new": "            let _ = writeln!(out, \"<host>\");",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "XML reports a timed-out host's ports",
+    "file": "crates/core/src/output.rs",
+    "old": "if host.state == crate::model::HostState::Down || timed_out(host) {",
+    "new": "if host.state == crate::model::HostState::Down {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "output::tests"
+    ],
+    "expect": [
+      "output::tests::a_timed_out_host_is_its_header_and_the_timeout"
+    ]
+  },
+  {
+    "name": "a cancel frees no slots",
+    "file": "crates/core/src/engine.rs",
+    "old": "self.active = self.active.saturating_sub(n);",
+    "new": "let _ = n;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-core",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "engine::tests"
+    ],
+    "expect": [
+      "engine::tests::cancelled_probes_free_slots_and_keep_the_window"
+    ]
+  },
+  {
+    "name": "the connect clock never starts",
+    "file": "crates/sys/src/scan.rs",
+    "old": "ctx.host.clock.start(clock_now);",
+    "new": "let _ = clock_now;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--all-features",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_past_its_budget_times_out_at_the_deadline",
+      "scan::tests::each_host_has_its_own_clock"
+    ]
+  },
+  {
+    "name": "the connect engine keeps a timed-out host's ports",
+    "file": "crates/sys/src/scan.rs",
+    "old": "            ctx.finals.clear();",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--all-features",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_past_its_budget_times_out_at_the_deadline"
+    ]
+  },
+  {
+    "name": "the raw clock never starts",
+    "file": "crates/sys/src/group.rs",
+    "old": "ctx.clock.start(clock_now);",
+    "new": "let _ = clock_now;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--all-features",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "group::tests"
+    ],
+    "expect": [
+      "group::tests::a_silent_host_times_out_at_its_deadline",
+      "group::tests::a_host_that_answered_and_timed_out_is_up_without_its_ports"
+    ]
+  },
+  {
+    "name": "the raw engine keeps a timed-out host's ports",
+    "file": "crates/sys/src/group.rs",
+    "old": "            if timed_out {\n                ctx.finals.clear();\n            }",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--all-features",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "group::tests"
+    ],
+    "expect": [
+      "group::tests::a_host_that_answered_and_timed_out_is_up_without_its_ports"
+    ]
+  },
+  {
+    "name": "--host-timeout is accepted with -sV, -O or scripts",
+    "file": "crates/cli/src/main.rs",
+    "old": "        if !unbound.is_empty() {",
+    "new": "        if false {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "timing"
+    ],
+    "expect": [
+      "options_the_engine_cannot_honour_are_refused_not_ignored"
+    ]
+  },
+  {
+    "name": "an explicit --host-timeout does not reach the engines",
+    "file": "crates/cli/src/main.rs",
+    "old": "timing.host_timeout_ms = cfg.host_timeout_ms.unwrap_or(0).max(0);",
+    "new": "timing.host_timeout_ms = 0;",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "timing"
+    ],
+    "expect": [
+      "a_host_timeout_binds_the_port_scan"
+    ]
+  },
+  {
+    "name": "the connect engine starts every clock with the group",
+    "file": "crates/sys/src/scan.rs",
+    "old": "    let start = Instant::now();\n    let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();",
+    "new": "    let start = Instant::now();\n    for c in ctxs.iter_mut() {\n        c.host.clock.start(hostclock::now());\n    }\n    let mut set: JoinSet<(usize, Probe, ConnectResult)> = JoinSet::new();",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_clock_starts_at_its_first_probe"
+    ]
+  },
+  {
+    "name": "the connect engine does not stop a finished host's clock",
+    "file": "crates/sys/src/scan.rs",
+    "old": "        if ctx.sched.is_done() {\n            ctx.host.clock.stop(hostclock::now());\n        }",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_host_that_finishes_stops_its_clock"
+    ]
+  },
+  {
+    "name": "the connect engine keeps a retired host's group slots",
+    "file": "crates/sys/src/scan.rs",
+    "old": "        group.on_cancel(u32::try_from(mine.len()).unwrap_or(u32::MAX));",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::retiring_a_host_frees_its_slots"
+    ]
+  },
+  {
+    "name": "a timed-out connect host loses its liveness reason",
+    "file": "crates/sys/src/scan.rs",
+    "old": "            ctx.host.discarded_reason = first_answer(&ctx.finals);",
+    "new": "",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_timed_out_host_keeps_its_liveness_reason"
+    ]
+  },
+  {
+    "name": "liveness ignores a timed-out host's kept reason",
+    "file": "crates/core/src/model.rs",
+    "old": "                .map(|p| p.reason)\n                .or(self.discarded_reason),",
+    "new": "                .map(|p| p.reason),",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-sys",
+      "--lib",
+      "--no-fail-fast",
+      "--",
+      "scan::tests"
+    ],
+    "expect": [
+      "scan::tests::a_timed_out_host_keeps_its_liveness_reason"
+    ]
+  },
+  {
+    "name": "--host-timeout 0 is refused with -sV",
+    "file": "crates/cli/src/main.rs",
+    "old": "if cfg.host_timeout_ms.is_some_and(|ms| ms > 0) {",
+    "new": "if cfg.host_timeout_ms.is_some() {",
+    "cmd": [
+      "cargo",
+      "test",
+      "-p",
+      "nmap-cli",
+      "--all-features",
+      "--no-fail-fast",
+      "--test",
+      "timing"
+    ],
+    "expect": [
+      "a_zero_host_timeout_is_no_bound_and_not_refused"
+    ]
+  }
+]

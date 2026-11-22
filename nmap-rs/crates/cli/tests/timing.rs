@@ -9,11 +9,12 @@
 //!      `--scan-delay`, "11.1 hours" for `--host-timeout`).
 //!   2. **An explicit knob beats `-T`, whichever came first.** C applies them
 //!      after the whole argument loop, so argv order does not decide.
-//!   3. **Nothing is accepted that does not take effect.** `--host-timeout` is
-//!      parsed and then *refused*, because this engine has no per-host
-//!      deadline yet. Accepting it would repeat the M7.0 mistake: an option
-//!      that silently does nothing is an option that silently scans past the
-//!      limit you set. The hostgroup pair binds since M7 cutover step b
+//!   3. **Nothing is accepted that does not take effect.** `--host-timeout`
+//!      binds the port scans since M7 cutover step c, and is *refused* with
+//!      `-sV`, `-O` or scripts, which do not keep it yet (steps d and e).
+//!      Accepting it there would repeat the M7.0 mistake: an option that
+//!      silently does nothing for part of a scan is an option that silently
+//!      scans past the limit you set. The hostgroup pair binds since step b
 //!      (`cli/tests/hostgroups.rs`).
 //!
 //! Every message below was compared against the installed C nmap, not against a
@@ -23,7 +24,7 @@
 #![cfg(not(miri))]
 
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_nmap-rs")
@@ -203,15 +204,89 @@ fn the_polite_template_carries_its_delay() {
 
 // ---- 3. nothing is accepted that does not take effect ----------------------
 
+/// `--host-timeout` with a phase that does not keep it yet is refused, not
+/// kept for the port scan and run past in the next phase.
 #[test]
 fn options_the_engine_cannot_honour_are_refused_not_ignored() {
-    let (stdout, stderr, ok) = run(&["--host-timeout", "30s", "-sL", "-n", "127.0.0.1"]);
-    assert!(!ok, "--host-timeout must be refused while it does nothing");
-    assert!(stderr.contains("per-host deadline"), "{stderr}");
+    for (extra, phase) in [
+        (&["-sV"][..], "-sV"),
+        (&["-O"][..], "-O"),
+        (&["-sC"][..], "scripts"),
+        (&["--script", "banner"][..], "scripts"),
+        (&["-A"][..], "-sV, -O, scripts"),
+    ] {
+        let mut args = vec!["--host-timeout", "30s", "-sT", "-Pn", "-n", "-p", "1"];
+        args.extend_from_slice(extra);
+        args.push("127.0.0.1");
+        let (stdout, stderr, ok) = run(&args);
+        assert!(
+            !ok,
+            "{args:?}: must be refused while {phase} does not keep it"
+        );
+        assert!(stderr.contains(&format!("not yet by {phase},")), "{stderr}");
+        assert!(
+            !stdout.contains("Nmap scan report"),
+            "{args:?} scanned anyway:\n{stdout}"
+        );
+    }
+}
+
+/// `--host-timeout 0` sets no budget (`Target::timedOut`, `Target.cc:448`),
+/// so there is nothing for `-sV`, `-O` or a script to run past: it is
+/// accepted with them, as 7.94 accepts it.
+#[test]
+fn a_zero_host_timeout_is_no_bound_and_not_refused() {
+    let (stdout, stderr, ok) = run(&[
+        "--host-timeout",
+        "0",
+        "-sT",
+        "-sV",
+        "-Pn",
+        "-n",
+        "-p",
+        "1",
+        "127.0.0.1",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("--host-timeout"), "{stderr}");
     assert!(
-        !stdout.contains("Nmap scan report"),
-        "--host-timeout scanned anyway:\n{stdout}"
+        stdout.contains("Nmap scan report for 127.0.0.1"),
+        "{stdout}"
     );
+}
+
+/// With a port scan alone `--host-timeout` binds: a host slowed past it is
+/// skipped as 7.94 skips it, and the run ends near the budget, not after its
+/// 3,000 ports at 20 ms apart, a minute. (Against 7.94 itself:
+/// `tests/differential/m7/host_timeout_diff.py`.)
+#[test]
+fn a_host_timeout_binds_the_port_scan() {
+    let start = Instant::now();
+    let (stdout, stderr, ok) = run(&[
+        "-sT",
+        "-Pn",
+        "-n",
+        "-p",
+        "1-3000",
+        "--scan-delay",
+        "20ms",
+        "--host-timeout",
+        "1s",
+        "127.0.0.1",
+    ]);
+    let took = start.elapsed();
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("Skipping host 127.0.0.1 due to host timeout\n"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("PORT "),
+        "its ports are not reported: {stdout}"
+    );
+    assert!(stdout.contains("(1 host up)"), "{stdout}");
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+    assert!(took >= Duration::from_secs(1), "took {took:?}");
 }
 
 /// A hostgroup bound C would quit on is refused in C's words.

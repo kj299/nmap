@@ -76,18 +76,30 @@ async fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    // Fail closed on the knob this engine cannot yet honour. Accepting it would
-    // be the M7.0 mistake in a new place: a `--host-timeout` that does nothing
-    // runs past a bound the operator set. Refusing is noisy; silently exceeding
-    // an explicit limit is worse. Tracked in docs/M7.3-CLI-PARITY.md, and lifted
-    // at M7 cutover step f.
+    // Fail closed where the knob cannot yet be honoured. The port scans keep a
+    // `--host-timeout` (M7 cutover step c); `-sV`, `-O` and the scripts do not
+    // yet (steps d and e). Accepting it with them would be the M7.0 mistake in
+    // a new place: a bound kept for one phase and run past in the next.
+    // Refusing is noisy; silently exceeding an explicit limit is worse.
+    // Tracked in docs/M7.3-CLI-PARITY.md.
     if cfg.host_timeout_ms.is_some() {
-        eprintln!(
-            "nmap-rs: --host-timeout is parsed but not yet enforced — this engine has no \
-             per-host deadline, so honouring it would be a lie. Refusing rather than \
-             running past the bound you set."
-        );
-        return ExitCode::FAILURE;
+        let unbound: Vec<&str> = [
+            (cfg.service_version, "-sV"),
+            (cfg.os_detection, "-O"),
+            (cfg.script, "scripts"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        if !unbound.is_empty() {
+            eprintln!(
+                "nmap-rs: --host-timeout is kept by the port scans but not yet by {}, \
+                 so a host could run past the bound you set. Refusing rather than \
+                 honouring it for part of the scan.",
+                unbound.join(", ")
+            );
+            return ExitCode::FAILURE;
+        }
     }
     // --min-hostgroup/--max-hostgroup bind the host groups (`core::hostgroup`);
     // a value C would quit on is refused as C refuses it.
@@ -350,7 +362,11 @@ async fn main() -> ExitCode {
     // explicit knobs (--scan-delay, --max-rtt-timeout, …) are folded in by
     // `timing_params` in nmap's own order, so they win over -T regardless of
     // where they appeared on the command line.
-    let timing = cfg.timing_params();
+    let mut timing = cfg.timing_params();
+    // Only an explicit `--host-timeout` binds the engines here. `-T5`'s implied
+    // 15 minutes (`nmap.cc:1392`) is recorded and not yet enforced: that is M7
+    // cutover step f (decision D5), once every phase keeps the clock.
+    timing.host_timeout_ms = cfg.host_timeout_ms.unwrap_or(0).max(0);
     let template = cfg.timing_template.unwrap_or(TimingTemplate::Normal);
     let max_par = timing.max_parallelism as usize;
 
